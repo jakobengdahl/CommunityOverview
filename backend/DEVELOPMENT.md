@@ -717,6 +717,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
 | POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
+| POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 
 Session state is server-owned: the browser no longer uploads canvas state, and
@@ -1147,6 +1148,14 @@ the session/document byte budgets are enforced only by
 `SessionManager.upsert_image_annotation` and not on the op path, and a
 `SavedView`'s stored `annotation_document` is rendered without passing
 through this check.
+
+The human GUI (clipboard paste, or a dropped/uploaded file on the canvas)
+reaches the identical pipeline through `POST /api/sessions/{id}/annotations/image`
+rather than this MCP tool — same `image_ingest.py` call, same
+`SessionManager.upsert_image_annotation` budgets, so there is exactly one
+ingest path regardless of caller. See that endpoint's row above for why its
+op is attributed to a dedicated client id instead of the pasting browser's
+own.
 
 ### UI Backend Endpoints
 

@@ -192,6 +192,14 @@ function GraphCanvasInner({
   onCreateSubscription,
   onCreateAgent,
   onDropCreateNode,
+  // Called with (dataUrl, position) when a human pastes an image from the
+  // clipboard, drops an image file on the canvas, or uses the annotation
+  // toolbox's image item to pick a file. Unlike createAnnotation (which adds
+  // a node straight to local state), image creation is a server round-trip —
+  // the host validates/optimizes/embeds it and this canvas only ever renders
+  // the annotation once it comes back over the session's realtime channel
+  // (see remoteAnnotationOps), never a client-side guess of the result.
+  onImageIngest,
   onShowOnly,
   onSelectionChange,
   onNodeDoubleClick: onNodeDoubleClickCallback,
@@ -298,6 +306,7 @@ function GraphCanvasInner({
     annotationRotateReset: 'Reset rotation',
     undoNotification: 'Move undone',
     redoNotification: 'Move redone',
+    imageIngestFailed: 'Could not add the image',
     ...contextMenuLabels,
   };
 
@@ -314,6 +323,7 @@ function GraphCanvasInner({
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    image: 'Image',
     ...annotationToolboxLabels,
   };
 
@@ -414,6 +424,12 @@ function GraphCanvasInner({
   }
   const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
+  // Hidden <input type="file"> the toolbox's image item clicks; the model-space
+  // position to ingest the file at is stashed here between that click and the
+  // input's change event (there is no click position to carry through a native
+  // file picker the way the pane context menu carries one).
+  const imageFileInputRef = useRef(null);
+  const pendingImagePositionRef = useRef(null);
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
   // Two-step "organize" keyboard chord: Ctrl/Cmd+O arms it, then c/h/v/t picks
@@ -1096,20 +1112,96 @@ function GraphCanvasInner({
     [setNodes]
   );
 
-  // Create an annotation at the current viewport's centre (used by the
-  // bottom toolbox, which has no click position of its own the way the pane
-  // context menu does). Mirrors handleAddGroup's centre computation.
+  // Model-space position at the current viewport's centre (used by the bottom
+  // toolbox and clipboard paste, neither of which has a click position of its
+  // own the way the pane context menu or a file drop does). Mirrors
+  // handleAddGroup's centre computation.
+  const viewportCenterPosition = useCallback(() => {
+    const wrapper = reactFlowWrapper.current;
+    const rect = wrapper?.getBoundingClientRect();
+    const centerX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+    return screenToFlowPosition({ x: centerX, y: centerY });
+  }, [screenToFlowPosition]);
+
+  // Create an annotation at the current viewport's centre (used by the bottom
+  // toolbox). 'image' is not a local-state creation like the other kinds — it
+  // opens the hidden file picker instead, and onImageIngest carries the
+  // resulting server round-trip (see that prop's docstring above).
   const createAnnotationAtViewportCenter = useCallback(
     (kind, options) => {
-      const wrapper = reactFlowWrapper.current;
-      const rect = wrapper?.getBoundingClientRect();
-      const centerX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
-      const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
-      const position = screenToFlowPosition({ x: centerX, y: centerY });
+      const position = viewportCenterPosition();
+      if (kind === 'image') {
+        pendingImagePositionRef.current = position;
+        imageFileInputRef.current?.click();
+        return;
+      }
       createAnnotation(kind, position, options);
     },
-    [screenToFlowPosition, createAnnotation]
+    [viewportCenterPosition, createAnnotation]
   );
+
+  // Read a single File as a data: URL (base64) — the same shape the MCP
+  // create_image_annotation tool's image_data param accepts server-side, so
+  // both a human paste/upload and an agent's call converge on identical input.
+  const readImageFileAsDataUrl = useCallback((file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('failed to read image file'));
+      reader.readAsDataURL(file);
+    });
+  }, []);
+
+  // Hand a File off to the host's ingest round-trip (validate/optimize/embed
+  // server-side). Deliberately does not touch local node state — unlike
+  // createAnnotation, the canvas only renders this annotation once the
+  // session's realtime channel delivers the server's actual result (see
+  // onImageIngest's docstring), so a bad read here surfaces as a notification
+  // rather than a node that silently never appears.
+  const ingestImageFile = useCallback(
+    (file, position) => {
+      if (!onImageIngest || !file || !file.type || !file.type.startsWith('image/')) return;
+      readImageFileAsDataUrl(file)
+        .then((dataUrl) => onImageIngest(dataUrl, position))
+        .catch(() => showNotification('error', cml.imageIngestFailed));
+    },
+    [onImageIngest, readImageFileAsDataUrl, showNotification, cml.imageIngestFailed]
+  );
+
+  const handleImageFileSelected = useCallback(
+    (event) => {
+      const file = event.target.files && event.target.files[0];
+      const position = pendingImagePositionRef.current || viewportCenterPosition();
+      pendingImagePositionRef.current = null;
+      event.target.value = ''; // allow re-selecting the same file next time
+      if (file) ingestImageFile(file, position);
+    },
+    [ingestImageFile, viewportCenterPosition]
+  );
+
+  // Clipboard image paste (Ctrl/Cmd+V), anywhere the canvas itself has focus —
+  // guarded the same way the keydown handler below guards Delete/Backspace, so
+  // pasting into a note's text field or any other input is untouched. Always
+  // lands at the viewport centre: unlike a drop, a paste carries no cursor
+  // position of its own.
+  useEffect(() => {
+    if (!onImageIngest) return undefined;
+    const handlePaste = (event) => {
+      const tag = event.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      const imageItem = Array.from(items).find((item) => item.type?.startsWith('image/'));
+      if (!imageItem) return;
+      const file = imageItem.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      ingestImageFile(file, viewportCenterPosition());
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [onImageIngest, ingestImageFile, viewportCenterPosition]);
 
   // Dismiss the pane annotation menu on any outside interaction (e.g. clicking a
   // graph node, which handlePaneClick does not cover), matching the annotation
@@ -1744,6 +1836,18 @@ function GraphCanvasInner({
   const onDrop = useCallback(
     (event) => {
       event.preventDefault();
+
+      // An OS file drag (an image dragged in from the desktop or another
+      // app/tab) carries files but never the toolbar's custom nodetype MIME
+      // type, so it is distinguished up front rather than falling through to
+      // the nodeType branch below and being silently ignored.
+      const droppedFile = event.dataTransfer.files && event.dataTransfer.files[0];
+      if (droppedFile && droppedFile.type?.startsWith('image/')) {
+        const dropPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+        ingestImageFile(droppedFile, dropPosition);
+        return;
+      }
+
       const nodeType = event.dataTransfer.getData('application/reactflow-nodetype');
       if (!nodeType) return;
 
@@ -1776,7 +1880,7 @@ function GraphCanvasInner({
         onDropCreateNode(nodeType, position);
       }
     },
-    [screenToFlowPosition, onDropCreateNode, setNodes, onCreateGroup]
+    [screenToFlowPosition, onDropCreateNode, setNodes, onCreateGroup, ingestImageFile]
   );
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
@@ -2395,6 +2499,18 @@ function GraphCanvasInner({
               compact={isCompact}
             />
           )}
+          {/* Backs the toolbox's image item and is otherwise invisible; the
+              file-upload half of image ingest (paste is a document-level
+              listener above). Kept mounted unconditionally so its ref is
+              stable across focus-view toggling. */}
+          <input
+            ref={imageFileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={handleImageFileSelected}
+            style={{ display: 'none' }}
+            data-testid="graph-image-file-input"
+          />
         </div>
 
         <NodeContextMenu

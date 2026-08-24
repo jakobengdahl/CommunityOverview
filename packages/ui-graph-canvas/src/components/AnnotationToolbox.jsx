@@ -18,6 +18,7 @@ const TOOLBOX_ITEMS = [
   { kind: 'shape', glyph: '◇', labelKey: 'shapeRhombus', shape: 'rhombus' },
   { kind: 'shape', glyph: '⬡', labelKey: 'shapeHexagon', shape: 'hexagon' },
   { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
+  { kind: 'image', glyph: '🖼️', labelKey: 'image' },
 ];
 
 /**
@@ -30,8 +31,10 @@ const TOOLBOX_ITEMS = [
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label/frame and every shape variant.
- * icon/vote_dot/image/freehand have no creation entry point yet (tracked
+ * It creates note/text/label/frame, every shape variant, and image (which
+ * opens a file picker rather than adding a node directly — the host's
+ * onCreate handles that distinction; see GraphCanvas's onImageIngest).
+ * icon/vote_dot/freehand still have no creation entry point yet (tracked
  * gaps, not silently downgraded here) and are left for follow-up work, per
  * the acceptance matrix's per-type rows.
  */
@@ -51,6 +54,7 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    image: 'Image',
     ...labels,
   };
 

@@ -124,9 +124,11 @@ MCP. The required entry points are:
 (dedicated toolbar/toolbox actions). The bottom toolbox also creates `text`,
 `frame`, and `shape` in every variant `content.shape` accepts — rectangle,
 circle, triangle, rhombus, hexagon and process arrow — each of which now
-renders as its own distinct visual. `icon`, `vote_dot`, `image` and
-`freehand` still render on canvas but have no GUI creation path — they can
-only be created via MCP. A right-click property editor now exists for every
+renders as its own distinct visual. `image` also has GUI creation now
+(toolbox file picker, clipboard paste, and OS file drop — all through the
+same server-side ingest MCP uses). `icon`, `vote_dot` and `freehand` still
+render on canvas but have no GUI creation path — they can only be created via
+MCP. A right-click property editor now exists for every
 rotatable kind (`note`, `label`, `text`, `frame`, `shape`, `icon`, `vote_dot`,
 `image`): a rotation control (±15° steps plus reset), and, for `shape` only,
 a subtype picker to change an existing shape's variant after creation. What
@@ -290,11 +292,15 @@ Required for every path that can set an `image` annotation's pixel content:
   point (paste, upload, MCP data, MCP URL import) — an annotation must not
   depend on a remote resource staying reachable to keep rendering.
 
-**Enforcement:** `create_image_annotation` ingests the image and is the only
-tool that sets pixel content. `create_annotation` refuses `type="image"` and
+**Enforcement:** the MCP `create_image_annotation` tool and the REST `POST
+/api/sessions/{id}/annotations/image` endpoint (the human clipboard-paste /
+file-upload path) are the only two entry points that set pixel content, and
+both call the identical `image_ingest.py` validate/optimize/embed pipeline
+plus `SessionManager.upsert_image_annotation` — there is one ingest
+implementation, not two. `create_annotation` refuses `type="image"` and
 `update_annotation` refuses a `content` carrying an `image` key, so the
 generic envelope can no longer store a supplied `content.image.url`
-verbatim. Underneath both, `SessionStore.apply_state_op`'s
+verbatim. Underneath all of these, `SessionStore.apply_state_op`'s
 `annotation_created`/`annotation_updated` branches (`image_annotation_error`
 in `backend/core/session_annotations.py`) reject any op whose `image` payload
 sets a URL that is not an embedded `data:image/webp;base64` URI — the content
@@ -340,8 +346,9 @@ is tempting to read more into the rule than it delivers:
 
 So the property this section actually guarantees today is narrower than "no
 remote resource anywhere": **no session annotation write persists a new
-non-embedded image URL**. No GUI creates image content at all yet — the
-`image` GUI cell below is still ❌.
+non-embedded image URL**. The GUI now creates image content too (clipboard
+paste, file drop, and the annotation toolbox's file picker — see the `image`
+GUI cell below), through the same validated endpoint described above.
 
 ## Persistence
 
@@ -450,9 +457,10 @@ generic kind hides its resize handles the same way a locked `note` does.
 Per-type property editors and GUI creation for these types are required v1
 scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
 non-goal. A right-click rotation control and, for `shape`, a subtype picker
-now exist for every generic kind; recoloring, an icon picker and image
-paste/upload are still reachable only through the MCP tools, which is the gap
-the acceptance matrix tracks, not the intended end state.
+now exist for every generic kind; image paste/upload now has a GUI path too
+(toolbox file picker, clipboard paste, OS file drop). Recoloring and an icon
+picker are still reachable only through the MCP tools, which is the gap the
+acceptance matrix tracks, not the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 `GenericAnnotationNode.jsx`).
@@ -568,7 +576,7 @@ rule](#downstream-closure-rule).
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `image` | ⚠ rotate (right-click) once created via MCP; still no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
+| `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 

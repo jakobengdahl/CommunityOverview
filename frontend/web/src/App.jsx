@@ -1050,6 +1050,41 @@ function App() {
     [sessionId, ensureSyncConnected, isSessionMaterialized]
   );
 
+  // Human clipboard-paste / file-upload image creation (GraphCanvas's
+  // onImageIngest). Unlike every other annotation kind this never touches
+  // local node state directly: the server validates, optimizes and embeds the
+  // image (the same pipeline the MCP create_image_annotation tool uses), and
+  // the resulting annotation reaches this browser back over its own SSE
+  // subscription — attributed to a dedicated server client id rather than
+  // this browser's own, specifically so sessionSyncClient.js does not drop it
+  // as an echo of a self-authored op (see backend/service/rest_api.py's
+  // ingest_session_image). This function therefore posts and returns; it does
+  // not add anything to the canvas itself. `whenReady()` waits for the same
+  // "session exists server-side" fact the op queue's own flush already
+  // guards on (D13/D14: a session is never created until its first real
+  // write), since this request bypasses that queue.
+  const handleImageIngest = useCallback(
+    async (dataUrl, position) => {
+      const targetId = sessionId;
+      const sync = ensureSyncConnected(targetId);
+      try {
+        await sync?.whenReady();
+        if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
+        await api.ingestSessionImage(targetId, {
+          x: position.x,
+          y: position.y,
+          imageData: dataUrl,
+        });
+        sessionStore.touchSession(targetId);
+        setSessionsVersion((v) => v + 1);
+      } catch (error) {
+        console.error('Error ingesting image:', error);
+        showNotification('error', error.message || t('canvas.image_ingest_failed'));
+      }
+    },
+    [sessionId, ensureSyncConnected, syncRef, showNotification, t]
+  );
+
   // Ask GraphCanvas for a snapshot (positions + groups); the callback runs
   // after the snapshot has been persisted for the current session.
   const requestSessionSnapshot = useCallback((onDone) => {
@@ -1836,6 +1871,7 @@ function App() {
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
+          onImageIngest={handleImageIngest}
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
@@ -1927,6 +1963,7 @@ function App() {
             annotationRotateReset: t('context_menu.annotation_rotate_reset'),
             undoNotification: t('context_menu.undo_notification'),
             redoNotification: t('context_menu.redo_notification'),
+            imageIngestFailed: t('canvas.image_ingest_failed'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
@@ -1941,6 +1978,7 @@ function App() {
             shapeRhombus: t('annotation_toolbox.shape_rhombus'),
             shapeHexagon: t('annotation_toolbox.shape_hexagon'),
             shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
+            image: t('annotation_toolbox.image'),
           }}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}

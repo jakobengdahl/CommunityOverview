@@ -24,6 +24,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^rhombus$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^process arrow$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
   });
 
   it('collapses again on a second toggle click', () => {
@@ -69,6 +70,15 @@ describe('AnnotationToolbox', () => {
 
     fireEvent.click(screen.getByRole('button', { name }));
     expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
+  });
+
+  it('calls onCreate with the image kind and no options, like the other simple kinds', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /^image$/i }));
+    expect(onCreate).toHaveBeenLastCalledWith('image', undefined);
   });
 
   it('accepts a labels override so the host app can localize it', () => {

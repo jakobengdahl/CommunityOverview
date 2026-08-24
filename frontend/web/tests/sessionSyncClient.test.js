@@ -297,6 +297,93 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(2);
   });
 
+  // Regression for the image-ingest echo-attribution fix: the browser that
+  // pasted an image is the same browser that made the underlying HTTP POST
+  // (backend/service/rest_api.py's ingest_session_image), but the server
+  // broadcasts that op under a dedicated marker client id
+  // (_HUMAN_IMAGE_INGEST_CLIENT_ID), not the pasting browser's own client_id —
+  // specifically so this echo is NOT treated as a self-authored op and
+  // dropped by the guard just above. Confirms the initiating client still
+  // receives and applies the server's actual embedded/optimized result over
+  // its own SSE subscription, rather than needing a bespoke response-body
+  // round-trip.
+  it('applies an image-ingest op even though the receiving client is the one that "sent" it, because the op carries a dedicated server client id', async () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ clientId: 'client-me', handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const imageOp = {
+      op: 'annotation_created',
+      annotation: { id: 'img-1', type: 'image', image: { url: 'data:image/webp;base64,AA==' } },
+    };
+    // The pasting browser is 'client-me' — the same id whose fetch() reached
+    // the ingest endpoint — but the broadcast is attributed to the server's
+    // marker, not to 'client-me'.
+    es.emit({ type: 'op', client_id: 'human-image-ingest', op: imageOp, seq: 1 });
+    expect(onRemoteOps).toHaveBeenCalledWith([imageOp], { clientId: 'human-image-ingest' });
+  });
+
+  describe('whenReady', () => {
+    it('resolves immediately once the client is already ready', async () => {
+      const { client } = makeClient();
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      await expect(client.whenReady()).resolves.toBeUndefined();
+    });
+
+    it('resolves once the first snapshot arrives for a not-yet-ready client', async () => {
+      const { client } = makeClient();
+      client.connect();
+      let resolved = false;
+      const p = client.whenReady().then(() => {
+        resolved = true;
+      });
+      expect(resolved).toBe(false);
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      await p;
+      expect(resolved).toBe(true);
+    });
+
+    it('resolves on a reconnect catch_up as well as a fresh snapshot', async () => {
+      const { client } = makeClient();
+      client.connect();
+      let resolved = false;
+      const p = client.whenReady().then(() => {
+        resolved = true;
+      });
+      FakeEventSource.instances[0].emit({ type: 'catch_up', seq: 4, ops: [] });
+      await p;
+      expect(resolved).toBe(true);
+    });
+
+    it('resolves every pending waiter, not just the first', async () => {
+      const { client } = makeClient();
+      client.connect();
+      const results = [];
+      const p1 = client.whenReady().then(() => results.push(1));
+      const p2 = client.whenReady().then(() => results.push(2));
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      await Promise.all([p1, p2]);
+      expect(results.sort()).toEqual([1, 2]);
+    });
+
+    // Regression: without this, a caller awaiting whenReady() when the
+    // session is switched away before the first snapshot ever arrives (e.g.
+    // App.jsx's handleImageIngest, mid-paste) would hang forever, keeping
+    // this whole client — and its closed EventSource — reachable and alive.
+    it('resolves pending waiters on close(), never leaving one hanging', async () => {
+      const { client } = makeClient();
+      client.connect();
+      let resolved = false;
+      const p = client.whenReady().then(() => {
+        resolved = true;
+      });
+      client.close();
+      await p;
+      expect(resolved).toBe(true);
+    });
+  });
+
   it('sendEdgesAdded enqueues and POSTs an edges_added op carrying the edges', async () => {
     const { client, fetchImpl } = makeClient();
     client.connect();
