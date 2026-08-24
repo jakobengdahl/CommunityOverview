@@ -1423,9 +1423,7 @@ class TestSetGroupMembers:
     async def test_replaces_membership_and_broadcasts(self):
         mgr = _manager()
         s = mgr.create_session()
-        mgr.upsert_annotation(
-            s.id, "mcp-agent", {"id": "group-1", "type": "group"}
-        )
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
 

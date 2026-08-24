@@ -335,9 +335,7 @@ class TestUpdateGroupMembers:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
-    def test_two_sequential_calls_each_add_a_different_member(
-        self, annotation_tools
-    ):
+    def test_two_sequential_calls_each_add_a_different_member(self, annotation_tools):
         """Each call re-reads the group's current membership at call time,
         so a second add call (issued after the first has returned) sees the
         first call's result instead of a stale snapshot fetched earlier.

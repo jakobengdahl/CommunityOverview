@@ -203,9 +203,7 @@ class TestSessionPersistenceAndMcpRoundTrip:
         assert match["color"] == case["fields"]["color"]
         assert match["font_size"] == case["fields"]["fontSize"]
 
-    def test_group_case_round_trips_through_mcp_and_persistence(
-        self, annotation_tools
-    ):
+    def test_group_case_round_trips_through_mcp_and_persistence(self, annotation_tools):
         """`group` has its own dedicated MCP tool set
         (`create_group_annotation`/`update_group_members`,
         task-mcp-full-annotation-crud) — this drives the fixture's group
