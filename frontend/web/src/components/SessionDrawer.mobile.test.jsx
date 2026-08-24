@@ -243,4 +243,47 @@ describe('SessionDrawer mobile overlay', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('blurs the focused close button before calling onClose, so aria-hidden never commits while a descendant is still focused', () => {
+    setMobile(true);
+    let activeElementAtCloseTime;
+    const onClose = vi.fn(() => {
+      activeElementAtCloseTime = document.activeElement;
+    });
+    renderDrawer({ onClose });
+
+    const closeButton = screen.getByRole('button', { name: 'Close menu' });
+    expect(closeButton).toHaveFocus();
+
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(activeElementAtCloseTime).not.toBe(closeButton);
+  });
+
+  it('blurs focus before calling onClose on Escape too', () => {
+    setMobile(true);
+    let activeElementAtCloseTime;
+    const onClose = vi.fn(() => {
+      activeElementAtCloseTime = document.activeElement;
+    });
+    renderDrawer({ onClose });
+
+    const closeButton = screen.getByRole('button', { name: 'Close menu' });
+    expect(closeButton).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(activeElementAtCloseTime).not.toBe(closeButton);
+  });
+
+  it('does not blur on close in desktop mode (no focus trap to race against)', () => {
+    setMobile(false);
+    const onClose = vi.fn();
+    renderDrawer({ onClose });
+
+    const closeButton = screen.getByRole('button', { name: 'Close menu' });
+    closeButton.focus();
+    fireEvent.click(closeButton);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

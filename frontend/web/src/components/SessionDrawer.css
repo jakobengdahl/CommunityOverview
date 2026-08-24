@@ -52,6 +52,17 @@
   pointer-events: auto;
 }
 
+/* Matches BottomSheet.css's reduced-motion contract for the sibling
+   search/create sheets — this drawer uses plain CSS transitions rather than
+   BottomSheet's JS-driven mount animation, so a media query is sufficient
+   here without needing the equivalent of its usePrefersReducedMotion hook. */
+@media (prefers-reduced-motion: reduce) {
+  .session-drawer,
+  .session-drawer-scrim {
+    transition: none;
+  }
+}
+
 .session-drawer-header {
   display: flex;
   align-items: center;

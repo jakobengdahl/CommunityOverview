@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   X,
   Feather,
@@ -69,6 +69,25 @@ function SessionDrawer({
   const drawerRef = useRef(null);
   const lastFocusedRef = useRef(null);
 
+  // Closing while a descendant still holds focus would commit aria-hidden on
+  // an ancestor of the active element in the same render that flips `open`
+  // (the browser blocks this and force-blurs it, and axe/Lighthouse flag it)
+  // — because unlike BottomSheet, this drawer stays mounted through close
+  // for its slide-out transition rather than unmounting outright. Blurring
+  // synchronously, before onClose's state update is even committed, avoids
+  // the race regardless of when the focus-restore effect cleanup later runs.
+  const closeDrawer = useCallback(() => {
+    if (
+      isMobile &&
+      drawerRef.current &&
+      document.activeElement &&
+      drawerRef.current.contains(document.activeElement)
+    ) {
+      document.activeElement.blur();
+    }
+    onClose();
+  }, [isMobile, onClose]);
+
   // Only one per-session menu is open at a time; drop it when the drawer closes
   // so it doesn't reappear on the next open. Reset during render (React's
   // recommended pattern for deriving from a prop change) rather than in an effect.
@@ -94,7 +113,7 @@ function SessionDrawer({
           setOpenMenuId(null);
           return;
         }
-        onClose();
+        closeDrawer();
         return;
       }
       if (!isMobile || e.key !== 'Tab') return;
@@ -120,7 +139,7 @@ function SessionDrawer({
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [open, suspendEscape, openMenuId, onClose, isMobile]);
+  }, [open, suspendEscape, openMenuId, closeDrawer, isMobile]);
 
   // Modal focus management for the mobile overlay only: move focus in on
   // open, restore it to whatever had focus beforehand on close — the same
@@ -179,7 +198,7 @@ function SessionDrawer({
       {isMobile && (
         <div
           className={`session-drawer-scrim${open ? ' open' : ''}`}
-          onClick={onClose}
+          onClick={closeDrawer}
           data-testid="session-drawer-scrim"
           aria-hidden="true"
         />
@@ -197,7 +216,7 @@ function SessionDrawer({
           <span className="session-drawer-title">{t('sessions.title')}</span>
           <button
             className="session-drawer-close"
-            onClick={onClose}
+            onClick={closeDrawer}
             title={t('sessions.close')}
             aria-label={t('sessions.close')}
           >
