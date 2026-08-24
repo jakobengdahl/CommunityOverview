@@ -396,9 +396,13 @@ deliberately kept off `create_group_annotation`'s upsert-by-id path unless a
 caller explicitly passes `member_node_ids`: the op merges by shallow
 `dict.update`, so an upsert that always reset membership to `[]` when
 omitted would fight `update_group_members`'s own writes any time a caller
-recreated a group just to change its label or color. There is no MCP tool
-yet to delete a group box itself (only its creation and membership) — see
-the acceptance matrix.
+recreated a group just to change its label or color. `delete_group_annotation`
+removes the group box by id, the same revision-checked delete contract as
+`delete_annotation`/`delete_sticky_note`; it removes only the box, not the
+graph nodes named in `member_node_ids` — a group never owns those nodes as
+annotations, so there is nothing else to cascade-delete, and this matches
+the GUI's own "Delete Group" action (`GroupNode.jsx`'s
+`removeGroupKeepChildren`), which un-parents and keeps every member node.
 
 None of the three tool sets lets a write silently convert one annotation
 type into another: creating or updating across the note/generic/group
@@ -564,7 +568,7 @@ rule](#downstream-closure-rule).
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ⚠ toolbox create (fixed default size), rotate (right-click); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `group` | ✅ toolbar create-group action | ⚠ `create_group_annotation` creates/upserts the box, `update_group_members` adds/removes member ids; no MCP tool deletes a group box itself, and editing an existing group's own label/color/geometry is only possible by a full upsert (no partial-update tool the way generic types have) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
+| `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |

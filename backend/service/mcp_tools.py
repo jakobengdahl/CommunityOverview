@@ -3441,9 +3441,8 @@ def register_mcp_tools(
         Delete an annotation by its stable id.
 
         Only acts on the generic types `create_annotation` manages (not
-        `note`/`group` — use `delete_sticky_note` for notes; deleting a
-        group box itself is not exposed through MCP yet, only its creation
-        and membership via `create_group_annotation`/`update_group_members`).
+        `note`/`group` — use `delete_sticky_note` for notes and
+        `delete_group_annotation` for group boxes).
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -3876,6 +3875,129 @@ def register_mcp_tools(
             "session_id": session_id,
             "group": project_annotation(updated) if updated else None,
             "member_node_ids": current,
+            "revision": result["revision"],
+        }
+
+    @register_tool
+    def delete_group_annotation(
+        session_id: str,
+        group_id: str,
+        expected_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete a `group` (node-membership box) annotation by its stable id.
+
+        This removes only the group box itself. `member_node_ids` names
+        graph nodes by id, not annotations the group owns — the annotation
+        model never writes graph nodes or edges
+        (docs/ANNOTATION_CONTRACT.md's "Scope" and "Persistence" sections),
+        so there is nothing else to cascade-delete. This matches the GUI's
+        own group-delete behavior (`GroupNode.jsx`'s "Delete Group" action,
+        `removeGroupKeepChildren`): it un-parents and keeps every member
+        node, never deleting or hiding them, and only removes the group
+        container. A membership change is not itself undoable through
+        `undo_last_action` (`update_group_members`'s docstring), but
+        deleting the group annotation is, like any other annotation type
+        (`session_activity.UNDOABLE_OPS`).
+
+        Only acts on `group`-typed annotations — a note or generic-type id
+        is refused as `not_found`, matching `update_group_members`'s and
+        `delete_annotation`'s cross-type boundary; use `delete_annotation`
+        for generic types and `delete_sticky_note` for notes.
+
+        Args:
+            session_id: The session ID shown in the browser header (e.g. "8244-1742")
+            group_id: The group annotation's stable id (from
+                `create_group_annotation` or `list_annotations`).
+            expected_revision: If given, the write is rejected unless it
+                equals the session's current `revision`. Omit for
+                last-write-wins.
+
+        Returns:
+            Dict with success, deleted group_id, and the new revision.
+            Retryable errors: revision_conflict, busy, rate_limited; change
+            the request for not_found.
+        """
+        if session_manager is None:
+            return {"success": False, "error": "Session manager not available"}
+        if not is_valid_session_id(session_id):
+            return {
+                "success": False,
+                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+            }
+        denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_group_annotation")
+        if denied:
+            return denied
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        existing = _find_any_annotation(session, group_id)
+        if existing is None or not is_group(existing):
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No group annotation with id {group_id!r} in this session.",
+            }
+        try:
+            result = session_manager.delete_annotation(
+                session_id,
+                _MCP_LAYOUT_CLIENT_ID,
+                group_id,
+                expected_revision=expected_revision,
+            )
+        except RevisionConflict as exc:
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since you read it; re-read "
+                    "list_annotations and retry with the current revision."
+                ),
+                "expected_revision": exc.expected,
+                "current_revision": exc.actual,
+            }
+        except AnnotationNotFound:
+            return {
+                "success": False,
+                "error": "not_found",
+                "message": f"No annotation with id {group_id!r} in this session.",
+            }
+        except LayoutBusy:
+            return {
+                "success": False,
+                "error": "busy",
+                "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
+            }
+        except SessionNotFound:
+            return {
+                "success": False,
+                "error": (
+                    f"Session '{session_id}' not found. "
+                    "This tool acts on a session's stored state, which exists "
+                    "once create_visualization_session created it or a browser "
+                    "made its first change to it."
+                ),
+            }
+        except OpError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "session_id": session_id,
+            "group_id": group_id,
             "revision": result["revision"],
         }
 

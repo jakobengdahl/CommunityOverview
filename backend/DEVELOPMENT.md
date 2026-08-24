@@ -1088,14 +1088,23 @@ recolor an existing group would silently wipe out membership
 `update_group_members` had set. Pass an explicit list (`[]` included) to
 set membership from this tool instead.
 
-Both tools resolve `annotation_id`/`group_id` against `group`-typed
+`delete_group_annotation` deletes a `group` by id, sharing the same
+revision-checked delete contract as `delete_annotation`/`delete_sticky_note`.
+It removes only the group box — `member_node_ids` names graph nodes by id,
+not annotations the group owns, so there is nothing else to cascade-delete.
+This matches the canvas GUI's own "Delete Group" action
+(`packages/ui-graph-canvas/src/components/GroupNode.jsx`'s
+`removeGroupKeepChildren`), which un-parents and keeps every member node
+rather than deleting or hiding them.
+
+All three tools resolve `annotation_id`/`group_id` against `group`-typed
 annotations only — a note or generic-type id is refused (`wrong_type` on
-create, `not_found` on `update_group_members`), matching the note/generic
-boundary above. There is no MCP tool yet to delete a group box itself, and
-`group_membership_changed` is outside `session_activity.UNDOABLE_OPS`
-(see that module's docstring), so a membership change made through
-`update_group_members` is not itself undoable through `undo_last_action` —
-creating or deleting the group annotation is, like any other type.
+create, `not_found` on `update_group_members`/`delete_group_annotation`),
+matching the note/generic boundary above. `group_membership_changed` is
+outside `session_activity.UNDOABLE_OPS` (see that module's docstring), so a
+membership change made through `update_group_members` is not itself
+undoable through `undo_last_action` — creating or deleting the group
+annotation is, like any other type.
 
 #### Image annotation tool
 
