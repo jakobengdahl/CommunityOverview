@@ -275,6 +275,23 @@ describe('SessionDrawer mobile overlay', () => {
     expect(activeElementAtCloseTime).not.toBe(closeButton);
   });
 
+  it('blurs the focused Activity button before calling onOpenActivity, since MobileShell closes the surface around that callback rather than through onClose', () => {
+    setMobile(true);
+    let activeElementWhenActivityFires;
+    const onOpenActivity = vi.fn(() => {
+      activeElementWhenActivityFires = document.activeElement;
+    });
+    renderDrawer({ onOpenActivity });
+
+    const activityButton = screen.getByRole('button', { name: 'Recent activity' });
+    activityButton.focus();
+    expect(activityButton).toHaveFocus();
+
+    fireEvent.click(activityButton);
+    expect(onOpenActivity).toHaveBeenCalledTimes(1);
+    expect(activeElementWhenActivityFires).not.toBe(activityButton);
+  });
+
   it('does not blur on close in desktop mode (no focus trap to race against)', () => {
     setMobile(false);
     const onClose = vi.fn();

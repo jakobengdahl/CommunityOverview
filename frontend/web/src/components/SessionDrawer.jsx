@@ -74,9 +74,14 @@ function SessionDrawer({
   // (the browser blocks this and force-blurs it, and axe/Lighthouse flag it)
   // — because unlike BottomSheet, this drawer stays mounted through close
   // for its slide-out transition rather than unmounting outright. Blurring
-  // synchronously, before onClose's state update is even committed, avoids
-  // the race regardless of when the focus-restore effect cleanup later runs.
-  const closeDrawer = useCallback(() => {
+  // synchronously, before the state update that flips `open` is even
+  // committed, avoids the race regardless of when the focus-restore effect
+  // cleanup later runs. Exposed separately from closeDrawer() because some
+  // actions (Activity) close the drawer from the *caller's* side — MobileShell
+  // closes its own surface state around onOpenActivity rather than routing
+  // through this component's onClose — so that click handler needs the same
+  // blur without calling onClose itself (surface.close already does that).
+  const blurFocusedDescendant = useCallback(() => {
     if (
       isMobile &&
       drawerRef.current &&
@@ -85,8 +90,12 @@ function SessionDrawer({
     ) {
       document.activeElement.blur();
     }
+  }, [isMobile]);
+
+  const closeDrawer = useCallback(() => {
+    blurFocusedDescendant();
     onClose();
-  }, [isMobile, onClose]);
+  }, [blurFocusedDescendant, onClose]);
 
   // Only one per-session menu is open at a time; drop it when the drawer closes
   // so it doesn't reappear on the next open. Reset during render (React's
@@ -333,7 +342,18 @@ function SessionDrawer({
             <span>{canvasLocked ? t('sessions.unlock_canvas') : t('sessions.lock_canvas')}</span>
           </button>
           {onOpenActivity && (
-            <button className="session-drawer-item" onClick={onOpenActivity}>
+            <button
+              className="session-drawer-item"
+              onClick={() => {
+                // MobileShell's onOpenActivity wrapper closes the surface
+                // itself (surface.close()) rather than calling this
+                // component's onClose, so it needs the same pre-close blur
+                // closeDrawer() gives Escape/scrim/close-button — see the
+                // comment on blurFocusedDescendant above.
+                blurFocusedDescendant();
+                onOpenActivity();
+              }}
+            >
               <ClockHistory size={15} />
               <span>{t('history.open')}</span>
             </button>
