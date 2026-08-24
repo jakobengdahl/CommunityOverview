@@ -20,6 +20,17 @@ import { useViewportMode } from '../hooks/useViewportMode';
 import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
 
+// Mirrors BottomSheet.jsx's focus-trap contract, applied here only for the
+// mobile full-screen variant (see the isMobile-gated effect below) — the
+// desktop docked panel keeps its pre-existing, untrapped focus behavior.
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function getFocusableElements(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
+}
+
 /**
  * SessionDrawer — full-height panel opened from the hamburger button (desktop)
  * or the Menu slot (mobile). Hosts session navigation (new / search / connect
@@ -55,6 +66,8 @@ function SessionDrawer({
   const [openMenuId, setOpenMenuId] = useState(null);
   const [wasOpen, setWasOpen] = useState(open);
   const searchInputRef = useRef(null);
+  const drawerRef = useRef(null);
+  const lastFocusedRef = useRef(null);
 
   // Only one per-session menu is open at a time; drop it when the drawer closes
   // so it doesn't reappear on the next open. Reset during render (React's
@@ -66,7 +79,10 @@ function SessionDrawer({
 
   // Escape closes the drawer — except while a dialog is stacked on top of it
   // (settings, connect, rename), where Escape belongs to that dialog. An open
-  // per-session menu is peeled off first, keeping the drawer in place.
+  // per-session menu is peeled off first, keeping the drawer in place. In
+  // mobile mode (full-screen overlay), Tab is also trapped inside the drawer
+  // the way BottomSheet already traps focus for the sibling search/create
+  // sheets — desktop's docked panel keeps its untrapped tab order.
   useEffect(() => {
     if (!open || suspendEscape) return;
     const handleKeyDown = (e) => {
@@ -79,11 +95,50 @@ function SessionDrawer({
           return;
         }
         onClose();
+        return;
+      }
+      if (!isMobile || e.key !== 'Tab') return;
+
+      const focusables = getFocusableElements(drawerRef.current);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      } else if (!focusables.includes(active)) {
+        e.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [open, suspendEscape, openMenuId, onClose]);
+  }, [open, suspendEscape, openMenuId, onClose, isMobile]);
+
+  // Modal focus management for the mobile overlay only: move focus in on
+  // open, restore it to whatever had focus beforehand on close — the same
+  // contract BottomSheet.jsx uses for the sibling search/create sheets.
+  useEffect(() => {
+    if (!isMobile || !open) return undefined;
+    lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
+
+    const focusable = getFocusableElements(drawerRef.current);
+    (focusable[0] || drawerRef.current)?.focus();
+
+    return () => {
+      const toRestore = lastFocusedRef.current;
+      if (toRestore && typeof toRestore.focus === 'function' && document.contains(toRestore)) {
+        toRestore.focus();
+      }
+    };
+  }, [isMobile, open]);
 
   useEffect(() => {
     if (searchOpen) searchInputRef.current?.focus();
@@ -99,17 +154,21 @@ function SessionDrawer({
 
   return (
     <>
-      {isMobile && open && (
+      {isMobile && (
         <div
-          className="session-drawer-scrim"
+          className={`session-drawer-scrim${open ? ' open' : ''}`}
           onClick={onClose}
           data-testid="session-drawer-scrim"
           aria-hidden="true"
         />
       )}
       <div
+        ref={drawerRef}
         className={`session-drawer${open ? ' open' : ''}${isMobile ? ' session-drawer--mobile' : ''}`}
         aria-hidden={!open}
+        role={isMobile ? 'dialog' : undefined}
+        aria-modal={isMobile ? open : undefined}
+        aria-label={t('sessions.title')}
       >
         <div className="session-drawer-header">
           <Feather size={18} className="session-drawer-app-icon" />
