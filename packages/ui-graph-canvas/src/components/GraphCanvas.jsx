@@ -50,6 +50,8 @@ import {
   ATTACHABLE_OVERLAY_KINDS,
   isManualNode,
   isArrowHeld,
+  isAnnotationDraggable,
+  isRemoteLocked,
   overlayToFlowNode,
   flowNodeToOverlay,
   nodeCenter,
@@ -307,6 +309,7 @@ function GraphCanvasInner({
     undoNotification: 'Move undone',
     redoNotification: 'Move redone',
     imageIngestFailed: 'Could not add the image',
+    annotationRemoteLocked: 'Someone else is editing this annotation',
     ...contextMenuLabels,
   };
 
@@ -469,18 +472,32 @@ function GraphCanvasInner({
     clear: clearHistory,
   } = useCanvasHistory();
 
+  const showNotification = useCallback((type, message) => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 3000);
+  }, []);
+
   // Stable notifier for annotation nodes (note/label/arrow) to signal the host
   // that an annotation was edited, recoloured or deleted so the session can be
   // persisted. Wrapped in a ref so the callback identity stays stable across
   // renders even as the parent's handler changes.
   const onAnnotationChangeRef = useRef(onAnnotationChange);
   onAnnotationChangeRef.current = onAnnotationChange;
-  const notifyAnnotationChange = useCallback(() => {
-    onAnnotationChangeRef.current?.();
+  const notifyAnnotationChange = useCallback((kind) => {
+    onAnnotationChangeRef.current?.(kind);
   }, []);
+  // Surfaced by an annotation component when a mutation is refused because
+  // another client currently holds the annotation's selection claim (leases
+  // are exclusive — task-annotation-shared-session-realtime), so the attempt
+  // is visible rather than a silent no-op.
+  const notifyRemoteLockedAttempt = useCallback(() => {
+    showNotification('info', cml.annotationRemoteLocked);
+  }, [cml.annotationRemoteLocked, showNotification]);
+
   const annotationContextValue = useMemo(
     () => ({
       notifyChange: notifyAnnotationChange,
+      notifyRemoteLockedAttempt,
       labels: {
         color: cml.annotationColor,
         delete: cml.deleteAnnotation,
@@ -498,6 +515,7 @@ function GraphCanvasInner({
     }),
     [
       notifyAnnotationChange,
+      notifyRemoteLockedAttempt,
       cml.annotationColor,
       cml.deleteAnnotation,
       cml.notePlaceholder,
@@ -909,11 +927,6 @@ function GraphCanvasInner({
     setPaneContextMenu(null);
   }, []);
 
-  const showNotification = useCallback((type, message) => {
-    setNotification({ type, message });
-    setTimeout(() => setNotification(null), 3000);
-  }, []);
-
   // Apply a batch of { id, position, parentId } moves to the canvas and persist
   // each one through the same callback a drag/organize uses, so an undo or redo
   // is indistinguishable from the move it reverses. `parentId` is restored too
@@ -924,6 +937,7 @@ function GraphCanvasInner({
     (moves) => {
       if (!moves || moves.length === 0) return;
       const byId = new Map(moves.map((m) => [m.id, m]));
+      const typeById = new Map(getFlowNodes().map((n) => [n.id, n.type]));
       setNodes((nds) =>
         reorderNodesForParentChild(
           nds.map((n) => {
@@ -934,10 +948,10 @@ function GraphCanvasInner({
         )
       );
       if (onNodePositionChange) {
-        for (const m of moves) onNodePositionChange(m.id, m.position);
+        for (const m of moves) onNodePositionChange(m.id, m.position, typeById.get(m.id));
       }
     },
-    [setNodes, onNodePositionChange]
+    [setNodes, onNodePositionChange, getFlowNodes]
   );
 
   const handleUndo = useCallback(() => {
@@ -1107,7 +1121,7 @@ function GraphCanvasInner({
       }
       setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
       setPaneContextMenu(null);
-      onAnnotationChangeRef.current?.();
+      onAnnotationChangeRef.current?.('create');
     },
     [setNodes]
   );
@@ -1351,7 +1365,7 @@ function GraphCanvasInner({
       }
 
       if (onNodePositionChange) {
-        onNodePositionChange(draggedNode.id, draggedNode.position);
+        onNodePositionChange(draggedNode.id, draggedNode.position, draggedNode.type);
       }
 
       // Get latest node positions directly from ReactFlow's internal store
@@ -1381,7 +1395,7 @@ function GraphCanvasInner({
                 : n
             )
           );
-          onAnnotationChangeRef.current?.();
+          onAnnotationChangeRef.current?.('geometry');
         }
       }
 
@@ -1961,17 +1975,24 @@ function GraphCanvasInner({
           // Delete removes overlay annotations (note/label/arrow) from the
           // canvas; graph nodes are hidden, not deleted. Groups are left to
           // their own context menu so their children stay correctly parented.
-          const overlayIds = selectedNodes
-            .filter((n) => OVERLAY_TYPES.has(n.type))
-            .map((n) => n.id);
+          // One held by another client's live selection claim is skipped —
+          // leases are exclusive (task-annotation-shared-session-realtime).
+          const deletableOverlays = selectedNodes.filter(
+            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data)
+          );
+          const overlayIds = deletableOverlays.map((n) => n.id);
+          const skippedLocked = selectedNodes.some(
+            (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
+          );
           const graphNodeIds = selectedNodes
             .filter((n) => !ANNOTATION_TYPES.has(n.type))
             .map((n) => n.id);
           if (overlayIds.length > 0) {
             const removeSet = new Set(overlayIds);
             setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
-            onAnnotationChangeRef.current?.();
+            onAnnotationChangeRef.current?.('delete');
           }
+          if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
           if (graphNodeIds.length > 0) {
             if (onHideMultiple) {
               onHideMultiple(graphNodeIds);
@@ -1998,8 +2019,10 @@ function GraphCanvasInner({
     organizeSelection,
     showNotification,
     cml.organizeHint,
+    cml.annotationRemoteLocked,
     handleUndo,
     handleRedo,
+    setNodes,
   ]);
 
   // Create group when signal changes (triggered from toolbar)
@@ -2103,7 +2126,12 @@ function GraphCanvasInner({
       if (n.type !== 'arrow') continue;
       if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
       const resolved = resolveAnchoredArrow(n, centers);
-      const desiredDraggable = !n.data?.locked && !isArrowHeld(n.data, existing);
+      // Folds in the same remote-claim exclusivity the selection-claim effect
+      // applies, so this effect (which runs on every `nodes` change, far more
+      // often) never resets `draggable` back to true out from under a claim
+      // another client is holding.
+      const desiredDraggable =
+        !n.data?.locked && !isArrowHeld(n.data, existing) && !isRemoteLocked(n.data);
       if (resolved || n.draggable !== desiredDraggable) {
         updates.set(n.id, { resolved, desiredDraggable });
         if (resolved) geometryChanged = true;
@@ -2129,7 +2157,7 @@ function GraphCanvasInner({
       })
     );
     // Only geometry is persisted; a draggable-only flip needs no save.
-    if (geometryChanged) onAnnotationChangeRef.current?.();
+    if (geometryChanged) onAnnotationChangeRef.current?.('geometry');
   }, [nodes, setNodes]);
 
   // Keep an attached label/text/icon/vote_dot glued to its attachment
@@ -2164,8 +2192,29 @@ function GraphCanvasInner({
     setNodes((nds) =>
       nds.map((n) => (updates.has(n.id) ? { ...n, position: updates.get(n.id) } : n))
     );
-    onAnnotationChangeRef.current?.();
+    onAnnotationChangeRef.current?.('geometry');
   }, [nodes, setNodes]);
+
+  // Mirror live remote selection claims onto annotation nodes (design 3.5,
+  // extended to annotations — task-annotation-shared-session-realtime). Graph
+  // ('custom') nodes get their `remoteSelection` marker recomputed fresh every
+  // render, sourced from the host's `inputNodes` prop (see the
+  // `reactFlowNodes` memo above); annotation nodes live only in ReactFlow's own
+  // node state instead, so the same live claim needs an effect to push it in.
+  // A claim held by another client also blocks local dragging here —
+  // annotation leases are exclusive, not merely advisory, unlike the
+  // pre-existing graph-node selection markers, which are visual-only.
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (!ANNOTATION_TYPES.has(n.type)) return n;
+        const marker = remoteSelections?.[n.id] ?? null;
+        if (!marker && !n.data?.remoteSelection) return n;
+        const nextData = { ...n.data, remoteSelection: marker };
+        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+      })
+    );
+  }, [remoteSelections, setNodes]);
 
   // Apply node positions arriving from another client (design step 6), holding
   // positions for not-yet-mounted nodes until they appear.

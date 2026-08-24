@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { resolveAnnotationIcon } from '../utils/annotationIcons';
-import { rotationStyle, ROTATABLE_OVERLAY_KINDS } from '../utils/annotations';
+import { rotationStyle, ROTATABLE_OVERLAY_KINDS, isRemoteLocked } from '../utils/annotations';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -81,7 +81,10 @@ function GenericAnnotationNode({ id, type, data, selected }) {
   const kind = type;
   const color = data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live claim makes
+  // this annotation's lease exclusive (task-annotation-shared-session-realtime).
+  const remoteLocked = isRemoteLocked(data);
   const { setNodes } = useReactFlow();
   const selectedClass = selected ? ' selected' : '';
   // Rotation is applied to the rendered element, not to the ReactFlow node
@@ -117,42 +120,70 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     if (!EDITABLE_KINDS.has(kind)) return;
     e.preventDefault();
     e.stopPropagation();
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setContextMenu({ x: e.clientX, y: e.clientY });
   };
 
   const changeShape = (shape) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, shape } } : n)));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeRotation = (deg) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     const next = normalizeAngle(deg);
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
     );
-    notifyChange();
+    notifyChange('geometry');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
   };
 
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
   // consistent geometry lock rather than only blocking one of two ways to
-  // move/resize the object.
+  // move/resize the object. A remote claim (another client's exclusive lease)
+  // hides them the same way.
   const resizer = RESIZABLE_KINDS.has(kind) && (
     <NodeResizer
       minWidth={MIN_SIZE}
       minHeight={MIN_SIZE}
-      isVisible={Boolean(selected) && !locked}
+      isVisible={Boolean(selected) && !locked && !remoteLocked}
       lineStyle={{ stroke: color, strokeWidth: 2 }}
       handleStyle={{ width: 10, height: 10, background: color, border: '2px solid white' }}
-      onResizeEnd={notifyChange}
+      onResizeEnd={() => notifyChange('geometry')}
     />
+  );
+
+  const remoteBadge = remoteLocked && (
+    <div
+      className="graph-node-remote-badge"
+      style={{ backgroundColor: data.remoteSelection.color }}
+      title={data.remoteSelection.displayName}
+    >
+      {data.remoteSelection.displayName}
+    </div>
   );
 
   const currentRotation = data?.rotation ?? 0;
@@ -181,6 +212,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           {data.text || ''}
         </div>
         {menu}
+        {remoteBadge}
       </>
     );
   }
@@ -195,6 +227,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           onContextMenu={openContextMenu}
         />
         {menu}
+        {remoteBadge}
       </>
     );
   }
@@ -230,6 +263,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           />
         </div>
         {menu}
+        {remoteBadge}
       </>
     );
   }
@@ -250,6 +284,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           {icon.text}
         </div>
         {menu}
+        {remoteBadge}
       </>
     );
   }
@@ -265,6 +300,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           {data.value ?? ''}
         </div>
         {menu}
+        {remoteBadge}
       </>
     );
   }
@@ -283,6 +319,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
             {data.alt || ''}
           </div>
           {menu}
+          {remoteBadge}
         </>
       );
     }
@@ -297,6 +334,7 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           onContextMenu={openContextMenu}
         />
         {menu}
+        {remoteBadge}
       </>
     );
   }

@@ -2,7 +2,7 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { DEFAULT_LABEL_FONT_SIZE, rotationStyle } from '../utils/annotations';
+import { DEFAULT_LABEL_FONT_SIZE, rotationStyle, isRemoteLocked } from '../utils/annotations';
 import './LabelNode.css';
 
 /**
@@ -21,7 +21,10 @@ function LabelNode({ id, data, selected }) {
   const inputRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live claim makes
+  // this label's lease exclusive (task-annotation-shared-session-realtime).
+  const remoteLocked = isRemoteLocked(data);
 
   useEffect(() => {
     setText(data.text || '');
@@ -58,11 +61,16 @@ function LabelNode({ id, data, selected }) {
 
   const commitText = () => {
     setIsEditing(false);
+    if (remoteLocked) {
+      setText(data.text || '');
+      notifyRemoteLockedAttempt();
+      return;
+    }
     const trimmed = text.trim();
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
     );
-    notifyChange();
+    notifyChange('text');
   };
 
   const handleKeyDown = (e) => {
@@ -77,28 +85,46 @@ function LabelNode({ id, data, selected }) {
   };
 
   const changeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color } } : n)));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeFontSize = (fontSize) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n)));
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeRotation = (deg) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     const next = ((deg % 360) + 360) % 360;
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
     );
-    notifyChange();
+    notifyChange('geometry');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
   };
 
   const color = data.color || LABEL_COLORS[0];
@@ -108,9 +134,19 @@ function LabelNode({ id, data, selected }) {
     <>
       <div
         className={`graph-label-node${selected ? ' selected' : ''}`}
-        style={{ color, fontSize, ...rotationStyle('label', data.rotation) }}
+        style={{
+          color,
+          fontSize,
+          ...rotationStyle('label', data.rotation),
+          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
+          outlineOffset: remoteLocked ? '2px' : undefined,
+        }}
         onDoubleClick={(e) => {
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setIsEditing(true);
         }}
         onContextMenu={(e) => {
@@ -119,6 +155,15 @@ function LabelNode({ id, data, selected }) {
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {remoteLocked && (
+          <div
+            className="graph-node-remote-badge"
+            style={{ backgroundColor: data.remoteSelection.color }}
+            title={data.remoteSelection.displayName}
+          >
+            {data.remoteSelection.displayName}
+          </div>
+        )}
         {isEditing ? (
           <input
             ref={inputRef}

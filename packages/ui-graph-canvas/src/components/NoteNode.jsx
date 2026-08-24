@@ -2,7 +2,7 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { DEFAULT_NOTE_FONT_SIZE, rotationStyle } from '../utils/annotations';
+import { DEFAULT_NOTE_FONT_SIZE, rotationStyle, isRemoteLocked } from '../utils/annotations';
 import './NoteNode.css';
 
 /**
@@ -22,7 +22,12 @@ function NoteNode({ id, data, selected }) {
   const inputRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  // Another client's live selection claim makes this note's lease exclusive
+  // (task-annotation-shared-session-realtime): every mutation below refuses
+  // to run while it is held, surfacing the attempt instead of silently
+  // dropping it or letting two clients race.
+  const remoteLocked = isRemoteLocked(data);
 
   useEffect(() => {
     setText(data.text || '');
@@ -59,11 +64,16 @@ function NoteNode({ id, data, selected }) {
 
   const commitText = () => {
     setIsEditing(false);
+    if (remoteLocked) {
+      setText(data.text || '');
+      notifyRemoteLockedAttempt();
+      return;
+    }
     const trimmed = text.trim();
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
     );
-    notifyChange();
+    notifyChange('text');
   };
 
   const handleKeyDown = (e) => {
@@ -75,28 +85,46 @@ function NoteNode({ id, data, selected }) {
   };
 
   const changeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color } } : n)));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeFontSize = (fontSize) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n)));
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeRotation = (deg) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     const next = ((deg % 360) + 360) % 360;
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
     );
-    notifyChange();
+    notifyChange('geometry');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
   };
 
   const color = data.color || NOTE_COLORS[0];
@@ -110,13 +138,22 @@ function NoteNode({ id, data, selected }) {
         isVisible={selected}
         lineStyle={{ stroke: color, strokeWidth: 2 }}
         handleStyle={{ width: 10, height: 10, background: color, border: '2px solid white' }}
-        onResizeEnd={notifyChange}
+        onResizeEnd={() => notifyChange('geometry')}
       />
       <div
         className="graph-note-node"
-        style={{ backgroundColor: color, ...rotationStyle('note', data.rotation) }}
+        style={{
+          backgroundColor: color,
+          ...rotationStyle('note', data.rotation),
+          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
+          outlineOffset: remoteLocked ? '2px' : undefined,
+        }}
         onDoubleClick={(e) => {
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setIsEditing(true);
         }}
         onContextMenu={(e) => {
@@ -125,6 +162,15 @@ function NoteNode({ id, data, selected }) {
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {remoteLocked && (
+          <div
+            className="graph-node-remote-badge"
+            style={{ backgroundColor: data.remoteSelection.color }}
+            title={data.remoteSelection.displayName}
+          >
+            {data.remoteSelection.displayName}
+          </div>
+        )}
         {isEditing ? (
           <textarea
             ref={inputRef}

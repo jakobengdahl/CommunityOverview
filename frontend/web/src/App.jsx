@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas } from '@community-graph/ui-graph-canvas';
+import { GraphCanvas, CANVAS_ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
@@ -28,6 +28,7 @@ import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
+import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -659,10 +660,16 @@ function App() {
           return n.data || n;
         });
       setSelectedGraphNodes(selectedWithData);
-      // Advertise the local selection as advisory soft-locks so collaborators see
-      // colored markers on the graph nodes this user is working with (design 3.5).
-      // Only real graph nodes carry markers, so annotations/groups are excluded.
-      const claimIds = selectedNodes.filter((n) => n.type === 'custom').map((n) => n.id);
+      // Advertise the local selection as selection claims so collaborators see
+      // colored markers on the elements this user is working with (design 3.5).
+      // Extended to every annotation kind, not just graph nodes
+      // (task-annotation-shared-session-realtime): GraphCanvas's own
+      // remote-selection effect makes an annotation claim exclusive (it blocks
+      // local dragging and every mutation while another client holds it), not
+      // merely advisory the way the graph-node marker still is.
+      const claimIds = selectedNodes
+        .filter((n) => n.type === 'custom' || CANVAS_ANNOTATION_TYPES.has(n.type))
+        .map((n) => n.id);
       syncRef.current?.setLocalSelection(claimIds);
     },
     [setSelectedGraphNodes]
@@ -1126,6 +1133,59 @@ function App() {
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
 
+  // Realtime publish timing for annotation changes — the "accepted operation
+  // timing" from task-annotation-shared-session-realtime's slice_scope, split
+  // out from the generic 1500ms autosave debounce above (which stays as-is
+  // for graph-node positions and the local session-restore bookkeeping the
+  // effect below triggers on every store-level change). The actual
+  // immediate-vs-debounced decision lives in annotationChangeScheduler.js
+  // (framework-agnostic, unit-tested against fake timers); this is just its
+  // React wiring. `publishRef` carries the latest emptiness guard and
+  // `requestSessionSnapshot` so the scheduler (created once and kept for the
+  // component's lifetime) always calls through to the current session, not a
+  // stale one captured at creation time.
+  const publishRef = useRef(() => {});
+  publishRef.current = () => {
+    // Mirrors scheduleAutoSave's own emptiness guard (D14).
+    if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
+    requestSessionSnapshot(null);
+  };
+  const annotationSchedulerRef = useRef(null);
+  if (!annotationSchedulerRef.current) {
+    annotationSchedulerRef.current = createAnnotationChangeScheduler({
+      publish: () => publishRef.current(),
+    });
+  }
+  const publishAnnotationChange = useCallback((kind) => {
+    annotationSchedulerRef.current.schedule(kind);
+  }, []);
+
+  // GraphCanvas's onAnnotationChange callback (see AnnotationContext's
+  // notifyChange doc comment for the kind vocabulary).
+  const handleAnnotationChange = useCallback(
+    (kind) => publishAnnotationChange(kind),
+    [publishAnnotationChange]
+  );
+
+  useEffect(() => {
+    return () => annotationSchedulerRef.current?.clearPending();
+  }, []);
+
+  // Position-change callback GraphCanvas's onNodePositionChange fires for
+  // both graph-node and annotation drags/moves alike. Graph node moves keep
+  // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
+  // annotation geometry publishes immediately at this release-time call.
+  const handleNodePositionChange = useCallback(
+    (_nodeId, _position, nodeType) => {
+      if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
+        publishAnnotationChange('geometry');
+        return;
+      }
+      scheduleAutoSave();
+    },
+    [publishAnnotationChange, scheduleAutoSave]
+  );
+
   useEffect(() => {
     scheduleAutoSave();
     return () => {
@@ -1133,13 +1193,17 @@ function App() {
     };
   }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, scheduleAutoSave]);
 
-  // Callback: Create group (called when group is created inside GraphCanvas)
+  // Callback: Create group (called when group is created inside GraphCanvas).
+  // A group box is itself an annotation kind (ANNOTATION_TYPES includes
+  // 'group'), so its creation publishes immediately like any other
+  // create/delete/style/geometry annotation change, not the generic 1500ms
+  // autosave debounce.
   const handleCreateGroup = useCallback(
     (position, groupNode) => {
       showNotification('success', 'Group created');
-      scheduleAutoSave();
+      publishAnnotationChange('create');
     },
-    [showNotification, scheduleAutoSave]
+    [showNotification, publishAnnotationChange]
   );
 
   // Confirm save view
@@ -1866,7 +1930,7 @@ function App() {
           onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
-          onNodePositionChange={scheduleAutoSave}
+          onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
@@ -1885,7 +1949,7 @@ function App() {
           onGroupsRestored={() => setPendingGroups(null)}
           annotationsToRestore={pendingAnnotations}
           onAnnotationsRestored={() => setPendingAnnotations(null)}
-          onAnnotationChange={scheduleAutoSave}
+          onAnnotationChange={handleAnnotationChange}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
@@ -1964,6 +2028,7 @@ function App() {
             undoNotification: t('context_menu.undo_notification'),
             redoNotification: t('context_menu.redo_notification'),
             imageIngestFailed: t('canvas.image_ingest_failed'),
+            annotationRemoteLocked: t('context_menu.annotation_remote_locked'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),

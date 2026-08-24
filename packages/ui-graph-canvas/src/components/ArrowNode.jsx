@@ -2,7 +2,7 @@ import { memo, useState, useRef, useEffect, useContext, useCallback } from 'reac
 import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
-import { findSnapTarget, isArrowAnchored } from '../utils/annotations';
+import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
 import './ArrowNode.css';
 
 /**
@@ -25,7 +25,10 @@ function ArrowNode({ id, data, selected }) {
   const contextMenuRef = useRef(null);
   const draggingRef = useRef(null);
   const { setNodes, screenToFlowPosition, getNodes } = useReactFlow();
-  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live claim makes
+  // this arrow's lease exclusive (task-annotation-shared-session-realtime).
+  const remoteLocked = isRemoteLocked(data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -60,22 +63,36 @@ function ArrowNode({ id, data, selected }) {
   };
 
   const changeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     patchData({ color });
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const toggleHead = (end) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [end]: !n.data[end] } } : n))
     );
-    notifyChange();
+    notifyChange('style');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
   };
 
   // Move one endpoint to a new flow-coordinate point, snapping onto a nearby
@@ -96,7 +113,7 @@ function ArrowNode({ id, data, selected }) {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id !== id) return n;
-          if (n.data?.locked) return n;
+          if (n.data?.locked || isRemoteLocked(n.data)) return n;
           const dx = Number(n.data.dx ?? 160);
           const dy = Number(n.data.dy ?? 0);
           let position = n.position;
@@ -132,7 +149,10 @@ function ArrowNode({ id, data, selected }) {
   const startEndpointDrag = (endpoint) => (e) => {
     e.stopPropagation();
     e.preventDefault();
-    if (data.locked) return;
+    if (data.locked || remoteLocked) {
+      if (remoteLocked) notifyRemoteLockedAttempt();
+      return;
+    }
     draggingRef.current = endpoint;
     const handleMove = (ev) => {
       const flowPoint = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
@@ -147,7 +167,7 @@ function ArrowNode({ id, data, selected }) {
     };
     const handleUp = () => {
       teardown();
-      notifyChange();
+      notifyChange('geometry');
     };
     dragTeardownRef.current = teardown;
     window.addEventListener('pointermove', handleMove, true);
@@ -180,6 +200,19 @@ function ArrowNode({ id, data, selected }) {
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {remoteLocked && (
+          <div
+            className="graph-node-remote-badge"
+            style={{
+              backgroundColor: data.remoteSelection.color,
+              left: originX - 2,
+              top: originY - 11,
+            }}
+            title={data.remoteSelection.displayName}
+          >
+            {data.remoteSelection.displayName}
+          </div>
+        )}
         <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
           <defs>
             <marker
@@ -224,7 +257,7 @@ function ArrowNode({ id, data, selected }) {
             markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
             markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
           />
-          {selected && !data.locked && (
+          {selected && !data.locked && !remoteLocked && (
             <>
               <circle
                 className="graph-arrow-handle nodrag"
