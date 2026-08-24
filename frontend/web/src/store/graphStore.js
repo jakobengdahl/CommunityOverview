@@ -299,7 +299,7 @@ const useGraphStore = create((set, get) => ({
   focusNodeId: null, // Node ID to zoom/pan to
   // Session-scoped, newest-first trail of nodes added to the visualization or
   // navigated to, so the user can jump back through what happened. Distinct from
-  // the backend graph-mutation log (RecentActivityDrawer) and from the canvas
+  // the backend graph-mutation log (ActivityDrawer's Graph tab) and from the canvas
   // position undo/redo (useCanvasHistory). Cleared on session switch / clear.
   navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view

@@ -1,0 +1,108 @@
+.session-activity-empty {
+  color: #666;
+  font-size: 0.82rem;
+  font-style: italic;
+  padding: 10px 4px;
+}
+
+.session-activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-activity-entry {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.session-activity-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.session-activity-actor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.session-activity-actor {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #bbb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-activity-time {
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: #777;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.session-activity-desc {
+  font-size: 0.85rem;
+  color: #eee;
+  line-height: 1.35;
+}
+
+.session-activity-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  min-height: 20px;
+}
+
+.session-activity-undone-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #999;
+}
+
+.session-activity-undo-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  background: rgba(100, 108, 255, 0.14);
+  border: 1px solid rgba(100, 108, 255, 0.4);
+  border-radius: 6px;
+  color: #b7bcff;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.session-activity-undo-button:hover:not(:disabled) {
+  background: rgba(100, 108, 255, 0.24);
+  border-color: #646cff;
+  color: #fff;
+}
+
+.session-activity-undo-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .session-activity-undo-button {
+    min-height: 32px;
+  }
+}
