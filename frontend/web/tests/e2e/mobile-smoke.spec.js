@@ -17,17 +17,8 @@ const LONG_PRESS_HOLD_MS = 900;
 // Surfaces that already hang off a viewport edge on a phone, excluded so this
 // check reports *new* breaks rather than failing on ones that predate it.
 // Delete an entry once its surface is fixed and the check covers it again.
-//
-// Kept per-edge rather than as one list: exempting a subtree from both edges
-// costs far more coverage than the break being silenced. The chat panel is the
-// largest subtree in the shell, and only its left edge is broken.
 const KNOWN_RIGHT_OVERFLOW = [];
-// .chat-panel-floating — a fixed 380px anchored 16px from the right edge, so at
-//   390px its left edge sits at x~-6. Its right edge is inside on both devices.
-// ChatPanel keeps its own pre-existing floating/minimized presentation in
-// MobileShell (see MobileShell.jsx) rather than being re-hosted in the bottom
-// sheet, so this pre-existing break is unchanged by the mobile shell split.
-const KNOWN_LEFT_OVERFLOW = ['.chat-panel-floating'];
+const KNOWN_LEFT_OVERFLOW = [];
 
 /**
  * Finds a point inside a canvas node that nothing else covers.
@@ -124,22 +115,34 @@ async function settleAnimations(page) {
   );
 }
 
-/** The chat panel opens expanded and covers the toolbar on a phone. */
-async function minimizeChat(page) {
-  const collapse = page.locator('.chat-collapse-button');
-  if (await collapse.isVisible()) {
-    await collapse.tap();
+async function expectMobileChatSheet(page) {
+  await expect(page.locator('.bottom-sheet:has(.chat-panel-sheet)')).toBeVisible();
+}
+
+async function closeChatSheet(page) {
+  const close = page.locator('.bottom-sheet:has(.chat-panel-sheet) .bottom-sheet-close');
+  if (await close.isVisible()) {
+    await close.tap();
   }
-  await expect(page.locator('.chat-panel-minimized')).toBeVisible();
+  await expect(page.locator('.bottom-sheet:has(.chat-panel-sheet)')).toHaveCount(0);
+}
+
+async function openChatSheet(page) {
+  const chatNav = page.locator('.mobile-shell-bottomnav-item[aria-label="Chat"]');
+  await expect(chatNav).toBeVisible();
+  if ((await page.locator('.bottom-sheet:has(.chat-panel-sheet)').count()) === 0) {
+    await chatNav.tap();
+  }
+  await expectMobileChatSheet(page);
 }
 
 async function openApp(page) {
   await page.goto('/');
   await expect(page.locator('.react-flow')).toBeVisible();
-  // The chat panel mounts only once /ui/capabilities has reported an LLM.
-  // Waiting for it means every assertion below measures a fully mounted shell,
-  // rather than racing that fetch and missing the panel entirely.
-  await expect(page.locator('.chat-panel-floating, .chat-panel-minimized')).toBeVisible();
+  // On mobile the chat surface is a bottom sheet, mounted only after
+  // /ui/capabilities has reported an LLM. Waiting for the sheet means every
+  // assertion below measures a fully mounted shell rather than racing startup.
+  await expectMobileChatSheet(page);
   await settleAnimations(page);
   // The coarse-pointer branch is what every assertion below depends on; if the
   // project stopped emulating touch these tests would silently pass as desktop.
@@ -221,24 +224,23 @@ test.describe('mobile shell', () => {
 
   test('at most one surface covers the canvas at a time', async ({ page }) => {
     await openApp(page);
-    // Chat starts expanded by default (chatPanelOpen defaults to true).
-    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+    // Chat starts expanded by default as the mobile Assistant bottom sheet.
+    await expectMobileChatSheet(page);
 
     await page.locator('.mobile-shell-bottomnav-item[aria-label="Create"]').tap();
-    await expect(page.locator('.bottom-sheet')).toBeVisible();
-    // Opening the create sheet must minimize chat first.
-    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
-    await expect(page.locator('.chat-panel-minimized')).toBeVisible();
+    await expect(page.locator('.bottom-sheet:has(.floating-toolbar)')).toBeVisible();
+    // Opening the create sheet must close chat first.
+    await expect(page.locator('.bottom-sheet:has(.chat-panel-sheet)')).toHaveCount(0);
 
     await page.locator('.mobile-shell-bottomnav-item[aria-label="Chat"]').tap();
-    // Opening chat must close the sheet.
-    await expect(page.locator('.bottom-sheet')).toHaveCount(0);
-    await expect(page.locator('.chat-panel-floating')).toBeVisible();
+    // Opening chat must close the create sheet.
+    await expect(page.locator('.bottom-sheet:has(.floating-toolbar)')).toHaveCount(0);
+    await expectMobileChatSheet(page);
 
     await page.locator('.mobile-shell-bottomnav-item[aria-label="Menu"]').tap();
-    // Opening the menu drawer must minimize chat too.
+    // Opening the menu drawer must close chat too.
     await expect(page.locator('.session-drawer')).toHaveClass(/\bopen\b/);
-    await expect(page.locator('.chat-panel-floating')).toHaveCount(0);
+    await expect(page.locator('.bottom-sheet:has(.chat-panel-sheet)')).toHaveCount(0);
   });
 
   test('a node can be created from the toolbox', async ({ page }, testInfo) => {
@@ -350,9 +352,9 @@ test.describe('mobile shell', () => {
 
   test('the chat panel reopens with a reachable composer', async ({ page }) => {
     await openApp(page);
-    await minimizeChat(page);
+    await closeChatSheet(page);
 
-    await page.locator('.chat-panel-minimized').tap();
+    await openChatSheet(page);
 
     const composer = page.locator('.chat-input');
     await expect(composer).toBeVisible();
