@@ -2466,7 +2466,7 @@ def register_mcp_tools(
 
         Covers every v1 annotation type except `note`, `group` and `image`:
         `text`, `label`, `line` (`arrow` accepted as an alias), `frame`,
-        `shape`, `icon`, `vote_dot`. Use `create_sticky_note` for notes,
+        `shape`, `icon`, `vote_dot`, `freehand`. Use `create_sticky_note` for notes,
         `create_group_annotation` for groups, and `create_image_annotation`
         for images (an image's pixel content must be ingested server-side, so
         it cannot be created from a bare envelope here). An image annotation
@@ -2492,7 +2492,7 @@ def register_mcp_tools(
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/frame/shape/icon/vote_dot
+            type: One of text/label/line/frame/shape/icon/vote_dot/freehand
                 ("arrow" accepted as an alias for "line"; "image" is
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.

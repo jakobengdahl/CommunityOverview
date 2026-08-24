@@ -229,3 +229,99 @@ describe('FreehandAnnotationNode property editor', () => {
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
 });
+
+// smallfix-freehand-context-menu-ignores-lock: a locked stroke's context menu
+// must offer only Unlock, matching the pattern established in NoteNode/
+// LabelNode/GenericAnnotationNode (smallfix-annotation-context-menus-ignore-lock).
+describe('FreehandAnnotationNode locked context menu', () => {
+  beforeEach(() => hoisted.setNodes.mockClear());
+
+  it('shows only an unlock action for a locked stroke, hiding colour/width/smoothing/opacity/delete', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          labels: {
+            unlock: 'Unlock',
+            freehandColor: 'Colour',
+            freehandWidth: 'Stroke width',
+            freehandSmoothing: 'Smoothing',
+            freehandOpacity: 'Opacity',
+            delete: 'Delete',
+          },
+        }}
+      >
+        <FreehandAnnotationNode id="f1" data={{ points: straightPoints, locked: true }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    expect(screen.queryByText('Colour')).toBeNull();
+    expect(screen.queryByText('Stroke width')).toBeNull();
+    expect(screen.queryByText('Smoothing')).toBeNull();
+    expect(screen.queryByText('Opacity')).toBeNull();
+    expect(screen.queryByText(/Delete/)).toBeNull();
+  });
+
+  it('unlocks a locked stroke and notifies the annotation context', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
+        <FreehandAnnotationNode id="f1" data={{ points: straightPoints, locked: true }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    fireEvent.click(screen.getByText(/Unlock/));
+    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true } });
+    expect(updated.data.locked).toBe(false);
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('refuses to open the locked context menu while another client holds the selection claim, notifying instead', () => {
+    const notifyChange = vi.fn();
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
+        <FreehandAnnotationNode
+          id="f1"
+          data={{
+            points: straightPoints,
+            locked: true,
+            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          }}
+        />
+      </AnnotationContext.Provider>
+    );
+    // Remote lock refuses opening the menu at all — matching every other
+    // remoteLocked-gated action on this component.
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    expect(screen.queryByText(/Unlock/)).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('still shows the full property editor when unlocked', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          labels: {
+            freehandColor: 'Colour',
+            freehandWidth: 'Stroke width',
+            freehandSmoothing: 'Smoothing',
+            freehandOpacity: 'Opacity',
+            delete: 'Delete',
+          },
+        }}
+      >
+        <FreehandAnnotationNode id="f1" data={{ points: straightPoints, locked: false }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    expect(screen.getByText('Colour')).toBeInTheDocument();
+    expect(screen.getByText(/Delete/)).toBeInTheDocument();
+  });
+});
