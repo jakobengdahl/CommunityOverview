@@ -1920,6 +1920,11 @@ function App() {
             annotationTextSize: t('context_menu.annotation_text_size'),
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
+            annotationShape: t('context_menu.annotation_shape'),
+            annotationRotation: t('context_menu.annotation_rotation'),
+            annotationRotateLeft: t('context_menu.annotation_rotate_left'),
+            annotationRotateRight: t('context_menu.annotation_rotate_right'),
+            annotationRotateReset: t('context_menu.annotation_rotate_reset'),
             undoNotification: t('context_menu.undo_notification'),
             redoNotification: t('context_menu.redo_notification'),
           }}

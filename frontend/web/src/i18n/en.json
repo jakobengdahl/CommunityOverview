@@ -360,6 +360,11 @@
     "annotation_text_size": "Text size",
     "arrow_start_head": "Start arrowhead",
     "arrow_end_head": "End arrowhead",
+    "annotation_shape": "Shape",
+    "annotation_rotation": "Rotation",
+    "annotation_rotate_left": "Rotate left 15°",
+    "annotation_rotate_right": "Rotate right 15°",
+    "annotation_rotate_reset": "Reset rotation",
     "undo_notification": "Move undone",
     "redo_notification": "Move redone"
   },

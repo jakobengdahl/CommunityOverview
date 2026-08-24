@@ -78,3 +78,39 @@ describe('group description round-trip (R12)', () => {
     ]);
   });
 });
+
+// task-annotation-render-direct-manipulation: label/text/icon/vote_dot
+// attachments now round-trip between the server annotation document and the
+// canvas overlay shape, not only through the JS annotation model.
+describe('attachment round-trip through the server annotation document', () => {
+  const attachment = { target_id: 'node-1', target_type: 'node', offset: { x: 4, y: -6 } };
+
+  it.each(['label', 'text', 'icon', 'vote_dot'])(
+    'carries an attachment through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata for %s',
+    (kind) => {
+      const overlay = {
+        id: `${kind}-1`,
+        kind,
+        position: { x: 0, y: 0 },
+        text: kind === 'text' || kind === 'label' ? 'hi' : undefined,
+        icon: kind === 'icon' ? 'flag' : undefined,
+        value: kind === 'vote_dot' ? 1 : undefined,
+        attachment,
+      };
+      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+      const stored = document.annotations.find((a) => a.id === overlay.id);
+      expect(stored.attachment).toEqual(attachment);
+
+      const metadata = annotationDocumentToLegacyMetadata(document);
+      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+      expect(roundTripped.attachment).toEqual(attachment);
+    }
+  );
+
+  it('leaves attachment unset when the overlay has none', () => {
+    const document = legacyMetadataToAnnotationDocument({
+      annotations: [{ id: 'label-2', kind: 'label', position: { x: 0, y: 0 }, text: 'no attach' }],
+    });
+    expect(document.annotations[0].attachment).toBeUndefined();
+  });
+});

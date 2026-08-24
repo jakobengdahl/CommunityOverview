@@ -126,13 +126,19 @@ MCP. The required entry points are:
 circle, triangle, rhombus, hexagon and process arrow — each of which now
 renders as its own distinct visual. `icon`, `vote_dot`, `image` and
 `freehand` still render on canvas but have no GUI creation path — they can
-only be created via MCP. Per-type property editors (recoloring, changing an
-icon or shape subtype, cropping an image, setting a rotation) do not exist
-yet for any generic type, including the ones the toolbox creates: a shape's
-variant is chosen when it is created and cannot yet be changed afterwards
-from the GUI. Closing this is tracked per type in the [acceptance
-matrix](#acceptance-matrix); it is not satisfied by documenting the
-wireframes above.
+only be created via MCP. A right-click property editor now exists for every
+rotatable kind (`note`, `label`, `text`, `frame`, `shape`, `icon`, `vote_dot`,
+`image`): a rotation control (±15° steps plus reset), and, for `shape` only,
+a subtype picker to change an existing shape's variant after creation. What
+it still does not cover: recoloring any generic kind, an icon picker for
+`icon`, and cropping/replacing an `image`'s pixel content. `label`, `text`,
+`icon` and `vote_dot` can now also be attached to a node or another
+annotation from the GUI, by dragging the annotation within snapping distance
+of the target ([Attachment and detach behavior](#attachment-and-detach-behavior))
+— there is still no dedicated "nearby object menu" (the wireframe above) that
+pre-wires a new attachable annotation to a target at creation time. Closing
+what remains is tracked per type in the [acceptance matrix](#acceptance-matrix);
+it is not satisfied by documenting the wireframes above.
 
 ## Operation layer
 
@@ -202,6 +208,29 @@ neither is type-specific.
   attaches to a frame; membership in a `group` is tracked separately via
   `member_node_ids` and the `group_membership_changed` op, not via
   `attachment`.
+
+**GUI attach/detach.** `label`, `text`, `icon` and `vote_dot` can now be
+(re)attached and detached from the canvas, not only via a raw
+`content.attachment` payload: dropping one of these overlays within
+`ATTACH_SNAP_RADIUS` (90px, unscaled) of a node's or another annotation's
+centre attaches it there, storing the drop point's offset from that centre so
+the overlay keeps exactly where it was released rather than jumping onto the
+target (the "free fine adjustment" the capability baseline calls for);
+dropping it outside every snap zone detaches it and keeps the position it was
+released at. Once attached, the overlay stays draggable — a further drag
+recomputes the attachment (still-attached with a new offset, or detached) the
+same way. While attached it follows its target's movement every render
+(`packages/ui-graph-canvas/src/components/GraphCanvas.jsx`'s attachment-follow
+effect, mirroring the pre-existing arrow-anchor effect); if the target
+disappears from the view (filtered, collapsed, not yet loaded, or deleted) the
+overlay is left at its last resolved position rather than being recomputed or
+reset, matching "detaches and keeps its last resolved model-space geometry"
+above. What this does not yet add: a "nearby object menu" that offers an
+attachable type pre-wired to a target at creation time (see [Human authoring
+surfaces](#human-authoring-surfaces)), and a manual way to inspect or clear an
+annotation's current attachment target other than dragging it away. `line`
+endpoint attach/detach (`startAnchor`/`endAnchor`, drag-to-snap on the
+endpoint handle) predates this and is unrelated code, unchanged here.
 
 **Validation.** `backend/core/session_annotations.py`'s generic annotation
 builder/patcher (used by `create_annotation`/`update_annotation`) rejects a
@@ -366,8 +395,10 @@ generic kind hides its resize handles the same way a locked `note` does.
 
 Per-type property editors and GUI creation for these types are required v1
 scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
-non-goal — today they are reachable only through the MCP tools, which is
-the gap the acceptance matrix tracks, not the intended end state.
+non-goal. A right-click rotation control and, for `shape`, a subtype picker
+now exist for every generic kind; recoloring, an icon picker and image
+paste/upload are still reachable only through the MCP tools, which is the gap
+the acceptance matrix tracks, not the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 `GenericAnnotationNode.jsx`).
@@ -401,9 +432,10 @@ drawn axis-aligned around the unrotated box, so on a rotated annotation they
 sit visibly askew from the object and a handle drag grows the box along the
 unrotated axes. `frame` and `shape` are where this is actually reachable
 today: both are toolbox-creatable and both accept a rotation through the
-generic MCP tools. `image` needs MCP for the object as well as the rotation.
-`note` is hard to meet in practice: no MCP tool can rotate one (see below),
-so a rotated note only exists if a client posts the op itself.
+generic MCP tools or the GUI rotation control described below. `image` needs
+MCP or the GUI control to create the object, but either can set the rotation.
+`note` no longer needs a raw op to reach a non-zero rotation — the GUI control
+below writes it directly — though no MCP tool can rotate one yet (see below).
 Rotation-aware resize handles are an open gap. The capability
 baseline requires it for text/headings, labels/callouts, sticky notes,
 images, icons/dots and basic shapes including the process arrow; `frame` is
@@ -423,23 +455,31 @@ non-goal. `group` never reaches this translation layer at all — its helpers
 (`annotationsToGroups`/`groupsToAnnotations`) carry no rotation field, so a
 group has no rotation to draw or preserve.
 
-**There is no GUI control to set a rotation yet.** On the tool surface it is
-set through MCP (`create_annotation`/`update_annotation`, or
-`create_image_annotation` when creating an image); a client posting raw ops
-can set one directly, as the note case below shows. The missing control
-belongs to the
-same per-type property-editor gap as recoloring and shape-subtype changes.
-That leaves `note` with no rotation source *on the MCP tool surface*: the
-generic tools refuse note ids, and the dedicated sticky-note tools take no
-`rotation` argument (`build_note_annotation` writes `rotation: 0`). The same
-boundary leaves a note's `z` and `locked` unwritable through those tools even
-though `list_sticky_notes` reports `z` and `locked` back. The raw op endpoint
-is not bounded that way — `SessionStore.apply_state_op` accepts an
-`annotation_created` note carrying `geometry.rotation`, `z` and `locked`, and
-`list_annotations` then reports all three — so a rotated note is reachable,
-just not through any tool or GUI control meant for it. Rotating a sticky note
-is part of the accepted baseline, so the missing tool argument is a gap,
-tracked in the `note` row below — not a decision that notes do not rotate.
+**A GUI rotation control now exists.** Right-clicking a `note`, `label`,
+`text`, `frame`, `shape`, `icon`, `vote_dot` or `image` opens a property
+editor with a rotation row: two step buttons (±15°) and a reset-to-0° button
+that also displays the current angle (`GenericAnnotationNode.jsx` for the six
+generic kinds; `NoteNode.jsx`/`LabelNode.jsx` for their own). It writes
+`data.rotation` on the ReactFlow node the same way the pre-existing
+color/text-size controls write their fields, so it round-trips through the same
+`overlayToFlowNode`/`flowNodeToOverlay` (`annotations.js`) and
+`sessionAnnotations.js` translators [already described](#canvas-rendering)
+below — no MCP or backend change was needed. This closes `note`'s
+tool-surface gap from the GUI side specifically: `note`'s rotation is now
+reachable without any client posting a raw op by hand.
+
+On the MCP tool surface, rotation is otherwise set through
+`create_annotation`/`update_annotation`, or `create_image_annotation` when
+creating an image. That leaves `note` with no rotation source *on the MCP
+tool surface* specifically: the generic tools refuse note ids, and the
+dedicated sticky-note tools take no `rotation` argument (`build_note_annotation`
+writes `rotation: 0`). The same boundary leaves a note's `z` and `locked`
+unwritable through those tools even though `list_sticky_notes` reports `z`
+and `locked` back. The raw op endpoint is not bounded that way —
+`SessionStore.apply_state_op` accepts an `annotation_created` note carrying
+`geometry.rotation`, `z` and `locked`, and `list_annotations` then reports all
+three. Adding a `rotation` argument to the sticky-note MCP tool set is still a
+tracked gap in the `note` row below, unaffected by the GUI control above.
 
 `z`, `locked` and `rotation` round-trip through every annotation type's canvas
 representation (`overlayToFlowNode`/`flowNodeToOverlay` in
@@ -465,16 +505,16 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set through any MCP tool, though `list_sticky_notes` reports `z` and `locked` back and `list_annotations` reports the rotation; a raw `annotation_created` op can still carry all three | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ⚠ toolbox create (fixed default), no property editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `label` | ✅ toolbox create, inline edit, drag/resize, attach | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `note` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click) | ⚠ sticky note tool set, but it takes no `rotation` argument on create or update — and the generic `reorder_annotation`/`set_annotation_lock` refuse note ids — so a note's `rotation` (and its `z`/`locked`) cannot be set through any MCP tool, though `list_sticky_notes` reports `z` and `locked` back and `list_annotations` reports the rotation; a raw `annotation_created` op or the GUI rotation control can still set it | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `text` | ⚠ toolbox create (fixed default), rotate (right-click), attach by dragging near a node/annotation; no color/font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `label` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
-| `frame` | ⚠ toolbox create (fixed default size), no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `frame` | ⚠ toolbox create (fixed default size), rotate (right-click); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ❌ no MCP tool (by design — `group_membership_changed` op only) | ✅ | ✅ | ✅ | ⬜ |
-| `shape` | ⚠ toolbox creates all six variants, each drawn distinctly; no editor to change an existing shape's subtype | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ❌ move only — no create UI or icon picker; renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `vote_dot` | ❌ render/move only, no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `image` | ❌ no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or icon picker — renders the 11 icon names the canvas set shares with the host registry as glyphs, the other 64 as a two-character abbreviation of the name (which collides: 64 names, 36 distinct marks) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `vote_dot` | ⚠ move, rotate (right-click) and attach by dragging near a node/annotation; still no create UI or color picker | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `image` | ⚠ rotate (right-click) once created via MCP; still no paste/upload UI | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ✅ | ⬜ |
 | `freehand` | ❌ no create UI (stylus input not wired); a `rotation` on the document model is never drawn | ❌ no MCP tool | ✅ document model round-trips it | ⚠ no creation path to exercise it live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass |
 | cross-type | — | — | — | ⚠ ops publish immediately, but the 300 ms text debounce and release-time-only geometry are not split out from the general autosave debounce, and edit leases are advisory/LWW with a 30 s TTL rather than exclusive ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 

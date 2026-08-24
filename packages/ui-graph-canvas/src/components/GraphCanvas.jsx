@@ -47,12 +47,15 @@ import {
 import {
   OVERLAY_TYPES,
   ANNOTATION_TYPES,
+  ATTACHABLE_OVERLAY_KINDS,
   isManualNode,
   isArrowHeld,
   overlayToFlowNode,
   flowNodeToOverlay,
   nodeCenter,
   resolveAnchoredArrow,
+  computeDroppedAttachment,
+  resolveAttachedPosition,
 } from '../utils/annotations';
 import {
   directNeighborIds,
@@ -288,6 +291,11 @@ function GraphCanvasInner({
     annotationTextSize: 'Text size',
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
+    annotationShape: 'Shape',
+    annotationRotation: 'Rotation',
+    annotationRotateLeft: 'Rotate left 15°',
+    annotationRotateRight: 'Rotate right 15°',
+    annotationRotateReset: 'Reset rotation',
     undoNotification: 'Move undone',
     redoNotification: 'Move redone',
     ...contextMenuLabels,
@@ -465,6 +473,11 @@ function GraphCanvasInner({
         textSize: cml.annotationTextSize,
         arrowStartHead: cml.arrowStartHead,
         arrowEndHead: cml.arrowEndHead,
+        shape: cml.annotationShape,
+        rotation: cml.annotationRotation,
+        rotateLeft: cml.annotationRotateLeft,
+        rotateRight: cml.annotationRotateRight,
+        rotateReset: cml.annotationRotateReset,
       },
     }),
     [
@@ -476,6 +489,11 @@ function GraphCanvasInner({
       cml.annotationTextSize,
       cml.arrowStartHead,
       cml.arrowEndHead,
+      cml.annotationShape,
+      cml.annotationRotation,
+      cml.annotationRotateLeft,
+      cml.annotationRotateRight,
+      cml.annotationRotateReset,
     ]
   );
 
@@ -1246,6 +1264,35 @@ function GraphCanvasInner({
 
       // Get latest node positions directly from ReactFlow's internal store
       const currentNodes = getFlowNodes();
+
+      // Attach/detach a dropped label/text/icon/vote_dot (the contract's
+      // node-attachable types): within ATTACH_SNAP_RADIUS of a node or
+      // another annotation's centre it (re)attaches and starts following that
+      // target (see the "keep attached overlays glued to their target" effect
+      // below); dropped outside every snap zone it detaches and keeps the
+      // position it was just released at (contract: "snap to the node edge
+      // with free fine adjustment and detach outside the snap zone"). Only a
+      // solo drag of the attachable overlay itself is handled — a multi-drag
+      // that happens to include one is left alone, same restraint the arrow
+      // endpoint snap uses.
+      if (
+        ATTACHABLE_OVERLAY_KINDS.has(draggedNode.type) &&
+        (!allDraggedNodes || allDraggedNodes.length <= 1)
+      ) {
+        const self = currentNodes.find((n) => n.id === draggedNode.id) || draggedNode;
+        const attachment = computeDroppedAttachment(self.position, currentNodes, draggedNode.id);
+        if (attachment || self.data?.attachment) {
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === draggedNode.id
+                ? { ...n, data: { ...n.data, attachment: attachment || undefined } }
+                : n
+            )
+          );
+          onAnnotationChangeRef.current?.();
+        }
+      }
+
       const groupNodes = currentNodes.filter((n) => n.type === 'group');
 
       // Determine which draggable graph nodes were part of this drag. Annotation
@@ -1979,6 +2026,41 @@ function GraphCanvasInner({
     );
     // Only geometry is persisted; a draggable-only flip needs no save.
     if (geometryChanged) onAnnotationChangeRef.current?.();
+  }, [nodes, setNodes]);
+
+  // Keep an attached label/text/icon/vote_dot glued to its attachment
+  // target's centre (plus the offset captured when it (re)attached) as the
+  // target moves — the same follow contract as the arrow anchor effect above,
+  // but for the generic `content.attachment` binding instead of an arrow
+  // endpoint. Unlike an anchored arrow, an attached overlay stays draggable
+  // (the contract's "free fine adjustment"), so a node currently mid-drag is
+  // skipped here — ReactFlow marks it `dragging: true` on every position
+  // change event, and repositioning it from this effect on the same render
+  // would fight the user's own drag. `resolveAttachedPosition` returns null
+  // once the target is absent, so a removed/hidden target leaves the overlay
+  // at its last resolved position rather than resetting it (contract:
+  // "detaches and keeps its last resolved model-space geometry").
+  useEffect(() => {
+    const centers = new Map();
+    let hasAttached = false;
+    for (const n of nodes) {
+      if (n.type === 'arrow') continue;
+      const c = nodeCenter(n);
+      if (c) centers.set(n.id, c);
+      if (ATTACHABLE_OVERLAY_KINDS.has(n.type) && n.data?.attachment) hasAttached = true;
+    }
+    if (!hasAttached) return;
+    const updates = new Map();
+    for (const n of nodes) {
+      if (!ATTACHABLE_OVERLAY_KINDS.has(n.type) || !n.data?.attachment || n.dragging) continue;
+      const nextPosition = resolveAttachedPosition(n, centers);
+      if (nextPosition) updates.set(n.id, nextPosition);
+    }
+    if (updates.size === 0) return;
+    setNodes((nds) =>
+      nds.map((n) => (updates.has(n.id) ? { ...n, position: updates.get(n.id) } : n))
+    );
+    onAnnotationChangeRef.current?.();
   }, [nodes, setNodes]);
 
   // Apply node positions arriving from another client (design step 6), holding

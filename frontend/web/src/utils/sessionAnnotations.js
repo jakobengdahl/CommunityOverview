@@ -102,12 +102,15 @@ function genericAnnotationToOverlay(a) {
   if (a.type === 'text') {
     overlay.text = a.text || '';
     overlay.fontSize = a.style?.fontSize;
+    overlay.attachment = a.attachment;
   } else if (a.type === 'shape') {
     overlay.shape = a.shape || 'rectangle';
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
+    overlay.attachment = a.attachment;
   } else if (a.type === 'vote_dot') {
     overlay.value = a.value ?? null;
+    overlay.attachment = a.attachment;
   } else if (a.type === 'image') {
     overlay.image = a.image || {};
     overlay.alt = a.alt || '';
@@ -128,11 +131,17 @@ function genericOverlayToAnnotation(o) {
     rotation: o.rotation ?? 0,
   };
   input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
-  if (o.kind === 'text') input.text = o.text || '';
-  else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
-  else if (o.kind === 'icon') input.icon = o.icon || 'circle';
-  else if (o.kind === 'vote_dot') input.value = o.value ?? null;
-  else if (o.kind === 'image') {
+  if (o.kind === 'text') {
+    input.text = o.text || '';
+    input.attachment = o.attachment;
+  } else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
+  else if (o.kind === 'icon') {
+    input.icon = o.icon || 'circle';
+    input.attachment = o.attachment;
+  } else if (o.kind === 'vote_dot') {
+    input.value = o.value ?? null;
+    input.attachment = o.attachment;
+  } else if (o.kind === 'image') {
     input.image = o.image || {};
     input.alt = o.alt || '';
   }
@@ -222,6 +231,7 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.style?.color,
         fontSize: a.style?.fontSize,
+        attachment: a.attachment,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
@@ -277,6 +287,7 @@ export function overlaysToAnnotations(overlays) {
         position: o.position || { x: 0, y: 0 },
         text: o.text || '',
         style: { color: o.color, fontSize: o.fontSize },
+        attachment: o.attachment,
         z: o.z ?? 0,
         locked: Boolean(o.locked),
         rotation: o.rotation ?? 0,
