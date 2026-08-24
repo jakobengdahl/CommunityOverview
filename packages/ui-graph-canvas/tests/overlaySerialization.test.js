@@ -438,6 +438,58 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // 61d5cc7b / smallfix-annotation-unsized-generic-geometry-clobber: icon,
+  // vote_dot and text carry no `style` box (RESIZABLE_KINDS in
+  // GenericAnnotationNode.jsx excludes them), so before this fix
+  // overlayToFlowNode had nowhere to put their geometry.w/h and
+  // flowNodeToOverlay always dropped it. sessionAnnotations.js now carries
+  // that geometry unconditionally on the server-facing side; this pins the
+  // matching fix on the live-canvas side (`data.size`, mirroring how
+  // `data.rotation` survives independent of ROTATABLE_OVERLAY_KINDS).
+  it.each(['text', 'icon', 'vote_dot'])(
+    'round-trips geometry.w/h for a %s through a data-only slot, not a style box',
+    (kind) => {
+      const overlay = {
+        id: `${kind}-sized`,
+        kind,
+        position: { x: 1, y: 1 },
+        text: kind === 'text' ? 'hi' : undefined,
+        icon: kind === 'icon' ? 'flag' : undefined,
+        value: kind === 'vote_dot' ? 3 : undefined,
+        color: '#fff',
+        size: { w: 32, h: 32 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      };
+      const node = overlayToFlowNode(overlay);
+      expect(node.data.size).toEqual({ w: 32, h: 32 });
+      // Not exposed as a resizable box — no `style` at all for these kinds.
+      expect(node.style).toBeUndefined();
+      expect(flowNodeToOverlay(node)).toEqual(overlay);
+    }
+  );
+
+  it('drops a stale style box on a non-sized kind rather than treating it as geometry', () => {
+    // A node that somehow carries both a `style` box (e.g. leftover from a
+    // prior render) and a `data.size` must still read geometry from
+    // `data.size` for a non-sized kind — style is never consulted for these.
+    const node = {
+      id: 'icon-1',
+      type: 'icon',
+      position: { x: 0, y: 0 },
+      style: { width: 999, height: 999 },
+      data: { icon: 'flag', locked: false, rotation: 0, size: { w: 32, h: 32 } },
+    };
+    expect(flowNodeToOverlay(node).size).toEqual({ w: 32, h: 32 });
+  });
+
+  it('carries no size on a freshly hydrated icon/vote_dot/text overlay with no size given', () => {
+    const node = overlayToFlowNode({ id: 't', kind: 'text', position: { x: 0, y: 0 } });
+    expect(node.data.size).toBeUndefined();
+    expect(flowNodeToOverlay(node).size).toBeUndefined();
+  });
+
   it('leaves attachment absent by default on generic overlays', () => {
     const node = overlayToFlowNode({ id: 't', kind: 'text', position: { x: 0, y: 0 } });
     expect(node.data.attachment).toBeUndefined();
