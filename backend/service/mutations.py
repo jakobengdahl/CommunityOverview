@@ -7,7 +7,8 @@ and (where required) the federation manager as explicit parameters.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from backend.core import Edge, Node, StaleUpdateError
+from backend.core import Edge, Node, NodeType, StaleUpdateError
+from backend.core.session_annotations import saved_view_annotation_error
 from backend.runtime.authorization import (
     GRAPH_ACTION_MUTATE,
     GraphAuthorizationDecision,
@@ -49,6 +50,16 @@ _NODE_MODEL_FIELDS = {
     "updated_at",
 }
 
+# add_nodes/update_node are the only write paths a SavedView's
+# annotation_document/annotations ever go through (there is no dedicated
+# "save view" mutation — the frontend posts a plain node through add_nodes).
+# Neither path is annotation-aware otherwise, so a SavedView node is the one
+# case where this generic layer must apply the same image-annotation rule
+# SessionStore enforces for live ops (see saved_view_annotation_error).
+_SAVED_VIEW_NODE_TYPES = frozenset(
+    {NodeType.SAVED_VIEW.value, NodeType.VISUALIZATION_VIEW.value}
+)
+
 
 def add_nodes(
     storage: "GraphStorage",
@@ -79,7 +90,17 @@ def add_nodes(
                 node_dict["metadata"] = meta
                 for k in extra:
                     node_dict.pop(k)
-            node_objects.append(Node(**node_dict))
+            node = Node(**node_dict)
+            if node.type_str in _SAVED_VIEW_NODE_TYPES:
+                annotation_error = saved_view_annotation_error(node.metadata)
+                if annotation_error:
+                    return {
+                        "success": False,
+                        "message": f"Error validating input: {annotation_error}",
+                        "added_node_ids": [],
+                        "added_edge_ids": [],
+                    }
+            node_objects.append(node)
         edge_objects = [Edge(**e) for e in edges]
     except Exception as e:
         return {
@@ -129,10 +150,21 @@ def update_node(
         return access.build_access_denied_result(
             action=GRAPH_ACTION_MUTATE, target="update_node", decision=decision
         )
+    target_node = storage.get_node(node_id)
     if decision.graph_access.enabled and not access.is_node_visible(
-        storage.get_node(node_id), decision.graph_access
+        target_node, decision.graph_access
     ):
         return {"success": False, "error": f"Node with ID {node_id} not found"}
+
+    if target_node is not None and target_node.type_str in _SAVED_VIEW_NODE_TYPES:
+        candidate_metadata = updates.get("metadata")
+        if isinstance(candidate_metadata, dict):
+            annotation_error = saved_view_annotation_error(candidate_metadata)
+            if annotation_error:
+                return {
+                    "success": False,
+                    "error": f"Error validating input: {annotation_error}",
+                }
 
     event_context = access.build_event_context(
         target="update_node",

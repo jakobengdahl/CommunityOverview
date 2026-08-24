@@ -337,12 +337,31 @@ is tempting to read more into the rule than it delivers:
   growth path predates this rule (any large `text` payload does the same) and
   is tracked as a follow-up; there is no CSRF or origin check on the ops
   endpoint either, so "a client" here means anything holding the session id.
-- A `SavedView` node's `metadata.annotation_document` never passes through
-  this check: it is stored as ordinary graph-node metadata and rendered
-  straight into the canvas on load, so a saved view carrying a remote image
-  URL still makes every viewer's browser fetch that host. Nothing persists
-  into the session from it — the resulting op is refused — but the fetch has
-  already happened. Also tracked as a follow-up.
+- A `SavedView`/`VisualizationView` node's `metadata.annotation_document` and
+  legacy `metadata.annotations` are ordinary graph-node metadata, written
+  through the generic `add_nodes`/`update_node` mutations rather than through
+  `SessionStore.apply_state_op` — so they never went through
+  `image_annotation_error` on their own. `saved_view_annotation_error`
+  (`backend/core/session_annotations.py`) closes the write side: `add_nodes`
+  and `update_node` (`backend/service/mutations.py`) apply it to any node of
+  either type before persisting, with no byte-identical-URL exemption (a
+  saved-view write is not an incremental patch onto previously-validated
+  state the way a live op is). `sanitize_saved_view_metadata` closes the read
+  side as defense in depth: `get_saved_view` (`backend/service/views.py`) and
+  the generic `serialize_node` (`backend/service/serializers.py`, so every
+  read path reaches it — including the canvas's "double-click a SavedView
+  node to open it" flow, which reads `metadata.annotations` off an
+  already-serialized node rather than calling `get_saved_view` again) strip
+  any non-embedded image URL before it can reach an `<img src>`, so a view
+  that reached storage before this rule existed still cannot make a viewer
+  fetch a remote host merely by opening it. `adopt_federated_node`
+  (`backend/service/mutations.py`) is a narrower residual gap: it calls
+  `storage.add_nodes` directly rather than the wrapper above, so a federated
+  `SavedView` node adopted from a source graph on an older, unpatched build
+  is not write-validated — though the read-side sanitizer still applies to it
+  on every subsequent load, so it cannot render an unembedded URL either way.
+  Tracked as a follow-up (`small-fix`-tagged Task node in the Corp planning
+  graph).
 
 So the property this section actually guarantees today is narrower than "no
 remote resource anywhere": **no session annotation write persists a new

@@ -10,12 +10,24 @@ from typing import Any, Dict, List
 
 from backend.core import (
     Node,
+    NodeType,
     Edge,
     SimilarNode,
     GraphStats,
     AddNodesResult,
     DeleteNodesResult,
     DeleteEdgesResult,
+)
+from backend.core.session_annotations import sanitize_saved_view_metadata
+
+# Every generic node read (search, get_node_details, add_nodes/update_node
+# responses, ...) funnels through serialize_node, including the "double-click
+# a SavedView node to open it" flow in App.jsx — which reads
+# metadata.annotations straight off an already-serialized node rather than
+# calling get_saved_view again. Sanitizing here, not only in
+# views.get_saved_view, is what makes that second read path safe too.
+_SAVED_VIEW_NODE_TYPES = frozenset(
+    {NodeType.SAVED_VIEW.value, NodeType.VISUALIZATION_VIEW.value}
 )
 
 
@@ -45,8 +57,18 @@ def serialize_node(node: Node) -> Dict[str, Any]:
     """
     Serialize a Node to a dictionary.
     Excludes large internal fields like 'embedding'.
+
+    A SavedView/VisualizationView node additionally has its annotation
+    metadata passed through ``sanitize_saved_view_metadata`` — see
+    ``_SAVED_VIEW_NODE_TYPES`` above for why every generic read needs this,
+    not only ``get_saved_view``.
     """
-    return serialize_to_json(node.model_dump(exclude={"embedding"}))
+    data = node.model_dump(exclude={"embedding"})
+    if node.type_str in _SAVED_VIEW_NODE_TYPES and isinstance(
+        data.get("metadata"), dict
+    ):
+        data["metadata"] = sanitize_saved_view_metadata(data["metadata"])
+    return serialize_to_json(data)
 
 
 def serialize_edge(edge: Edge) -> Dict[str, Any]:
