@@ -608,6 +608,29 @@ describe('computeDroppedAttachment', () => {
     });
   });
 
+  // Contract: "frame and group are containment/visual constructs, not
+  // attachment targets" — dropping near one must not attach to it, even when
+  // it is the nearest candidate.
+  it('never attaches to a frame or a group, even when nothing else is nearby', () => {
+    const withFrameAndGroup = [
+      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, withFrameAndGroup, 'self')).toBeNull();
+  });
+
+  it('skips a nearby frame to attach to a real node within the same radius', () => {
+    const mixed = [
+      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'node-1', type: 'custom', position: { x: 105, y: 105 }, width: 0, height: 0 },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, mixed, 'self')).toMatchObject({
+      target_id: 'node-1',
+    });
+  });
+
   it('returns null outside the snap radius (detach)', () => {
     expect(
       computeDroppedAttachment({ x: 100 + ATTACH_SNAP_RADIUS + 1, y: 100 }, nodes, 'self')

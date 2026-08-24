@@ -212,8 +212,12 @@ neither is type-specific.
 **GUI attach/detach.** `label`, `text`, `icon` and `vote_dot` can now be
 (re)attached and detached from the canvas, not only via a raw
 `content.attachment` payload: dropping one of these overlays within
-`ATTACH_SNAP_RADIUS` (90px, unscaled) of a node's or another annotation's
-centre attaches it there, storing the drop point's offset from that centre so
+`ATTACH_SNAP_RADIUS` (90px, unscaled) of a node's or another attachable
+annotation's centre attaches it there (`frame` and `group` are excluded from
+candidacy, per this section's rule that nothing attaches to either — even
+when one is the nearest thing to the drop point, a further-away valid target
+is preferred, or the overlay stays unattached), storing the drop point's
+offset from that centre so
 the overlay keeps exactly where it was released rather than jumping onto the
 target (the "free fine adjustment" the capability baseline calls for);
 dropping it outside every snap zone detaches it and keeps the position it was

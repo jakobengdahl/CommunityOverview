@@ -318,10 +318,15 @@ export const ATTACH_SNAP_RADIUS = 90;
 // dropped (the contract's "free fine adjustment") instead of jumping onto the
 // centre. Returns null when nothing is close enough — the caller detaches
 // (contract: "snap to the node edge ... and detach outside the snap zone").
+// `frame` and `group` are excluded from candidacy: the contract's Attachment
+// section is explicit that they are "containment/visual constructs, not
+// attachment targets" — nothing attaches to a frame or a group, the same way
+// nothing attaches to another line/arrow (findSnapTarget's own exclusion).
 export function computeDroppedAttachment(position, nodes, excludeId) {
-  const targetId = findSnapTarget(position, nodes, { excludeId, radius: ATTACH_SNAP_RADIUS });
+  const candidates = nodes.filter((n) => n.type !== 'frame' && n.type !== 'group');
+  const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
   if (!targetId) return null;
-  const target = nodes.find((n) => n.id === targetId);
+  const target = candidates.find((n) => n.id === targetId);
   const center = target && nodeCenter(target);
   if (!center) return null;
   return {
