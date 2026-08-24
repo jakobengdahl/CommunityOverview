@@ -55,7 +55,18 @@ const GENERIC_OVERLAY_FIELDS = {
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
   // moves the whole stroke without this layer having to touch `points`.
-  freehand: ['points', 'color', 'strokeWidth', 'smoothing', 'pointerType', 'pressureSource'],
+  // `opacity` (0-1) mirrors `color`'s convention: a top-level overlay/flow-node
+  // field that the host layer (frontend/web's sessionAnnotations.js) projects
+  // to/from the server annotation's `style.opacity`.
+  freehand: [
+    'points',
+    'color',
+    'strokeWidth',
+    'smoothing',
+    'opacity',
+    'pointerType',
+    'pressureSource',
+  ],
 };
 
 // Generic overlay kinds that carry an explicit box size (frame/shape/image);

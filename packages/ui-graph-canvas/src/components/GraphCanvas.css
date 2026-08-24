@@ -624,6 +624,39 @@ body.graph-suppress-selection * {
   }
 }
 
+/* Freehand drawing mode (armed by the annotation toolbox's 'freehand' item).
+   Both elements sit above ReactFlow's pane but never intercept pointer
+   events themselves — the wrapper's own listeners, attached beneath them,
+   capture the drawing gesture via DOM bubbling (see GraphCanvas.jsx's
+   pointer-capture effect). */
+.graph-freehand-preview-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 6;
+  pointer-events: none;
+  touch-action: none;
+  overflow: visible;
+}
+
+.graph-freehand-drawing-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #b45309;
+  background: rgba(120, 53, 15, 0.92);
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 @media (prefers-color-scheme: light) {
   .graph-marks-legend {
     background: rgba(255, 255, 255, 0.92);

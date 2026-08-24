@@ -19,6 +19,12 @@ const TOOLBOX_ITEMS = [
   { kind: 'shape', glyph: '⬡', labelKey: 'shapeHexagon', shape: 'hexagon' },
   { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
   { kind: 'image', glyph: '🖼️', labelKey: 'image' },
+  // Unlike every other item, clicking this one does not create an annotation
+  // immediately — GraphCanvas's onCreate special-cases 'freehand' to arm a
+  // one-stroke drawing mode instead (docs/ANNOTATION_CONTRACT.md's "Physical
+  // device acceptance" gap: this is the GUI creation entry point stylus input
+  // needed). `activeKind` reflects that armed state back onto this button.
+  { kind: 'freehand', glyph: '✏️', labelKey: 'freehand' },
 ];
 
 /**
@@ -34,11 +40,13 @@ const TOOLBOX_ITEMS = [
  * It creates note/text/label/frame, every shape variant, and image (which
  * opens a file picker rather than adding a node directly — the host's
  * onCreate handles that distinction; see GraphCanvas's onImageIngest).
- * icon/vote_dot/freehand still have no creation entry point yet (tracked
- * gaps, not silently downgraded here) and are left for follow-up work, per
- * the acceptance matrix's per-type rows.
+ * icon/vote_dot still have no creation entry point yet (tracked gaps, not
+ * silently downgraded here) and are left for follow-up work, per the
+ * acceptance matrix's per-type rows. `activeKind` (currently only meaningful
+ * for 'freehand') marks that item as pressed while its armed drawing mode is
+ * active, so a user mid-stroke can see which tool is live.
  */
-function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
+function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind = null }) {
   const [expanded, setExpanded] = useState(false);
 
   const lbl = {
@@ -55,6 +63,7 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
     image: 'Image',
+    freehand: 'Freehand',
     ...labels,
   };
 
@@ -86,9 +95,12 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false }) {
             <button
               key={`${kind}-${labelKey}`}
               type="button"
-              className="annotation-toolbox-item"
+              className={`annotation-toolbox-item${
+                activeKind === kind ? ' annotation-toolbox-item--active' : ''
+              }`}
               onClick={() => onCreate?.(kind, shape ? { shape } : undefined)}
               aria-label={lbl[labelKey]}
+              aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
               title={lbl[labelKey]}
             >
               <span className="annotation-toolbox-item-glyph" aria-hidden="true">
