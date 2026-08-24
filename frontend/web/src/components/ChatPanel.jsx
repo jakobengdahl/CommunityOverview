@@ -14,6 +14,7 @@ import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
+import { useVisualViewportInset } from '../hooks/useVisualViewportInset';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -40,7 +41,8 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel({ collectionShortName }) {
+function ChatPanel({ collectionShortName, variant = 'floating' }) {
+  const isSheet = variant === 'sheet';
   const {
     chatMessages,
     addChatMessage,
@@ -83,6 +85,11 @@ function ChatPanel({ collectionShortName }) {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const handleSendRef = useRef(null);
+
+  // Keyboard-aware composer (sheet variant only, see the JSX below) — a
+  // graceful no-op everywhere visualViewport is unavailable, so this is safe
+  // to always call regardless of variant.
+  const keyboardInset = useVisualViewportInset();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -670,8 +677,11 @@ function ChatPanel({ collectionShortName }) {
     return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   };
 
-  // Minimized state
+  // Minimized state — the sheet variant is mounted (inside BottomSheet) only
+  // while chatPanelOpen is true, and the mobile bottom nav's Chat slot is the
+  // equivalent affordance while closed, so it has no minimized bar of its own.
   if (!chatPanelOpen) {
+    if (isSheet) return null;
     return (
       <div className="chat-panel-minimized" onClick={toggleChatPanel}>
         <ChatDotsFill size={18} className="chat-panel-minimized-icon" />
@@ -683,26 +693,33 @@ function ChatPanel({ collectionShortName }) {
   // Expanded state
   return (
     <div
-      className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}
+      className={
+        isSheet ? 'chat-panel-sheet' : `chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`
+      }
       id="guide-target-chat"
     >
-      <div className="chat-header">
-        <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
-          <ChatDotsFill size={16} />
-          <h3>Graph assistant</h3>
-          {effectiveMaxDepth > 1 && (
-            <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
-              {t('federation.depth_indicator', {
-                current: federationDepth,
-                max: effectiveMaxDepth,
-              })}
-            </span>
-          )}
+      {!isSheet && (
+        <div className="chat-header">
+          <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
+            <ChatDotsFill size={16} />
+            <h3>Graph assistant</h3>
+            {effectiveMaxDepth > 1 && (
+              <span
+                className="chat-depth-indicator"
+                title={t('federation.depth_indicator_tooltip')}
+              >
+                {t('federation.depth_indicator', {
+                  current: federationDepth,
+                  max: effectiveMaxDepth,
+                })}
+              </span>
+            )}
+          </div>
+          <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
+            <ChevronRight size={18} />
+          </button>
         </div>
-        <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
-          <ChevronRight size={18} />
-        </button>
-      </div>
+      )}
 
       <div className="chat-messages">
         {chatMessages
@@ -872,7 +889,10 @@ function ChatPanel({ collectionShortName }) {
 
       {error && <div className="chat-error">{error}</div>}
 
-      <div className="chat-input-container">
+      <div
+        className="chat-input-container"
+        style={isSheet && keyboardInset ? { marginBottom: `${keyboardInset}px` } : undefined}
+      >
         {selectionSummary && (
           <div className="selection-indicator">
             <div className="selection-indicator-content">

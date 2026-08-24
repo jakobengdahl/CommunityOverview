@@ -27,7 +27,7 @@ vi.mock('../src/components/SessionDrawer', () => ({
 }));
 
 vi.mock('../src/components/ChatPanel', () => ({
-  default: () => <div data-testid="chat-panel" />,
+  default: ({ variant }) => <div data-testid="chat-panel" data-variant={variant} />,
 }));
 
 function baseProps(overrides = {}) {
@@ -168,5 +168,43 @@ describe('MobileShell', () => {
 
     expect(onCreateNodeForType).toHaveBeenCalledWith('Actor');
     expect(screen.queryByTestId('floating-toolbar')).not.toBeInTheDocument();
+  });
+
+  describe('Chat bottom sheet', () => {
+    it('is not mounted when chat is closed, and hosts ChatPanel in sheet variant when opened', () => {
+      render(<MobileShell {...baseProps()} />);
+
+      expect(screen.queryByTestId('chat-panel')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('bottom-sheet-scrim')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.chat'));
+
+      expect(screen.getByTestId('chat-panel')).toHaveAttribute('data-variant', 'sheet');
+      expect(
+        screen.getByRole('dialog', { name: 'mobile_nav.chat_panel_title' })
+      ).toBeInTheDocument();
+    });
+
+    it('closing the chat sheet (its own close control) persists the collapse like the desktop minimize does', () => {
+      render(<MobileShell {...baseProps()} />);
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.chat'));
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+
+      fireEvent.click(screen.getByTestId('bottom-sheet-scrim'));
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+      expect(screen.queryByTestId('chat-panel')).not.toBeInTheDocument();
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('true');
+    });
+
+    it('does not mount the chat sheet when llmAvailable is false', () => {
+      render(<MobileShell {...baseProps({ llmAvailable: false })} />);
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.chat'));
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+      expect(screen.queryByTestId('chat-panel')).not.toBeInTheDocument();
+    });
   });
 });
