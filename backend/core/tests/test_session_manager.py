@@ -6,10 +6,12 @@ presence/claim lifecycle on connect/disconnect.
 """
 
 import asyncio
+import json
 import threading
 
 import pytest
 
+from backend.core import image_ingest
 from backend.core.session_hub import InProcessEventBus
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
@@ -536,6 +538,25 @@ class TestOpBatchByteCap:
         )
         assert res["seq"] == 1
 
+    async def test_max_request_body_bytes_admits_the_larger_of_the_two_caps(self):
+        """The REST layer's pre-parse body-size check (rest_api.py) cannot
+        yet tell an ordinary batch from one carrying a validated embedded
+        image — that needs the JSON decoded — so it has to use whichever cap
+        is larger, not the flat one alone (that would 413 a real embedded-
+        image batch before apply_ops ever got a chance to route it
+        correctly)."""
+        flat_larger = _manager(max_op_batch_bytes=999_999_999)
+        assert (
+            flat_larger.max_request_body_bytes
+            == flat_larger.max_op_batch_bytes
+            == 999_999_999
+        )
+        image_larger = _manager(max_op_batch_bytes=256)
+        assert (
+            image_larger.max_request_body_bytes
+            == image_ingest.DEFAULT_MAX_SESSION_DOCUMENT_BYTES
+        )
+
     async def test_oversized_batch_leaves_state_untouched(self):
         mgr = _manager(max_op_batch_bytes=256)
         s = mgr.create_session()
@@ -555,6 +576,150 @@ class TestOpBatchByteCap:
                 ],
             )
         assert mgr.get_session(s.id).state["node_refs"] == ["keep"]
+
+
+class TestApplyOpsImageBudgets:
+    """``apply_ops`` is the browser's write path (``POST .../ops``, via
+    sessionSyncClient.js). An embedded image annotation must route through
+    the image/session/document budgets instead of the flat op-batch cap
+    (smallfix-embedded-image-over-op-batch-cap-immovable — without this, a
+    ~400KB image that ``create_image_annotation`` happily created becomes
+    permanently unmovable, since every move/resize/relayer/lock re-sends the
+    whole annotation and always exceeded the flat cap), while the *ops* path
+    also needs its own per-image cap (nothing here calls
+    ``image_ingest.optimize_image``) and a cumulative session/document budget
+    that many small batches cannot walk past over time
+    (smallfix-session-ops-path-ignores-image-budgets)."""
+
+    async def test_browser_move_of_a_large_embedded_image_succeeds(self):
+        """The exact shape sessionSyncClient.js sends on move/resize/
+        relayer/lock: the whole annotation, embedded image included, as one
+        `annotation_updated` op. A ``max_op_batch_bytes`` well under the
+        image's size pins that this is no longer bounded by the flat cap."""
+        mgr = _manager(max_op_batch_bytes=256)
+        s = mgr.create_session()
+        image = _image_annotation("img-1", data_bytes=400_000)
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            image,
+            optimized_image_bytes=400_000,
+            max_session_image_bytes=1_000_000,
+        )
+        moved = dict(image)
+        moved["position"] = {"x": 40, "y": 60}
+
+        res = await mgr.apply_ops(
+            s.id,
+            "browser-1",
+            s.seq,
+            [{"op": "annotation_updated", "annotation": moved}],
+            max_session_image_bytes=1_000_000,
+        )
+
+        assert res["seq"] == 2
+        assert mgr.get_session(s.id).state["annotations"][0]["position"] == {
+            "x": 40,
+            "y": 60,
+        }
+
+    async def test_non_image_ops_in_the_same_batch_are_unaffected(self):
+        """A batch mixing an image echo with an ordinary op (the common case
+        — a multi-select drag) must still apply both, with the non-image op
+        still bounded by the flat cap it always was."""
+        mgr = _manager(max_op_batch_bytes=256)
+        s = mgr.create_session()
+        image = _image_annotation("img-1", data_bytes=400_000)
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            image,
+            optimized_image_bytes=400_000,
+            max_session_image_bytes=1_000_000,
+        )
+        moved = dict(image)
+        moved["position"] = {"x": 5, "y": 5}
+
+        res = await mgr.apply_ops(
+            s.id,
+            "browser-1",
+            s.seq,
+            [
+                {"op": "annotation_updated", "annotation": moved},
+                {"op": "nodes_added", "node_ids": ["a"]},
+            ],
+            max_session_image_bytes=1_000_000,
+        )
+
+        assert res["seq"] == 3
+        assert mgr.get_session(s.id).state["node_refs"] == ["a"]
+
+    async def test_forged_oversized_image_op_is_rejected(self):
+        """Neither this generic ops path nor ``upsert_annotation`` goes
+        through ``image_ingest.optimize_image``'s own size enforcement, so a
+        client posting an over-budget but correctly-prefixed payload
+        directly must still be capped, not waved through as one validated
+        image."""
+        mgr = _manager()
+        s = mgr.create_session()
+        huge = _image_annotation(
+            "img-1", data_bytes=image_ingest.DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES + 1
+        )
+        with pytest.raises(ImageBudgetExceeded):
+            await mgr.apply_ops(
+                s.id,
+                "browser-1",
+                s.seq,
+                [{"op": "annotation_created", "annotation": huge}],
+            )
+        assert mgr.get_session(s.id).state["annotations"] == []
+
+    async def test_cumulative_session_budget_closes_the_many_small_batches_path(
+        self,
+    ):
+        """smallfix-session-ops-path-ignores-image-budgets: the flat cap only
+        bounds *one* request. Many separate, individually-legal batches (each
+        far under the flat op-batch cap on its own) must not be able to walk
+        the session's total document size past its configured budget."""
+        mgr = _manager()
+        s = mgr.create_session()
+        chunk = "x" * 2000
+
+        async def _add(suffix, max_session_document_bytes):
+            return await mgr.apply_ops(
+                s.id,
+                "browser-1",
+                s.seq,
+                [
+                    {
+                        "op": "annotation_created",
+                        "annotation": {
+                            "id": f"n{suffix}",
+                            "type": "label",
+                            "text": chunk,
+                        },
+                    }
+                ],
+                max_session_document_bytes=max_session_document_bytes,
+            )
+
+        # A generous budget lets two small, individually-legal batches
+        # through, establishing the document size they leave behind.
+        generous = 10_000_000
+        await _add(0, generous)
+        await _add(1, generous)
+        size_after_two = len(json.dumps(mgr.get_session(s.id).to_dict()))
+        seq_after_two = mgr.get_session(s.id).seq
+
+        # Pin the budget to exactly what those two batches already used: a
+        # third batch — on its own trivially under the flat op-batch cap —
+        # must still be refused, because it is the *cumulative* session
+        # document being checked now, not just this one request's size.
+        with pytest.raises(ImageBudgetExceeded):
+            await _add(2, size_after_two)
+
+        assert mgr.get_session(s.id).seq == seq_after_two
+        assert len(json.dumps(mgr.get_session(s.id).to_dict())) == size_after_two
 
 
 class TestTokenBucketEviction:
@@ -1170,6 +1335,58 @@ class TestUpsertAnnotation:
             mgr.upsert_annotation(s.id, "mcp-agent", {"id": "ann-1", "type": "shape"})
         assert s.seq == seq_before
         assert s.state["annotations"][0]["type"] == "line"
+
+    async def test_flat_cap_still_applies_to_a_large_non_image_annotation(self):
+        """The image-budget carve-out below must not swallow the flat cap
+        for everything else: smallfix-duplicate-image-annotation-op-cap
+        fixes embedded images specifically, not oversized text/label
+        payloads, which stay bounded by the small generic cap."""
+        mgr = _manager(max_op_batch_bytes=256)
+        s = mgr.create_session()
+        with pytest.raises(OpBatchTooLarge):
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"type": "label", "text": "x" * 1000}
+            )
+        assert s.state["annotations"] == []
+
+    async def test_duplicate_style_copy_of_a_realistic_image_succeeds(self):
+        """Regression test for smallfix-duplicate-image-annotation-op-cap:
+        ``duplicate_annotation`` (mcp_tools.py) builds its copy by taking the
+        stored annotation dict, swapping in a new id, and calling this same
+        method — this pins that shape directly. Before the fix, a
+        realistically sized embedded image (bigger than the 256-byte-here
+        flat cap, still under the per-image budget) created fine via
+        ``upsert_image_annotation`` but failed to duplicate with
+        ``too_large``."""
+        mgr = _manager(max_op_batch_bytes=256)
+        s = mgr.create_session()
+        original = _image_annotation("img-1", data_bytes=2000)
+        mgr.upsert_image_annotation(
+            s.id, "mcp-agent", original, optimized_image_bytes=2000
+        )
+        copy = dict(original)
+        copy["id"] = "img-2"
+
+        res = mgr.upsert_annotation(s.id, "mcp-agent", copy)
+
+        assert res["annotation"]["id"] == "img-2"
+        assert len(s.state["annotations"]) == 2
+
+    async def test_forged_oversized_image_payload_is_still_capped(self):
+        """Neither this generic path nor ``apply_ops`` (see
+        ``TestApplyOpsImageBudgets``) goes through ``image_ingest.
+        optimize_image``, so without an explicit per-image check here a
+        caller could submit an over-budget but correctly-prefixed payload
+        directly and have it waved through as if it were one validated
+        image. The per-image cap in ``_check_image_budgets`` closes that."""
+        mgr = _manager()
+        s = mgr.create_session()
+        huge = _image_annotation(
+            "img-1", data_bytes=image_ingest.DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES + 1
+        )
+        with pytest.raises(ImageBudgetExceeded):
+            mgr.upsert_annotation(s.id, "mcp-agent", huge)
+        assert s.state["annotations"] == []
 
 
 class TestUpsertImageAnnotation:

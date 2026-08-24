@@ -339,14 +339,24 @@ is tempting to read more into the rule than it delivers:
 
 - The store can tell an embedded data URI from a remote link, but not *which*
   embedded bytes came from ingest. A client can still forge a data URI and
-  persist a self-supplied picture. The per-image, per-session and document
-  budgets in `image_ingest.py` are enforced only by
-  `SessionManager.upsert_image_annotation`, **not** on the op path, and the
-  256KB op-batch cap is per request rather than cumulative — so repeated
-  single-op batches can grow a session document far past those budgets. That
-  growth path predates this rule (any large `text` payload does the same) and
-  is tracked as a follow-up; there is no CSRF or origin check on the ops
-  endpoint either, so "a client" here means anything holding the session id.
+  persist a self-supplied picture — bounded by the per-image budget (below),
+  not unlimited. There is no CSRF or origin check on the ops endpoint either,
+  so "a client" here means anything holding the session id.
+
+  The per-image, per-session and document budgets in `image_ingest.py` used
+  to be enforced only by `SessionManager.upsert_image_annotation` (the
+  dedicated MCP ingest path), leaving two gaps, now closed: an op carrying a
+  validated-shape embedded image on the `apply_ops` path (a browser
+  move/resize/relayer/lock, or a `duplicate_annotation` copy through
+  `upsert_annotation`) is now classified and budgeted the same way instead of
+  hitting the small flat op-batch cap that always rejected a realistically
+  sized picture; and `apply_ops` now also checks the *cumulative* session
+  image/document totals after each batch, not just that one batch's size, so
+  many small, individually-legal batches can no longer grow a session
+  document past budget over time (the growth path is not image-specific — a
+  large `text` payload reaches it the same way — so the cumulative check
+  applies to any state-changing batch, not only image-carrying ones). See
+  `docs/MULTI_USER_SESSIONS_DESIGN.md` §3.9 for the mechanism.
 - A `SavedView`/`VisualizationView` node's `metadata.annotation_document` and
   legacy `metadata.annotations` are ordinary graph-node metadata, written
   through the generic `add_nodes`/`update_node` mutations rather than through

@@ -27,10 +27,12 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .image_ingest import (
+    DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES,
     DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
     DEFAULT_MAX_SESSION_IMAGE_BYTES,
     data_url_byte_length,
 )
+from .session_annotations import IMAGE_TYPE, annotation_type_of, is_embedded_image_url
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
@@ -110,14 +112,21 @@ class AnnotationRecentlyDeleted(Exception):
         self.annotation_id = annotation_id
 
 
-class ImageBudgetExceeded(Exception):
+class ImageBudgetExceeded(OpBatchTooLarge):
     """Embedding this image would exceed a configured image/document byte budget.
 
-    Raised by ``upsert_image_annotation`` before the write is attempted, so a
-    rejected image never touches the store — distinct from ``OpBatchTooLarge``,
-    which guards the small generic op-batch cap that every other annotation
-    write still uses (see ``upsert_image_annotation``'s docstring for why
-    embedded images need their own, larger budget).
+    Raised before the write is attempted, so a rejected image never touches
+    the store. A subclass of ``OpBatchTooLarge`` (not a sibling) so every
+    existing caller that already catches ``OpBatchTooLarge`` to mean "this
+    write was too big, tell the caller `too_large`" — the REST ops endpoint,
+    ``duplicate_annotation`` — keeps doing the right thing for an embedded
+    image without change; a caller that wants the more specific budget
+    message can catch ``ImageBudgetExceeded`` first. See
+    ``_check_image_budgets`` for the shared enforcement every path that can
+    persist an already-embedded image (create, duplicate, a raw ops-batch
+    write) now routes through, instead of each guarding a different cap
+    (``smallfix-duplicate-image-annotation-op-cap``,
+    ``smallfix-embedded-image-over-op-batch-cap-immovable``).
     """
 
 
@@ -241,6 +250,93 @@ def _session_image_bytes(
     return total
 
 
+def _annotation_embedded_image_bytes(annotation: Any) -> int:
+    """Decoded bytes of a *validated-shape* embedded image *annotation*
+    carries, else 0.
+
+    Gated on the exact ``is_embedded_image_url`` prefix — stricter than
+    ``_image_annotation_bytes``'s ";base64," sniff — so only a payload the
+    server itself could have produced (server-side ingest's own optimized
+    content type) is routed through the larger image budgets
+    (``_check_image_budgets``) instead of the flat op-batch cap. A
+    same-shaped but forged payload (e.g. a raw ``apply_ops`` call carrying an
+    ``image`` type with an arbitrary ";base64," string) still falls under the
+    flat cap and is rejected there, before the store's own image-shape
+    validation (``session_annotations.image_annotation_error``) ever runs.
+    """
+    if not isinstance(annotation, dict) or annotation_type_of(annotation) != IMAGE_TYPE:
+        return 0
+    image = annotation.get("image")
+    if not isinstance(image, dict):
+        return 0
+    url = image.get("url")
+    if not is_embedded_image_url(url):
+        return 0
+    return data_url_byte_length(url)
+
+
+def _op_embedded_image_bytes(op: Dict[str, Any]) -> int:
+    """``_annotation_embedded_image_bytes`` for an ops-batch entry: only
+    ``annotation_created``/``annotation_updated`` ops can carry an
+    annotation payload at all.
+    """
+    if op.get("op") not in ("annotation_created", "annotation_updated"):
+        return 0
+    return _annotation_embedded_image_bytes(op.get("annotation"))
+
+
+def _check_image_budgets(
+    session: "Session",
+    *,
+    annotation_id: Optional[str],
+    existing: Optional[Dict[str, Any]],
+    new_annotation: Dict[str, Any],
+    image_bytes: int,
+    max_session_image_bytes: int,
+    max_session_document_bytes: int,
+    max_optimized_image_bytes: int = DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES,
+) -> None:
+    """Raise ``ImageBudgetExceeded`` if persisting *new_annotation* (whose
+    embedded image is *image_bytes* decoded bytes) here would exceed the
+    per-image, per-session or per-document budget.
+
+    Shared by every path that can persist an already-embedded image payload
+    — dedicated ingest (``upsert_image_annotation``), the generic create/
+    duplicate path (``upsert_annotation``), and a raw ops-batch write
+    (``apply_ops``) — so all three enforce the one regime instead of each
+    guarding a different, uncoordinated cap.
+
+    The per-image check is redundant for ``upsert_image_annotation`` (its
+    caller already downsized the image with ``image_ingest.optimize_image``
+    before calling in), but not for the other two paths: neither goes
+    through the optimizer, so without this check here a caller could submit
+    an oversized but correctly-prefixed payload directly and have it
+    budgeted as if it were a validated single image.
+    """
+    if image_bytes > max_optimized_image_bytes:
+        raise ImageBudgetExceeded(
+            f"embedded image is {image_bytes} bytes, exceeding the "
+            f"{max_optimized_image_bytes}-byte per-image limit"
+        )
+    other_image_bytes = _session_image_bytes(session, exclude_id=annotation_id)
+    if other_image_bytes + image_bytes > max_session_image_bytes:
+        raise ImageBudgetExceeded(
+            f"embedding this image would bring the session's total "
+            f"embedded image data to {other_image_bytes + image_bytes} "
+            f"bytes, over the {max_session_image_bytes}-byte session limit"
+        )
+    current_doc_bytes = len(json.dumps(session.to_dict()))
+    existing_bytes = len(json.dumps(existing)) if existing is not None else 0
+    new_annotation_bytes = len(json.dumps(new_annotation))
+    projected_doc_bytes = current_doc_bytes - existing_bytes + new_annotation_bytes
+    if projected_doc_bytes > max_session_document_bytes:
+        raise ImageBudgetExceeded(
+            f"embedding this image would bring the session document to "
+            f"{projected_doc_bytes} bytes, over the "
+            f"{max_session_document_bytes}-byte document limit"
+        )
+
+
 class SessionManager:
     """High-level façade over the session store, event bus, presence and claims."""
 
@@ -285,8 +381,25 @@ class SessionManager:
 
     @property
     def max_op_batch_bytes(self) -> int:
-        """Byte cap enforced on a single ops batch (§3.9)."""
+        """Byte cap enforced on a single *non-image* ops batch (§3.9)."""
         return self._max_op_batch_bytes
+
+    @property
+    def max_request_body_bytes(self) -> int:
+        """Sanity ceiling for the raw HTTP body of one ``POST .../ops`` request.
+
+        ``apply_ops`` itself now applies two different caps depending on what
+        each op carries (the flat ``max_op_batch_bytes`` for everything else,
+        the larger image/session/document budgets for a validated embedded
+        image), so the REST layer's pre-parse size check — which runs before
+        the body is even JSON-decoded, and so cannot tell which case applies
+        — has to admit the *larger* of the two: the full session document
+        budget, since no legitimate batch can need to carry more than the
+        document it is writing into could ever hold. ``apply_ops``'s own
+        checks still enforce the tighter, per-case bound once the body is
+        parsed.
+        """
+        return max(self._max_op_batch_bytes, DEFAULT_MAX_SESSION_DOCUMENT_BYTES)
 
     @property
     def max_ops_per_batch(self) -> int:
@@ -491,6 +604,9 @@ class SessionManager:
         client_id: str,
         base_seq: Optional[int],
         ops: List[Dict[str, Any]],
+        *,
+        max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
+        max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
     ) -> Dict[str, Any]:
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -500,8 +616,29 @@ class SessionManager:
             raise OpBatchTooLarge()
         # Bound the batch by *size* as well as *count* (§3.9): a single op such
         # as `layout_applied` can carry a large positions map that the op-count
-        # cap alone would not catch.
-        if len(json.dumps(ops)) > self._max_op_batch_bytes:
+        # cap alone would not catch. An op carrying a validated-shape embedded
+        # image (the browser echoing a whole `image` annotation back on every
+        # move/resize/relayer/lock, per sessionSyncClient.js) is charged
+        # against the image budgets below instead of this flat cap — sized for
+        # reference-only ops, not a multi-hundred-KB picture
+        # (smallfix-embedded-image-over-op-batch-cap-immovable) — so it is
+        # excluded from this sum rather than making every non-image op share a
+        # cap wide enough to admit one.
+        non_image_bytes = 0
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            image_bytes = _op_embedded_image_bytes(op)
+            if image_bytes:
+                if image_bytes > DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES:
+                    raise ImageBudgetExceeded(
+                        f"embedded image is {image_bytes} bytes, exceeding "
+                        f"the {DEFAULT_MAX_OPTIMIZED_IMAGE_BYTES}-byte "
+                        "per-image limit"
+                    )
+                continue
+            non_image_bytes += len(json.dumps(op))
+        if non_image_bytes > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
         if not isinstance(client_id, str) or not client_id:
             raise OpError("'client_id' is required")
@@ -571,6 +708,35 @@ class SessionManager:
                     # loop-thread writer (the synchronous ``apply_layout`` path)
                     # may be mutating it during this await. See persist_snapshot.
                     snapshot = copy.deepcopy(session.to_dict())
+
+                    # Cumulative budget check (smallfix-session-ops-path-ignores-
+                    # image-budgets): the per-batch caps above only bound *one*
+                    # request. Without this, many small batches — each legally
+                    # under the flat cap, or each carrying one budget-legal
+                    # image — can still walk the session's total document size
+                    # (and total embedded-image bytes) arbitrarily far past the
+                    # configured budgets over time. Checked against the
+                    # *resulting* state (the snapshot, after every op in this
+                    # batch has been applied in-memory) rather than the
+                    # arriving ops, so it catches growth from any op type —
+                    # not just images — before that snapshot is persisted; the
+                    # `except Exception` below rolls it back like any other
+                    # mid-batch failure.
+                    total_image_bytes = _session_image_bytes(session)
+                    if total_image_bytes > max_session_image_bytes:
+                        raise ImageBudgetExceeded(
+                            f"this batch would bring the session's total "
+                            f"embedded image data to {total_image_bytes} "
+                            f"bytes, over the {max_session_image_bytes}-byte "
+                            "session limit"
+                        )
+                    total_doc_bytes = len(json.dumps(snapshot))
+                    if total_doc_bytes > max_session_document_bytes:
+                        raise ImageBudgetExceeded(
+                            f"this batch would bring the session document to "
+                            f"{total_doc_bytes} bytes, over the "
+                            f"{max_session_document_bytes}-byte document limit"
+                        )
                     await asyncio.to_thread(self.store.persist_snapshot, snapshot)
             except Exception:
                 session.state = saved_state
@@ -796,6 +962,8 @@ class SessionManager:
         annotation: Dict[str, Any],
         *,
         expected_revision: Optional[int] = None,
+        max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
+        max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one annotation **synchronously** (MCP write path).
 
@@ -808,6 +976,16 @@ class SessionManager:
         ``annotation["id"]`` matches one already in the session (idempotent
         client retries), so create and upsert share this one op and this one
         method. Omit ``annotation["id"]`` to have the store mint one.
+
+        This is also the path ``duplicate_annotation`` copies an image
+        annotation through. An annotation carrying a validated-shape embedded
+        image (``_annotation_embedded_image_bytes``) is routed through the
+        same image/session/document budgets ``upsert_image_annotation``
+        enforces, instead of the small flat op-batch cap every other
+        annotation still uses — otherwise a duplicate of a realistic image
+        (larger than 256KB but well inside the per-image budget) fails with
+        ``too_large`` even though creating that same image succeeded
+        (``smallfix-duplicate-image-annotation-op-cap``).
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -815,8 +993,6 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if len(json.dumps(annotation)) > self._max_op_batch_bytes:
-            raise OpBatchTooLarge()
         if not self._bucket.consume(client_id, 1):
             raise RateLimited()
 
@@ -830,6 +1006,33 @@ class SessionManager:
             raise SessionNotFound()
         if expected_revision is not None and expected_revision != session.seq:
             raise RevisionConflict(expected_revision, session.seq)
+
+        image_bytes = _annotation_embedded_image_bytes(annotation)
+        if image_bytes:
+            annotation_id = annotation.get("id")
+            existing = (
+                next(
+                    (
+                        a
+                        for a in session.state.get("annotations", [])
+                        if a.get("id") == annotation_id
+                    ),
+                    None,
+                )
+                if isinstance(annotation_id, str)
+                else None
+            )
+            _check_image_budgets(
+                session,
+                annotation_id=annotation_id if isinstance(annotation_id, str) else None,
+                existing=existing,
+                new_annotation=annotation,
+                image_bytes=image_bytes,
+                max_session_image_bytes=max_session_image_bytes,
+                max_session_document_bytes=max_session_document_bytes,
+            )
+        elif len(json.dumps(annotation)) > self._max_op_batch_bytes:
+            raise OpBatchTooLarge()
 
         op: Dict[str, Any] = {
             "op": "annotation_created",
@@ -908,28 +1111,15 @@ class SessionManager:
             else None
         )
 
-        other_image_bytes = _session_image_bytes(
+        _check_image_budgets(
             session,
-            exclude_id=annotation_id if isinstance(annotation_id, str) else None,
+            annotation_id=annotation_id if isinstance(annotation_id, str) else None,
+            existing=existing,
+            new_annotation=annotation,
+            image_bytes=optimized_image_bytes,
+            max_session_image_bytes=max_session_image_bytes,
+            max_session_document_bytes=max_session_document_bytes,
         )
-        if other_image_bytes + optimized_image_bytes > max_session_image_bytes:
-            raise ImageBudgetExceeded(
-                f"embedding this image would bring the session's total "
-                f"embedded image data to "
-                f"{other_image_bytes + optimized_image_bytes} bytes, over "
-                f"the {max_session_image_bytes}-byte session limit"
-            )
-
-        current_doc_bytes = len(json.dumps(session.to_dict()))
-        existing_bytes = len(json.dumps(existing)) if existing is not None else 0
-        new_annotation_bytes = len(json.dumps(annotation))
-        projected_doc_bytes = current_doc_bytes - existing_bytes + new_annotation_bytes
-        if projected_doc_bytes > max_session_document_bytes:
-            raise ImageBudgetExceeded(
-                f"embedding this image would bring the session document to "
-                f"{projected_doc_bytes} bytes, over the "
-                f"{max_session_document_bytes}-byte document limit"
-            )
 
         op: Dict[str, Any] = {
             "op": "annotation_created",
