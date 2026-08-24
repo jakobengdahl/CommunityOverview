@@ -1,16 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ resizerProps: [] }));
+const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => ({
   NodeResizer: (props) => {
     hoisted.resizerProps.push(props);
     return <div data-testid="resizer" />;
   },
+  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
 }));
+
+// Applies the latest setNodes(updater) call to a single-node array and
+// returns the updated node, the same helper style GraphCanvasUndo.test.jsx
+// uses for its live node store.
+function applyLatestUpdate(node) {
+  const call = hoisted.setNodes.mock.calls.at(-1);
+  return call[0]([node])[0];
+}
 
 // A simple, generic visual representation for the v1 annotation types that
 // have no dedicated per-type editor yet (text, frame, shape, icon, vote_dot,
@@ -25,6 +34,7 @@ vi.mock('reactflow', () => ({
 describe('GenericAnnotationNode', () => {
   beforeEach(() => {
     hoisted.resizerProps.length = 0;
+    hoisted.setNodes.mockClear();
   });
 
   it('renders text content', () => {
@@ -297,5 +307,104 @@ describe('GenericAnnotationNode', () => {
     const props = hoisted.resizerProps.at(-1);
     props.onResizeEnd();
     expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+});
+
+// task-annotation-render-direct-manipulation: a right-click property editor
+// (shape subtype picker + rotation control) for every kind this component
+// renders — previously none of them had any GUI editor at all.
+describe('GenericAnnotationNode property editor', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+  });
+
+  it('opens a shape-subtype picker and rotation controls for a shape annotation', () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    expect(screen.getByLabelText('circle')).toBeInTheDocument();
+    expect(screen.getByLabelText('triangle')).toBeInTheDocument();
+    expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+  });
+
+  it('marks the current shape as the active picker option', () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'hexagon' }} />);
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    expect(screen.getByLabelText('hexagon').className).toContain('active');
+    expect(screen.getByLabelText('circle').className).not.toContain('active');
+  });
+
+  it("changes an existing shape annotation's subtype from the picker", () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    fireEvent.click(screen.getByLabelText('triangle'));
+    expect(applyLatestUpdate({ id: 's1', data: { shape: 'circle' } }).data.shape).toBe('triangle');
+  });
+
+  it('does not show a shape picker for a non-shape kind', () => {
+    const { container } = render(<GenericAnnotationNode id="f1" type="frame" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-frame'));
+    expect(screen.queryByLabelText('circle')).toBeNull();
+    expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+  });
+
+  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+    'rotates right by 15° and normalizes into [0, 360) for a %s',
+    (kind) => {
+      const data = { rotation: 350, text: 'x', icon: 'flag', image: {} };
+      const { container } = render(
+        <GenericAnnotationNode id="n1" type={kind} data={data} selected />
+      );
+      const root = container.querySelector(
+        kind === 'shape' ? '[data-testid="shape-halo"]' : `.kind-${kind}`
+      );
+      fireEvent.contextMenu(root);
+      fireEvent.click(screen.getByLabelText('Rotate right 15°'));
+      expect(applyLatestUpdate({ id: 'n1', data }).data.rotation).toBe(5);
+    }
+  );
+
+  it('resets rotation to 0 via the reset button, showing the current angle on it', () => {
+    render(<GenericAnnotationNode id="n1" type="text" data={{ rotation: 45, text: 'x' }} />);
+    fireEvent.contextMenu(screen.getByText('x'));
+    expect(screen.getByLabelText('Reset rotation').textContent).toBe('45°');
+    fireEvent.click(screen.getByLabelText('Reset rotation'));
+    expect(applyLatestUpdate({ id: 'n1', data: { rotation: 45 } }).data.rotation).toBe(0);
+  });
+
+  it('deletes the annotation via the context menu delete button', () => {
+    render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
+    fireEvent.contextMenu(screen.getByText('1'));
+    fireEvent.click(screen.getByText(/Delete/));
+    const call = hoisted.setNodes.mock.calls.at(-1);
+    expect(call[0]([{ id: 'v1' }, { id: 'other' }])).toEqual([{ id: 'other' }]);
+  });
+
+  it('notifies the annotation context after a rotation change', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange,
+          labels: { rotateReset: 'Reset rotation', delete: 'Delete', rotation: 'Rotation' },
+        }}
+      >
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('1'));
+    fireEvent.click(screen.getByLabelText('Reset rotation'));
+    expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the context menu on Escape', async () => {
+    render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
+    fireEvent.contextMenu(screen.getByText('1'));
+    expect(screen.getByLabelText('Reset rotation')).toBeInTheDocument();
+    // The dismiss listeners are wired up on a setTimeout(0) (so the very
+    // contextmenu event that opened the menu doesn't immediately close it);
+    // let it flush before the Escape keydown.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByLabelText('Reset rotation')).toBeNull();
   });
 });

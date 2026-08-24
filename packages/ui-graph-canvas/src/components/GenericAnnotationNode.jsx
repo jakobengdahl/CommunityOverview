@@ -1,11 +1,27 @@
-import { memo, useContext } from 'react';
-import { NodeResizer } from 'reactflow';
+import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { resolveAnnotationIcon } from '../utils/annotationIcons';
-import { rotationStyle } from '../utils/annotations';
+import { rotationStyle, ROTATABLE_OVERLAY_KINDS } from '../utils/annotations';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
+
+// A right-click property editor exists only for the kinds that actually have
+// something to edit today: `shape`'s subtype (only `shape` needs this) and
+// every rotatable generic kind's rotation (docs/ANNOTATION_CONTRACT.md:
+// "there is no GUI control to set a rotation yet" / "no editor to change an
+// existing shape's subtype" — `shape` is already a member of
+// ROTATABLE_OVERLAY_KINDS, so this is exactly that set). Recolouring and an
+// icon picker for `icon` stay out of this slice — see remaining_scope on
+// task-annotation-render-direct-manipulation.
+const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
+
+const ROTATE_STEP = 15;
+function normalizeAngle(deg) {
+  return ((deg % 360) + 360) % 360;
+}
 
 // frame/shape/image are the generic kinds that carry an explicit box size
 // (SIZED_GENERIC_KINDS in utils/annotations.js) and are the only ones
@@ -34,6 +50,9 @@ const SHAPE_STYLES = Object.freeze(
   })
 );
 
+// The shape-subtype picker's option order — every variant SHAPE_STYLES draws.
+const SHAPE_NAMES = ['rectangle', 'circle', 'triangle', 'rhombus', 'hexagon', 'process_arrow'];
+
 // A clip-path clips the element's outline away too, so the dashed selection
 // outline every other generic kind uses is invisible on a triangle, rhombus,
 // hexagon or process arrow — and a locked one shows no resize handles either,
@@ -53,19 +72,73 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * translation layer, so an MCP-created annotation of one of these types never
  * rendered. Selection and move (drag) are handled generically by GraphCanvas
  * for every annotation type; this component adds the visual selection
- * outline and, for the sized kinds, model-space resize via ReactFlow's
- * NodeResizer. Per-type property editors remain out of scope for v1, same as
- * documented for the MCP tools.
+ * outline, for the sized kinds, model-space resize via ReactFlow's
+ * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
+ * property editor (shape subtype, rotation). Recolouring and an icon picker
+ * remain out of scope; see the module doc comment on EDITABLE_KINDS.
  */
-function GenericAnnotationNode({ type, data, selected }) {
+function GenericAnnotationNode({ id, type, data, selected }) {
   const kind = type;
   const color = data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange } = useContext(AnnotationContext);
+  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { setNodes } = useReactFlow();
   const selectedClass = selected ? ' selected' : '';
   // Rotation is applied to the rendered element, not to the ReactFlow node
   // wrapper, so drag hit-testing keeps using the unrotated bounding box.
   const rotation = rotationStyle(kind, data?.rotation);
+
+  const [contextMenu, setContextMenu] = useState(null);
+  const contextMenuRef = useRef(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleDismiss = (e) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target)) return;
+      setContextMenu(null);
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+      document.addEventListener('keydown', handleKeyDown, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (e) => {
+    if (!EDITABLE_KINDS.has(kind)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const changeShape = (shape) => {
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, shape } } : n)));
+    setContextMenu(null);
+    notifyChange();
+  };
+
+  const changeRotation = (deg) => {
+    const next = normalizeAngle(deg);
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
+    );
+    notifyChange();
+  };
+
+  const remove = () => {
+    setNodes((nds) => nds.filter((n) => n.id !== id));
+    setContextMenu(null);
+    notifyChange();
+  };
 
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
@@ -82,14 +155,33 @@ function GenericAnnotationNode({ type, data, selected }) {
     />
   );
 
+  const currentRotation = data?.rotation ?? 0;
+  const menu = contextMenu && (
+    <ContextMenuPortal
+      menuRef={contextMenuRef}
+      position={contextMenu}
+      kind={kind}
+      shape={data.shape || 'rectangle'}
+      rotation={currentRotation}
+      labels={labels}
+      onChangeShape={changeShape}
+      onChangeRotation={changeRotation}
+      onDelete={remove}
+    />
+  );
+
   if (kind === 'text') {
     return (
-      <div
-        className={`graph-generic-annotation-node kind-text${selectedClass}`}
-        style={{ color, ...rotation }}
-      >
-        {data.text || ''}
-      </div>
+      <>
+        <div
+          className={`graph-generic-annotation-node kind-text${selectedClass}`}
+          style={{ color, ...rotation }}
+          onContextMenu={openContextMenu}
+        >
+          {data.text || ''}
+        </div>
+        {menu}
+      </>
     );
   }
 
@@ -100,7 +192,9 @@ function GenericAnnotationNode({ type, data, selected }) {
         <div
           className={`graph-generic-annotation-node kind-frame${selectedClass}`}
           style={{ borderColor: color, width: '100%', height: '100%', ...rotation }}
+          onContextMenu={openContextMenu}
         />
+        {menu}
       </>
     );
   }
@@ -119,6 +213,7 @@ function GenericAnnotationNode({ type, data, selected }) {
             ...rotation,
             ...(selected ? SELECTED_SHAPE_HALO : null),
           }}
+          onContextMenu={openContextMenu}
         >
           <div
             // No `selected` class: the shared dashed outline it carries is
@@ -134,6 +229,7 @@ function GenericAnnotationNode({ type, data, selected }) {
             }}
           />
         </div>
+        {menu}
       </>
     );
   }
@@ -144,24 +240,32 @@ function GenericAnnotationNode({ type, data, selected }) {
     const icon = resolveAnnotationIcon(data.icon);
     const iconClass = icon.isGlyph ? '' : ' kind-icon-abbreviated';
     return (
-      <div
-        className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
-        style={{ borderColor: color, ...rotation }}
-        title={data.icon}
-      >
-        {icon.text}
-      </div>
+      <>
+        <div
+          className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
+          style={{ borderColor: color, ...rotation }}
+          title={data.icon}
+          onContextMenu={openContextMenu}
+        >
+          {icon.text}
+        </div>
+        {menu}
+      </>
     );
   }
 
   if (kind === 'vote_dot') {
     return (
-      <div
-        className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
-        style={{ backgroundColor: color, ...rotation }}
-      >
-        {data.value ?? ''}
-      </div>
+      <>
+        <div
+          className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
+          style={{ backgroundColor: color, ...rotation }}
+          onContextMenu={openContextMenu}
+        >
+          {data.value ?? ''}
+        </div>
+        {menu}
+      </>
     );
   }
 
@@ -174,9 +278,11 @@ function GenericAnnotationNode({ type, data, selected }) {
           <div
             className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
             style={rotation}
+            onContextMenu={openContextMenu}
           >
             {data.alt || ''}
           </div>
+          {menu}
         </>
       );
     }
@@ -188,12 +294,92 @@ function GenericAnnotationNode({ type, data, selected }) {
           src={url}
           alt={data.alt || ''}
           style={{ width: '100%', height: '100%', ...rotation }}
+          onContextMenu={openContextMenu}
         />
+        {menu}
       </>
     );
   }
 
   return null;
+}
+
+// The right-click property editor's portal content, split out only so the
+// six kind branches above can each attach it without repeating its JSX.
+// Rotation controls show for every EDITABLE_KINDS member; the shape-subtype
+// grid shows only for `kind === 'shape'`.
+function ContextMenuPortal({
+  menuRef,
+  position,
+  kind,
+  shape,
+  rotation,
+  labels,
+  onChangeShape,
+  onChangeRotation,
+  onDelete,
+}) {
+  return createPortal(
+    <div
+      ref={menuRef}
+      className="graph-annotation-context-menu"
+      style={{ left: position.x, top: position.y }}
+    >
+      {kind === 'shape' && (
+        <>
+          <div className="context-menu-title">{labels.shape}</div>
+          <div className="context-menu-shapes">
+            {SHAPE_NAMES.map((name) => (
+              <button
+                key={name}
+                type="button"
+                className={`shape-picker-button${shape === name ? ' active' : ''}`}
+                aria-label={name}
+                title={name}
+                onClick={() => onChangeShape(name)}
+              >
+                <span
+                  className={`shape-picker-swatch shape-${name}`}
+                  style={SHAPE_STYLES[name] || SHAPE_STYLES.rectangle}
+                />
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <div className="context-menu-title">{labels.rotation}</div>
+      <div className="context-menu-rotate">
+        <button
+          type="button"
+          className="rotate-button"
+          aria-label={labels.rotateLeft}
+          onClick={() => onChangeRotation(rotation - ROTATE_STEP)}
+        >
+          ⟲
+        </button>
+        <button
+          type="button"
+          className="rotate-button rotate-reset"
+          aria-label={labels.rotateReset}
+          onClick={() => onChangeRotation(0)}
+        >
+          {Math.round(rotation)}°
+        </button>
+        <button
+          type="button"
+          className="rotate-button"
+          aria-label={labels.rotateRight}
+          onClick={() => onChangeRotation(rotation + ROTATE_STEP)}
+        >
+          ⟳
+        </button>
+      </div>
+      <button type="button" className="context-menu-delete" onClick={onDelete}>
+        🗑️ {labels.delete}
+      </button>
+    </div>,
+    document.body
+  );
 }
 
 export default memo(GenericAnnotationNode);

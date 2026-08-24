@@ -17,5 +17,10 @@ export const AnnotationContext = createContext({
     textSize: 'Text size',
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
+    shape: 'Shape',
+    rotation: 'Rotation',
+    rotateLeft: 'Rotate left 15°',
+    rotateRight: 'Rotate right 15°',
+    rotateReset: 'Reset rotation',
   },
 });

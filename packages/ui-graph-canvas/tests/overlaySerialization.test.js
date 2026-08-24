@@ -8,6 +8,10 @@ import {
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
+  computeDroppedAttachment,
+  resolveAttachedPosition,
+  ATTACHABLE_OVERLAY_KINDS,
+  ATTACH_SNAP_RADIUS,
   OVERLAY_TYPES,
 } from '../src/utils/annotations';
 
@@ -91,6 +95,22 @@ describe('overlay serialization', () => {
       text: 'L',
       color: '#fff',
       fontSize: 28,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(flowNodeToOverlay(overlayToFlowNode(overlay))).toEqual(overlay);
+  });
+
+  it('round-trips a label with an attachment', () => {
+    const overlay = {
+      id: 'label-2',
+      kind: 'label',
+      position: { x: 3, y: 4 },
+      text: 'L',
+      color: '#fff',
+      fontSize: 28,
+      attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: 5 } },
       z: 0,
       locked: false,
       rotation: 0,
@@ -366,6 +386,61 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  it('round-trips an attachment on a text overlay', () => {
+    const overlay = {
+      id: 'text-2',
+      kind: 'text',
+      position: { x: 40, y: 40 },
+      text: 'attached',
+      color: '#fff',
+      fontSize: 16,
+      attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 10, y: -5 } },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.attachment).toEqual(overlay.attachment);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips an attachment on an icon overlay', () => {
+    const overlay = {
+      id: 'icon-2',
+      kind: 'icon',
+      position: { x: 1, y: 1 },
+      icon: 'flag',
+      color: '#fff',
+      attachment: { target_id: 'node-2', target_type: 'annotation', offset: { x: 0, y: 20 } },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips an attachment on a vote_dot overlay', () => {
+    const overlay = {
+      id: 'vote-2',
+      kind: 'vote_dot',
+      position: { x: 1, y: 1 },
+      value: 5,
+      color: '#fff',
+      attachment: { target_id: 'node-3', target_type: 'node', offset: { x: -8, y: -8 } },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('leaves attachment absent by default on generic overlays', () => {
+    const node = overlayToFlowNode({ id: 't', kind: 'text', position: { x: 0, y: 0 } });
+    expect(node.data.attachment).toBeUndefined();
+  });
+
   it('drags a freehand node without rewriting its point coordinates', () => {
     // The node-relative convention: moving `position` alone (a plain
     // ReactFlow drag) must be enough to move the whole stroke — `data.points`
@@ -498,5 +573,105 @@ describe('isArrowHeld', () => {
     // Anchors stay in the data (they re-glue if the target returns) but a
     // filtered/collapsed/deleted target must not hold the arrow non-draggable.
     expect(isArrowHeld({ startAnchor: 'a', endAnchor: 'b' }, new Set(['c']))).toBe(false);
+  });
+});
+
+describe('ATTACHABLE_OVERLAY_KINDS', () => {
+  it('names exactly the node-attachable generic kinds', () => {
+    expect(ATTACHABLE_OVERLAY_KINDS).toEqual(new Set(['text', 'label', 'icon', 'vote_dot']));
+  });
+});
+
+describe('computeDroppedAttachment', () => {
+  const nodes = [
+    { id: 'target', type: 'custom', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+  ];
+
+  it('attaches to a node within the snap radius, storing the drop offset', () => {
+    const dropped = { x: 130, y: 90 };
+    expect(computeDroppedAttachment(dropped, nodes, 'self')).toEqual({
+      target_id: 'target',
+      target_type: 'node',
+      offset: { x: 30, y: -10 },
+    });
+  });
+
+  it('reports target_type "annotation" when the target is an annotation overlay', () => {
+    const overlayNodes = [
+      { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, width: 0, height: 0 },
+      { id: 'self', type: 'label', position: { x: 0, y: 0 }, width: 0, height: 0 },
+    ];
+    expect(computeDroppedAttachment({ x: 5, y: 5 }, overlayNodes, 'self')).toMatchObject({
+      target_id: 'note-1',
+      target_type: 'annotation',
+    });
+  });
+
+  // Contract: "frame and group are containment/visual constructs, not
+  // attachment targets" — dropping near one must not attach to it, even when
+  // it is the nearest candidate.
+  it('never attaches to a frame or a group, even when nothing else is nearby', () => {
+    const withFrameAndGroup = [
+      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, withFrameAndGroup, 'self')).toBeNull();
+  });
+
+  it('skips a nearby frame to attach to a real node within the same radius', () => {
+    const mixed = [
+      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'node-1', type: 'custom', position: { x: 105, y: 105 }, width: 0, height: 0 },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, mixed, 'self')).toMatchObject({
+      target_id: 'node-1',
+    });
+  });
+
+  it('returns null outside the snap radius (detach)', () => {
+    expect(
+      computeDroppedAttachment({ x: 100 + ATTACH_SNAP_RADIUS + 1, y: 100 }, nodes, 'self')
+    ).toBeNull();
+  });
+
+  it('never attaches to itself, even at distance 0 from its own centre', () => {
+    const onlySelf = [{ id: 'self', type: 'label', position: { x: 0, y: 0 }, width: 0, height: 0 }];
+    expect(computeDroppedAttachment({ x: 0, y: 0 }, onlySelf, 'self')).toBeNull();
+  });
+});
+
+describe('resolveAttachedPosition', () => {
+  it('returns null when the node carries no attachment', () => {
+    const node = { position: { x: 0, y: 0 }, data: {} };
+    expect(resolveAttachedPosition(node, new Map())).toBeNull();
+  });
+
+  it('recomputes the position from the target centre plus the stored offset', () => {
+    const node = {
+      position: { x: 0, y: 0 },
+      data: { attachment: { target_id: 'a', offset: { x: 10, y: -5 } } },
+    };
+    const centers = new Map([['a', { x: 50, y: 50 }]]);
+    expect(resolveAttachedPosition(node, centers)).toEqual({ x: 60, y: 45 });
+  });
+
+  it('returns null (freezes position) when the target is absent', () => {
+    const node = {
+      position: { x: 12, y: 34 },
+      data: { attachment: { target_id: 'gone', offset: { x: 0, y: 0 } } },
+    };
+    expect(resolveAttachedPosition(node, new Map())).toBeNull();
+  });
+
+  it('is idempotent when the position already matches (loop-safe)', () => {
+    const node = {
+      position: { x: 60, y: 45 },
+      data: { attachment: { target_id: 'a', offset: { x: 10, y: -5 } } },
+    };
+    const centers = new Map([['a', { x: 50, y: 50 }]]);
+    expect(resolveAttachedPosition(node, centers)).toBeNull();
   });
 });

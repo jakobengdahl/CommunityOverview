@@ -87,6 +87,14 @@ function LabelNode({ id, data, selected }) {
     notifyChange();
   };
 
+  const changeRotation = (deg) => {
+    const next = ((deg % 360) + 360) % 360;
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
+    );
+    notifyChange();
+  };
+
   const remove = () => {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
@@ -160,6 +168,33 @@ function LabelNode({ id, data, selected }) {
                   A
                 </button>
               ))}
+            </div>
+            <div className="context-menu-title">{labels.rotation}</div>
+            <div className="context-menu-rotate">
+              <button
+                type="button"
+                className="rotate-button"
+                aria-label={labels.rotateLeft}
+                onClick={() => changeRotation((data.rotation ?? 0) - 15)}
+              >
+                ⟲
+              </button>
+              <button
+                type="button"
+                className="rotate-button rotate-reset"
+                aria-label={labels.rotateReset}
+                onClick={() => changeRotation(0)}
+              >
+                {Math.round(data.rotation ?? 0)}°
+              </button>
+              <button
+                type="button"
+                className="rotate-button"
+                aria-label={labels.rotateRight}
+                onClick={() => changeRotation((data.rotation ?? 0) + 15)}
+              >
+                ⟳
+              </button>
             </div>
             <button className="context-menu-delete" onClick={remove}>
               🗑️ {labels.delete}

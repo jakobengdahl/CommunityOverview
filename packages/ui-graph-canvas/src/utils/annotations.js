@@ -35,15 +35,21 @@ export const ANNOTATION_TYPES = new Set([
 // dimensions (frame/shape/image) but wasn't given a size.
 const DEFAULT_GENERIC_SIZE = { w: 160, h: 96 };
 
+// The v1 types that may bind to a node/annotation via `content.attachment`
+// (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
+// attaches per-endpoint (`start`/`end`) instead, via its own mechanism
+// (startAnchor/endAnchor below), not this field.
+export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_dot']);
+
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
 // inverse so the two stay exact mirrors of each other.
 const GENERIC_OVERLAY_FIELDS = {
-  text: ['text', 'color', 'fontSize'],
+  text: ['text', 'color', 'fontSize', 'attachment'],
   frame: ['color'],
   shape: ['shape', 'color'],
-  icon: ['icon', 'color'],
-  vote_dot: ['value', 'color'],
+  icon: ['icon', 'color', 'attachment'],
+  vote_dot: ['value', 'color', 'attachment'],
   image: ['image', 'alt', 'color'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
@@ -148,6 +154,7 @@ export function overlayToFlowNode(overlay) {
         text: overlay.text || '',
         color: overlay.color,
         fontSize: overlay.fontSize,
+        attachment: overlay.attachment,
         locked,
         rotation,
       },
@@ -208,6 +215,7 @@ export function flowNodeToOverlay(node) {
       text: node.data?.text || '',
       color: node.data?.color,
       fontSize: node.data?.fontSize,
+      attachment: node.data?.attachment,
       z,
       locked,
       rotation,
@@ -294,4 +302,56 @@ export function resolveAnchoredArrow(arrow, centers) {
   const newDy = end.y - start.y;
   if (start.x === pos.x && start.y === pos.y && newDx === dx && newDy === dy) return null;
   return { position: { x: start.x, y: start.y }, dx: newDx, dy: newDy };
+}
+
+// Distance (px, unscaled) within which a dropped attachable overlay
+// (label/text/icon/vote_dot) snaps onto — and stays attached to — a node or
+// another annotation's centre. Looser than SNAP_RADIUS (an arrow endpoint,
+// a precise point) because "attach this label to that node" is a coarser
+// gesture aimed at "near this object", not a pixel-precise line endpoint.
+export const ATTACH_SNAP_RADIUS = 90;
+
+// Compute the attachment a dropped attachable overlay (label/text/icon/
+// vote_dot) should carry after being released at `position`: attaches to the
+// nearest node/annotation centre within ATTACH_SNAP_RADIUS, storing the drop
+// point's offset from that centre so the overlay keeps exactly where it was
+// dropped (the contract's "free fine adjustment") instead of jumping onto the
+// centre. Returns null when nothing is close enough — the caller detaches
+// (contract: "snap to the node edge ... and detach outside the snap zone").
+// `frame` and `group` are excluded from candidacy: the contract's Attachment
+// section is explicit that they are "containment/visual constructs, not
+// attachment targets" — nothing attaches to a frame or a group, the same way
+// nothing attaches to another line/arrow (findSnapTarget's own exclusion).
+export function computeDroppedAttachment(position, nodes, excludeId) {
+  const candidates = nodes.filter((n) => n.type !== 'frame' && n.type !== 'group');
+  const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
+  if (!targetId) return null;
+  const target = candidates.find((n) => n.id === targetId);
+  const center = target && nodeCenter(target);
+  if (!center) return null;
+  return {
+    target_id: targetId,
+    target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
+    offset: { x: position.x - center.x, y: position.y - center.y },
+  };
+}
+
+// Recompute an attached overlay's position from its target's current centre
+// plus the offset captured when it (re)attached. Returns the new {x, y}
+// position when it differs from the node's current one, else null — the same
+// idempotent, loop-safe contract resolveAnchoredArrow keeps despite depending
+// on `nodes`. Returns null when the target is absent (filtered, collapsed, not
+// yet loaded, or deleted): the overlay keeps its last resolved position rather
+// than being recomputed or reset (contract: "detaches and keeps its last
+// resolved model-space geometry").
+export function resolveAttachedPosition(node, centers) {
+  const targetId = node.data?.attachment?.target_id;
+  if (!targetId) return null;
+  const center = centers.get(targetId);
+  if (!center) return null;
+  const offset = node.data.attachment.offset || { x: 0, y: 0 };
+  const next = { x: center.x + offset.x, y: center.y + offset.y };
+  const pos = node.position || {};
+  if (pos.x === next.x && pos.y === next.y) return null;
+  return next;
 }
