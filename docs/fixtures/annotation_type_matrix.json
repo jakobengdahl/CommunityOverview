@@ -1,0 +1,157 @@
+{
+  "$comment": [
+    "Shared cross-language round-trip fixture for the v1 annotation type",
+    "matrix (docs/ANNOTATION_CONTRACT.md). One case per accepted type/payload",
+    "variant. Consumed by:",
+    "  - packages/ui-graph-canvas/tests/annotationTypeMatrix.test.js (JS model)",
+    "  - backend/core/tests/test_annotation_type_matrix.py (backend model,",
+    "    session persistence and the MCP tool surface)",
+    "Each case's `fields` merge onto the annotation's top level exactly the",
+    "way `annotationModel.js`'s per-type payload and",
+    "`session_annotations.build_annotation`'s `content` argument both work,",
+    "so the same case data drives both without translation. `image.fields.image.url`",
+    "is a syntactically-embedded placeholder (matches the",
+    "`data:image/webp;base64,` prefix the ingest guard requires) rather than a",
+    "real ingested picture — exercising ingest itself is",
+    "backend/service/tests/test_mcp_image_annotation_tool.py's job, not this",
+    "fixture's; this matrix only checks that the object-model layer accepts",
+    "and round-trips a syntactically valid embedded image payload."
+  ],
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "note-1",
+      "type": "note",
+      "x": 10,
+      "y": 20,
+      "w": 180,
+      "h": 100,
+      "fields": { "text": "A sticky note", "color": "#fbbf24", "fontSize": 14 }
+    },
+    {
+      "id": "text-1",
+      "type": "text",
+      "x": 30,
+      "y": 40,
+      "fields": {
+        "text": "A heading",
+        "attachment": { "target_id": "node-1", "target_type": "node", "anchor": "top" }
+      }
+    },
+    {
+      "id": "label-1",
+      "type": "label",
+      "x": 50,
+      "y": 60,
+      "fields": {
+        "text": "A callout",
+        "attachment": {
+          "target_id": "node-2",
+          "target_type": "node",
+          "anchor": "right",
+          "offset": { "x": 5, "y": -5 }
+        }
+      }
+    },
+    {
+      "id": "line-1",
+      "type": "line",
+      "x": 0,
+      "y": 0,
+      "fields": {
+        "to": { "x": 100, "y": 0 },
+        "startArrow": false,
+        "endArrow": true,
+        "start": { "point": { "x": 0, "y": 0 } },
+        "end": { "attachment": { "target_id": "node-3", "target_type": "node" } }
+      }
+    },
+    {
+      "id": "frame-1",
+      "type": "frame",
+      "x": 0,
+      "y": 0,
+      "w": 400,
+      "h": 300,
+      "fields": {}
+    },
+    {
+      "id": "group-1",
+      "type": "group",
+      "x": 0,
+      "y": 0,
+      "w": 320,
+      "h": 180,
+      "fields": { "label": "A group", "member_node_ids": ["node-a", "node-b"] }
+    },
+    {
+      "id": "shape-rectangle-1",
+      "type": "shape",
+      "x": 0,
+      "y": 0,
+      "w": 160,
+      "h": 96,
+      "fields": { "shape": "rectangle" }
+    },
+    {
+      "id": "shape-process-arrow-1",
+      "type": "shape",
+      "x": 0,
+      "y": 0,
+      "w": 160,
+      "h": 96,
+      "rotation": 45,
+      "fields": { "shape": "process_arrow" }
+    },
+    {
+      "id": "icon-1",
+      "type": "icon",
+      "x": 70,
+      "y": 80,
+      "fields": {
+        "icon": "flag",
+        "attachment": { "target_id": "node-4", "target_type": "node" }
+      }
+    },
+    {
+      "id": "vote-dot-1",
+      "type": "vote_dot",
+      "x": 90,
+      "y": 100,
+      "fields": {
+        "value": 3,
+        "attachment": { "target_id": "node-5", "target_type": "node" }
+      }
+    },
+    {
+      "id": "image-1",
+      "type": "image",
+      "x": 0,
+      "y": 0,
+      "w": 200,
+      "h": 150,
+      "fields": {
+        "image": {
+          "url": "data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==",
+          "width": 200,
+          "height": 150
+        },
+        "alt": "A diagram"
+      }
+    },
+    {
+      "id": "freehand-1",
+      "type": "freehand",
+      "x": 0,
+      "y": 0,
+      "fields": {
+        "points": [
+          { "x": 0, "y": 0, "pressure": 0.4 },
+          { "x": 10, "y": 10, "pressure": 0.8 }
+        ],
+        "smoothing": 0.2,
+        "strokeWidth": 3
+      }
+    }
+  ]
+}

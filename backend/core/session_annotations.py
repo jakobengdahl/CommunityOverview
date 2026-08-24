@@ -86,6 +86,126 @@ _RESERVED_ANNOTATION_KEYS = {
     "updated_by",
 }
 
+# The `content.shape` variants a `shape` annotation accepts
+# (docs/ANNOTATION_CONTRACT.md), mirroring
+# `packages/ui-graph-canvas/src/utils/annotationModel.js`'s `ANNOTATION_SHAPES`.
+# A string outside this set is not rejected — `backend/DEVELOPMENT.md`
+# documents that a name outside the set is "stored verbatim and drawn as a
+# rectangle" by the canvas, matching `normalizeShapeName`'s behaviour of
+# keeping an unrecognised name rather than discarding it, so this constant is
+# used for documentation/tests, not as a rejection list. Only the *type* of
+# `content.shape` is validated below (see `_validate_generic_content`).
+ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
+    {"rectangle", "circle", "triangle", "rhombus", "hexagon", "process_arrow"}
+)
+
+# The generic types whose `content.attachment` may bind them to a node
+# (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
+# attaches per-endpoint (`start`/`end`) instead, validated separately.
+ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
+    {"text", "label", "icon", "vote_dot"}
+)
+
+
+def _attachment_error(value: Any, *, field: str) -> Optional[str]:
+    """Structural validation for an `attachment = {target_id, target_type,
+    anchor, offset}` payload (docs/ANNOTATION_CONTRACT.md's "Attachment and
+    detach behavior"). `None` clears/omits the attachment and is always
+    valid; anything else must be a well-formed object. Unlike the shape/icon
+    checks, a malformed attachment is rejected rather than merely
+    type-checked, because a value that isn't a resolvable target reference
+    doesn't mean anything (there is no "verbatim but unrecognised" case for
+    it the way there is for a shape or icon name).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return f"{field} must be an object"
+    target_id = value.get("target_id")
+    if target_id is None or (isinstance(target_id, str) and not target_id.strip()):
+        return f"{field}.target_id is required and must not be empty"
+    if not isinstance(target_id, (str, int, float)):
+        return f"{field}.target_id must be a string"
+    target_type = value.get("target_type")
+    if target_type is not None and not isinstance(target_type, str):
+        return f"{field}.target_type must be a string"
+    anchor = value.get("anchor")
+    if anchor is not None and not isinstance(anchor, str):
+        return f"{field}.anchor must be a string"
+    offset = value.get("offset")
+    if offset is not None:
+        if (
+            not isinstance(offset, dict)
+            or not isinstance(offset.get("x"), (int, float))
+            or not isinstance(offset.get("y"), (int, float))
+        ):
+            return f"{field}.offset must be an object with numeric x and y"
+    return None
+
+
+def _line_endpoint_error(value: Any, *, field: str) -> Optional[str]:
+    """Structural validation for a `line`'s `start`/`end` endpoint
+    (docs/ANNOTATION_CONTRACT.md: "Line endpoints may attach to a node or to
+    another annotation, or stay free-floating at a fixed model-space
+    point."). `None` is valid (an endpoint carried only via the legacy
+    `from`/`to` point fields, with no explicit `start`/`end`).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return f"{field} must be an object"
+    point = value.get("point")
+    if point is not None:
+        if (
+            not isinstance(point, dict)
+            or not isinstance(point.get("x"), (int, float))
+            or not isinstance(point.get("y"), (int, float))
+        ):
+            return f"{field}.point must be an object with numeric x and y"
+    return _attachment_error(value.get("attachment"), field=f"{field}.attachment")
+
+
+def _validate_generic_content(
+    ann_type: Optional[str], source: Dict[str, Any]
+) -> Optional[str]:
+    """Type-specific structural validation for a generic annotation's
+    payload fields, given either the `content` dict a builder is about to
+    merge or the already-merged annotation dict (both put payload fields at
+    the top level — see `_apply_content`). Returns an error message, or
+    `None` when *source* is valid for *ann_type*.
+
+    Deliberately narrow: only the fields the v1 contract actually
+    type-constrains are checked (`shape`, `icon`, `attachment`, a `line`'s
+    `start`/`end`) — everything else in `content` stays the free-form,
+    verbatim payload `build_annotation`'s docstring describes. A `shape` or
+    `icon` name outside its documented set is *not* an error (see
+    `ANNOTATION_SHAPES`'s docstring); only its type is checked, so a caller
+    gets a clear `invalid_content` for an obviously wrong payload (a number,
+    a list) instead of silently corrupting the stored document with a value
+    no renderer expects a string field to hold.
+    """
+    if not source:
+        return None
+    if ann_type == "shape" and "shape" in source:
+        shape = source["shape"]
+        if not isinstance(shape, str) or not shape.strip():
+            return "content.shape must be a non-empty string"
+    if ann_type == "icon" and "icon" in source:
+        icon = source["icon"]
+        if not isinstance(icon, str) or not icon.strip():
+            return "content.icon must be a non-empty string"
+    if ann_type in ATTACHABLE_ANNOTATION_TYPES and "attachment" in source:
+        error = _attachment_error(source["attachment"], field="content.attachment")
+        if error:
+            return error
+    if ann_type == "line":
+        for key in ("start", "end"):
+            if key in source:
+                error = _line_endpoint_error(source[key], field=f"content.{key}")
+                if error:
+                    return error
+    return None
+
 
 def is_note(annotation: Dict[str, Any]) -> bool:
     """Whether *annotation* is a v1 ``note`` annotation (checks type or its
@@ -337,7 +457,12 @@ def image_annotation_error(
     )
 
 
-def _apply_content(target: Dict[str, Any], content: Optional[Dict[str, Any]]) -> None:
+def _apply_content(
+    target: Dict[str, Any],
+    content: Optional[Dict[str, Any]],
+    *,
+    ann_type: Optional[str] = None,
+) -> None:
     if not content:
         return
     reserved = _RESERVED_ANNOTATION_KEYS & content.keys()
@@ -346,6 +471,9 @@ def _apply_content(target: Dict[str, Any], content: Optional[Dict[str, Any]]) ->
             f"content must not set reserved field(s) {sorted(reserved)}; "
             "those are managed by their own arguments"
         )
+    content_error = _validate_generic_content(ann_type, content)
+    if content_error:
+        raise ValueError(content_error)
     target.update(content)
 
 
@@ -399,7 +527,7 @@ def build_annotation(
         annotation["size"] = {"w": geometry["w"], "h": geometry["h"]}
     if style is not None:
         annotation["style"] = dict(style)
-    _apply_content(annotation, content)
+    _apply_content(annotation, content, ann_type=type)
     if annotation_id is not None:
         annotation["id"] = annotation_id
     return annotation
@@ -525,7 +653,7 @@ def build_annotation_patch(
         patch["z"] = z
     if locked is not None:
         patch["locked"] = bool(locked)
-    _apply_content(patch, content)
+    _apply_content(patch, content, ann_type=ann_type)
     return patch
 
 
