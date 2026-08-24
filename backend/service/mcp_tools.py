@@ -3730,10 +3730,14 @@ def register_mcp_tools(
         not present is dropped by a remove without error), and writes the
         result as one `group_membership_changed` op — so the caller does not
         have to fetch the full current list first just to add or remove one
-        id, and two agents adding different members in the same call window
-        do not silently clobber each other's addition (each call reads the
-        group fresh under the session lock). This op has no undo entry
-        (docs/ANNOTATION_CONTRACT.md's cross-type row, and
+        id. Two calls issued back to back each compute their delta from the
+        list the previous call actually wrote, so neither has to know the
+        other's outcome in advance — but, like every other MCP annotation
+        write, this is last-write-wins under a genuine race between two
+        concurrent calls (no CRDT — see `session_manager.py`'s module
+        docstring): pass `expected_revision` if you need the write rejected
+        instead of silently applied over a concurrent change. This op has no
+        undo entry (docs/ANNOTATION_CONTRACT.md's cross-type row, and
         `session_activity.UNDOABLE_OPS`'s docstring — membership changes are
         not currently undoable through `undo_last_action`, unlike most other
         annotation writes).

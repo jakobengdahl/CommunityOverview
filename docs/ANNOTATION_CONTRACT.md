@@ -354,8 +354,11 @@ has its own dedicated tool set too: `create_group_annotation` creates or
 upserts the box (label/description/color/geometry/an optional starting
 `member_node_ids`), and `update_group_members` adds and/or removes member
 node ids by wrapping the `group_membership_changed` op — resolving the
-current list and the requested change under the session lock so a caller
-does not have to read-modify-write the full membership itself. Membership is
+current list against the requested change itself so a caller does not have
+to read-modify-write the full membership. Like every other MCP annotation
+write this is last-write-wins under a genuine race between two concurrent
+calls, not a locked read-modify-write (`expected_revision` is the real
+conflict-detection mechanism, same as the rest of the surface). Membership is
 deliberately kept off `create_group_annotation`'s upsert-by-id path unless a
 caller explicitly passes `member_node_ids`: the op merges by shallow
 `dict.update`, so an upsert that always reset membership to `[]` when
@@ -364,8 +367,9 @@ recreated a group just to change its label or color. There is no MCP tool
 yet to delete a group box itself (only its creation and membership) — see
 the acceptance matrix.
 
-Neither tool set lets a write silently convert one annotation type into
-another: creating or updating across the note/generic/group boundary, or
+None of the three tool sets lets a write silently convert one annotation
+type into another: creating or updating across the note/generic/group
+boundary, or
 replacing an existing generic annotation's id with a different type, is
 refused rather than applied. See `backend/DEVELOPMENT.md`'s "Generic
 annotation tools" and "Group annotation tools" sections for the full

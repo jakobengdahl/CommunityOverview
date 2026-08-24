@@ -18,6 +18,7 @@ import pytest
 from backend.core import GraphStorage
 from backend.core.session_manager import SessionManager
 from backend.core.session_store import InMemorySessionPersistenceBackend, SessionStore
+from backend.runtime.authorization import AUTHORIZATION_MODE_ENV
 from backend.service import GraphService, register_mcp_tools
 
 
@@ -334,12 +335,14 @@ class TestUpdateGroupMembers:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
-    def test_two_calls_each_add_a_different_member_without_clobbering(
+    def test_two_sequential_calls_each_add_a_different_member(
         self, annotation_tools
     ):
-        """Each call re-reads the group's current membership under the
-        session lock, so a second add call sees the first call's result
-        instead of overwriting it with a stale snapshot."""
+        """Each call re-reads the group's current membership at call time,
+        so a second add call (issued after the first has returned) sees the
+        first call's result instead of a stale snapshot fetched earlier.
+        This is not a concurrency guarantee — see update_group_members's
+        docstring for the last-write-wins rule under a genuine race."""
         tools_map, manager = annotation_tools
         session = manager.create_session()
         created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
@@ -387,3 +390,66 @@ class TestListAnnotationsIncludesGroups:
         listed = tools_map["list_annotations"](session_id=session.id, types=["group"])
 
         assert {a["type"] for a in listed["annotations"]} == {"group"}
+
+
+class TestGroupAnnotationToolsAuthorization:
+    """Same authorization seam as the other generic annotation tools (see
+    TestGenericAnnotationToolsAuthorization in
+    test_mcp_generic_annotation_tools.py)."""
+
+    def test_deny_all_blocks_create(self, annotation_tools, monkeypatch):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        result = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+
+        assert result.get("error_code") == "access_denied"
+        assert session.state["annotations"] == []
+
+    def test_read_only_blocks_create_and_creates_nothing(
+        self, annotation_tools, monkeypatch
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        assert session.state["annotations"] == []
+
+    def test_deny_all_blocks_update_group_members(self, annotation_tools, monkeypatch):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "deny-all")
+
+        result = tools_map["update_group_members"](
+            session_id=session.id,
+            group_id=created["group"]["id"],
+            add_member_node_ids=["n1"],
+        )
+
+        assert result.get("error_code") == "access_denied"
+
+    def test_read_only_blocks_update_group_members_and_changes_nothing(
+        self, annotation_tools, monkeypatch
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, member_node_ids=["n0"]
+        )
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["update_group_members"](
+            session_id=session.id,
+            group_id=created["group"]["id"],
+            add_member_node_ids=["n1"],
+        )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        assert session.state["annotations"][0]["member_node_ids"] == ["n0"]

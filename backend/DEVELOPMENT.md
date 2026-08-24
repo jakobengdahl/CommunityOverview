@@ -1071,12 +1071,14 @@ document; pass `types` to filter it.
 common `x`/`y`/`w`/`h`/`z`/`locked` envelope, and optionally a starting
 `member_node_ids` list. `update_group_members` is the ongoing way to manage
 membership: given `add_member_node_ids` and/or `remove_member_node_ids`, it
-reads the group's current `member_node_ids` under the session lock, applies
-the additions and removals (a duplicate add is a no-op, a remove of an
-absent id is dropped without error), and writes the merged result as one
-`group_membership_changed` op — so a caller adding one member does not have
-to fetch and resend the whole current list, and two calls in the same
-window each read a fresh list rather than clobbering each other's change.
+reads the group's current `member_node_ids`, applies the additions and
+removals (a duplicate add is a no-op, a remove of an absent id is dropped
+without error), and writes the merged result as one `group_membership_changed`
+op — so a caller adding one member does not have to fetch and resend the
+whole current list. This is last-write-wins under a genuine race between two
+concurrent calls, the same as every other MCP annotation write
+(`session_manager.py`'s module docstring — server-ordered, no CRDT); pass
+`expected_revision` for real conflict detection instead.
 
 `create_group_annotation`'s upsert path deliberately does **not** reset
 `member_node_ids` to `[]` when the argument is omitted, unlike every other
