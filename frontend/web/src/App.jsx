@@ -7,7 +7,7 @@ import DesktopShell from './components/DesktopShell';
 import MobileShell from './components/MobileShell';
 import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
-import RecentActivityDrawer from './components/RecentActivityDrawer';
+import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
@@ -1974,7 +1974,13 @@ function App() {
       {fullscreenCanvasActive && (
         <FullscreenExitButton onExit={exitFullscreenCanvas} label={t('fullscreen.exit')} />
       )}
-      <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
+      <ActivityDrawer
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
+        sessionId={sessionId}
+        currentClientId={api.getClientId()}
+        roster={roster}
+      />
       {clearConfirm && (
         <ConfirmDialog
           title={

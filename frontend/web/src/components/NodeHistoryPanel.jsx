@@ -12,9 +12,11 @@ import './NodeHistoryPanel.css';
  * letting the user jump back through what happened.
  *
  * This is deliberately distinct from the backend graph-mutation log
- * (RecentActivityDrawer, which shows who changed what in the graph data) and
- * from the canvas position undo/redo (useCanvasHistory). It answers "what have
- * I been looking at / adding in this session — take me back to it".
+ * (ActivityDrawer's Graph tab, which shows who changed what in the graph data
+ * — its Session tab is the per-session annotation/canvas activity feed, also
+ * distinct from this) and from the canvas position undo/redo (useCanvasHistory).
+ * It answers "what have I been looking at / adding in this session — take me
+ * back to it".
  *
  * The toggle only appears once the trail has at least one entry, so it stays
  * out of the way on an empty canvas.
