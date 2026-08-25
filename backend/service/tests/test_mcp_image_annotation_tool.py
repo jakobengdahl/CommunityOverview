@@ -462,6 +462,51 @@ class TestCreateImageAnnotationConcurrencyAndBudgets:
         assert result["error"] == "too_large"
         assert session.state["annotations"] == []
 
+    def test_id_collision_race_after_precheck_is_a_clean_error(
+        self, image_tools, monkeypatch
+    ):
+        """Regression test for smallfix-mcp-image-annotation-opError-race:
+        the id/type pre-check above only guards against a collision that
+        already existed when the tool started — image_url fetch + optimize
+        can take seconds, a real window for a concurrent write to create the
+        same id as a different type before this tool's own write lands.
+        SessionStore.apply_state_op then raises OpError for the type-change
+        attempt (backend/core/session_store.py's "cannot change type via
+        upsert" guard) rather than the tool silently retyping the annotation.
+
+        Simulate that window here: the pre-check passes because 'race-1'
+        does not exist yet, then a same-id 'shape' annotation is written
+        (as if by another collaborator) while optimize_image is "in flight",
+        so upsert_image_annotation's own write is the one that collides.
+        The generic `except OpError` this tool already carries (in place
+        since the tool's original commit, 9a58f17) must turn that into a
+        clean error result instead of an unhandled exception, and the
+        colliding shape annotation must be left untouched."""
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        real_optimize = mcp_tools.optimize_image
+
+        def _racing_optimize(raw, **kwargs):
+            manager.upsert_annotation(
+                session.id, "other-collaborator", {"id": "race-1", "type": "shape"}
+            )
+            return real_optimize(raw, **kwargs)
+
+        monkeypatch.setattr(mcp_tools, "optimize_image", _racing_optimize)
+
+        result = tools_map["create_image_annotation"](
+            session_id=session.id,
+            x=0,
+            y=0,
+            image_data=_png_data_url(),
+            annotation_id="race-1",
+        )
+
+        assert result["success"] is False
+        assert "cannot change type via upsert" in result["error"]
+        assert len(session.state["annotations"]) == 1
+        assert session.state["annotations"][0]["type"] == "shape"
+
 
 class TestCreateImageAnnotationAuthorization:
     """Same authorization seam as the other generic annotation tools (see
