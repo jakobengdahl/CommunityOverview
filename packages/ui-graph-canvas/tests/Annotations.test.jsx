@@ -283,10 +283,11 @@ describe('ArrowNode', () => {
   // `n.data` from live state rather than the render-time `data` prop
   // precisely so the write respects the lock that arrived in between, the
   // same stale-lock race "ignores an in-flight endpoint move once the arrow
-  // becomes locked" documents for moveEndpoint. Without the
-  // `!nextData.locked` term in patchData's draggable expression this passes
-  // silently — which is how the earlier version of this file lost the only
-  // coverage of that term.
+  // becomes locked" documents for moveEndpoint. This case is the only guard
+  // on the `!nextData.locked` term in patchData's draggable expression, and
+  // on patchData reading `n.data` from live state rather than the
+  // render-time prop: with either removed, this case fails and nothing else
+  // in the suite does.
   it('keeps the arrow non-draggable when a lock lands between menu-open and click', () => {
     renderWithContext(
       <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: false }} selected={false} />
