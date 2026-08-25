@@ -706,8 +706,10 @@ box size: `frame`, `shape` and `image`. `text`, `icon` and `vote_dot` render
 at a fixed intrinsic size and are not resizable. A locked annotation of any
 generic kind hides its resize handles the same way a locked `note` does.
 `text` and `shape` now have their own inline text editing too
-(task-annotation-doubleclick-to-edit-text) — see below — closing the gap this
-paragraph used to describe as exclusive to `note`/`label`/`line`.
+(task-annotation-doubleclick-to-edit-text) — see below — so inline text
+editing is no longer exclusive to `note`/`label`. `line` was never part of
+that: its own dedicated UX above is endpoint attach/drag and anchoring, not
+inline text.
 
 Per-type property editors and GUI creation for these types are required v1
 scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
