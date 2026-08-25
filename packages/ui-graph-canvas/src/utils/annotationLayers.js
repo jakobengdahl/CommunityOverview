@@ -45,12 +45,13 @@ const Z_MAX = 2147483647;
 const Z_MIN = -2147483648;
 
 // Both bounds are checked in both directions, not just the one each step
-// moves toward. A neighbour already past the range in the *opposite*
-// direction is the dangerous case: with an annotation at `Date.now()` —
-// the bring-to-front idiom named above — send-to-back computes a layer just
-// under it, still far above Z_MAX, which the browser clamps back down to
-// Z_MAX and paints at the very front. That is not a no-op, it is the
-// opposite of what was asked for.
+// moves toward. With an annotation at `Date.now()` — the bring-to-front
+// idiom named above — send-to-back computes a layer just under it, still far
+// above Z_MAX, which the browser clamps back to Z_MAX. Reaching that branch
+// means the clicked annotation's own layer is past the bound too, so it was
+// already sitting in that same clamped band: the step moves nothing on
+// screen, publishes an op every other client applies, and leaves the tie it
+// was meant to break intact.
 function inCssRange(z) {
   return z >= Z_MIN && z <= Z_MAX;
 }

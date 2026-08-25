@@ -125,7 +125,12 @@ describe('resolveLayerZ guards', () => {
     // A stale constant left behind by a rename must no-op rather than pick
     // one of the two real directions and move the annotation the wrong way.
     for (const bogus of ['forward', 'backward', undefined, null, '']) {
+      // Both ids, deliberately. Querying only 'a' would pass even without the
+      // guard: an unrecognised direction falls through to the back branch,
+      // where 'a' (current 0 < min 4) already returns null for an unrelated
+      // reason. 'b' is the one that would silently move.
       expect(resolveLayerZ(nodes, 'a', bogus)).toBeNull();
+      expect(resolveLayerZ(nodes, 'b', bogus)).toBeNull();
     }
   });
 
@@ -140,12 +145,13 @@ describe('resolveLayerZ guards', () => {
   });
 
   it('refuses when a neighbour past the bound would drag the result out the other side', () => {
-    // The dangerous direction: an annotation parked above Z_MAX (an agent
-    // writing Date.now() as a bring-to-front) makes send-to-back compute a
-    // layer just under it — still far above Z_MAX, which the browser clamps
-    // back down to Z_MAX and paints at the very front. That is the opposite
-    // of what was asked for, not a no-op, so both bounds are checked in both
-    // directions.
+    // An annotation parked above Z_MAX (an agent writing Date.now() as a
+    // bring-to-front) makes send-to-back compute a layer just under it —
+    // still far above Z_MAX, which the browser clamps back to Z_MAX. Getting
+    // here means the clicked annotation is past the bound too and already
+    // sits in that clamped band, so the write moves nothing on screen while
+    // every other client applies it and the tie survives. Hence both bounds
+    // are checked in both directions, not one per direction.
     expect(resolveLayerZ([note('a', 4e9), note('b', 3e9)], 'a', LAYER_BACK)).toBeNull();
     expect(resolveLayerZ([note('a', -4e9), note('b', -3e9)], 'a', LAYER_FRONT)).toBeNull();
     expect(
