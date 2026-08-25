@@ -154,7 +154,7 @@ describe('AnnotationToolbox', () => {
     const captions = document.querySelectorAll('.annotation-toolbox-item-label');
     expect(items.length).toBeGreaterThan(1);
     expect(captions.length).toBe(items.length);
-    expect(captions[0].textContent).toBeTruthy();
+    expect([...captions].every((c) => c.textContent.trim())).toBe(true);
   });
 
   it('captions the items on a coarse pointer, which compact alone does not cover', () => {
