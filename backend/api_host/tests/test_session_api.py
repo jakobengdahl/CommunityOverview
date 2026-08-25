@@ -994,8 +994,10 @@ class TestImageIngestBodyCap:
     """This endpoint takes its body as raw ``Request`` rather than a typed
     Pydantic parameter specifically so the Content-Length pre-check can run
     before FastAPI/Starlette ever buffers or parses the request (see
-    ingest_session_image's docstring) — mirrors TestOpBatchBodyCap's coverage
-    of the sibling .../ops endpoint for the same reason."""
+    ingest_session_image's docstring). The missing-field/malformed-JSON 422
+    cases below mirror TestOpBatchBodyCap's equivalent pair for the sibling
+    .../ops endpoint; the header-precheck and backstop tests are specific to
+    this endpoint's own cap."""
 
     def test_oversized_content_length_header_is_rejected_before_body_is_read(
         self, test_app: TestClient, monkeypatch
