@@ -1044,7 +1044,18 @@ a name outside that set is stored verbatim and drawn as a rectangle — that
 membership is not enforced, only the field's *type* is (a non-string or
 empty `shape`/`icon` is refused as `invalid_content`, mirroring the same
 check backend/core/session_annotations.py's `_validate_generic_content` runs
-for both tools). `text`/`label`/`icon`/`vote_dot` accept a
+for both tools). `text` and `shape` also read typography out of the shared `style` argument
+rather than `content`: `style.fontSize` (px), `style.font` (one of the
+curated family names in `GENERIC_FONT_FAMILIES`,
+`packages/ui-graph-canvas/src/utils/annotations.js` — a short list of CSS
+generic font families such as `serif`/`monospace`/`cursive`, chosen over free
+font-name entry so rendering stays predictable across clients with no font
+files to ship; omitted/absent means the app's own default font), and
+`style.textAlign` (one of the nine box positions `top-left` through
+`bottom-right`). Each falls back independently to how the canvas already
+rendered before these existed, so omitting any of them changes nothing for an
+existing annotation.
+`text`/`label`/`icon`/`vote_dot` accept a
 `content.attachment = {target_id, target_type, anchor, offset}` binding them
 to a node, and a `line`'s `content.start`/`content.end` may each carry a
 `point` (`{x, y}`) and/or an `attachment`

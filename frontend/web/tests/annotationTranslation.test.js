@@ -281,6 +281,65 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
+  // task-annotation-text-alignment-and-font: alignment and font family are
+  // new fields, carried under `style` alongside `fontSize` — same
+  // "unsized-geometry clobber" risk as any other new content field, so this
+  // pins that both directions carry all three, not just fontSize.
+  it("round-trips a text annotation's alignment and font family", () => {
+    const overlays = [
+      {
+        id: 'text-2b',
+        kind: 'text',
+        position: { x: 1, y: 2 },
+        text: 'Region',
+        color: '#fff',
+        fontSize: 20,
+        textAlign: 'middle-center',
+        font: 'serif',
+        size: { w: 220, h: 60 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style).toEqual({
+      color: '#fff',
+      fontSize: 20,
+      textAlign: 'middle-center',
+      font: 'serif',
+    });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it("round-trips a shape's caption alignment, font size and font family", () => {
+    const overlays = [
+      {
+        id: 'shape-2b',
+        kind: 'shape',
+        position: { x: 0, y: 0 },
+        shape: 'hexagon',
+        text: 'Step 2',
+        color: '#60A5FA',
+        fontSize: 18,
+        textAlign: 'top-left',
+        font: 'monospace',
+        size: { w: 160, h: 96 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style).toEqual({
+      color: '#60A5FA',
+      fontSize: 18,
+      textAlign: 'top-left',
+      font: 'monospace',
+    });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
   it('round-trips a frame annotation (size lives in geometry, not a payload field)', () => {
     const overlays = [
       {

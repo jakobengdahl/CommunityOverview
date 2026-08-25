@@ -2490,6 +2490,17 @@ def register_mcp_tools(
           - vote_dot: {"value": 3}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
 
+        `text` and `shape` also read typography out of `style` (not
+        `content`): `style.fontSize` (px), `style.font` (one of the curated
+        family names GENERIC_FONT_FAMILIES in
+        packages/ui-graph-canvas/src/utils/annotations.js lists — currently
+        "serif", "monospace", "cursive"; omit for the app's own default font),
+        and `style.textAlign` (one of the nine box positions "top-left"
+        through "bottom-right", e.g. {"style": {"fontSize": 20, "font":
+        "serif", "textAlign": "middle-center"}}). All three are optional and
+        each falls back independently to what the canvas already rendered
+        before this existed, so omitting them changes nothing.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
             type: One of text/label/line/frame/shape/icon/vote_dot/freehand
@@ -2502,7 +2513,8 @@ def register_mcp_tools(
             h: Optional height in model-space px.
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
-            style: Optional style dict (fill/stroke/color/opacity/font, ...).
+            style: Optional style dict (fill/stroke/color/opacity; for
+                text/shape also fontSize/font/textAlign — see above).
             z: Optional layer order (higher draws on top). Defaults to 0.
             locked: Whether the annotation starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the
@@ -2942,7 +2954,10 @@ def register_mcp_tools(
                 `image` is rejected here: an image annotation's picture is
                 replaced by calling `create_image_annotation` again with the
                 same annotation_id, so the new bytes go through ingest.
-            style: New style dict, if changing it (replaces the whole dict).
+            style: New style dict, if changing it (replaces the whole dict —
+                for text/shape this includes fontSize/font/textAlign, so
+                changing only one of them still means resending every style
+                field you want kept, per create_annotation's docstring).
             expected_revision: If given, the write is rejected unless it
                 equals the session's current `revision` (optimistic
                 concurrency). Read it from `list_annotations` first. Omit

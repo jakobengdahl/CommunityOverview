@@ -8,6 +8,13 @@ import {
   ROTATABLE_OVERLAY_KINDS,
   isRemoteLocked,
   resolveRotatedResizeGeometry,
+  DEFAULT_GENERIC_TEXT_FONT_SIZE,
+  DEFAULT_SHAPE_CAPTION_FONT_SIZE,
+  GENERIC_TEXT_FONT_SIZES,
+  GENERIC_FONT_FAMILIES,
+  TEXT_ALIGN_VALUES,
+  TEXT_ALIGN_DEFAULT_BY_KIND,
+  TEXT_ALIGN_STYLES,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './GenericAnnotationNode.css';
@@ -62,6 +69,19 @@ const VOTE_VALUE_MIN = 0;
 // (a vote's value is a number with its own stepper, and an icon/image carry
 // no caption in the v1 content model).
 const EDITABLE_TEXT_KINDS = new Set(['text', 'shape']);
+
+// Maps each half of a `textAlign` value ('top-left' -> ['top','left']) to the
+// `labels` key carrying its translated word, so the 3x3 alignment picker's
+// aria-label/title can compose "Top left" etc. from the same six short words
+// rather than needing nine separately-translated strings.
+const ALIGN_LABEL_KEYS = Object.freeze({
+  top: 'alignTop',
+  middle: 'alignMiddle',
+  bottom: 'alignBottom',
+  left: 'alignLeft',
+  center: 'alignCenter',
+  right: 'alignRight',
+});
 
 // The axis-aligned rectangle each shape variant's clip-path is *guaranteed*
 // to fully contain, as inset percentages (top/right/bottom/left) against the
@@ -260,7 +280,8 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * property editor (colour, shape subtype, icon name, vote value, rotation
  * and layer order), and — for EDITABLE_TEXT_KINDS (`text`, `shape`) —
  * double-click-to-edit inline text, following NoteNode/LabelNode's own
- * pattern exactly.
+ * pattern exactly, plus nine-position text alignment, font size and a
+ * curated font-family picker (task-annotation-text-alignment-and-font).
  */
 // See NoteNode's equivalent default: an annotation whose payload is missing
 // should draw empty rather than throw. Every read below already uses `?.` or a
@@ -278,6 +299,21 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // Rotation is applied to the rendered element, not to the ReactFlow node
   // wrapper, so drag hit-testing keeps using the unrotated bounding box.
   const rotation = rotationStyle(kind, data?.rotation);
+
+  // Typography for EDITABLE_TEXT_KINDS (`text`, `shape`) —
+  // task-annotation-text-alignment-and-font. Computed unconditionally (not
+  // just inside those two branches) so the shared `textEditor` below, which
+  // renders for either kind, can use the same values without re-deriving
+  // them per branch. Harmless for every other kind: nothing reads these.
+  const textAlign = data?.textAlign || TEXT_ALIGN_DEFAULT_BY_KIND[kind] || 'top-left';
+  const textAlignStyle = TEXT_ALIGN_STYLES[textAlign] || TEXT_ALIGN_STYLES['top-left'];
+  const textFontSize =
+    data?.fontSize ||
+    (kind === 'shape' ? DEFAULT_SHAPE_CAPTION_FONT_SIZE : DEFAULT_GENERIC_TEXT_FONT_SIZE);
+  // Unset/falsy means "no override" — the annotation keeps inheriting the
+  // app's ambient font exactly as it does today (GENERIC_FONT_FAMILIES has no
+  // "default" entry of its own; see its doc comment).
+  const textFontFamily = data?.font || undefined;
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
@@ -443,6 +479,45 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
+  // Typography changes for EDITABLE_TEXT_KINDS (`text`, `shape`) — same
+  // 'style' notification NoteNode/LabelNode's own changeFontSize uses (a
+  // presentation change, not geometry or text content).
+  const changeTextAlign = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, textAlign: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  const changeFontSize = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  // `null` clears the override (falls back to the ambient app font) — see
+  // GENERIC_FONT_FAMILIES's doc comment on why the curated list itself has no
+  // "default" member for this to pick instead.
+  const changeFont = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, font: next } } : n))
+    );
+    notifyChange('style');
+  };
+
   const changeValue = (next) => {
     if (remoteLocked) {
       notifyRemoteLockedAttempt();
@@ -585,12 +660,18 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       rotation={currentRotation}
       locked={locked}
       labels={labels}
+      textAlign={textAlign}
+      fontSize={textFontSize}
+      font={data?.font}
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
       onChangeColor={changeColor}
       onChangeValue={changeValue}
       onChangeLayer={changeLayer}
       onChangeRotation={changeRotation}
+      onChangeTextAlign={changeTextAlign}
+      onChangeFontSize={changeFontSize}
+      onChangeFont={changeFont}
       onDelete={remove}
       onUnlock={unlock}
     />
@@ -599,12 +680,21 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // Shared by `text` and `shape` below — the only difference between the two
   // was `rows`, which `shape`'s inset wrapper overrides via CSS `height: 100%`
   // anyway (see GenericAnnotationNode.css), so one element serves both rather
-  // than two copies that can quietly drift apart.
+  // than two copies that can quietly drift apart. Typography (fontSize/font/
+  // textAlign, task-annotation-text-alignment-and-font) is inline here rather
+  // than left to GenericAnnotationNode.css, so the textarea matches the
+  // committed text's own rendering below while the user is actively editing
+  // it instead of visibly jumping the instant it commits.
   const textEditor = (
     <textarea
       ref={textInputRef}
       className="graph-generic-annotation-text-input nodrag"
       rows={2}
+      style={{
+        fontSize: textFontSize,
+        fontFamily: textFontFamily,
+        textAlign: textAlignStyle.textAlign,
+      }}
       value={textDraft}
       onChange={handleTextChange}
       onBlur={commitText}
@@ -619,11 +709,29 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       <>
         <div
           className={`graph-generic-annotation-node kind-text${selectedClass}`}
-          style={{ color, ...rotation }}
+          style={{
+            color,
+            fontSize: textFontSize,
+            fontFamily: textFontFamily,
+            display: 'flex',
+            flexDirection: 'column',
+            // Vertical alignment (justifyContent) has no visible effect here
+            // today — `text` has no box, so it always exactly fills its own
+            // content (see TEXT_ALIGN_STYLES's doc comment) — but is applied
+            // anyway so this keeps rendering correctly if `text` ever gains
+            // one, without this branch needing to change.
+            justifyContent: textAlignStyle.justifyContent,
+            alignItems: textAlignStyle.alignItems,
+            ...rotation,
+          }}
           onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
         >
-          {isEditingText ? textEditor : data.text || ''}
+          {isEditingText ? (
+            textEditor
+          ) : (
+            <span style={{ textAlign: textAlignStyle.textAlign }}>{data.text || ''}</span>
+          )}
         </div>
         {menu}
         {remoteBadge}
@@ -698,11 +806,27 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               something to show/type, so an empty, untouched shape keeps no
               extra hit-testable element sitting over its resize handles. */}
           {(isEditingText || data.text) && (
-            <div className="graph-generic-annotation-shape-text" style={shapeTextInsetStyle(shape)}>
+            <div
+              className="graph-generic-annotation-shape-text"
+              style={{
+                ...shapeTextInsetStyle(shape),
+                justifyContent: textAlignStyle.justifyContent,
+                alignItems: textAlignStyle.alignItems,
+              }}
+            >
               {isEditingText ? (
                 textEditor
               ) : (
-                <span className="graph-generic-annotation-shape-text-content">{data.text}</span>
+                <span
+                  className="graph-generic-annotation-shape-text-content"
+                  style={{
+                    fontSize: textFontSize,
+                    fontFamily: textFontFamily,
+                    textAlign: textAlignStyle.textAlign,
+                  }}
+                >
+                  {data.text}
+                </span>
               )}
             </div>
           )}
@@ -804,12 +928,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
 // layer row last before Delete, matching the note/label/line/freehand
 // menus. The
-// colour swatches show for COLORABLE_KINDS, the shape-subtype grid only for
-// `kind === 'shape'`, the icon-name grid only for `kind === 'icon'`, and the
-// value stepper only for `kind === 'vote_dot'`. A locked annotation gets
-// none of them — the capability baseline is "a locked object remains
-// selectable but offers only unlock or copy" — so this shows only the unlock
-// action instead.
+// colour swatches show for COLORABLE_KINDS, the nine-position alignment grid,
+// font-size picker and curated font-family picker
+// (task-annotation-text-alignment-and-font) for EDITABLE_TEXT_KINDS (`text`,
+// `shape`), the shape-subtype grid only for `kind === 'shape'`, the icon-name
+// grid only for `kind === 'icon'`, and the value stepper only for
+// `kind === 'vote_dot'`. A locked annotation gets none of them — the
+// capability baseline is "a locked object remains selectable but offers only
+// unlock or copy" — so this shows only the unlock action instead.
 function ContextMenuPortal({
   menuRef,
   position,
@@ -821,12 +947,18 @@ function ContextMenuPortal({
   rotation,
   locked,
   labels,
+  textAlign,
+  fontSize,
+  font,
   onChangeShape,
   onChangeIcon,
   onChangeColor,
   onChangeValue,
   onChangeLayer,
   onChangeRotation,
+  onChangeTextAlign,
+  onChangeFontSize,
+  onChangeFont,
   onDelete,
   onUnlock,
 }) {
@@ -863,6 +995,72 @@ function ContextMenuPortal({
                 aria-label={c}
                 onClick={() => onChangeColor(c)}
               />
+            ))}
+          </div>
+        </>
+      )}
+      {EDITABLE_TEXT_KINDS.has(kind) && (
+        <>
+          <div className="context-menu-title">{labels.textAlign}</div>
+          <div className="context-menu-align">
+            {TEXT_ALIGN_VALUES.map((pos) => {
+              const [vertical, horizontal] = pos.split('-');
+              const ariaLabel = `${labels[ALIGN_LABEL_KEYS[vertical]]} ${labels[ALIGN_LABEL_KEYS[horizontal]]}`;
+              return (
+                <button
+                  key={pos}
+                  type="button"
+                  className={`align-picker-button${textAlign === pos ? ' active' : ''}`}
+                  aria-label={ariaLabel}
+                  title={ariaLabel}
+                  onClick={() => onChangeTextAlign(pos)}
+                >
+                  <span
+                    className="align-picker-dot"
+                    style={{
+                      justifyContent: TEXT_ALIGN_STYLES[pos].justifyContent,
+                      alignItems: TEXT_ALIGN_STYLES[pos].alignItems,
+                    }}
+                  >
+                    <span className="align-picker-dot-mark" />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="context-menu-title">{labels.textSize}</div>
+          <div className="context-menu-sizes">
+            {GENERIC_TEXT_FONT_SIZES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                className={`size-button${fontSize === s ? ' active' : ''}`}
+                style={{ fontSize: Math.min(s, 18) }}
+                onClick={() => onChangeFontSize(s)}
+              >
+                A
+              </button>
+            ))}
+          </div>
+          <div className="context-menu-title">{labels.fontFamily}</div>
+          <div className="context-menu-fonts">
+            <button
+              type="button"
+              className={`font-button${!font ? ' active' : ''}`}
+              onClick={() => onChangeFont(null)}
+            >
+              {labels.fontDefault}
+            </button>
+            {GENERIC_FONT_FAMILIES.map((family) => (
+              <button
+                key={family}
+                type="button"
+                className={`font-button${font === family ? ' active' : ''}`}
+                style={{ fontFamily: family }}
+                onClick={() => onChangeFont(family)}
+              >
+                {family}
+              </button>
             ))}
           </div>
         </>

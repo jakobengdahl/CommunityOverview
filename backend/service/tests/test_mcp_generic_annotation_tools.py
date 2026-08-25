@@ -233,6 +233,56 @@ class TestCreateAnnotation:
         # The shape name is untouched by a caption-only update.
         assert updated["annotation"]["content"]["shape"] == "triangle"
 
+    def test_text_typography_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
+        """fontSize/font/textAlign (task-annotation-text-alignment-and-font)
+        live under `style`, a generic, un-typed passthrough
+        (`build_annotation`/`build_annotation_patch` in
+        session_annotations.py) — this pins that all three actually survive
+        create/list/update over the MCP surface, mirroring the shape-caption
+        pin above for `content`.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="text",
+            x=0,
+            y=0,
+            content={"text": "Heading"},
+            style={
+                "color": "#fff",
+                "fontSize": 24,
+                "font": "serif",
+                "textAlign": "middle-center",
+            },
+            annotation_id="text-typography-1",
+        )
+        assert created["annotation"]["style"] == {
+            "color": "#fff",
+            "fontSize": 24,
+            "font": "serif",
+            "textAlign": "middle-center",
+        }
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["text"])
+        assert listed["annotations"][0]["style"]["textAlign"] == "middle-center"
+
+        updated = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id="text-typography-1",
+            style={
+                "color": "#fff",
+                "fontSize": 24,
+                "font": "monospace",
+                "textAlign": "top-left",
+            },
+        )
+        assert updated["annotation"]["style"]["font"] == "monospace"
+        assert updated["annotation"]["style"]["textAlign"] == "top-left"
+
     def test_invalid_type_is_rejected(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
