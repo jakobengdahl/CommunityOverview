@@ -52,16 +52,21 @@
 /* Unlike `text`'s bare textarea above, `shape`'s inset wrapper always has an
    explicit size (from the shape's own `style.width/height`), so filling it
    is a real percentage, not a circular one. `font-size` is repeated here
-   (rather than left to `font: inherit`) to match
+   (rather than left to `font: inherit`/`color: inherit` above) to match
    `.graph-generic-annotation-shape-text-content` below exactly — neither
    `.graph-generic-annotation-shape-text` nor the halo/wrapper above it sets
-   one, so without this the textarea would inherit the browser default while
-   editing and visibly reflow to 14px the instant the caption commits and
-   re-renders as that span. */
+   any of these, so without this override the textarea would fall back to
+   the browser/ambient default for each while editing (illegible on a dark
+   fill, since the base rule's background is a translucent black) and then
+   visibly change — size, colour and alignment all at once — the instant the
+   caption commits and re-renders as that span. */
 .graph-generic-annotation-shape-text .graph-generic-annotation-text-input {
   width: 100%;
   height: 100%;
+  color: #e6edf3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   font-size: 14px;
+  text-align: center;
   pointer-events: auto;
 }
 
