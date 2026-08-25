@@ -129,13 +129,24 @@ describe('resolveLayerZ guards', () => {
     }
   });
 
-  it('keeps the layer inside the range CSS can actually apply', () => {
+  it('refuses rather than tie when the neighbour is already at the CSS bound', () => {
     // An agent may set any z over MCP (Date.now() is a common bring-to-front
-    // idiom). CSS clamps z-index to int32, so a value past that bound is not
-    // the layer the browser paints.
-    const high = resolveLayerZ([note('a', 0), note('b', 2 ** 40)], 'a', LAYER_FRONT);
-    expect(high).toBeLessThanOrEqual(2147483647);
-    const low = resolveLayerZ([note('a', 0), note('b', -(2 ** 40))], 'a', LAYER_BACK);
-    expect(low).toBeGreaterThanOrEqual(-2147483648);
+    // idiom). CSS clamps z-index to int32, so clamping the step back down to
+    // the bound would land level with the neighbour it is meant to pass —
+    // the exact tie this module exists to break, published as an op that
+    // changes nothing on screen. Nowhere further to go is a no-op.
+    expect(resolveLayerZ([note('a', 0), note('b', 2147483647)], 'a', LAYER_FRONT)).toBeNull();
+    expect(resolveLayerZ([note('a', 0), note('b', -2147483648)], 'a', LAYER_BACK)).toBeNull();
+  });
+
+  it('refuses past the range where an integer step survives float precision', () => {
+    // Beyond 2^53, Math.floor(max) + 1 === max, so the "strictly past"
+    // guarantee cannot be met at all.
+    expect(resolveLayerZ([note('a', 0), note('b', 2 ** 60)], 'a', LAYER_FRONT)).toBeNull();
+    expect(resolveLayerZ([note('a', 0), note('b', -(2 ** 60))], 'a', LAYER_BACK)).toBeNull();
+  });
+
+  it('still moves for a large layer that is comfortably inside the bound', () => {
+    expect(resolveLayerZ([note('a', 0), note('b', 1000000)], 'a', LAYER_FRONT)).toBe(1000001);
   });
 });

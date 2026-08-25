@@ -215,10 +215,13 @@ created annotation, and sending an annotation to the back writes a negative
 and useful — it is how a `frame` gets behind the nodes it frames — not an
 accident of the arithmetic.
 
-The value is also clamped to the signed 32-bit range CSS `z-index` accepts,
-so the layer that is stored is the layer the browser actually paints. Without
-that, two annotations pushed past the bound would clamp to the same value and
-the tie the control exists to break would survive.
+A layer is only ever written when it is an integer strictly past every other
+annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
+the layer that is stored is the layer the browser actually paints. Against a
+neighbour already at that bound the click is a no-op: clamping the step back
+down to the bound would land level with the neighbour it is meant to pass,
+recreating the tie the control exists to break while publishing an operation
+that changes nothing on screen.
 
 Semantic default layers — a per-kind default `z` at creation time, so a frame
 starts behind the annotations it frames — are **not** implemented; every

@@ -7,10 +7,12 @@
  * arithmetic: which `z` a "bring to front" / "send to back" click produces,
  * given what else is currently on the canvas.
  *
- * The result is always an integer within the CSS int32 range, even when the
+ * Any layer it returns is an integer strictly past every other annotation's,
+ * and inside the range CSS `z-index` accepts — including when the
  * annotations already on the canvas carry fractional `z` values (an agent may
  * set any float over MCP — `z` is `Optional[float]` in
- * backend/core/session_annotations.py). ReactFlow
+ * backend/core/session_annotations.py). When no such value exists it returns
+ * null rather than an approximate one. ReactFlow
  * writes a node's `zIndex` straight into the element's inline style, and CSS
  * `z-index` accepts only `auto | <integer>`: a browser rejects
  * `z-index: 0.5` outright and the element silently keeps whatever it had.
@@ -32,6 +34,13 @@ import { ANNOTATION_TYPES } from './annotations';
 
 export const LAYER_FRONT = 'front';
 export const LAYER_BACK = 'back';
+
+// CSS clamps `z-index` to a signed 32-bit integer, so a layer past that
+// bound is not the layer the browser actually applies. Reachable because an
+// agent may set any `z` over MCP, and `Date.now()` is a common way to write
+// a bring-to-front.
+const Z_MAX = 2147483647;
+const Z_MIN = -2147483648;
 
 function layerOf(node) {
   const z = node?.zIndex;
@@ -68,23 +77,20 @@ export function resolveLayerZ(nodes, id, direction) {
   if (direction === LAYER_FRONT) {
     const max = Math.max(...others);
     if (current > max) return null;
-    // floor before stepping so a fractional neighbour still yields an
-    // integer that is strictly above it.
-    return clampLayer(Math.floor(max) + 1);
+    // Floor before stepping so a fractional neighbour still yields an
+    // integer strictly above it. Then refuse rather than hand back a value
+    // that is not strictly above after all: clamping Z_MAX + 1 to Z_MAX
+    // would *tie* with the neighbour it is meant to pass — the exact
+    // ambiguity this module exists to remove — and past 2^53 the step is
+    // swallowed by float precision so `z > max` is false too. Either way the
+    // annotation has nowhere further to go, so the click is a no-op like any
+    // other already-at-the-front case.
+    const z = Math.floor(max) + 1;
+    return z > max && z <= Z_MAX ? z : null;
   }
   const min = Math.min(...others);
   if (current < min) return null;
-  return clampLayer(Math.ceil(min) - 1);
-}
-
-// CSS clamps `z-index` to a signed 32-bit integer, so a layer past that
-// bound is not the layer the browser actually applies: two annotations
-// stepped beyond it would clamp to the same value and the tie this module
-// exists to break would survive. Reachable because an agent may set any `z`
-// over MCP, and `Date.now()` is a common way to write a bring-to-front.
-// Clamping keeps the stored value and the painted value the same number.
-const Z_MAX = 2147483647;
-const Z_MIN = -2147483648;
-function clampLayer(z) {
-  return Math.min(Z_MAX, Math.max(Z_MIN, z));
+  // Mirror of the front case above, including its two refusals.
+  const z = Math.ceil(min) - 1;
+  return z < min && z >= Z_MIN ? z : null;
 }
