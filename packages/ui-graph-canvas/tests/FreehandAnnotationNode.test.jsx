@@ -325,3 +325,25 @@ describe('FreehandAnnotationNode locked context menu', () => {
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
   });
 });
+
+describe('freehand default colour', () => {
+  // Reported from owner testing: a stroke drawn without choosing a colour was
+  // invisible. The default was a near-white picked for a dark canvas, so the
+  // tool looked broken rather than mis-coloured — the worst failure mode for
+  // the one annotation kind whose whole interaction is "draw and see a line".
+  it('renders an unstyled stroke in a colour that is visible on a light canvas', () => {
+    const { container } = render(
+      <FreehandAnnotationNode id="f-default" data={{ points: straightPoints }} />
+    );
+    // The visible stroke, not the transparent hit-area path drawn beside it.
+    const stroke = container.querySelector('.graph-freehand-stroke path');
+    expect(stroke).toBeTruthy();
+    const value = stroke.getAttribute('stroke');
+    expect(value).toBe('#111827');
+    // Guard the property rather than only the constant: a near-white default
+    // is the specific bug, so assert darkness, not just inequality.
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    expect(luminance).toBeLessThan(0.3);
+  });
+});

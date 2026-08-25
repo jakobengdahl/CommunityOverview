@@ -26,11 +26,26 @@ import './FreehandAnnotationNode.css';
  * that helper's doc comment for why segments rather than one continuous
  * variable-width curve.
  */
-const DEFAULT_COLOR = '#e6edf3';
+// Black, because a stroke has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// freehand stroke drawn with it is invisible, so the tool reads as broken
+// rather than as mis-coloured. Kept in the swatch list too — a white stroke is
+// still wanted for a dark background — but it is no longer what you get by
+// drawing without choosing.
+const DEFAULT_COLOR = '#111827';
 const DEFAULT_STROKE_WIDTH = 2;
 const PAD = 8;
 
-const FREEHAND_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+const FREEHAND_COLORS = [
+  DEFAULT_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
 const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
 const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
 const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
