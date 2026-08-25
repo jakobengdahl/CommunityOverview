@@ -239,11 +239,19 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('tooltip')).toHaveTextContent('Lägg till en klisterlapp');
   });
 
-  it('gives every emoji glyph the presentation it needs to render as one', () => {
-    // U+1F5D2 (the sticky note) has Emoji_Presentation=No, so bare it renders
-    // text-style or as tofu; it needs U+FE0F. Its neighbours 1F518 and 26AB
-    // have Emoji_Presentation=Yes and correctly carry none. Asserting the
-    // rule rather than a list keeps this true as glyphs change.
+  it('gives every emoji glyph that needs one its variation selector', () => {
+    // A pictographic code point with Emoji_Presentation=No renders text-style
+    // or as tofu unless U+FE0F follows it. U+1F5D2 (sticky note) and U+270F
+    // (pencil) are both in that class; U+1F518 and U+26AB are
+    // Emoji_Presentation=Yes and correctly carry none.
+    //
+    // This is a checked LIST, not a derived rule — the property is a Unicode
+    // table this package does not carry, so a glyph added later is not
+    // covered until it is added here. Naming that plainly rather than dressing
+    // the list up as a rule, because the first version of this test claimed
+    // the rule and then skipped U+270F, which is in the toolbox already.
+    const NEEDS_SELECTOR = new Set([0x1f5d2, 0x1f3f7, 0x1f5bc, 0x270f]);
+
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
@@ -251,17 +259,17 @@ describe('AnnotationToolbox', () => {
       (el) => el.textContent
     );
     expect(glyphs.length).toBeGreaterThan(1);
+
+    const checked = [];
     for (const glyph of glyphs) {
-      const points = [...glyph].map((c) => c.codePointAt(0));
-      // Anything in the pictographic planes that is not already
-      // emoji-presentation must be followed by the variation selector.
-      const needsSelector = points[0] >= 0x1f000 && points[0] <= 0x1f9ff;
-      const emojiByDefault = [0x1f4dd, 0x1f518, 0x1f3f7, 0x1f5bc, 0x1f5d2].includes(points[0]);
-      if (needsSelector && !emojiByDefault) continue; // outside the tested rule
-      if (points[0] === 0x1f5d2 || points[0] === 0x1f3f7 || points[0] === 0x1f5bc) {
-        expect(points[1]).toBe(0xfe0f);
-      }
+      const [first, second] = [...glyph].map((c) => c.codePointAt(0));
+      if (!NEEDS_SELECTOR.has(first)) continue;
+      checked.push(first);
+      expect(second).toBe(0xfe0f);
     }
+    // Guard against the list drifting out of the toolbox entirely: if none of
+    // these glyphs is present any more, the test is passing for no reason.
+    expect(checked.length).toBe(NEEDS_SELECTOR.size);
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {
