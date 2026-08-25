@@ -200,7 +200,25 @@ it would need, are not implemented.
 An annotation tied with the current front is not treated as already in front —
 the tie is what the click exists to break — so it moves. A click that would
 change nothing (already alone at the front, or at the back) is a no-op and
-publishes no operation.
+publishes no operation, and so is a click on an annotation another client
+currently holds the claim on (the attempt is surfaced, as for every other
+annotation mutation). A `locked` annotation is not offered the row at all,
+per the capability baseline's "remains selectable but offers only unlock or
+copy".
+
+Only other *annotations* are consulted: the ordering is computed against
+them, and no graph node is ever read to decide the result. That is not the
+same as staying within the graph's own band, and should not be read as such.
+Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
+created annotation, and sending an annotation to the back writes a negative
+`z` that does place it behind the graph's nodes and edges. That is intended
+and useful — it is how a `frame` gets behind the nodes it frames — not an
+accident of the arithmetic.
+
+The value is also clamped to the signed 32-bit range CSS `z-index` accepts,
+so the layer that is stored is the layer the browser actually paints. Without
+that, two annotations pushed past the bound would clamp to the same value and
+the tie the control exists to break would survive.
 
 Semantic default layers — a per-kind default `z` at creation time, so a frame
 starts behind the annotations it frames — are **not** implemented; every

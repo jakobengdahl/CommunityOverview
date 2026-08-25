@@ -236,14 +236,18 @@ dot**'s menu has a value stepper, so you can raise or lower the count after it's
 placed. Icon and voting-dot annotations also support the same attach behaviour as labels
 once placed: drag one near a node or another annotation to attach it.
 
-Notes, labels, arrows, freehand strokes and all the shape-like annotations have a
-**Layer** row in their right-click menu, just above Delete. **Bring to front** puts the
-annotation on top of every other annotation and **Send to back** puts it underneath, so
-you can pull a sticky note out from under a frame or tuck a shape behind a label. The
-buttons do nothing once an annotation is already alone at the front or the back. Two
-limits worth knowing: layering applies to annotations only, so it never moves an
-annotation in front of or behind a graph node; and a group box can be layered *against*
-but not layered itself — its own menu has no Layer row.
+Notes, labels, arrows, freehand strokes, text, frames, shapes, icons, voting dots and
+images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+front** puts the annotation on top of the other annotations and **Send to back** puts it
+underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
+label. The buttons do nothing once an annotation is already alone at the front or the
+back, and a locked annotation has no Layer row at all — unlock it first.
+
+Send to back goes all the way back: it will put the annotation behind your graph's own
+nodes and edges, which is what you want for a frame that should sit behind the nodes it
+frames. Bring it forward again with **Bring to front**. One gap worth knowing: a group box
+can be layered *against* by other annotations, but cannot be layered itself — its own menu
+has no Layer row.
 
 ### 2.6 Saved views
 

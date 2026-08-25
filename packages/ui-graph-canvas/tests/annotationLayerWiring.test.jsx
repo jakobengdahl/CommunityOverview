@@ -3,6 +3,9 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import ArrowNode from '../src/components/ArrowNode';
 import LabelNode from '../src/components/LabelNode';
 import FreehandAnnotationNode from '../src/components/FreehandAnnotationNode';
+import { useAnnotationLayer } from '../src/components/AnnotationLayerControls';
+import { AnnotationContext } from '../src/components/AnnotationContext';
+import { LAYER_FRONT } from '../src/utils/annotationLayers';
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
 
@@ -69,6 +72,18 @@ describe('shared annotation layer row', () => {
         expect(updated[0].zIndex).toBe(5);
       });
 
+      it('sends the annotation behind the others', () => {
+        hoisted.nodes = [
+          { id: 'x1', type: c.flowType, zIndex: 0 },
+          { id: 'other', type: 'note', zIndex: -2 },
+        ];
+        c.render(c.data);
+        c.open();
+        fireEvent.click(screen.getByLabelText('Send to back'));
+        const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+        expect(updated[0].zIndex).toBe(-3);
+      });
+
       it('refuses a layer change on a locked annotation', () => {
         hoisted.nodes = [
           { id: 'x1', type: c.flowType, zIndex: 0 },
@@ -76,12 +91,62 @@ describe('shared annotation layer row', () => {
         ];
         c.render({ ...c.data, locked: true });
         c.open();
-        // Four of the five menus withhold the row entirely when locked;
-        // ArrowNode still renders it, so the click must be refused instead.
-        const button = screen.queryByLabelText('Bring to front');
-        if (button) fireEvent.click(button);
-        expect(hoisted.setNodes).not.toHaveBeenCalled();
+        // The row is withheld from a locked annotation in all five menus
+        // (AnnotationLayerControls returns null), so a locked annotation
+        // never meets a visibly present but inert control. The hook's own
+        // refusal is pinned separately, below.
+        expect(screen.queryByLabelText('Bring to front')).toBeNull();
+        expect(screen.queryByLabelText('Send to back')).toBeNull();
       });
     });
   }
+});
+
+// The hook refuses independently of whether any caller's markup happens to
+// hide the row. That separation is the point: four of the five menus have a
+// `locked` branch of their own and ArrowNode has none, so relying on the
+// markup alone is exactly how a locked line stayed relayerable in the first
+// place. Driving the hook directly keeps the guarantee pinned even though no
+// menu currently renders the row for a locked annotation.
+describe('useAnnotationLayer refuses independently of the markup', () => {
+  function Harness({ data }) {
+    const changeLayer = useAnnotationLayer('x1', data);
+    return (
+      <button type="button" onClick={() => changeLayer(LAYER_FRONT)}>
+        go
+      </button>
+    );
+  }
+
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [
+      { id: 'x1', type: 'note', zIndex: 0 },
+      { id: 'other', type: 'note', zIndex: 4 },
+    ];
+  });
+
+  it('refuses when the annotation carries the persisted locked flag', () => {
+    render(<Harness data={{ locked: true }} />);
+    fireEvent.click(screen.getByText('go'));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('refuses and surfaces the attempt when another client holds the claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt }}>
+        <Harness data={{ remoteSelection: { color: '#f00', displayName: 'Ada' } }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.click(screen.getByText('go'));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('acts when the annotation is neither locked nor claimed', () => {
+    render(<Harness data={{}} />);
+    fireEvent.click(screen.getByText('go'));
+    expect(hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes)[0].zIndex).toBe(5);
+  });
 });

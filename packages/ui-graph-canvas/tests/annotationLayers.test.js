@@ -117,3 +117,25 @@ describe('resolveLayerZ round-trips through the overlay translators', () => {
     expect(flowNodeToOverlay(overlayToFlowNode(overlay)).z).toBe(7);
   });
 });
+
+describe('resolveLayerZ guards', () => {
+  const nodes = [note('a', 0), note('b', 4)];
+
+  it('does nothing for a direction it does not recognise', () => {
+    // A stale constant left behind by a rename must no-op rather than pick
+    // one of the two real directions and move the annotation the wrong way.
+    for (const bogus of ['forward', 'backward', undefined, null, '']) {
+      expect(resolveLayerZ(nodes, 'a', bogus)).toBeNull();
+    }
+  });
+
+  it('keeps the layer inside the range CSS can actually apply', () => {
+    // An agent may set any z over MCP (Date.now() is a common bring-to-front
+    // idiom). CSS clamps z-index to int32, so a value past that bound is not
+    // the layer the browser paints.
+    const high = resolveLayerZ([note('a', 0), note('b', 2 ** 40)], 'a', LAYER_FRONT);
+    expect(high).toBeLessThanOrEqual(2147483647);
+    const low = resolveLayerZ([note('a', 0), note('b', -(2 ** 40))], 'a', LAYER_BACK);
+    expect(low).toBeGreaterThanOrEqual(-2147483648);
+  });
+});

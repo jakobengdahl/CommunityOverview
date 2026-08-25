@@ -290,7 +290,11 @@ function FreehandAnnotationNode({ id, data, selected }) {
                     </button>
                   ))}
                 </div>
-                <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
                 <button type="button" className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

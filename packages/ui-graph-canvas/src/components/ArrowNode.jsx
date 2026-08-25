@@ -314,7 +314,11 @@ function ArrowNode({ id, data, selected }) {
               <span>{labels.arrowEndHead}</span>
               <span>{endArrow ? '✔' : ''}</span>
             </button>
-            <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
+            <AnnotationLayerControls
+              labels={labels}
+              locked={data.locked}
+              onChangeLayer={changeLayer}
+            />
             <button className="context-menu-delete" onClick={remove}>
               🗑️ {labels.delete}
             </button>

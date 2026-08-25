@@ -12,7 +12,13 @@ import { LAYER_BACK, LAYER_FRONT, resolveLayerZ } from '../utils/annotationLayer
  * component only renders the row — so the control behaves identically
  * whichever annotation it is opened on.
  */
-export default function AnnotationLayerControls({ labels, onChangeLayer }) {
+export default function AnnotationLayerControls({ labels, locked, onChangeLayer }) {
+  // A locked annotation is offered only unlock or copy, so the row is not
+  // shown at all rather than shown and refused. Four of the five menus would
+  // withhold it anyway through their own `locked` branch, but ArrowNode has
+  // none and renders its menu whatever `locked` says — without this it would
+  // be the one place a user meets a visibly present, silently inert control.
+  if (locked) return null;
   return (
     <>
       <div className="context-menu-title">{labels.layer}</div>
@@ -44,10 +50,10 @@ export default function AnnotationLayerControls({ labels, onChangeLayer }) {
  * The layer-change handler behind the row above.
  *
  * Refuses on a persisted `locked` flag as well as on another client's live
- * claim. The four menus that have a locked branch already withhold the whole
- * row from a locked annotation, but ArrowNode has no such branch and opens
- * its menu whatever `locked` says — so the check lives here, where it covers
- * all five identically, rather than in each caller.
+ * claim. The row above already hides itself when locked, so this is the
+ * enforcement behind that: a guarantee of the hook itself rather than of any
+ * one caller's markup, so no future call site can reintroduce the hole by
+ * rendering the row without its own `locked` branch.
  *
  * Stays silent when the step is a no-op: an annotation already at the front
  * has nothing to publish.
