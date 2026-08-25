@@ -132,6 +132,7 @@
     "session_undo_done": "Action undone",
     "session_undo_conflict": "That action can no longer be undone — it was changed since",
     "session_undo_busy": "Session is busy — try again in a moment",
+    "session_undo_claimed": "Someone else has that selected right now — try again in a moment",
     "session_undo_rate_limited": "Too many actions — wait a moment and try again",
     "session_undo_unavailable": "There's nothing of yours left to undo",
     "session_undo_failed": "Could not undo that action",

@@ -163,20 +163,30 @@ export function findLatestUndoable(records, actorId) {
  * is always translated rather than surfacing the backend's English-only text.
  *
  * @param {{status?: number, message?: string}} err
- * @returns {'rate_limited'|'unavailable'|'busy'|'conflict'|'failed'}
+ * @returns {'rate_limited'|'unavailable'|'busy'|'claimed'|'conflict'|'failed'}
  */
 export function classifyUndoError(err) {
   const status = err?.status;
   if (status === 429) return 'rate_limited';
   if (status === 404) return 'unavailable';
   if (status === 409) {
-    // The only 409 the UI ever triggers other than a real conflict: the
-    // session is mid-write (LayoutBusy, session_manager.py) — literal string
-    // match against that one backend message so a transient lock reads as
-    // "busy, retry" rather than the (non-retryable) conflict message. A
-    // future wording change there just falls back to the conflict message,
-    // which is still a safe, true description of a 409.
+    // Two of the backend's 409s are transient and retryable, and the generic
+    // conflict message ("can no longer be undone") is false for both, so each
+    // is matched on its own backend text: the session is mid-write
+    // (LayoutBusy), or another client holds a live selection claim on the
+    // annotation the inverse op would touch (ClaimConflict) — the latter
+    // clears on deselect or when the 30 s TTL expires. The claim string is
+    // pinned from the backend side by
+    // backend/core/tests/test_session_manager.py's
+    // test_claim_conflict_message_matches_the_ui_classifier, so a wording
+    // change there fails CI rather than silently degrading this into the
+    // (false, permanent-sounding) conflict text. The LayoutBusy string is not
+    // pinned that way — it is a literal in rest_api.py, and a drift there
+    // falls back to the conflict message.
     if (err?.message === 'session busy, retry') return 'busy';
+    if (typeof err?.message === 'string' && err.message.includes('is claimed by another client')) {
+      return 'claimed';
+    }
     return 'conflict';
   }
   return 'failed';

@@ -18,10 +18,12 @@ Three concerns:
   lazy (pruned on every read/write) so no background task is needed and a
   departed user never freezes an element. The map itself stays advisory —
   ``claim()`` always takes over an existing claim (LWW) and never refuses —
-  but ``session_manager.SessionManager.apply_ops`` now reads a snapshot of it
-  and rejects (``ClaimConflict``) a browser batch op that would mutate an
-  annotation another client currently holds. That check runs only for the
-  ``apply_ops`` batch path (the REST ``/ops`` endpoint): whether an
+  but the browser write paths now read a snapshot of it and reject
+  (``ClaimConflict``) an op that would mutate an annotation another client
+  currently holds: ``session_manager.SessionManager.apply_ops`` (the REST
+  ``/ops`` endpoint), ``undo_last_action`` (``/undo``, which replays a stored
+  inverse op), and the image-ingest endpoint, which replaces an annotation
+  outside ``apply_ops`` and so checks the same snapshot itself. Whether an
   MCP-agent-issued write (the separate synchronous ``upsert_annotation`` /
   ``update_annotation`` / ``delete_annotation`` path, all keyed to the shared
   ``mcp-agent`` client id) should also be checked against a live claim, or
