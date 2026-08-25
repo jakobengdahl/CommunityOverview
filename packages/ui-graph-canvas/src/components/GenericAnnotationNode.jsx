@@ -508,7 +508,9 @@ function GenericAnnotationNode({ id, type, data, selected }) {
 
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
-// Rotation and layer controls show for every EDITABLE_KINDS member; the
+// Rotation and layer controls show for every EDITABLE_KINDS member (the
+// layer row last before Delete, matching the note/label/line/freehand
+// menus); the
 // colour swatches show for COLORABLE_KINDS, the shape-subtype grid only for
 // `kind === 'shape'`, the icon-name grid only for `kind === 'icon'`, and the
 // value stepper only for `kind === 'vote_dot'`. A locked annotation gets
@@ -637,7 +639,6 @@ function ContextMenuPortal({
           </div>
         </>
       )}
-      <AnnotationLayerControls labels={labels} onChangeLayer={onChangeLayer} />
       <div className="context-menu-title">{labels.rotation}</div>
       <div className="context-menu-rotate">
         <button
@@ -665,6 +666,7 @@ function ContextMenuPortal({
           ⟳
         </button>
       </div>
+      <AnnotationLayerControls labels={labels} onChangeLayer={onChangeLayer} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}
       </button>

@@ -667,21 +667,51 @@ describe('GenericAnnotationNode property editor', () => {
     });
   });
 
-  // docs/ANNOTATION_CONTRACT.md: "semantic default layers plus manual
-  // forward/back". The arithmetic itself is covered by
-  // annotationLayers.test.js; these pin the wiring into the menu.
+  // See docs/ANNOTATION_CONTRACT.md's "Layer order" for why the control is
+  // bring-to-front/send-to-back rather than a one-step forward/back. The
+  // arithmetic itself is covered by annotationLayers.test.js; these pin the
+  // wiring into the menu.
   describe('layer controls', () => {
-    it('writes the stepped layer onto the annotation as zIndex', () => {
+    it('writes an integer layer onto the annotation as zIndex', () => {
       hoisted.nodes = [
         { id: 'v1', type: 'vote_dot', zIndex: 0 },
         { id: 'other', type: 'note', zIndex: 1 },
       ];
       render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
       fireEvent.contextMenu(screen.getByText('1'));
-      fireEvent.click(screen.getByLabelText('Bring forward'));
+      fireEvent.click(screen.getByLabelText('Bring to front'));
       const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
       expect(updated[0].zIndex).toBe(2);
+      expect(Number.isInteger(updated[0].zIndex)).toBe(true);
       expect(updated[1].zIndex).toBe(1);
+    });
+
+    it('refuses a layer change while another client holds the claim', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 0 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      const notifyRemoteLockedAttempt = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{
+            notifyChange: vi.fn(),
+            notifyRemoteLockedAttempt,
+            labels: { layer: 'Layer', layerFront: 'Bring to front' },
+          }}
+        >
+          <GenericAnnotationNode
+            id="v1"
+            type="vote_dot"
+            data={{ value: 1, remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          />
+        </AnnotationContext.Provider>
+      );
+      // A remote claim refuses the context menu outright, so the row is never
+      // reachable — the attempt is surfaced rather than silently ignored.
+      fireEvent.contextMenu(screen.getByText('1'));
+      expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
     });
 
     it('leaves the canvas untouched when the annotation is already at the front', () => {
@@ -692,13 +722,13 @@ describe('GenericAnnotationNode property editor', () => {
       const notifyChange = vi.fn();
       render(
         <AnnotationContext.Provider
-          value={{ notifyChange, labels: { layer: 'Layer', layerForward: 'Bring forward' } }}
+          value={{ notifyChange, labels: { layer: 'Layer', layerFront: 'Bring to front' } }}
         >
           <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
         </AnnotationContext.Provider>
       );
       fireEvent.contextMenu(screen.getByText('1'));
-      fireEvent.click(screen.getByLabelText('Bring forward'));
+      fireEvent.click(screen.getByLabelText('Bring to front'));
       expect(hoisted.setNodes).not.toHaveBeenCalled();
       expect(notifyChange).not.toHaveBeenCalled();
     });
@@ -706,7 +736,7 @@ describe('GenericAnnotationNode property editor', () => {
     it('offers no layer controls on a locked annotation', () => {
       render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />);
       fireEvent.contextMenu(screen.getByText('1'));
-      expect(screen.queryByLabelText('Bring forward')).toBeNull();
+      expect(screen.queryByLabelText('Bring to front')).toBeNull();
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
     });
   });

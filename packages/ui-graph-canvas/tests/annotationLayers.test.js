@@ -1,81 +1,119 @@
 import { describe, it, expect } from 'vitest';
-import { LAYER_BACKWARD, LAYER_FORWARD, resolveLayerZ } from '../src/utils/annotationLayers';
+import { LAYER_BACK, LAYER_FRONT, resolveLayerZ } from '../src/utils/annotationLayers';
+import { flowNodeToOverlay, overlayToFlowNode } from '../src/utils/annotations';
 
 // `z` is the annotation envelope's layer field, carried on a ReactFlow node
 // as `zIndex` (utils/annotations.js) and persisted by the host's session
-// translators. These cases pin what one forward/back click must produce:
-// docs/ANNOTATION_CONTRACT.md's "semantic default layers plus manual
-// forward/back".
+// translators. See docs/ANNOTATION_CONTRACT.md's "Layer order".
 const note = (id, zIndex) => ({ id, type: 'note', zIndex });
 const graphNode = (id, zIndex) => ({ id, type: 'custom', zIndex });
 
 describe('resolveLayerZ', () => {
-  it('steps past exactly one neighbouring layer rather than to the front', () => {
-    const nodes = [note('a', 0), note('b', 1), note('c', 5)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeGreaterThan(1);
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeLessThan(5);
+  it('puts an annotation in front of every other annotation', () => {
+    const nodes = [note('a', 0), note('b', 3), note('c', 7)];
+    expect(resolveLayerZ(nodes, 'a', LAYER_FRONT)).toBe(8);
   });
 
-  it('lands strictly above the layer it passed, never level with it', () => {
-    // Landing *on* a neighbour's z leaves paint order to ReactFlow's DOM
-    // order, so the click could visibly do nothing.
-    const nodes = [note('a', 0), note('b', 1)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeGreaterThan(1);
+  it('puts an annotation behind every other annotation', () => {
+    const nodes = [note('a', 5), note('b', 3), note('c', 7)];
+    expect(resolveLayerZ(nodes, 'a', LAYER_BACK)).toBe(2);
   });
 
-  it('breaks a tie upward when another annotation shares the same layer', () => {
-    const nodes = [note('a', 3), note('b', 3), note('c', 9)];
-    const z = resolveLayerZ(nodes, 'a', LAYER_FORWARD);
-    expect(z).toBeGreaterThan(3);
-    expect(z).toBeLessThan(9);
+  it('breaks a tie with the current front rather than calling it a no-op', () => {
+    // Every annotation is created at z = 0, so ties are the common case and
+    // are exactly what the click exists to resolve.
+    const nodes = [note('a', 0), note('b', 0), note('c', 0)];
+    expect(resolveLayerZ(nodes, 'a', LAYER_FRONT)).toBe(1);
+    expect(resolveLayerZ(nodes, 'a', LAYER_BACK)).toBe(-1);
   });
 
-  it('breaks a tie downward on a backward step', () => {
-    const nodes = [note('a', 3), note('b', 3), note('c', -4)];
-    const z = resolveLayerZ(nodes, 'a', LAYER_BACKWARD);
-    expect(z).toBeLessThan(3);
-    expect(z).toBeGreaterThan(-4);
-  });
-
-  it('fits between two adjacent integer layers instead of renumbering them', () => {
-    const nodes = [note('a', 0), note('b', 5), note('c', 6)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBe(5.5);
-  });
-
-  it('reports a no-op when already at the front or at the back', () => {
+  it('reports a no-op when already alone at the front or at the back', () => {
     const nodes = [note('a', 4), note('b', 1)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeNull();
-    expect(resolveLayerZ(nodes, 'b', LAYER_BACKWARD)).toBeNull();
+    expect(resolveLayerZ(nodes, 'a', LAYER_FRONT)).toBeNull();
+    expect(resolveLayerZ(nodes, 'b', LAYER_BACK)).toBeNull();
   });
 
   it('reports a no-op when the annotation is the only one on the canvas', () => {
     const nodes = [note('a', 0)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeNull();
-    expect(resolveLayerZ(nodes, 'a', LAYER_BACKWARD)).toBeNull();
+    expect(resolveLayerZ(nodes, 'a', LAYER_FRONT)).toBeNull();
+    expect(resolveLayerZ(nodes, 'a', LAYER_BACK)).toBeNull();
   });
 
-  it('never steps an annotation past a graph node', () => {
+  // A browser rejects `z-index: 0.5` outright and the element keeps whatever
+  // it had, so a fractional result would publish an op and move nothing on
+  // screen. An agent may set any float over MCP, so fractional neighbours
+  // are reachable. jsdom's CSSOM accepts the value a real browser discards,
+  // so nothing downstream of this can catch a regression here.
+  it('returns an integer strictly past a fractional neighbour', () => {
+    const front = resolveLayerZ([note('a', 0), note('b', 2.5)], 'a', LAYER_FRONT);
+    expect(Number.isInteger(front)).toBe(true);
+    expect(front).toBeGreaterThan(2.5);
+
+    const back = resolveLayerZ([note('a', 0), note('b', -2.5)], 'a', LAYER_BACK);
+    expect(Number.isInteger(back)).toBe(true);
+    expect(back).toBeLessThan(-2.5);
+  });
+
+  it('returns an integer even when the annotation itself sits on a fractional layer', () => {
+    const z = resolveLayerZ([note('a', 0.5), note('b', 0.5)], 'a', LAYER_FRONT);
+    expect(Number.isInteger(z)).toBe(true);
+    expect(z).toBeGreaterThan(0.5);
+  });
+
+  it('never returns NaN or a non-finite layer', () => {
+    const nodes = [note('a', Number.NaN), note('b', Number.POSITIVE_INFINITY), note('c', 2)];
+    for (const direction of [LAYER_FRONT, LAYER_BACK]) {
+      const z = resolveLayerZ(nodes, 'a', direction);
+      expect(Number.isFinite(z)).toBe(true);
+    }
+  });
+
+  it('orders against annotations only, never against a graph node', () => {
     // Graph nodes share the ReactFlow z-space but are not part of the
-    // annotation layer model; reordering against one would silently change
-    // how the graph itself paints.
-    const nodes = [note('a', 0), graphNode('n1', 2)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBeNull();
+    // annotation layer model; ordering against one would silently change how
+    // the graph itself paints.
+    expect(resolveLayerZ([note('a', 0), graphNode('n1', 9)], 'a', LAYER_FRONT)).toBeNull();
+    expect(resolveLayerZ([note('a', 0), graphNode('n1', 9), note('b', 0)], 'a', LAYER_FRONT)).toBe(
+      1
+    );
   });
 
   it('treats a node with no zIndex as layer 0', () => {
-    const nodes = [{ id: 'a', type: 'note' }, note('b', 0)];
-    expect(resolveLayerZ(nodes, 'a', LAYER_FORWARD)).toBe(1);
+    expect(resolveLayerZ([{ id: 'a', type: 'note' }, note('b', 4)], 'a', LAYER_FRONT)).toBe(5);
   });
 
   it('returns null for an id that is not on the canvas', () => {
-    expect(resolveLayerZ([note('a', 0)], 'missing', LAYER_FORWARD)).toBeNull();
+    expect(resolveLayerZ([note('a', 0)], 'missing', LAYER_FRONT)).toBeNull();
   });
 
-  it('is reversible: forward then backward puts the annotation back below the layer it passed', () => {
-    const nodes = [note('a', 0), note('b', 1), note('c', 5)];
-    const forward = resolveLayerZ(nodes, 'a', LAYER_FORWARD);
-    const moved = [{ ...nodes[0], zIndex: forward }, nodes[1], nodes[2]];
-    const back = resolveLayerZ(moved, 'a', LAYER_BACKWARD);
-    expect(back).toBeLessThan(1);
+  it('is reversible: front then back puts the annotation behind the others again', () => {
+    const nodes = [note('a', 0), note('b', 0), note('c', 0)];
+    const front = resolveLayerZ(nodes, 'a', LAYER_FRONT);
+    const moved = [{ ...nodes[0], zIndex: front }, nodes[1], nodes[2]];
+    expect(resolveLayerZ(moved, 'a', LAYER_BACK)).toBeLessThan(0);
+  });
+});
+
+// The arithmetic above is only useful if the value it produces survives to
+// the server. This ties it to the translators that carry it: the layer the
+// control writes onto the flow node's `zIndex` must come back out of
+// `flowNodeToOverlay` as the annotation's `z`, or the change would be
+// computed, published as a no-op diff, and lost on reload.
+describe('resolveLayerZ round-trips through the overlay translators', () => {
+  it('lands the new layer on the annotation envelope as z', () => {
+    const overlay = { id: 'a', kind: 'note', position: { x: 0, y: 0 }, z: 0, text: 'hi' };
+    const flowNode = overlayToFlowNode(overlay);
+    expect(flowNode.zIndex).toBe(0);
+
+    const canvas = [flowNode, { id: 'b', type: 'note', zIndex: 3 }];
+    const z = resolveLayerZ(canvas, 'a', LAYER_FRONT);
+    const moved = { ...flowNode, zIndex: z };
+
+    expect(flowNodeToOverlay(moved).z).toBe(4);
+  });
+
+  it('keeps a layer set by an agent when the annotation is only rehydrated', () => {
+    const overlay = { id: 'a', kind: 'shape', position: { x: 0, y: 0 }, z: 7, shape: 'circle' };
+    expect(flowNodeToOverlay(overlayToFlowNode(overlay)).z).toBe(7);
   });
 });

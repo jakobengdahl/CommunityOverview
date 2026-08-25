@@ -236,13 +236,14 @@ dot**'s menu has a value stepper, so you can raise or lower the count after it's
 placed. Icon and voting-dot annotations also support the same attach behaviour as labels
 once placed: drag one near a node or another annotation to attach it.
 
-Every annotation's right-click menu — notes, labels, arrows, freehand strokes and all the
-rest — ends with a **Layer** row. **Bring forward** moves the annotation up past whatever
-sits directly above it and **Send backward** moves it down past whatever sits directly
-below, one step per click, so you can pull a sticky note out from under a frame or tuck a
-shape behind a label. The buttons do nothing once an annotation is already at the very
-front or the very back. Layering applies to annotations only: a click never moves an
-annotation past a graph node.
+Notes, labels, arrows, freehand strokes and all the shape-like annotations have a
+**Layer** row in their right-click menu, just above Delete. **Bring to front** puts the
+annotation on top of every other annotation and **Send to back** puts it underneath, so
+you can pull a sticky note out from under a frame or tuck a shape behind a label. The
+buttons do nothing once an annotation is already alone at the front or the back. Two
+limits worth knowing: layering applies to annotations only, so it never moves an
+annotation in front of or behind a graph node; and a group box can be layered *against*
+but not layered itself — its own menu has no Layer row.
 
 ### 2.6 Saved views
 

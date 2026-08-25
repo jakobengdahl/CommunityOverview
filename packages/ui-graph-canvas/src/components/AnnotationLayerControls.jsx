@@ -2,11 +2,11 @@ import { useContext } from 'react';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { isRemoteLocked } from '../utils/annotations';
-import { LAYER_BACKWARD, LAYER_FORWARD, resolveLayerZ } from '../utils/annotationLayers';
+import { LAYER_BACK, LAYER_FRONT, resolveLayerZ } from '../utils/annotationLayers';
 
 /**
- * The forward/back layer row shared by every annotation context menu
- * (note, label, arrow, freehand and the generic kinds). One implementation
+ * The layer row shared by every annotation context menu that has one
+ * (note, label, line, freehand and the generic kinds). One implementation
  * rather than five copies: the arithmetic lives in utils/annotationLayers.js,
  * the refusal rules live in `useAnnotationLayer` below, and each calling
  * component only renders the row — so the control behaves identically
@@ -20,18 +20,18 @@ export default function AnnotationLayerControls({ labels, onChangeLayer }) {
         <button
           type="button"
           className="layer-button"
-          aria-label={labels.layerBackward}
-          title={labels.layerBackward}
-          onClick={() => onChangeLayer(LAYER_BACKWARD)}
+          aria-label={labels.layerBack}
+          title={labels.layerBack}
+          onClick={() => onChangeLayer(LAYER_BACK)}
         >
           ⤓
         </button>
         <button
           type="button"
           className="layer-button"
-          aria-label={labels.layerForward}
-          title={labels.layerForward}
-          onClick={() => onChangeLayer(LAYER_FORWARD)}
+          aria-label={labels.layerFront}
+          title={labels.layerFront}
+          onClick={() => onChangeLayer(LAYER_FRONT)}
         >
           ⤒
         </button>
@@ -41,14 +41,20 @@ export default function AnnotationLayerControls({ labels, onChangeLayer }) {
 }
 
 /**
- * The layer-change handler behind the row above. Refuses while another
- * client holds this annotation's claim (surfacing the attempt, as every
- * other annotation mutation does), and stays silent when the step is a
- * no-op — an annotation already at the front has nothing to report.
+ * The layer-change handler behind the row above.
  *
- * A layer change publishes as 'style': it is an envelope-field edit at a
- * release point, not a continuous gesture, so it wants the immediate
- * publish path rather than the debounced text one.
+ * Refuses on a persisted `locked` flag as well as on another client's live
+ * claim. The four menus that have a locked branch already withhold the whole
+ * row from a locked annotation, but ArrowNode has no such branch and opens
+ * its menu whatever `locked` says — so the check lives here, where it covers
+ * all five identically, rather than in each caller.
+ *
+ * Stays silent when the step is a no-op: an annotation already at the front
+ * has nothing to publish.
+ *
+ * A layer change publishes as 'style': an envelope-field edit at a release
+ * point, not a continuous gesture, so it wants the immediate publish path
+ * rather than the debounced text one.
  */
 export function useAnnotationLayer(id, data) {
   const { getNodes, setNodes } = useReactFlow();
@@ -58,6 +64,7 @@ export function useAnnotationLayer(id, data) {
       notifyRemoteLockedAttempt();
       return;
     }
+    if (data?.locked) return;
     // Resolved against getNodes() rather than inside the setNodes updater:
     // an updater must stay pure (React may re-run it), so it is not a place
     // to decide whether to notify the host of a change.
@@ -67,5 +74,3 @@ export function useAnnotationLayer(id, data) {
     notifyChange('style');
   };
 }
-
-export { LAYER_BACKWARD, LAYER_FORWARD };

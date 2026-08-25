@@ -150,12 +150,14 @@ renders none, so it is offered no swatches), for `shape` a subtype picker, for
 stepper that never counts below zero. `freehand` gets its own right-click
 property editor too (color, stroke width, smoothing, opacity) — it is not in
 the rotatable set (see [Canvas rendering](#canvas-rendering) on why rotation is
-not drawn for it), so it has no rotation control. Every annotation context menu
-— the dedicated `note`/`label`/`line`/`freehand` editors and the generic one
-alike — also carries the shared manual forward/back layer row described under
-[Layer order](#layer-order). What the editors still do not cover: font family,
-size, weight, style or alignment for the text-bearing kinds, and
-cropping/replacing an `image`'s pixel content.
+not drawn for it), so it has no rotation control. The dedicated
+`note`/`label`/`line`/`freehand` editors and the generic one alike also carry
+the shared bring-to-front/send-to-back layer row described under
+[Layer order](#layer-order); `group`'s own context menu does not. What the
+editors still do not cover: any font control at all for the generic `text`
+kind (`note` and `label` have a text-size picker, but no kind has font family,
+weight, style or alignment), and cropping/replacing an `image`'s pixel
+content.
 `label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
 another annotation from the GUI, by dragging the annotation within snapping
 distance of the target
@@ -167,20 +169,38 @@ it is not satisfied by documenting the wireframes above.
 
 ### Layer order
 
-An annotation's `z` is a float, and every annotation context menu carries the
-same manual forward/back row (`AnnotationLayerControls`). One click steps past
-exactly one neighbouring layer — not to the front — and lands *strictly* past
-it: landing on a neighbour's own `z` would leave the two annotations' paint
-order to the canvas library's DOM order, so a click could visibly do nothing.
-Where two adjacent layers leave no integer between them the step takes the
-midpoint, which is why `z` is a float: no other annotation is ever renumbered
-to make room. A step that would move nothing (the annotation is already at the
-front, or already at the back) is a no-op and publishes no operation.
+An annotation's `z` orders it against the other annotations on the canvas.
+The `note`, `label`, `line`, `freehand` and generic-kind context menus each
+carry the same layer row (`AnnotationLayerControls`), offering **bring to
+front** and **send to back**. `group` has its own context menu and does *not*
+carry the row — a group box can be ordered against by other annotations but
+cannot be reordered itself.
 
-Only other annotations are counted. Graph nodes and edges share the canvas's
-z-space but are not part of the annotation layer model, so an annotation is
-never stepped past one — reordering against a graph node would be a silent,
-unrequested change to how the graph itself paints.
+The value written is always an **integer**, even when annotations already on
+the canvas carry fractional `z` values (an agent may set any float over MCP —
+`z` is `Optional[float]` server-side). The canvas writes a node's layer
+straight into the element's inline style, and CSS `z-index` accepts only
+`auto | <integer>`: a browser rejects `z-index: 0.5` outright and the element
+silently keeps whatever it had. A fractional layer would publish an operation
+and move nothing on screen — worse than refusing, because every other client
+would still apply it. Note that a jsdom-based test cannot catch this: jsdom's
+CSSOM accepts the fractional value that a real browser discards.
+
+Front/back rather than a one-step forward/back is a deliberate trade. A true
+one-step swap needs distinct integer levels to step between, and every
+annotation is created at `z = 0`, so the common case is a pile of ties.
+Breaking those ties one step at a time means renumbering the annotations
+around the one that moved — and an `annotation_updated` op carries the
+*whole* annotation, which for an embedded image is its entire data URI. A
+renumber touching a few images would exceed the session op batch's byte cap
+and be rejected atomically. Front/back always writes exactly one annotation,
+so it cannot reach that cap. One-step forward/back, and the level compaction
+it would need, are not implemented.
+
+An annotation tied with the current front is not treated as already in front —
+the tie is what the click exists to break — so it moves. A click that would
+change nothing (already alone at the front, or at the back) is a no-op and
+publishes no operation.
 
 Semantic default layers — a per-kind default `z` at creation time, so a frame
 starts behind the annotations it frames — are **not** implemented; every
@@ -715,15 +735,15 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/relayer (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ⚠ toolbox create (fixed default), rotate/recolor/relayer (right-click), attach by dragging near a node/annotation; no font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/relayer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/relayer (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
-| `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/relayer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `text` | ⚠ toolbox create (fixed default), rotate/recolor/layer (right-click), attach by dragging near a node/annotation; no font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
+| `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
-| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype, colour, rotation and layer | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ⚠ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/relayer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype, colour, rotation and layer (front/back) | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer row; a `rotation` on the document model is still never drawn (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |

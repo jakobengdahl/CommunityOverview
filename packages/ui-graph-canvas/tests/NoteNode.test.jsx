@@ -201,20 +201,20 @@ describe('NoteNode layer controls', () => {
     hoisted.nodes = [];
   });
 
-  it('steps a note past the annotation above it', () => {
+  it('brings a note in front of the annotation above it', () => {
     hoisted.nodes = [
       { id: 'n1', type: 'note', zIndex: 0 },
       { id: 'a2', type: 'label', zIndex: 1 },
     ];
     render(<NoteNode id="n1" data={{ text: 'hi' }} />);
     fireEvent.contextMenu(screen.getByText('hi'));
-    fireEvent.click(screen.getByLabelText('Bring forward'));
+    fireEvent.click(screen.getByLabelText('Bring to front'));
     expect(hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes)[0].zIndex).toBe(2);
   });
 
   it('offers no layer controls on a locked note', () => {
     render(<NoteNode id="n1" data={{ text: 'hi', locked: true }} />);
     fireEvent.contextMenu(screen.getByText('hi'));
-    expect(screen.queryByLabelText('Bring forward')).toBeNull();
+    expect(screen.queryByLabelText('Bring to front')).toBeNull();
   });
 });
