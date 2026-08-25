@@ -5,6 +5,8 @@ import {
   buildFreehandPath,
   hasPressureData,
   buildPressureSegments,
+  smoothAnchors,
+  segmentsFromCurvePoints,
 } from '../src/utils/freehandPath';
 
 // A "jittery" hand-drawn line: an L-shaped stroke (roughly horizontal, then
@@ -203,6 +205,46 @@ describe('buildFreehandPath', () => {
     const single = buildFreehandPath([{ x: 1, y: 2 }], 1);
     expect(single.points).toEqual([{ x: 1, y: 2 }]);
     expect(single.d).toBe('M 1 2 L 1 2');
+  });
+});
+
+describe('smoothAnchors + segmentsFromCurvePoints (shared reduce-and-curve-fit step)', () => {
+  // FreehandAnnotationNode reduces + curve-fits once, then builds both a `d`
+  // string (via pointsToPathData) and pressure segments (via
+  // segmentsFromCurvePoints) from that single result, instead of paying for
+  // reduceFreehandPoints + smoothAnchors twice the way calling
+  // buildFreehandPath and buildPressureSegments independently would. These
+  // two must agree with the all-in-one helpers for the same input.
+  it('is an identity at smoothing=0, matching buildFreehandPath', () => {
+    const points = jitteryLine();
+    const reduced = reduceFreehandPoints(points, 0);
+    expect(smoothAnchors(reduced, 0)).toEqual(reduced);
+    expect(pointsToPathData(smoothAnchors(reduced, 0))).toBe(buildFreehandPath(points, 0).d);
+  });
+
+  it('produces the same `d` as buildFreehandPath when composed manually', () => {
+    const points = jitteryLine();
+    const reduced = reduceFreehandPoints(points, 0.6);
+    const curved = smoothAnchors(reduced, 0.6);
+    expect(pointsToPathData(curved)).toBe(buildFreehandPath(points, 0.6).d);
+  });
+
+  it('produces the same segments as buildPressureSegments when composed manually', () => {
+    const points = [
+      { x: 0, y: 0, pressure: 0.2 },
+      { x: 10, y: 5, pressure: 0.8 },
+      { x: 20, y: 0, pressure: 0.5 },
+    ];
+    const reduced = reduceFreehandPoints(points, 0.5);
+    const curved = smoothAnchors(reduced, 0.5);
+    expect(segmentsFromCurvePoints(curved, 3)).toEqual(buildPressureSegments(points, 0.5, 3));
+  });
+
+  it('segmentsFromCurvePoints handles empty and single-point input', () => {
+    expect(segmentsFromCurvePoints([], 2)).toEqual([]);
+    expect(segmentsFromCurvePoints([{ x: 5, y: 5, pressure: 0.5 }], 2)).toEqual([
+      { d: 'M 5 5 L 5 5', width: expect.any(Number) },
+    ]);
   });
 });
 

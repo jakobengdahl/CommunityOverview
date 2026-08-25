@@ -2,7 +2,13 @@ import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { buildFreehandPath, hasPressureData, buildPressureSegments } from '../utils/freehandPath';
+import {
+  reduceFreehandPoints,
+  smoothAnchors,
+  pointsToPathData,
+  hasPressureData,
+  segmentsFromCurvePoints,
+} from '../utils/freehandPath';
 import { isRemoteLocked } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './FreehandAnnotationNode.css';
@@ -186,10 +192,17 @@ function FreehandAnnotationNode({ id, data, selected }) {
       pressure: p.pressure,
     }));
     const aware = hasPressureData(localPoints);
-    const { d: pathData } = buildFreehandPath(localPoints, smoothing);
+    // Reduce + curve-fit exactly once and reuse the result for both the `d`
+    // string and the pressure segments — reduceFreehandPoints/smoothAnchors
+    // are the expensive step (up to ~7x the anchors at high smoothing), and
+    // this component always needs `d` (even pressure-aware strokes use it
+    // for the transparent hit-target path below), so there is no path that
+    // only needs one of the two outputs.
+    const reduced = reduceFreehandPoints(localPoints, smoothing);
+    const curved = smoothAnchors(reduced, smoothing);
     return {
-      d: pathData,
-      segments: aware ? buildPressureSegments(localPoints, smoothing, strokeWidth) : null,
+      d: pointsToPathData(curved),
+      segments: aware ? segmentsFromCurvePoints(curved, strokeWidth) : null,
       pressureAware: aware,
     };
   }, [rawPoints, originX, originY, smoothing, strokeWidth]);

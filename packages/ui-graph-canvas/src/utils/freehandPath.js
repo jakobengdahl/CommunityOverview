@@ -180,8 +180,15 @@ function interpolatePoint(p0, p1, p2, p3, t) {
  * rendered path byte-identical to before this module changed. Never removes
  * or reorders an anchor, only adds between them, so curve fitting never
  * fights with `reduceFreehandPoints`'s decimation.
+ *
+ * Exported (rather than kept internal to `buildFreehandPath`/
+ * `buildPressureSegments`) so a caller building BOTH a `d` string and
+ * pressure segments from the same points — as FreehandAnnotationNode does —
+ * can run `reduceFreehandPoints` + `smoothAnchors` once and feed the result
+ * to `pointsToPathData` and `segmentsFromCurvePoints` respectively, instead
+ * of paying for the reduce-and-curve-fit twice.
  */
-function smoothAnchors(points, smoothing) {
+export function smoothAnchors(points, smoothing) {
   const level = clampSmoothing(smoothing);
   if (level <= 0 || points.length < 3) return points;
   const subdivisions = Math.round(level * MAX_CURVE_SUBDIVISIONS);
@@ -293,17 +300,32 @@ export function buildPressureSegments(
 ) {
   const reduced = reduceFreehandPoints(points, smoothing);
   if (reduced.length === 0) return [];
-  if (reduced.length === 1) {
-    const p = reduced[0];
+  const curved = smoothAnchors(reduced, smoothing);
+  return segmentsFromCurvePoints(curved, baseWidth);
+}
+
+/**
+ * Split an already reduced-and-curve-fit point list into one two-point path
+ * segment per adjacent pair, each carrying its own pressure-derived width.
+ * Factored out of `buildPressureSegments` so a caller that already computed
+ * `reduceFreehandPoints` + `smoothAnchors` once (to also build a `d` string
+ * via `pointsToPathData`) can reuse that same result here instead of running
+ * decimation and curve-fitting a second time — see `smoothAnchors`'s doc
+ * comment. `buildPressureSegments` itself still does both steps for callers
+ * (including this file's own tests) that only need the segments.
+ */
+export function segmentsFromCurvePoints(points, baseWidth = DEFAULT_STROKE_WIDTH_FALLBACK) {
+  if (points.length === 0) return [];
+  if (points.length === 1) {
+    const p = points[0];
     return [
       { d: `M ${p.x} ${p.y} L ${p.x} ${p.y}`, width: widthForPressure(p.pressure, baseWidth) },
     ];
   }
-  const curved = smoothAnchors(reduced, smoothing);
   const segments = [];
-  for (let i = 0; i < curved.length - 1; i++) {
-    const a = curved[i];
-    const b = curved[i + 1];
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
     let pressure;
     if (Number.isFinite(a.pressure) && Number.isFinite(b.pressure)) {
       pressure = (a.pressure + b.pressure) / 2;
