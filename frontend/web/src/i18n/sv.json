@@ -424,6 +424,7 @@
     "undo_notification": "Flytt ångrad",
     "redo_notification": "Flytt återställd",
     "annotation_remote_locked": "Någon annan redigerar denna annotering",
+    "annotation_locked_skipped": "Den annoteringen är låst — lås upp den först",
     "annotation_layer": "Lager",
     "annotation_layer_front": "Lägg överst",
     "annotation_layer_back": "Lägg underst",
