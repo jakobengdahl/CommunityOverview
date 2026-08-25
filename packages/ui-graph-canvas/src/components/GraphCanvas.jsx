@@ -2283,7 +2283,9 @@ function GraphCanvasInner({
           // Two kinds are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
-          // unlock or copy, the same rule every annotation context menu applies.
+          // unlock or copy — the rule every *overlay* annotation's context menu
+          // applies. `group` is the exception and ignores the flag, but Delete
+          // never reaches a group anyway (see below).
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
