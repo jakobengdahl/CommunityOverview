@@ -2485,7 +2485,7 @@ def register_mcp_tools(
         differs per type — see docs/ANNOTATION_CONTRACT.md), for example:
           - text/label: {"text": "..."}
           - line: {"to": {"x": .., "y": ..}, "endArrow": true}
-          - shape: {"shape": "rectangle"}
+          - shape: {"shape": "rectangle", "text": "optional caption"}
           - icon: {"icon": "flag"}
           - vote_dot: {"value": 3}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.

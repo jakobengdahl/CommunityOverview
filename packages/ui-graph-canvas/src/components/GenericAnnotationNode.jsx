@@ -596,6 +596,24 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     />
   );
 
+  // Shared by `text` and `shape` below — the only difference between the two
+  // was `rows`, which `shape`'s inset wrapper overrides via CSS `height: 100%`
+  // anyway (see GenericAnnotationNode.css), so one element serves both rather
+  // than two copies that can quietly drift apart.
+  const textEditor = (
+    <textarea
+      ref={textInputRef}
+      className="graph-generic-annotation-text-input nodrag"
+      rows={2}
+      value={textDraft}
+      onChange={handleTextChange}
+      onBlur={commitText}
+      onKeyDown={handleTextKeyDown}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    />
+  );
+
   if (kind === 'text') {
     return (
       <>
@@ -605,21 +623,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
         >
-          {isEditingText ? (
-            <textarea
-              ref={textInputRef}
-              className="graph-generic-annotation-text-input nodrag"
-              rows={2}
-              value={textDraft}
-              onChange={handleTextChange}
-              onBlur={commitText}
-              onKeyDown={handleTextKeyDown}
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            data.text || ''
-          )}
+          {isEditingText ? textEditor : data.text || ''}
         </div>
         {menu}
         {remoteBadge}
@@ -699,16 +703,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               style={shapeTextInsetStyle(shape)}
             >
               {isEditingText ? (
-                <textarea
-                  ref={textInputRef}
-                  className="graph-generic-annotation-text-input nodrag"
-                  value={textDraft}
-                  onChange={handleTextChange}
-                  onBlur={commitText}
-                  onKeyDown={handleTextKeyDown}
-                  onClick={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                />
+                textEditor
               ) : (
                 <span className="graph-generic-annotation-shape-text-content">{data.text}</span>
               )}

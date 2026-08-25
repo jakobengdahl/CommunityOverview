@@ -198,6 +198,41 @@ class TestCreateAnnotation:
         assert updated["annotation"]["w"] == 160
         assert updated["annotation"]["content"]["shape"] == "process_arrow"
 
+    def test_shape_caption_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
+        """A shape's optional `content.text` caption
+        (task-annotation-doubleclick-to-edit-text) is free-form payload like
+        every other content field outside shape/icon/attachment/line
+        (`_validate_generic_content`'s docstring) — this pins that it
+        actually survives create/list/update over the MCP surface, not just
+        the frontend translators.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            content={"shape": "triangle", "text": "Step 1"},
+            annotation_id="shape-caption-1",
+        )
+        assert created["annotation"]["content"]["text"] == "Step 1"
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["shape"])
+        assert listed["annotations"][0]["content"]["text"] == "Step 1"
+
+        updated = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id="shape-caption-1",
+            content={"text": "Step 2"},
+        )
+        assert updated["annotation"]["content"]["text"] == "Step 2"
+        # The shape name is untouched by a caption-only update.
+        assert updated["annotation"]["content"]["shape"] == "triangle"
+
     def test_invalid_type_is_rejected(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
