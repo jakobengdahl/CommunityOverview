@@ -287,6 +287,9 @@ describe('a malformed group in a restored session', () => {
     'a string',
     { position: { x: 1, y: 1 } },
     { id: '', position: { x: 2, y: 2 } },
+    { id: 5, position: { x: 3, y: 3 } },
+    { id: 'g-nopos' },
+    { id: 'g-nullpos', position: null },
   ];
 
   it('does not take the canvas down', () => {
@@ -309,7 +312,18 @@ describe('a malformed group in a restored session', () => {
       .filter(Array.isArray)
       .find((list) => list.some((n) => n?.type === 'group'));
     expect(produced).toBeTruthy();
-    expect(produced.filter((n) => n.type === 'group').map((n) => n.id)).toEqual(['g-ok']);
+    // The three with a usable id survive — a missing position is defaulted
+    // rather than treated as unreadable, because the group is still a group.
+    expect(produced.filter((n) => n.type === 'group').map((n) => n.id)).toEqual([
+      'g-ok',
+      'g-nopos',
+      'g-nullpos',
+    ]);
+    // And every restored group has a position, or ReactFlow throws on it.
+    for (const g of produced.filter((n) => n.type === 'group')) {
+      expect(typeof g.position?.x).toBe('number');
+      expect(typeof g.position?.y).toBe('number');
+    }
   });
 
   it('never re-parents a node onto a group that is not on the canvas', () => {
@@ -317,21 +331,41 @@ describe('a malformed group in a restored session', () => {
     // from inside ReactFlow's store where no boundary reaches. Asserted as the
     // invariant rather than against one contrived input, since the ways to
     // produce a dangling parent will change as the group shape does.
+    // Real nodes on the canvas: without them nothing can be re-parented and
+    // the assertion has nothing to bite on.
     render(
       <GraphCanvas
-        nodes={[]}
+        nodes={[
+          { id: 'n1', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+          { id: 'n2', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+          { id: 'n-orphan', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+        ]}
         edges={[]}
-        groupsToRestore={{ groups, parentIds: { 'n-orphan': 'g-gone', n1: 'g-ok' } }}
+        groupsToRestore={{ groups, parentIds: { 'n-orphan': 'g-gone', n1: 'g-ok', n2: 5 } }}
       />
     );
+    // The updater is fed the nodes that are actually on the canvas. Feeding it
+    // an empty list would leave nothing to re-parent, and the assertion would
+    // pass by having nothing to check.
+    const onCanvas = [
+      { id: 'n1', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+      { id: 'n2', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+      { id: 'n-orphan', type: 'custom', position: { x: 0, y: 0 }, data: {} },
+    ];
+    let checked = 0;
     for (const call of hoisted.setNodes.mock.calls) {
-      const produced = typeof call[0] === 'function' ? call[0]([]) : call[0];
+      const produced = typeof call[0] === 'function' ? call[0](onCanvas) : call[0];
       if (!Array.isArray(produced)) continue;
       const ids = new Set(produced.map((n) => n?.id));
       for (const n of produced) {
-        if (n?.parentId) expect(ids.has(n.parentId)).toBe(true);
+        if (n?.parentId) {
+          checked += 1;
+          expect(ids.has(n.parentId)).toBe(true);
+        }
       }
     }
+    // At least one node really was re-parented, or this asserts nothing.
+    expect(checked).toBeGreaterThan(0);
   });
 });
 

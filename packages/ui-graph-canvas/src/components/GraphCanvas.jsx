@@ -2417,7 +2417,10 @@ function GraphCanvasInner({
         .map((g) => ({
           id: g.id,
           type: 'group',
-          position: g.position,
+          // Defaulted like every sibling path (overlayToFlowNode, the remote
+          // upsert-group branch below, sessionAnnotations.js). A node with no
+          // position throws inside ReactFlow's store, which no boundary reaches.
+          position: g.position || { x: 0, y: 0 },
           data: {
             label: g.label || 'Group',
             description: g.description || '',
@@ -2425,13 +2428,11 @@ function GraphCanvasInner({
           },
           style: g.style || { width: 300, height: 200 },
         }));
-      // Built from what survived rather than the raw input. This cannot
-      // currently differ — every entry the filter drops has no usable id, so a
-      // set built from the raw list would only gain `undefined`, which no
-      // truthy `savedParent` matches — and no test distinguishes the two. It is
-      // written this way because deriving the set from the list it describes is
-      // the correct relationship, and the alternative is right only by accident
-      // of what "malformed" happens to mean today.
+      // Built from what survived, not the raw input. A group with a numeric id
+      // — which JSON permits — is dropped by the filter but would land in a
+      // raw-derived set, and a matching `parentIds` value is truthy, so a node
+      // would be parented onto a group that is not on the canvas. That throws
+      // inside ReactFlow's store, where no boundary reaches.
       const groupIdSet = new Set(groupNodes.map((g) => g.id));
       setNodes((nds) => {
         const nonGroups = nds
