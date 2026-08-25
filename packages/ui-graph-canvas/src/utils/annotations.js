@@ -54,14 +54,23 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
 // inverse so the two stay exact mirrors of each other.
+//
+// `textAlign`/`font` (task-annotation-text-alignment-and-font) are new on
+// both `text` and `shape`; `fontSize` is new on `shape` (`text` already had
+// it, carried since before this task but never actually rendered — see
+// GenericAnnotationNode.jsx). All three are optional and, left unset, resolve
+// to the default GenericAnnotationNode.jsx computes per kind, so an existing
+// annotation with none of them keeps rendering exactly as it did before this
+// task — the same "omitted field = default" contract `color`/`rotation`
+// already follow.
 const GENERIC_OVERLAY_FIELDS = {
-  text: ['text', 'color', 'fontSize', 'attachment'],
+  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment'],
   frame: ['color'],
   // `text` here is a `shape`'s optional caption
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'color', 'text'],
+  shape: ['shape', 'color', 'text', 'fontSize', 'textAlign', 'font'],
   icon: ['icon', 'color', 'attachment'],
   vote_dot: ['value', 'color', 'attachment'],
   image: ['image', 'alt', 'color'],
@@ -175,6 +184,96 @@ export function resolveRotatedResizeGeometry({ start, end, rotation }) {
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;
 export const DEFAULT_LABEL_FONT_SIZE = 16;
+
+// Default font sizes (px) for the generic `text` kind's own text and for a
+// `shape`'s caption — chosen to match the size each rendered at (hardcoded in
+// GenericAnnotationNode.css) before this task made it a real, settable field,
+// so an existing annotation with no stored `fontSize` renders identically to
+// before.
+export const DEFAULT_GENERIC_TEXT_FONT_SIZE = 16;
+export const DEFAULT_SHAPE_CAPTION_FONT_SIZE = 14;
+
+// The size options the generic `text`/`shape` font-size picker offers —
+// deliberately the same shape as NOTE_FONT_SIZES/LabelNode's own list (a
+// short, fixed set rather than free numeric entry), widened a little at the
+// top end since `text` also serves as a free-standing heading, not only a
+// caption.
+export const GENERIC_TEXT_FONT_SIZES = [12, 14, 16, 18, 24, 32];
+
+// Curated font-family choices for the generic `text`/`shape` kinds
+// (task-annotation-text-alignment-and-font's FONT SCOPE decision): a short,
+// fixed list of CSS *generic* font families rather than free-form font-name
+// entry. Every one of these is a CSS Fonts Level 3 generic family name,
+// resolved by the viewer's own browser/OS to whatever it already has
+// installed for that generic — so rendering is predictable and consistent
+// across every client with no font files to ship, at the cost of not
+// offering a specific named typeface. `undefined`/absent means "no override"
+// — the annotation keeps inheriting the app's own ambient font, exactly as
+// every `text`/`shape` annotation already renders today, so this list has no
+// "default" entry of its own; the control that clears the override is a
+// separate action, not a member of this list.
+export const GENERIC_FONT_FAMILIES = ['serif', 'monospace', 'cursive'];
+
+// The nine box positions `textAlign` accepts, row-major (top row, middle row,
+// bottom row) — the order a 3x3 alignment-grid picker lays its buttons out in.
+export const TEXT_ALIGN_VALUES = Object.freeze([
+  'top-left',
+  'top-center',
+  'top-right',
+  'middle-left',
+  'middle-center',
+  'middle-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+]);
+
+// The default `textAlign` per kind when none is stored — chosen to exactly
+// match how each kind already renders with no alignment field at all, so an
+// existing annotation is unaffected by this task adding the field:
+// `text` has no box (it hugs its own content — GenericAnnotationNode.jsx's
+// RESIZABLE_KINDS excludes it) and, with no CSS alignment rule at all today,
+// lays out top-left by plain block-flow default; `shape`'s caption is drawn
+// centred in its inset box today (GenericAnnotationNode.css's now-removed
+// hardcoded `align-items/justify-content: center`).
+export const TEXT_ALIGN_DEFAULT_BY_KIND = Object.freeze({
+  text: 'top-left',
+  shape: 'middle-center',
+});
+
+// Maps a `textAlign` value to the flexbox properties (for a column-direction
+// flex container: `justifyContent` is the vertical position, `alignItems` the
+// horizontal one) plus the `textAlign` CSS needed so multi-line/wrapped
+// content aligns the same way *within* its own box, not only the box itself
+// within its container. Exported so GenericAnnotationNode.jsx and its tests
+// share one source rather than re-deriving the mapping.
+//
+// Honest limitation: `shape` always has an explicit box (SIZED_GENERIC_KINDS),
+// so all nine positions are visibly distinct there. `text` has none — its box
+// always exactly matches its own content (no NodeResizer, no stored width) —
+// so the vertical component (`justifyContent`) has no visible effect for
+// `text` today: with nothing but the content itself inside the box, "top"
+// and "bottom" are literally the same pixel position. The horizontal
+// component (`alignItems`/`textAlign`) IS visible for `text` whenever the
+// content spans multiple lines (typed line breaks), since those lines can be
+// narrower than the widest one. Making `text` itself resizable — the only way
+// to make its vertical alignment mean something — is a separate, bigger UX
+// change (the same call 61d5cc7b already made for icon/vote_dot), not part
+// of this task.
+const FLEX_START = 'flex-start';
+const FLEX_END = 'flex-end';
+const CENTER = 'center';
+export const TEXT_ALIGN_STYLES = Object.freeze({
+  'top-left': { justifyContent: FLEX_START, alignItems: FLEX_START, textAlign: 'left' },
+  'top-center': { justifyContent: FLEX_START, alignItems: CENTER, textAlign: 'center' },
+  'top-right': { justifyContent: FLEX_START, alignItems: FLEX_END, textAlign: 'right' },
+  'middle-left': { justifyContent: CENTER, alignItems: FLEX_START, textAlign: 'left' },
+  'middle-center': { justifyContent: CENTER, alignItems: CENTER, textAlign: 'center' },
+  'middle-right': { justifyContent: CENTER, alignItems: FLEX_END, textAlign: 'right' },
+  'bottom-left': { justifyContent: FLEX_END, alignItems: FLEX_START, textAlign: 'left' },
+  'bottom-center': { justifyContent: FLEX_END, alignItems: CENTER, textAlign: 'center' },
+  'bottom-right': { justifyContent: FLEX_END, alignItems: FLEX_END, textAlign: 'right' },
+});
 
 // Flow distance (px, unscaled) within which an arrow endpoint snaps onto a
 // node/annotation centre. Kept generous so connecting is easy (design intent).

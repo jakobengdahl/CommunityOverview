@@ -134,6 +134,12 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // translator that dropped them would make the browser's next autosave diff
 // the annotation back to rotation 0 / createAnnotation's 160x96 default,
 // silently undoing what an agent or a collaborator had just set.
+// `text` and `shape` additionally carry `style.fontSize`/`style.font`/
+// `style.textAlign` (task-annotation-text-alignment-and-font) — the same
+// reasoning applies: leaving any one of them out of either direction below
+// would make the next autosave diff it back to its default, silently
+// discarding a typography choice an agent or collaborator had just set (the
+// "unsized-geometry clobber" class of bug this task's own node warns about).
 const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
 
 function genericAnnotationToOverlay(a) {
@@ -150,12 +156,25 @@ function genericAnnotationToOverlay(a) {
   if (a.type === 'text') {
     overlay.text = a.text || '';
     overlay.fontSize = a.style?.fontSize;
+    // `font`/`textAlign` (task-annotation-text-alignment-and-font) live
+    // under `style` alongside `fontSize`, not `content` — the same
+    // convention `fontSize` already established for this kind, and the
+    // `style` argument's own documented home for typography
+    // (backend/service/mcp_tools.py's create_annotation/update_annotation
+    // docstrings).
+    overlay.font = a.style?.font;
+    overlay.textAlign = a.style?.textAlign;
     overlay.attachment = a.attachment;
   } else if (a.type === 'shape') {
     overlay.shape = a.shape || 'rectangle';
     // Optional caption (task-annotation-doubleclick-to-edit-text) — same
     // empty-string default as every other kind's `text` field.
     overlay.text = a.text || '';
+    // Caption typography (task-annotation-text-alignment-and-font) — new on
+    // `shape`, same `style`-nested convention as `text`'s own fontSize above.
+    overlay.fontSize = a.style?.fontSize;
+    overlay.font = a.style?.font;
+    overlay.textAlign = a.style?.textAlign;
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
@@ -178,7 +197,14 @@ function genericOverlayToAnnotation(o) {
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
   };
-  input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
+  // `text` and `shape` (task-annotation-text-alignment-and-font) both carry
+  // fontSize/font/textAlign under `style`, mirroring `text`'s pre-existing
+  // fontSize convention rather than the plain `{color}` every other generic
+  // kind gets.
+  input.style =
+    o.kind === 'text' || o.kind === 'shape'
+      ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
+      : { color: o.color };
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;

@@ -233,6 +233,16 @@ elsewhere on the canvas to finish. A Shape's caption stays inside its outline no
 the variant — a triangle or hexagon's text sits within the part of the figure it's
 guaranteed to fit rather than spilling past a corner.
 
+A Text annotation's or Shape's caption's right-click menu also has a nine-position
+alignment grid (each button doubles as a small live preview of that position), a text-size
+picker, and a font picker: **Default** plus a short curated list — **Serif**,
+**Monospace**, **Cursive** — chosen so text renders the same way for everyone rather than
+depending on a font file the viewer might not have. For a Shape, note that the alignment
+grid's top/middle/bottom choices only matter once the shape is tall enough to show the
+difference; for a Text annotation, which always sizes itself to its own content, only
+left/center/right currently make a visible difference, and only once the text spans more
+than one line.
+
 Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
 the note and label menus offer, plus a colour picker for everything that paints a colour
 (an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype

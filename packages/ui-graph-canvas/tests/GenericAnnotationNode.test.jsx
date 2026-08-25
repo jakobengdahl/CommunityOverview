@@ -1138,6 +1138,208 @@ describe('regular shape geometry', () => {
   });
 });
 
+// task-annotation-text-alignment-and-font: nine-position alignment, font
+// size and a curated font-family picker for the two EDITABLE_TEXT_KINDS
+// (`text`, `shape`). An existing annotation with none of these fields stored
+// must keep rendering exactly as it did before this task, so the default
+// cases below are pinned as carefully as the overridden ones.
+describe('text/shape typography', () => {
+  beforeEach(() => {
+    hoisted.resizerProps.length = 0;
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('defaults `text` to its previous 16px size and top-left layout', () => {
+    const { container } = render(<GenericAnnotationNode type="text" data={{ text: 'Hi' }} />);
+    const node = container.querySelector('.kind-text');
+    expect(node.style.fontSize).toBe('16px');
+    expect(node.style.justifyContent).toBe('flex-start');
+    expect(node.style.alignItems).toBe('flex-start');
+    // No font-family override: inherits the ambient app font, unchanged.
+    expect(node.style.fontFamily).toBe('');
+  });
+
+  it('defaults a `shape` caption to its previous 14px, centred layout', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'rectangle', text: 'Caption' }} />
+    );
+    const wrapper = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(wrapper.style.justifyContent).toBe('center');
+    expect(wrapper.style.alignItems).toBe('center');
+    const content = container.querySelector('.graph-generic-annotation-shape-text-content');
+    expect(content.style.fontSize).toBe('14px');
+  });
+
+  it('renders an overridden fontSize/font/textAlign on `text`', () => {
+    const { container } = render(
+      <GenericAnnotationNode
+        type="text"
+        data={{ text: 'Hi', fontSize: 28, font: 'serif', textAlign: 'bottom-right' }}
+      />
+    );
+    const node = container.querySelector('.kind-text');
+    expect(node.style.fontSize).toBe('28px');
+    expect(node.style.fontFamily).toBe('serif');
+    expect(node.style.justifyContent).toBe('flex-end');
+    expect(node.style.alignItems).toBe('flex-end');
+  });
+
+  // A stored fontSize of 0 is an explicit, if degenerate, value and must be
+  // honored rather than treated as "unset" and replaced by the kind default
+  // (an earlier `data?.fontSize || default` did exactly that, since `||`
+  // treats 0 as falsy the same way it does undefined/null).
+  it('honors an explicit fontSize of 0 instead of falling back to the default', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="text" data={{ text: 'Hi', fontSize: 0 }} />
+    );
+    expect(container.querySelector('.kind-text').style.fontSize).toBe('0px');
+  });
+
+  it('renders an overridden fontSize/font/textAlign on a `shape` caption', () => {
+    const { container } = render(
+      <GenericAnnotationNode
+        type="shape"
+        data={{
+          shape: 'rectangle',
+          text: 'Caption',
+          fontSize: 20,
+          font: 'monospace',
+          textAlign: 'top-left',
+        }}
+      />
+    );
+    const wrapper = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(wrapper.style.justifyContent).toBe('flex-start');
+    expect(wrapper.style.alignItems).toBe('flex-start');
+    const content = container.querySelector('.graph-generic-annotation-shape-text-content');
+    expect(content.style.fontSize).toBe('20px');
+    expect(content.style.fontFamily).toBe('monospace');
+  });
+
+  it.each(['text', 'shape'])(
+    'shows the alignment grid, font-size picker and font picker for %s',
+    (kind) => {
+      const { container } = render(
+        <GenericAnnotationNode type={kind} data={kind === 'shape' ? { shape: 'rectangle' } : {}} />
+      );
+      const target =
+        kind === 'shape' ? screen.getByTestId('shape-halo') : container.querySelector('.kind-text');
+      fireEvent.contextMenu(target);
+      expect(document.querySelectorAll('.align-picker-button')).toHaveLength(9);
+      expect(document.querySelector('.context-menu-sizes')).toBeTruthy();
+      // Button text is the translated family label (labels.fontFamily*), not
+      // the bare stored keyword — packages/ui-graph-canvas's i18n rule.
+      expect(screen.getByText('Default')).toBeInTheDocument();
+      expect(screen.getByText('Serif')).toBeInTheDocument();
+      expect(screen.getByText('Monospace')).toBeInTheDocument();
+      expect(screen.getByText('Cursive')).toBeInTheDocument();
+    }
+  );
+
+  it.each(['frame', 'icon', 'vote_dot', 'image'])('shows no typography controls for %s', (kind) => {
+    const data = kind === 'icon' ? { icon: 'flag' } : kind === 'vote_dot' ? { value: 1 } : {};
+    const { container } = render(<GenericAnnotationNode type={kind} data={data} />);
+    const target =
+      kind === 'icon'
+        ? screen.getByTitle('flag')
+        : kind === 'vote_dot'
+          ? screen.getByText('1')
+          : container.querySelector(`.kind-${kind}`);
+    fireEvent.contextMenu(target);
+    expect(document.querySelector('.context-menu-align')).toBeNull();
+    expect(document.querySelector('.context-menu-fonts')).toBeNull();
+  });
+
+  it('sets textAlign on click and notifies the annotation context', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange,
+          notifyRemoteLockedAttempt: () => {},
+          labels: {
+            textAlign: 'Alignment',
+            alignTop: 'Top',
+            alignMiddle: 'Middle',
+            alignBottom: 'Bottom',
+            alignLeft: 'Left',
+            alignCenter: 'Center',
+            alignRight: 'Right',
+            textSize: 'Text size',
+            fontFamily: 'Font',
+            fontDefault: 'Default',
+          },
+        }}
+      >
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    fireEvent.click(screen.getByLabelText('Bottom Right'));
+    expect(applyLatestUpdate({ id: 't1', data: {} }).data.textAlign).toBe('bottom-right');
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('sets fontSize on click', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi' }} />);
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    // Every GENERIC_TEXT_FONT_SIZES button renders the same "A" glyph at a
+    // different size — pick the first (smallest, 12) rather than an
+    // ambiguous text match.
+    fireEvent.click(screen.getAllByText('A')[0]);
+    expect(applyLatestUpdate({ id: 't1', data: {} }).data.fontSize).toBe(12);
+  });
+
+  it('sets and clears a font-family override on click', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi', font: 'serif' }} />);
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    // Clicked by its translated label ("Monospace"), matching what the DOM
+    // actually shows; the stored value it writes is still the bare keyword.
+    fireEvent.click(screen.getByText('Monospace'));
+    expect(applyLatestUpdate({ id: 't1', data: { font: 'serif' } }).data.font).toBe('monospace');
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    fireEvent.click(screen.getByText('Default'));
+    expect(applyLatestUpdate({ id: 't1', data: { font: 'serif' } }).data.font).toBeNull();
+  });
+
+  it('refuses a typography change on a remote-locked annotation', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: () => {},
+          notifyRemoteLockedAttempt,
+          labels: {
+            textAlign: 'Alignment',
+            alignTop: 'Top',
+            alignMiddle: 'Middle',
+            alignBottom: 'Bottom',
+            alignLeft: 'Left',
+            alignCenter: 'Center',
+            alignRight: 'Right',
+            textSize: 'Text size',
+            fontFamily: 'Font',
+            fontDefault: 'Default',
+          },
+        }}
+      >
+        <GenericAnnotationNode
+          id="t1"
+          type="text"
+          data={{ text: 'Hi', remoteSelection: { color: '#fff', displayName: 'Ada' } }}
+        />
+      </AnnotationContext.Provider>
+    );
+    // A remote claim refuses even opening the menu (openContextMenu itself
+    // notifies and returns) — matching every other mutation on a remote-locked
+    // annotation, so there is nothing to click here at all.
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    expect(document.querySelector('.context-menu-align')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('process arrow', () => {
   it('is a full-height block with a point, not a thin arrow', () => {
     const clip = clipPathFor('process_arrow');

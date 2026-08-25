@@ -57,7 +57,8 @@ Each annotation has:
 - `kind`: compatibility alias equal to `type`, except legacy inputs may use `arrow`
 - `geometry`: model-space x/y/width/height plus optional rotation
 - `position`: compatibility x/y projection
-- `style`: visual style fields such as fill, stroke, color, opacity and font
+- `style`: visual style fields such as fill, stroke, color, opacity, font
+  size/family and text alignment
 - `z`: layer order
 - `locked`: object lock flag
 - `created_by`, `updated_by`, `created_at`, `updated_at`: optional attribution
@@ -147,17 +148,20 @@ plus reset), a colour picker for the kinds that paint one (`text`, `frame`,
 `shape`, `icon`, `vote_dot` — `image` carries a `color` in the model but
 renders none, so it is offered no swatches), for `shape` a subtype picker, for
 `icon` a picker grid over the full icon vocabulary, and for `vote_dot` a value
-stepper that never counts below zero. `freehand` gets its own right-click
-property editor too (color, stroke width, smoothing, opacity) — it is not in
-the rotatable set (see [Canvas rendering](#canvas-rendering) on why rotation is
-not drawn for it), so it has no rotation control. The dedicated
-`note`/`label`/`line`/`freehand` editors and the generic one alike also carry
-the shared bring-to-front/send-to-back layer row described under
+stepper that never counts below zero; for `text` and `shape` (whose caption
+is now editable — see below), the right-click editor also carries a
+nine-position text-alignment grid, a font-size picker and a curated
+font-family picker (task-annotation-text-alignment-and-font — see [Typography
+controls](#typography-controls-text-shape)). `freehand` gets its own
+right-click property editor too (color, stroke width, smoothing, opacity) —
+it is not in the rotatable set (see [Canvas rendering](#canvas-rendering) on
+why rotation is not drawn for it), so it has no rotation control. The
+dedicated `note`/`label`/`line`/`freehand` editors and the generic one alike
+also carry the shared bring-to-front/send-to-back layer row described under
 [Layer order](#layer-order); `group`'s own context menu does not. What the
-editors still do not cover: any font control at all for the generic `text`
-kind (`note` and `label` have a text-size picker, but no kind has font family,
-weight, style or alignment), and cropping/replacing an `image`'s pixel
-content.
+editors still do not cover: `note`/`label` still have only a text-size
+picker, not the alignment/font-family control `text`/`shape` now have, and
+cropping/replacing an `image`'s pixel content is still unsupported.
 `label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
 another annotation from the GUI, by dragging the annotation within snapping
 distance of the target
@@ -753,6 +757,57 @@ gap named only `note`/`label`/`text`/the six `shape` variants. `icon`,
 `vote_dot` and `image` are excluded too — none carries a free-text field in
 the v1 content model (a vote's `value` is a number with its own stepper).
 
+### Typography controls (`text`, `shape`)
+
+`text` and `shape` (task-annotation-text-alignment-and-font) are the only two
+kinds with editable free text (see above), so they are the only two kinds
+this task adds typography to: a nine-position text-alignment grid
+(`top-left` through `bottom-right`, matching `content.attachment.anchor`'s
+box-position vocabulary in spirit though it is a separate field), a font-size
+picker, and a curated font-family picker. All three live under `style`
+(`style.textAlign`, `style.fontSize`, `style.font`), not `content` — the same
+place `text`'s pre-existing `fontSize` already lived — and each is optional,
+falling back independently to whatever the annotation already rendered as
+before this task: `text` defaults to `top-left` (its plain block-flow layout
+with no alignment rule at all), `shape`'s caption defaults to `middle-center`
+(the centred layout `GenericAnnotationNode.css` used to hardcode), and both
+default their font size to what was previously hardcoded in CSS (16px for
+`text`, 14px for a `shape` caption) and their font family to the app's own
+ambient font (no override). An existing annotation with none of these fields
+stored therefore renders exactly as it did before this task.
+
+**Font scope.** The font-family picker is a short curated list of CSS
+*generic* font families (`GENERIC_FONT_FAMILIES` in
+`packages/ui-graph-canvas/src/utils/annotations.js`: `serif`, `monospace`,
+`cursive`, plus the unstyled default) rather than free-form font-name entry
+or an uploaded font file. A generic family name is resolved by the viewer's
+own browser/OS, so it renders predictably on every client with nothing to
+ship or embed — the trade-off is a fixed, small set of looks rather than a
+specific named typeface.
+
+**`text` has no box, so its vertical alignment is inert today.** `text` is
+not one of the kinds that carries an explicit box size
+(`RESIZABLE_KINDS`/`SIZED_GENERIC_KINDS` in `GenericAnnotationNode.jsx`/
+`annotations.js` — unchanged by this task) — it always renders exactly as
+large as its own content, the same as before. The alignment control's
+horizontal axis is still visible for `text` whenever the caption spans
+multiple lines (typed line breaks): shorter lines sit left/center/right of
+the widest one. The vertical axis (`top`/`middle`/`bottom`) has no visible
+effect for `text` — with the box always equal to the content, there is no
+extra room to place it in — until `text` itself becomes resizable, which
+this task deliberately leaves out of scope (the same call `61d5cc7b` already
+made for `icon`/`vote_dot`: making an unsized kind resizable is a separate,
+bigger UX change). `shape`'s caption has a real box (the shape's own
+`w`/`h`), so all nine positions are visibly distinct there today.
+
+**MCP.** `create_annotation`/`update_annotation` read these three fields from
+their existing `style` argument — see their docstrings
+(`backend/service/mcp_tools.py`) — so no new MCP tool or parameter was added;
+an agent setting `style.fontSize` on a `text`/`shape` annotation already goes
+through the generic, un-typed `style` passthrough
+(`backend/core/session_annotations.py`) that `text`'s `fontSize` already used
+before this task.
+
 An `icon` annotation draws the glyph its configured `content.icon` name
 resolves to in the canvas package's icon set
 (`packages/ui-graph-canvas/src/utils/annotationIcons.js`). That set now has a
@@ -877,12 +932,12 @@ rule](#downstream-closure-rule).
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
 | `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer (right-click), attach by dragging near a node/annotation; no font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape)), attach by dragging near a node/annotation; no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/unlock (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
-| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour, rotation and layer (front/back). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour, rotation, layer (front/back), and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
