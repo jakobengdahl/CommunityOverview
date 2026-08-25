@@ -14,10 +14,13 @@ import { LAYER_BACK, LAYER_FRONT, resolveLayerZ } from '../utils/annotationLayer
  */
 export default function AnnotationLayerControls({ labels, locked, onChangeLayer }) {
   // A locked annotation is offered only unlock or copy, so the row is not
-  // shown at all rather than shown and refused. Four of the five menus would
-  // withhold it anyway through their own `locked` branch, but ArrowNode has
-  // none and renders its menu whatever `locked` says — without this it would
-  // be the one place a user meets a visibly present, silently inert control.
+  // shown at all rather than shown and refused. Every one of the five menus
+  // now withholds it anyway through its own `locked` branch — ArrowNode was
+  // the last without one, and gaining it made this guard unreachable from
+  // every current caller. It stays as the floor: a new call site that
+  // forgets its own branch gets the right behaviour rather than a visibly
+  // present, silently inert control. The real enforcement is in
+  // `useAnnotationLayer` below, which refuses whatever any markup does.
   if (locked) return null;
   return (
     <>
