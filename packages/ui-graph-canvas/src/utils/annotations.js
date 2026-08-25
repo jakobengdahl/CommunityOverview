@@ -57,7 +57,11 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_
 const GENERIC_OVERLAY_FIELDS = {
   text: ['text', 'color', 'fontSize', 'attachment'],
   frame: ['color'],
-  shape: ['shape', 'color'],
+  // `text` here is a `shape`'s optional caption
+  // (task-annotation-doubleclick-to-edit-text), not a separate annotation
+  // kind — a shape with no caption keeps `text: ''`, matching every other
+  // kind's empty-string default rather than an absent field.
+  shape: ['shape', 'color', 'text'],
   icon: ['icon', 'color', 'attachment'],
   vote_dot: ['value', 'color', 'attachment'],
   image: ['image', 'alt', 'color'],

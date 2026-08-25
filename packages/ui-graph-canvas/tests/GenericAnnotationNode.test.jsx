@@ -817,6 +817,158 @@ describe('GenericAnnotationNode locked context menu', () => {
   });
 });
 
+// task-annotation-doubleclick-to-edit-text: only note/label/group had
+// double-click-to-edit; `text` (whose whole purpose is text) and every
+// `shape` variant had no content-editing UI at all. This follows
+// NoteNode/LabelNode's exact pattern: double-click to enter, blur/Escape to
+// commit, live per-keystroke sync (the host's scheduler debounces 'text'
+// changes to 300ms — see AnnotationContext's notifyChange doc comment).
+describe('GenericAnnotationNode inline text editing', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+  });
+
+  it('enters edit mode on double-click, showing a textarea seeded with the current text', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toHaveValue('Hello');
+  });
+
+  it('syncs every keystroke live and commits the trimmed value on blur', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'typing' } });
+    expect(applyLatestUpdate({ id: 't1', data: { text: 'Hello' } }).data.text).toBe('typing');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+
+    fireEvent.change(textarea, { target: { value: '  world  ' } });
+    fireEvent.blur(textarea);
+    expect(applyLatestUpdate({ id: 't1', data: { text: 'Hello' } }).data.text).toBe('world');
+  });
+
+  it('cancels the edit on Escape, reverting to the stored text without writing it', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'discard me' } });
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+  });
+
+  it('refuses to enter edit mode while another client holds the selection claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+      >
+        <GenericAnnotationNode
+          id="t1"
+          type="text"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('enters edit mode on double-click for a shape annotation', () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'triangle' }} />);
+    fireEvent.doubleClick(screen.getByTestId('shape-halo'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it("writes a shape's caption and notifies the text-kind change", () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByTestId('shape-halo'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Step 1' } });
+    expect(
+      applyLatestUpdate({ id: 's1', data: { shape: 'rectangle' } }).data.text
+    ).toBe('Step 1');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+
+  it('shows a previously stored caption without entering edit mode', () => {
+    render(<GenericAnnotationNode type="shape" data={{ shape: 'hexagon', text: 'caption' }} />);
+    expect(screen.getByText('caption')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('renders no caption layer at all for an empty, unedited shape', () => {
+    const { container } = render(<GenericAnnotationNode type="shape" data={{ shape: 'circle' }} />);
+    expect(container.querySelector('.graph-generic-annotation-shape-text')).toBeNull();
+  });
+
+  it.each(['icon', 'vote_dot', 'image', 'frame'])(
+    'does not open a text editor on double-click for %s (no free-text field to edit)',
+    (kind) => {
+      const { container } = render(
+        <GenericAnnotationNode
+          id="n1"
+          type={kind}
+          data={{ icon: 'flag', value: 1, image: {} }}
+        />
+      );
+      const root = container.querySelector(`.kind-${kind}`);
+      fireEvent.doubleClick(root);
+      expect(screen.queryByRole('textbox')).toBeNull();
+    }
+  );
+
+  // The whole point of this task's shape-specific problem: a clip-path clips
+  // the shape's own outline, so a caption centred in the bounding box would
+  // spill past the visible figure at the corners for every non-rectangular
+  // variant. Each SHAPE_TEXT_INSET entry is the axis-aligned rectangle its
+  // clip-path is proven to contain (see that constant's derivation comment
+  // in GenericAnnotationNode.jsx) — pin that the rendered overlay actually
+  // carries it, not merely that some inset exists.
+  it.each([
+    ['rectangle', { top: '0%', right: '0%', bottom: '0%', left: '0%' }],
+    ['triangle', { top: '50%', right: '25%', bottom: '0%', left: '25%' }],
+    ['rhombus', { top: '25%', right: '25%', bottom: '25%', left: '25%' }],
+    ['hexagon', { top: '0%', right: '25%', bottom: '0%', left: '25%' }],
+    ['process_arrow', { top: '0%', right: '30%', bottom: '0%', left: '0%' }],
+  ])('insets a %s caption to the rectangle its clip-path is proven to contain', (shape, inset) => {
+    const { container } = render(<GenericAnnotationNode type="shape" data={{ shape, text: 'x' }} />);
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(overlay.style.top).toBe(inset.top);
+    expect(overlay.style.right).toBe(inset.right);
+    expect(overlay.style.bottom).toBe(inset.bottom);
+    expect(overlay.style.left).toBe(inset.left);
+  });
+
+  it("insets a circle caption to its inscribed square's margin", () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'circle', text: 'x' }} />
+    );
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    const margin = ((1 - 1 / Math.sqrt(2)) / 2) * 100;
+    expect(parseFloat(overlay.style.top)).toBeCloseTo(margin, 6);
+    expect(parseFloat(overlay.style.left)).toBeCloseTo(margin, 6);
+  });
+
+  it('falls back to the rectangle inset for an unrecognised shape name', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'star', text: 'x' }} />
+    );
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(overlay.style.top).toBe('0%');
+    expect(overlay.style.left).toBe('0%');
+  });
+});
+
 // Parse a `polygon(x% y%, ...)` clip-path into side lengths at a given box
 // size, so the assertions below are about the figure a user sees rather than
 // about the percentages that happen to produce it. This is the whole point of

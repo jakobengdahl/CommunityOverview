@@ -79,6 +79,31 @@ describe('group description round-trip (R12)', () => {
   });
 });
 
+// task-annotation-doubleclick-to-edit-text: a shape's optional caption text
+// must survive the host-level overlay <-> server-document round trip too,
+// not only the canvas-node round trip overlaySerialization.test.js covers —
+// this is the layer legacyMetadataToAnnotationDocument/
+// annotationDocumentToLegacyMetadata actually use for session save/restore.
+describe("shape caption round-trip", () => {
+  it('carries a caption through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata', () => {
+    const overlay = { id: 'shape-1', kind: 'shape', position: { x: 0, y: 0 }, shape: 'hexagon', text: 'Step 1' };
+    const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+    const stored = document.annotations.find((a) => a.id === overlay.id);
+    expect(stored.text).toBe('Step 1');
+
+    const metadata = annotationDocumentToLegacyMetadata(document);
+    const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+    expect(roundTripped.text).toBe('Step 1');
+  });
+
+  it('defaults to an empty caption when the shape overlay has none', () => {
+    const document = legacyMetadataToAnnotationDocument({
+      annotations: [{ id: 'shape-2', kind: 'shape', position: { x: 0, y: 0 }, shape: 'circle' }],
+    });
+    expect(document.annotations[0].text).toBe('');
+  });
+});
+
 // task-annotation-render-direct-manipulation: label/text/icon/vote_dot
 // attachments now round-trip between the server annotation document and the
 // canvas overlay shape, not only through the JS annotation model.

@@ -188,7 +188,12 @@ function withTypePayload(annotation, type, geometry) {
     };
   }
   if (type === 'shape') {
-    return { shape: normalizeShapeName(annotation.shape) };
+    // `text` is optional caption content added by
+    // task-annotation-doubleclick-to-edit-text — a shape with none keeps
+    // rendering exactly as before, but a caption survives normalization
+    // (and therefore session save/reload) the same way `text`/`label`'s own
+    // content field does.
+    return { shape: normalizeShapeName(annotation.shape), text: annotation.text || '' };
   }
   if (type === 'icon') {
     return {
