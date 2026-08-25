@@ -1,8 +1,14 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { buildFreehandPath, hasPressureData, buildPressureSegments } from '../utils/freehandPath';
+import {
+  reduceFreehandPoints,
+  smoothAnchors,
+  pointsToPathData,
+  hasPressureData,
+  segmentsFromCurvePoints,
+} from '../utils/freehandPath';
 import { isRemoteLocked } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './FreehandAnnotationNode.css';
@@ -51,6 +57,11 @@ const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
 const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
 const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
 
+// Stable empty-array reference for the no-points fallback below, so a
+// missing/invalid `data.points` doesn't itself defeat this component's
+// useMemo (a fresh `[]` literal every render would count as "changed").
+const EMPTY_POINTS = [];
+
 function boundingBox(points) {
   let minX = Infinity;
   let minY = Infinity;
@@ -67,7 +78,7 @@ function boundingBox(points) {
 }
 
 function FreehandAnnotationNode({ id, data, selected }) {
-  const rawPoints = Array.isArray(data?.points) ? data.points : [];
+  const rawPoints = Array.isArray(data?.points) ? data.points : EMPTY_POINTS;
   const color = data?.color || DEFAULT_COLOR;
   const strokeWidth = Number.isFinite(data?.strokeWidth) ? data.strokeWidth : DEFAULT_STROKE_WIDTH;
   const smoothing = data?.smoothing ?? 0;
@@ -166,16 +177,40 @@ function FreehandAnnotationNode({ id, data, selected }) {
   // position.
   const originX = PAD - minX;
   const originY = PAD - minY;
-  const localPoints = rawPoints.map((p) => ({
-    x: p.x + originX,
-    y: p.y + originY,
-    pressure: p.pressure,
-  }));
-  const pressureAware = hasPressureData(localPoints);
-  const { d } = buildFreehandPath(localPoints, smoothing);
-  const segments = pressureAware
-    ? buildPressureSegments(localPoints, smoothing, strokeWidth)
-    : null;
+  // Curve-fitting (Catmull-Rom resampling, task-annotation-freehand-true-
+  // smoothing) can now emit several times more points than it reduces at
+  // high smoothing, the opposite of the old RDP-decimation cost profile —
+  // so this stage is memoized on the actual sampled points rather than
+  // recomputed every render. `rawPoints` (`data.points`) is a stable
+  // reference across a drag (drag moves the node's flow position, not its
+  // points array — see this component's own doc comment), so a stroke's
+  // curve is only rebuilt when its points, smoothing, or origin truly
+  // change — deliberately NOT keyed on `strokeWidth`, which this stage never
+  // reads; splitting it out keeps a plain width change (no effect on the
+  // curve at all) from re-running reduce+curve-fit for nothing.
+  const { localPoints, curved } = useMemo(() => {
+    const lp = rawPoints.map((p) => ({
+      x: p.x + originX,
+      y: p.y + originY,
+      pressure: p.pressure,
+    }));
+    const reduced = reduceFreehandPoints(lp, smoothing);
+    return { localPoints: lp, curved: smoothAnchors(reduced, smoothing) };
+  }, [rawPoints, originX, originY, smoothing]);
+  const pressureAware = useMemo(() => hasPressureData(localPoints), [localPoints]);
+  // `curved` can hold up to ~7x the reduced point count at high smoothing,
+  // so building `d` (used unconditionally, even for pressure-aware strokes'
+  // hit-target path below) is memoized too — otherwise a re-render that
+  // touches neither points nor smoothing (selection, remote-selection badge,
+  // context menu open/close, locked/opacity) would still re-walk it.
+  const d = useMemo(() => pointsToPathData(curved), [curved]);
+  // Splitting into per-segment widths is a cheap single pass over the
+  // already curve-fit points (unlike the reduce+curve-fit stage above), so
+  // it's fine for this one to depend on `strokeWidth` directly.
+  const segments = useMemo(
+    () => (pressureAware ? segmentsFromCurvePoints(curved, strokeWidth) : null),
+    [pressureAware, curved, strokeWidth]
+  );
 
   return (
     <div
