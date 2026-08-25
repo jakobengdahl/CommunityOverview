@@ -484,6 +484,22 @@ describe('a stored annotation this version cannot read', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it('refuses a primitive group entry instead of fabricating a phantom group', () => {
+    // A string or a number does NOT throw on `g.id` — it yields undefined — so
+    // without an explicit refusal it becomes a group annotation with a
+    // generated id, an empty label and no members: an unexplained box on the
+    // canvas, and nothing anywhere reporting it.
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const groups = annotationsToGroups([]).groups;
+    expect(groups).toEqual([]);
+    const doc = legacyMetadataToAnnotationDocument({
+      groups: [{ id: 'g-ok', label: 'fine', position: { x: 0, y: 0 } }, 'a string', 7, true],
+      parentIds: {},
+    });
+    expect(doc.annotations.map((a) => a.id)).toEqual(['g-ok']);
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
   it('the legacy overlay path keeps the annotations it can read', () => {
     warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(

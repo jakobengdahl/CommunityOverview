@@ -2407,18 +2407,32 @@ function GraphCanvasInner({
     const parentIds = Array.isArray(groupsToRestore) ? {} : groupsToRestore?.parentIds || {};
 
     if (groups && groups.length > 0) {
-      const groupNodes = groups.map((g) => ({
-        id: g.id,
-        type: 'group',
-        position: g.position,
-        data: {
-          label: g.label || 'Group',
-          description: g.description || '',
-          color: g.color || '#646cff',
-        },
-        style: g.style || { width: 300, height: 200 },
-      }));
-      const groupIdSet = new Set(groups.map((g) => g.id));
+      // The sibling of the overlay restore's own filter below. A stored group
+      // that is not a usable object throws on `g.id` here — inside an effect,
+      // so outside every AnnotationErrorBoundary, taking the whole canvas with
+      // it. A group is an annotation kind and answers to the same rule as the
+      // rest: skip it, keep the others.
+      const groupNodes = groups
+        .filter((g) => g && typeof g === 'object' && typeof g.id === 'string' && g.id)
+        .map((g) => ({
+          id: g.id,
+          type: 'group',
+          position: g.position,
+          data: {
+            label: g.label || 'Group',
+            description: g.description || '',
+            color: g.color || '#646cff',
+          },
+          style: g.style || { width: 300, height: 200 },
+        }));
+      // Built from what survived rather than the raw input. This cannot
+      // currently differ — every entry the filter drops has no usable id, so a
+      // set built from the raw list would only gain `undefined`, which no
+      // truthy `savedParent` matches — and no test distinguishes the two. It is
+      // written this way because deriving the set from the list it describes is
+      // the correct relationship, and the alternative is right only by accident
+      // of what "malformed" happens to mean today.
+      const groupIdSet = new Set(groupNodes.map((g) => g.id));
       setNodes((nds) => {
         const nonGroups = nds
           .filter((n) => n.type !== 'group' && !n.id.startsWith('group-'))

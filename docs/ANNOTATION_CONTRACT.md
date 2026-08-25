@@ -254,6 +254,12 @@ one below it cannot reach:
   while each failure is logged to the console separately, for whoever has to
   find the defect.
 
+Groups are annotations too, and get the same treatment in both places: a
+malformed entry in a restored session's group list is filtered before it can
+throw on `g.id` inside an effect — where no boundary reaches — and a primitive
+entry is refused rather than silently becoming a group annotation with a
+generated id and no members.
+
 An unknown kind therefore never reaches the canvas at all: it is dropped while
 normalising, and the restore path filters by the known overlay kinds besides.
 The translators tolerate one because they are also used on already-built nodes,

@@ -275,6 +275,66 @@ describe('every call site drops what the translators refuse', () => {
   });
 });
 
+describe('a malformed group in a restored session', () => {
+  // The sibling of the overlay restore, and the one this branch first missed:
+  // it throws on `g.id` INSIDE an effect, so no error boundary can catch it and
+  // the whole canvas unmounts. The failure the branch exists to prevent, for
+  // the input it claimed to have closed.
+  const groups = [
+    { id: 'g-ok', position: { x: 0, y: 0 }, label: 'Team' },
+    null,
+    undefined,
+    'a string',
+    { position: { x: 1, y: 1 } },
+    { id: '', position: { x: 2, y: 2 } },
+  ];
+
+  it('does not take the canvas down', () => {
+    expect(() =>
+      render(
+        <GraphCanvas
+          nodes={[{ id: 'n1', type: 'custom', position: { x: 0, y: 0 }, data: { label: 'Real' } }]}
+          edges={[]}
+          groupsToRestore={{ groups, parentIds: {} }}
+        />
+      )
+    ).not.toThrow();
+    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
+  });
+
+  it('restores the group it can read and drops the rest', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} groupsToRestore={{ groups, parentIds: {} }} />);
+    const produced = hoisted.setNodes.mock.calls
+      .map((c) => (typeof c[0] === 'function' ? c[0]([]) : c[0]))
+      .filter(Array.isArray)
+      .find((list) => list.some((n) => n?.type === 'group'));
+    expect(produced).toBeTruthy();
+    expect(produced.filter((n) => n.type === 'group').map((n) => n.id)).toEqual(['g-ok']);
+  });
+
+  it('never re-parents a node onto a group that is not on the canvas', () => {
+    // Re-parenting onto a group that does not exist is its own crash, thrown
+    // from inside ReactFlow's store where no boundary reaches. Asserted as the
+    // invariant rather than against one contrived input, since the ways to
+    // produce a dangling parent will change as the group shape does.
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        groupsToRestore={{ groups, parentIds: { 'n-orphan': 'g-gone', n1: 'g-ok' } }}
+      />
+    );
+    for (const call of hoisted.setNodes.mock.calls) {
+      const produced = typeof call[0] === 'function' ? call[0]([]) : call[0];
+      if (!Array.isArray(produced)) continue;
+      const ids = new Set(produced.map((n) => n?.id));
+      for (const n of produced) {
+        if (n?.parentId) expect(ids.has(n.parentId)).toBe(true);
+      }
+    }
+  });
+});
+
 describe('overlayToFlowNode / flowNodeToOverlay refuse what they cannot translate', () => {
   it.each([
     ['null', null],
