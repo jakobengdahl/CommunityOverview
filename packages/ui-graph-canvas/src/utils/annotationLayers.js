@@ -12,7 +12,9 @@
  * annotations already on the canvas carry fractional `z` values (an agent may
  * set any float over MCP — `z` is `Optional[float]` in
  * backend/core/session_annotations.py). When no such value exists it returns
- * null rather than an approximate one. ReactFlow
+ * null rather than an approximate one — including in a few cases where an
+ * in-range layer does exist but the step that would reach it cannot be
+ * computed safely. ReactFlow
  * writes a node's `zIndex` straight into the element's inline style, and CSS
  * `z-index` accepts only `auto | <integer>`: a browser rejects
  * `z-index: 0.5` outright and the element silently keeps whatever it had.
@@ -67,10 +69,13 @@ function layerOf(node) {
  * That is not the same as staying inside the graph's band, and must not be
  * read as such — graph nodes carry no `zIndex` at all (nothing outside
  * ./annotations.js ever sets one), so they sit at 0 alongside a freshly
- * created annotation. Sending an annotation to the back therefore writes a
- * negative `z` and does place it behind the graph's own nodes and edges.
- * That is the intended, useful behaviour — it is how a `frame` gets behind
- * the nodes it frames — not an accident of the arithmetic.
+ * created annotation. Send-to-back writes one below the backmost annotation,
+ * so while that annotation is at or below 0 — the default, since every
+ * annotation is created there — the result is negative and does place the
+ * annotation behind the graph's own nodes and edges. That is intended and
+ * useful, and it is how a `frame` gets behind the nodes it frames. It is not
+ * a guarantee: once every annotation has been pushed above 0 the result
+ * lands at 0 or higher, level with or in front of the graph.
  *
  * An annotation tied with the current front is *not* already in front — the
  * tie is what the click is there to break — so it moves.

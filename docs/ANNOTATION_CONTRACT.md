@@ -215,9 +215,10 @@ annotation. Whenever that backmost annotation is itself at or below 0 — the
 default, since every annotation is created at 0 — the result is negative and
 does place the annotation behind the graph's nodes and edges. That is
 intended and useful, and it is how a `frame` gets behind the nodes it frames;
-it is not, however, a guarantee, and a canvas whose annotations have all been
-pushed above 0 will send one back to a layer that still sits in front of the
-graph.
+it is not, however, a guarantee. Once every annotation has been pushed above
+0, send-to-back lands at 0 or higher — level with the graph (where paint
+order falls back to document order) or in front of it, but no longer behind
+it.
 
 A layer is only ever written when it is an integer strictly past every other
 annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
