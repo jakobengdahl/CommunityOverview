@@ -146,6 +146,18 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(shape.data.shape).toBe('circle');
   });
 
+  // task-annotation-doubleclick-to-edit-text: a shape's optional caption
+  // field is present from creation (matching `text`-kind's own branch just
+  // above in GraphCanvas.jsx), not merely absent until a user's first edit.
+  it('creates a shape annotation with an empty caption already present', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    const shape = findCreatedNode('shape');
+    expect(shape.data.text).toBe('');
+  });
+
   // task-annotation-render-direct-manipulation remaining_scope: "icon/vote_dot
   // GUI creation is still not implemented" — closed here.
   it('creates an icon annotation via the toolbox with a default icon and size', () => {

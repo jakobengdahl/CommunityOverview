@@ -306,6 +306,9 @@ describe('generic annotation overlay translation', () => {
         kind: 'shape',
         position: { x: 5, y: 5 },
         shape: 'circle',
+        // task-annotation-doubleclick-to-edit-text: shape now carries an
+        // optional caption field, defaulting to '' like text/label's own.
+        text: '',
         color: '#60A5FA',
         size: { w: 120, h: 120 },
         z: 4,

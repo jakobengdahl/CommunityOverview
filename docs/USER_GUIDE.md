@@ -227,6 +227,12 @@ is uploaded to the server, which validates it, optimises it, and embeds the resu
 keeps rendering even if the original file or URL later disappears. It appears on the
 canvas a moment after you paste or drop it, once the server has finished processing.
 
+Like Note and Label, a **Text** annotation and any **Shape** — including a process
+arrow — can be double-clicked to type into it: click away, press Escape, or just click
+elsewhere on the canvas to finish. A Shape's caption stays inside its outline no matter
+the variant — a triangle or hexagon's text sits within the part of the figure it's
+guaranteed to fit rather than spilling past a corner.
+
 Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
 the note and label menus offer, plus a colour picker for everything that paints a colour
 (an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype

@@ -49,6 +49,84 @@ const GENERIC_COLORS = [
 // stepper never takes it below zero.
 const VOTE_VALUE_MIN = 0;
 
+// The generic kinds that get inline double-click-to-edit text, following the
+// exact pattern NoteNode/LabelNode already established (double-click to
+// enter, blur/Escape to commit, live sync at the shared 300ms text debounce —
+// see AnnotationContext's notifyChange('text') doc comment). `text`'s whole
+// purpose is holding text; `shape` covers every content.shape variant
+// (rectangle through process_arrow) so a shape can carry a caption. `frame`
+// is deliberately excluded — the contract describes it as a "visual-only
+// framing box", and the reported gap (task-annotation-doubleclick-to-edit-text)
+// names only note/label/text/the six shape variants, not frame. `icon`,
+// `vote_dot` and `image` have no free-text field to edit this way either
+// (a vote's value is a number with its own stepper, and an icon/image carry
+// no caption in the v1 content model).
+const EDITABLE_TEXT_KINDS = new Set(['text', 'shape']);
+
+// The axis-aligned rectangle each shape variant's clip-path is *guaranteed*
+// to fully contain, as inset percentages (top/right/bottom/left) against the
+// node's own box. A text layer positioned inside this rectangle can never
+// spill past the visible painted outline, however the clip-path itself is
+// drawn — solving the "text overflows the corners" problem this task exists
+// to close without touching the shape's stored geometry.
+//
+// Insetting the text was chosen over growing the shape to fit: growing would
+// fight the fixed aspect ratios REGULAR_SHAPE_ASPECT enforces for triangle/
+// hexagon/rhombus (there is no single side to grow that keeps the figure
+// regular), and would move the annotation's stored width/height as a side
+// effect of typing rather than of a deliberate resize gesture. Insetting only
+// changes where the text layer draws; `shape`'s geometry semantics — and
+// everything resize/aspect-lock does with them — stay exactly as they are.
+//
+// Derivation per variant (reading SHAPE_STYLES' clip-paths, not eyeballed):
+// - `rectangle` has no clip-path at all: the full box is safe.
+// - `process_arrow`'s body (the 0%-70% block before its point) and
+//   `hexagon`'s vertical band (25%-75%, full height, since both its slanted
+//   edges only move *outward* from x=25%/75% as they run from y=0%/100%
+//   toward y=50%) are each already an axis-aligned rectangle wholly inside
+//   the polygon.
+// - `circle` inscribes a centred square (or, for a non-square box, a
+//   same-fraction axis-aligned rectangle) of side length 1/sqrt(2) of the
+//   box on each axis — the largest one a circle/ellipse can contain — so the
+//   margin on every side is (1 - 1/sqrt(2))/2.
+// - `triangle` (apex top-centre, full-width base) and `rhombus` (a point at
+//   each edge midpoint) both reduce to the textbook maximal-area
+//   axis-aligned inscribed rectangle for their shape: half the box's width
+//   and half its height, centred — sitting on the base for the triangle
+//   (inset-top 50%, inset-bottom 0%, since the triangle only widens going
+//   down), centred on all four sides for the rhombus.
+const CIRCLE_TEXT_INSET_PCT = ((1 - 1 / Math.sqrt(2)) / 2) * 100;
+const SHAPE_TEXT_INSET = Object.freeze(
+  Object.assign(Object.create(null), {
+    rectangle: { top: 0, right: 0, bottom: 0, left: 0 },
+    circle: {
+      top: CIRCLE_TEXT_INSET_PCT,
+      right: CIRCLE_TEXT_INSET_PCT,
+      bottom: CIRCLE_TEXT_INSET_PCT,
+      left: CIRCLE_TEXT_INSET_PCT,
+    },
+    triangle: { top: 50, right: 25, bottom: 0, left: 25 },
+    rhombus: { top: 25, right: 25, bottom: 25, left: 25 },
+    hexagon: { top: 0, right: 25, bottom: 0, left: 25 },
+    process_arrow: { top: 0, right: 30, bottom: 0, left: 0 },
+  })
+);
+
+// Falls back to the rectangle inset (the whole box) for an unrecognised
+// shape name, matching SHAPE_STYLES' own fallback — including a name that
+// collides with an inherited Object member, since SHAPE_TEXT_INSET has no
+// prototype to collide with.
+function shapeTextInsetStyle(shape) {
+  const inset = SHAPE_TEXT_INSET[shape] || SHAPE_TEXT_INSET.rectangle;
+  return {
+    position: 'absolute',
+    top: `${inset.top}%`,
+    right: `${inset.right}%`,
+    bottom: `${inset.bottom}%`,
+    left: `${inset.left}%`,
+  };
+}
+
 const ROTATE_STEP = 15;
 function normalizeAngle(deg) {
   return ((deg % 360) + 360) % 360;
@@ -180,7 +258,9 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * outline, for the sized kinds, model-space resize via ReactFlow's
  * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
  * property editor (colour, shape subtype, icon name, vote value, rotation
- * and layer order).
+ * and layer order), and — for EDITABLE_TEXT_KINDS (`text`, `shape`) —
+ * double-click-to-edit inline text, following NoteNode/LabelNode's own
+ * pattern exactly.
  */
 // See NoteNode's equivalent default: an annotation whose payload is missing
 // should draw empty rather than throw. Every read below already uses `?.` or a
@@ -205,6 +285,25 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // gesture, read by handleResizeEnd to map the gesture's net delta back
   // through this annotation's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
+
+  // Inline text editing for EDITABLE_TEXT_KINDS (`text`, `shape`) — state and
+  // effects mirror NoteNode/LabelNode's own exactly, so the same double-click/
+  // blur/Escape/live-sync behaviour holds for every editable kind rather than
+  // inventing a second editing model.
+  const [isEditingText, setIsEditingText] = useState(false);
+  const [textDraft, setTextDraft] = useState(data.text || '');
+  const textInputRef = useRef(null);
+
+  useEffect(() => {
+    setTextDraft(data.text || '');
+  }, [data.text]);
+
+  useEffect(() => {
+    if (isEditingText && textInputRef.current) {
+      textInputRef.current.focus();
+      textInputRef.current.select();
+    }
+  }, [isEditingText]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -237,6 +336,57 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       return;
     }
     setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  // Double-click entry point for EDITABLE_TEXT_KINDS, matching NoteNode/
+  // LabelNode's onDoubleClick exactly: only a live remote claim refuses entry
+  // (a persisted `locked` flag does not — neither dedicated component checks
+  // it here either, so this stays consistent rather than inventing a
+  // stricter rule only for the generic kinds).
+  const startEditingText = (e) => {
+    if (!EDITABLE_TEXT_KINDS.has(kind)) return;
+    e.stopPropagation();
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setIsEditingText(true);
+  };
+
+  // Authoritative write on blur/Escape — trims, matching NoteNode/LabelNode.
+  const commitText = () => {
+    setIsEditingText(false);
+    if (remoteLocked) {
+      setTextDraft(data.text || '');
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    const trimmed = textDraft.trim();
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
+    );
+    notifyChange('text');
+  };
+
+  // Live per-keystroke sync — see NoteNode/LabelNode's equivalent comment
+  // (docs/ANNOTATION_CONTRACT.md's "300 ms text debounce"). Pushes the raw,
+  // untrimmed value on every change; commitText still trims on blur/Escape.
+  const handleTextChange = (e) => {
+    const next = e.target.value;
+    setTextDraft(next);
+    if (remoteLocked) return;
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
+    );
+    notifyChange('text');
+  };
+
+  const handleTextKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setTextDraft(data.text || '');
+      setIsEditingText(false);
+    }
   };
 
   const changeShape = (shape) => {
@@ -446,15 +596,34 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     />
   );
 
+  // Shared by `text` and `shape` below — the only difference between the two
+  // was `rows`, which `shape`'s inset wrapper overrides via CSS `height: 100%`
+  // anyway (see GenericAnnotationNode.css), so one element serves both rather
+  // than two copies that can quietly drift apart.
+  const textEditor = (
+    <textarea
+      ref={textInputRef}
+      className="graph-generic-annotation-text-input nodrag"
+      rows={2}
+      value={textDraft}
+      onChange={handleTextChange}
+      onBlur={commitText}
+      onKeyDown={handleTextKeyDown}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    />
+  );
+
   if (kind === 'text') {
     return (
       <>
         <div
           className={`graph-generic-annotation-node kind-text${selectedClass}`}
           style={{ color, ...rotation }}
+          onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
         >
-          {data.text || ''}
+          {isEditingText ? textEditor : data.text || ''}
         </div>
         {menu}
         {remoteBadge}
@@ -501,6 +670,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             ...rotation,
             ...(selected ? SELECTED_SHAPE_HALO : null),
           }}
+          onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
         >
           {/* Inside the halo (rather than a sibling of it) so the resize
@@ -520,6 +690,22 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
             }}
           />
+          {/* Sits on the halo (unclipped) rather than inside the shape div
+              above (clipped), at the inset SHAPE_TEXT_INSET computes for
+              this variant — see that constant's comment for why an inset
+              text layer, not a grown shape, is the fix for the clip-path
+              overflow this task reported. Only mounted while there is
+              something to show/type, so an empty, untouched shape keeps no
+              extra hit-testable element sitting over its resize handles. */}
+          {(isEditingText || data.text) && (
+            <div className="graph-generic-annotation-shape-text" style={shapeTextInsetStyle(shape)}>
+              {isEditingText ? (
+                textEditor
+              ) : (
+                <span className="graph-generic-annotation-shape-text-content">{data.text}</span>
+              )}
+            </div>
+          )}
         </div>
         {menu}
         {remoteBadge}
