@@ -54,24 +54,38 @@ describe('reduceFreehandPoints', () => {
     ]);
   });
 
-  it('does not simplify a jittery stroke of ordinary length, regardless of how it will be smoothed', () => {
-    // Decimation is a payload-size control, not a smoothing-scaled one: an
-    // ordinary-sized stroke keeps every sample no matter what smoothing the
-    // caller later applies when building a path from it.
+  it('does not simplify a jittery stroke of ordinary length at any smoothing level', () => {
+    // Decimation's degree is a fixed, payload-size-driven control, not a
+    // smoothing-scaled one: an ordinary-sized stroke keeps every sample no
+    // matter what smoothing the caller later applies when building a path.
     const points = jitteryLine();
-    expect(reduceFreehandPoints(points)).toEqual(points);
+    expect(reduceFreehandPoints(points, 0)).toEqual(points);
+    expect(reduceFreehandPoints(points, 0.3)).toEqual(points);
+    expect(reduceFreehandPoints(points, 1)).toEqual(points);
   });
 
-  it('simplifies only once a stroke crosses the payload-size threshold', () => {
+  it('never simplifies at smoothing=0, no matter how long the stroke', () => {
+    // "No smoothing" has always meant "every sampled point" — the payload
+    // safety net below only ever engages once smoothing is requested at all.
+    const long = longStraightLine(1000);
+    expect(reduceFreehandPoints(long, 0)).toEqual(long);
+  });
+
+  it('simplifies a long stroke only once smoothing is requested, still gated by the payload-size threshold', () => {
     const short = longStraightLine(100);
     const long = longStraightLine(1000);
-    expect(reduceFreehandPoints(short)).toEqual(short);
-    expect(reduceFreehandPoints(long).length).toBeLessThan(long.length);
+    expect(reduceFreehandPoints(short, 0.5)).toEqual(short);
+    expect(reduceFreehandPoints(long, 0.5).length).toBeLessThan(long.length);
+  });
+
+  it('simplifies a long stroke the same amount at every smoothing level above 0 (degree is fixed, not scaled)', () => {
+    const long = longStraightLine(1000);
+    expect(reduceFreehandPoints(long, 0.1)).toEqual(reduceFreehandPoints(long, 1));
   });
 
   it('is deterministic: same input always reduces to the same output', () => {
     const points = longStraightLine(1000);
-    expect(reduceFreehandPoints(points)).toEqual(reduceFreehandPoints(points));
+    expect(reduceFreehandPoints(points, 0.5)).toEqual(reduceFreehandPoints(points, 0.5));
   });
 
   it('handles empty and single-point input safely', () => {

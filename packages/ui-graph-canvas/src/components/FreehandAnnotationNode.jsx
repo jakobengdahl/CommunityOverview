@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
@@ -51,6 +51,11 @@ const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
 const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
 const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
 
+// Stable empty-array reference for the no-points fallback below, so a
+// missing/invalid `data.points` doesn't itself defeat this component's
+// useMemo (a fresh `[]` literal every render would count as "changed").
+const EMPTY_POINTS = [];
+
 function boundingBox(points) {
   let minX = Infinity;
   let minY = Infinity;
@@ -67,7 +72,7 @@ function boundingBox(points) {
 }
 
 function FreehandAnnotationNode({ id, data, selected }) {
-  const rawPoints = Array.isArray(data?.points) ? data.points : [];
+  const rawPoints = Array.isArray(data?.points) ? data.points : EMPTY_POINTS;
   const color = data?.color || DEFAULT_COLOR;
   const strokeWidth = Number.isFinite(data?.strokeWidth) ? data.strokeWidth : DEFAULT_STROKE_WIDTH;
   const smoothing = data?.smoothing ?? 0;
@@ -166,16 +171,28 @@ function FreehandAnnotationNode({ id, data, selected }) {
   // position.
   const originX = PAD - minX;
   const originY = PAD - minY;
-  const localPoints = rawPoints.map((p) => ({
-    x: p.x + originX,
-    y: p.y + originY,
-    pressure: p.pressure,
-  }));
-  const pressureAware = hasPressureData(localPoints);
-  const { d } = buildFreehandPath(localPoints, smoothing);
-  const segments = pressureAware
-    ? buildPressureSegments(localPoints, smoothing, strokeWidth)
-    : null;
+  // Curve-fitting (Catmull-Rom resampling, task-annotation-freehand-true-
+  // smoothing) can now emit several times more points than it reduces at
+  // high smoothing, the opposite of the old RDP-decimation cost profile —
+  // so this stage is memoized on the actual sampled points rather than
+  // recomputed every render. `rawPoints` (`data.points`) is a stable
+  // reference across a drag (drag moves the node's flow position, not its
+  // points array — see this component's own doc comment), so a stroke's
+  // curve is only rebuilt when its points, smoothing, or width truly change.
+  const { d, segments, pressureAware } = useMemo(() => {
+    const localPoints = rawPoints.map((p) => ({
+      x: p.x + originX,
+      y: p.y + originY,
+      pressure: p.pressure,
+    }));
+    const aware = hasPressureData(localPoints);
+    const { d: pathData } = buildFreehandPath(localPoints, smoothing);
+    return {
+      d: pathData,
+      segments: aware ? buildPressureSegments(localPoints, smoothing, strokeWidth) : null,
+      pressureAware: aware,
+    };
+  }, [rawPoints, originX, originY, smoothing, strokeWidth]);
 
   return (
     <div

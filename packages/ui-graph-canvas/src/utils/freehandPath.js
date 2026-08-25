@@ -13,11 +13,14 @@
  *
  * They are now independent:
  *  - `reduceFreehandPoints` is a payload-size control only. It always dedupes
- *    consecutive near-identical samples, and simplifies further ONLY once a
- *    stroke is long enough that its serialized size is a real concern — never
- *    scaled by the user-facing smoothing setting.
- *  - `smoothing` now drives curve *fitting*: at 0 the path is exactly the
- *    pre-existing quadratic-through-midpoints curve through the retained
+ *    consecutive near-identical samples. At smoothing=0 that's all it does —
+ *    "no smoothing" still means every sampled point, at any length, exactly
+ *    as before. Above 0, it simplifies further, but ONLY once a stroke is
+ *    long enough that its serialized size is a real concern, and by a fixed
+ *    tolerance — the *degree* of simplification is never scaled by how high
+ *    smoothing is set, only whether smoothing is requested at all.
+ *  - `smoothing` now also drives curve *fitting*: at 0 the path is exactly
+ *    the pre-existing quadratic-through-midpoints curve through the retained
  *    points (byte-identical `d` output to before this change). Above 0, a
  *    Catmull-Rom spline is fit through the same retained points and resampled
  *    into extra intermediate points before that same quadratic pass runs, so
@@ -25,12 +28,12 @@
  *    anchors — not fewer of them.
  *
  * Net effect on already-saved strokes: a stroke saved at smoothing=0 renders
- * pixel-identically (both stages are no-ops beyond dedupe, exactly as
- * before). A stroke saved with smoothing>0 will now render differently —
- * with its original point detail intact and a genuinely smoother curve
- * through it — because that is precisely the bug this module fixes; the old
- * output for smoothing>0 was the coarsened, over-decimated shape the owner
- * reported, not a shape worth preserving.
+ * pixel-identically, at any length (both stages are no-ops beyond dedupe,
+ * exactly as before). A stroke saved with smoothing>0 will now render
+ * differently — with its original point detail intact and a genuinely
+ * smoother curve through it — because that is precisely the bug this module
+ * fixes; the old output for smoothing>0 was the coarsened, over-decimated
+ * shape the owner reported, not a shape worth preserving.
  *
  * Pure functions, no randomness or wall-clock reads, so the same input always
  * produces the same output.
@@ -117,13 +120,17 @@ function simplify(points, epsilon) {
 /**
  * Reduce a raw sampled point array for payload size. Always dedupes;
  * simplifies further only once the stroke is long enough
- * (DECIMATION_POINT_THRESHOLD) that its serialized cost is worth trimming —
- * deliberately NOT driven by the smoothing setting (see module doc comment).
- * Always returns at least one point when given at least one (never produces
- * an empty stroke from a non-empty one).
+ * (DECIMATION_POINT_THRESHOLD) that its serialized cost is worth trimming.
+ * The *degree* of that simplification is a fixed epsilon, deliberately NOT
+ * scaled by the smoothing setting (see module doc comment) — but smoothing=0
+ * still means what it always has, "every sampled point, full stop", at any
+ * stroke length, so the safety net only ever engages once some smoothing is
+ * actually requested (smoothing > 0). Always returns at least one point when
+ * given at least one (never produces an empty stroke from a non-empty one).
  */
-export function reduceFreehandPoints(points) {
+export function reduceFreehandPoints(points, smoothing = 0) {
   const deduped = dedupePoints(Array.isArray(points) ? points : []);
+  if (clampSmoothing(smoothing) <= 0) return deduped;
   if (deduped.length <= DECIMATION_POINT_THRESHOLD) return deduped;
   return simplify(deduped, DECIMATION_EPSILON);
 }
@@ -222,15 +229,16 @@ export function pointsToPathData(points) {
 }
 
 /**
- * Convenience: reduce (payload-size decimation, independent of `smoothing`),
- * fit a smoothing-scaled curve through the retained anchors, then build path
- * data in one call. `points` in the return is the reduced anchor list (before
+ * Convenience: reduce (payload-size decimation — gated on whether smoothing
+ * is requested at all, never scaled by how high it is), fit a
+ * smoothing-scaled curve through the retained anchors, then build path data
+ * in one call. `points` in the return is the reduced anchor list (before
  * curve-fit resampling) — the same "how many real samples survived" value
  * this function has always returned; `d` is built from the (possibly denser,
  * smoothing>0) curve-fit points.
  */
 export function buildFreehandPath(points, smoothing = 0) {
-  const reduced = reduceFreehandPoints(points);
+  const reduced = reduceFreehandPoints(points, smoothing);
   const curved = smoothAnchors(reduced, smoothing);
   return { points: reduced, d: pointsToPathData(curved) };
 }
@@ -283,7 +291,7 @@ export function buildPressureSegments(
   smoothing = 0,
   baseWidth = DEFAULT_STROKE_WIDTH_FALLBACK
 ) {
-  const reduced = reduceFreehandPoints(points);
+  const reduced = reduceFreehandPoints(points, smoothing);
   if (reduced.length === 0) return [];
   if (reduced.length === 1) {
     const p = reduced[0];
