@@ -95,9 +95,12 @@
 
 /* Hidden by default — the hover tooltip carries the name and the description
    instead. Shown wherever hover is unavailable, so a touch user never has to
-   hover to learn what an icon means. Same belt-and-suspenders pair
-   FloatingToolbar uses: the hover-capability query, and the compact variant
-   the host sets from its own coarse-pointer flag. */
+   hover to learn what an icon means. Two independent signals, the same pair
+   FloatingToolbar uses: the hover-capability media query (belt) and the
+   `touch` prop the host derives from its own coarse-pointer flag
+   (suspenders). Note `--compact` is NOT one of them: it is a viewport-width
+   signal, so it would caption a mouse user with a narrow window and miss a
+   coarse-pointer user on a wide one. */
 .annotation-toolbox-item-label {
   display: none;
   font-size: 11px;
@@ -162,10 +165,18 @@
   box-sizing: border-box;
 }
 
-/* Compact is the host's coarse-pointer signal, so it captions the items the
-   same way the hover-capability query does — a touch user gets the name
-   without a hover they cannot perform. */
+/* Compact is width-only: bigger cells for a narrow window, but no captions —
+   a mouse user with a small window can still hover. Captioning is the
+   `--touch` variant's job. */
 .annotation-toolbox--compact .annotation-toolbox-item {
+  min-width: 48px;
+  height: 48px;
+}
+
+/* The host's coarse-pointer signal. Captions the items the same way the
+   hover-capability query does, and covers the case that query can miss on
+   some hybrid devices that report hover while being used by finger. */
+.annotation-toolbox--touch .annotation-toolbox-item {
   width: auto;
   min-width: 48px;
   height: 48px;
@@ -173,6 +184,6 @@
   padding: 0 10px;
 }
 
-.annotation-toolbox--compact .annotation-toolbox-item-label {
+.annotation-toolbox--touch .annotation-toolbox-item-label {
   display: inline;
 }

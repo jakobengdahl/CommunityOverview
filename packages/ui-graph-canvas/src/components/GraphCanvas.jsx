@@ -2885,6 +2885,10 @@ function GraphCanvasInner({
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               labels={atl}
               compact={isCompact}
+              // Distinct from `compact`, which is a viewport-WIDTH signal
+              // (COMPACT_MEDIA_QUERY). A coarse pointer on a wide screen has
+              // no hover and would otherwise get an unlabelled icon grid.
+              touch={isTouchMode}
               activeKind={freehandActive ? 'freehand' : null}
             />
           )}

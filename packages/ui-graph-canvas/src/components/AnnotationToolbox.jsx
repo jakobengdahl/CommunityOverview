@@ -9,7 +9,7 @@ import './AnnotationToolbox.css';
 // the per-type-editor gaps this still doesn't close - creating a shape from
 // here is not the same as being able to change an existing one's subtype.
 const TOOLBOX_ITEMS = [
-  { kind: 'note', glyph: '🗒', labelKey: 'note' },
+  { kind: 'note', glyph: '🗒️', labelKey: 'note' },
   { kind: 'text', glyph: 'T', labelKey: 'text' },
   { kind: 'label', glyph: '🏷️', labelKey: 'label' },
   { kind: 'frame', glyph: '▢', labelKey: 'frame' },
@@ -52,14 +52,22 @@ const TOOLBOX_ITEMS = [
  * pressed while its armed drawing mode is active, so a user mid-stroke can
  * see which tool is live.
  */
-function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind = null }) {
+const TOOLTIP_ID = 'annotation-toolbox-tooltip';
+
+function AnnotationToolbox({
+  onCreate,
+  labels = {},
+  compact = false,
+  touch = false,
+  activeKind = null,
+}) {
   const [expanded, setExpanded] = useState(false);
   // Hover description, positioned above the hovered cell. A portal for the
   // same reason FloatingToolbar uses one: the items row clips and the toolbox
   // sits in a stacking context, so a tooltip rendered inline would be cut off
-  // by its own container. Hover-only by construction — the visible label the
-  // items no longer carry is restored by CSS wherever hover is unavailable,
-  // so a touch user is never left with an unlabelled grid.
+  // by its own container. Hover-only by construction — the visible caption the
+  // items no longer show is restored wherever hover is unavailable, so a touch
+  // user is never left with an unlabelled grid.
   const [hovered, setHovered] = useState(null);
 
   const showTip = (event, key) => {
@@ -108,7 +116,7 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
         compact ? ' annotation-toolbox--compact' : ''
-      }`}
+      }${touch ? ' annotation-toolbox--touch' : ''}`}
       data-testid="annotation-toolbox"
       role="toolbar"
       aria-label={lbl.toggleExpand}
@@ -135,10 +143,21 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
               className={`annotation-toolbox-item${
                 activeKind === kind ? ' annotation-toolbox-item--active' : ''
               }`}
-              onClick={() => onCreate?.(kind, shape ? { shape } : undefined)}
+              onClick={() => {
+                // A tap on a touch device fires the emulated mouseenter but no
+                // mouseleave until the user touches something else, so without
+                // this the tooltip stays on screen after the item is used.
+                setHovered(null);
+                onCreate?.(kind, shape ? { shape } : undefined);
+              }}
               aria-label={lbl[labelKey]}
               aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
-              title={lbl[`${labelKey}Hint`] || lbl[labelKey]}
+              // The description is the accessible *description*, referenced
+              // rather than duplicated. A `title` would give the same text a
+              // second, native tooltip on top of the styled one — the visual
+              // clutter this redesign exists to reduce. FloatingToolbar sets
+              // no title for the same reason.
+              aria-describedby={hovered?.key === labelKey ? TOOLTIP_ID : undefined}
               onMouseEnter={(e) => showTip(e, labelKey)}
               onMouseLeave={() => setHovered(null)}
               onFocus={(e) => showTip(e, labelKey)}
@@ -160,6 +179,7 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
         hovered &&
         createPortal(
           <div
+            id={TOOLTIP_ID}
             className="annotation-toolbox-tooltip"
             role="tooltip"
             style={{ left: hovered.left, top: hovered.top }}
