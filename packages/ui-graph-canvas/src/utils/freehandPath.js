@@ -189,6 +189,7 @@ function interpolatePoint(p0, p1, p2, p3, t) {
  * of paying for the reduce-and-curve-fit twice.
  */
 export function smoothAnchors(points, smoothing) {
+  if (!Array.isArray(points)) return [];
   const level = clampSmoothing(smoothing);
   if (level <= 0 || points.length < 3) return points;
   const subdivisions = Math.round(level * MAX_CURVE_SUBDIVISIONS);
