@@ -19,11 +19,14 @@ vi.mock('reactflow', () => ({
 // wiring that drifts on one component is caught rather than assumed.
 //
 // The `locked` case is the reason this file exists. Four of the five menus
-// hide the whole row behind a `locked ? <unlock only> : <...>` branch, but
-// ArrowNode has no such branch and opens its menu whatever `locked` says, so
-// relying on each caller's markup left exactly one annotation kind
-// relayerable while locked. The row now withholds itself when locked
-// (AnnotationLayerControls returns null) and the hook refuses independently
+// hid the whole row behind a `locked ? <unlock only> : <...>` branch;
+// ArrowNode had no such branch and opened its menu whatever `locked` said,
+// so relying on each caller's markup left exactly one annotation kind
+// relayerable while locked. ArrowNode has since gained that branch too, so
+// its case below now passes because the whole menu is unlock-only rather
+// than because the row withholds itself. The row still withholds itself when
+// locked (AnnotationLayerControls returns null) and the hook refuses
+// independently
 // of any markup — the two are pinned separately below, so neither guard can
 // be dropped without a test failing.
 const CASES = [
@@ -106,11 +109,12 @@ describe('shared annotation layer row', () => {
 });
 
 // The hook refuses independently of whether any caller's markup happens to
-// hide the row. That separation is the point: four of the five menus have a
-// `locked` branch of their own and ArrowNode has none, so relying on the
-// markup alone is exactly how a locked line stayed relayerable in the first
-// place. Driving the hook directly keeps the guarantee pinned even though no
-// menu currently renders the row for a locked annotation.
+// hide the row. That separation is the point: relying on each menu's own
+// `locked` branch is exactly how a locked line stayed relayerable in the
+// first place, back when ArrowNode was the one menu without such a branch.
+// Every menu has one now, so no caller renders the row for a locked
+// annotation and the markup-level assertions above cannot fail — driving the
+// hook directly is what keeps the guarantee pinned.
 describe('useAnnotationLayer refuses independently of the markup', () => {
   function Harness({ data }) {
     const changeLayer = useAnnotationLayer('x1', data);
