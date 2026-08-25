@@ -2890,6 +2890,13 @@ def register_mcp_tools(
                 ),
             }
         except OpError as exc:
+            # A same-id collision with a different type slipped past the
+            # pre-check above (a concurrent write landed in the window between
+            # that read and this write — the pre-check is a fast-path UX
+            # nicety, not the enforcement point); SessionStore.apply_state_op
+            # is the actual authority and raises OpError here instead of
+            # silently retyping the annotation. Same race, same handling, as
+            # the REST endpoint's ingest_session_image.
             return {"success": False, "error": str(exc)}
         return {
             "success": True,
