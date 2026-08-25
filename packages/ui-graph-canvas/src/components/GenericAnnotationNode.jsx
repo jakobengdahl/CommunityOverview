@@ -256,7 +256,7 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * rendered. Selection and move (drag) are handled generically by GraphCanvas
  * for every annotation type; this component adds the visual selection
  * outline, for the sized kinds, model-space resize via ReactFlow's
- * NodeResizer, — for the kinds EDITABLE_KINDS names — a right-click
+ * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
  * property editor (colour, shape subtype, icon name, vote value, rotation
  * and layer order), and — for EDITABLE_TEXT_KINDS (`text`, `shape`) —
  * double-click-to-edit inline text, following NoteNode/LabelNode's own

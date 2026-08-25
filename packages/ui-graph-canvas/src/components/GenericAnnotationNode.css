@@ -60,6 +60,14 @@
 
 .graph-generic-annotation-shape-text-content {
   color: #e6edf3;
+  /* Unlike `text`'s own `color` (a font colour), a shape's `color` is its
+     fill — reusing it for the caption would often make it worse, not
+     better (a light fill with matching light text is illegible). The
+     text-shadow LabelNode.css already uses for the same "readable text over
+     an arbitrary background" problem keeps this caption legible across the
+     full GENERIC_COLORS palette (including light fills like #eab308/#f97316)
+     without computing per-fill contrast. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   font-size: 14px;
   text-align: center;
   white-space: pre-wrap;
