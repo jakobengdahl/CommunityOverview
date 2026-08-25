@@ -381,6 +381,48 @@ class TestSessionActivityAndUndo:
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"] == []
 
+    def test_undo_is_409_while_another_client_holds_the_claim(
+        self, test_app: TestClient
+    ):
+        """Undo is a browser write, so it answers to the same claim rule
+        POST /ops does. Actor-scoping does not cover this: the action being
+        undone is the caller's own, but the annotation it touches was claimed
+        by someone else in between."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="hello")
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c2",
+                "ops": [{"op": "selection_claimed", "element_ids": ["note-1"]}],
+            },
+        )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 409
+        assert "claimed by another client" in resp.json()["detail"]
+
+        # Refused without touching anything: the note is still there and the
+        # action is still undoable once the claim clears.
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"][0]["text"] == "hello"
+
+    def test_undo_succeeds_once_the_claim_is_released(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="hello")
+        for op in ("selection_claimed", "selection_released"):
+            test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={
+                    "client_id": "c2",
+                    "ops": [{"op": op, "element_ids": ["note-1"]}],
+                },
+            )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 200
+        assert resp.json()["undone_op"] == "annotation_created"
+
     def test_undo_delete_restores_the_annotation(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         self._create_note(test_app, sid, text="hello")

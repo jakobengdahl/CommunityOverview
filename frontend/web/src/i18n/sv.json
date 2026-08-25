@@ -132,6 +132,7 @@
     "session_undo_done": "Åtgärden ångrades",
     "session_undo_conflict": "Den åtgärden går inte längre att ångra — den har ändrats sedan dess",
     "session_undo_busy": "Sessionen är upptagen — försök igen om en stund",
+    "session_undo_claimed": "Någon annan har den markerad just nu — försök igen om en stund",
     "session_undo_rate_limited": "För många åtgärder — vänta en stund och försök igen",
     "session_undo_unavailable": "Det finns inget kvar av dina åtgärder att ångra",
     "session_undo_failed": "Kunde inte ångra den åtgärden",

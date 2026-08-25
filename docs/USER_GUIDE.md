@@ -577,6 +577,10 @@ marked *(You)*) and when.
 - If the item you are trying to undo has changed since (someone else edited it,
   or you did something else to it first), undo fails with a clear conflict
   message instead of silently overwriting that later change.
+- If someone else currently has that item selected, undo waits rather than
+  reaching through them: you are told to try again in a moment, and it works
+  once they click away. This one is temporary — unlike the conflict above, the
+  action stays undoable.
 - Session activity is kept for 7 days or the last 500 actions per session,
   whichever comes first — it is not a permanent record.
 

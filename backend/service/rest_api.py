@@ -1231,6 +1231,8 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="no undoable action")
         except UndoConflict as exc:
             raise HTTPException(status_code=409, detail=exc.reason)
+        except ClaimConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except RevisionConflict as exc:
             raise HTTPException(
                 status_code=409,
