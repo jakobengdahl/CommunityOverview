@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { DEFAULT_LABEL_FONT_SIZE, rotationStyle, isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './LabelNode.css';
 
 /**
@@ -25,6 +26,7 @@ function LabelNode({ id, data, selected }) {
   // See NoteNode's equivalent comment: another client's live claim makes
   // this label's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
 
   useEffect(() => {
@@ -282,6 +284,7 @@ function LabelNode({ id, data, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

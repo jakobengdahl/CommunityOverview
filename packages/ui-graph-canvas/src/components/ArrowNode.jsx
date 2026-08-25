@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
 import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './ArrowNode.css';
 
 /**
@@ -29,6 +30,7 @@ function ArrowNode({ id, data, selected }) {
   // See NoteNode's equivalent comment: another client's live claim makes
   // this arrow's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -312,6 +314,7 @@ function ArrowNode({ id, data, selected }) {
               <span>{labels.arrowEndHead}</span>
               <span>{endArrow ? '✔' : ''}</span>
             </button>
+            <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
             <button className="context-menu-delete" onClick={remove}>
               🗑️ {labels.delete}
             </button>

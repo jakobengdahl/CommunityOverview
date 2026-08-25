@@ -3,14 +3,14 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn(), nodes: [] }));
 
 vi.mock('reactflow', () => ({
   NodeResizer: (props) => {
     hoisted.resizerProps.push(props);
     return <div data-testid="resizer" />;
   },
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
 
 // Applies the latest setNodes(updater) call to a single-node array and
@@ -35,6 +35,7 @@ describe('GenericAnnotationNode', () => {
   beforeEach(() => {
     hoisted.resizerProps.length = 0;
     hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
   });
 
   it('renders text content', () => {
@@ -567,6 +568,147 @@ describe('GenericAnnotationNode property editor', () => {
     fireEvent.contextMenu(screen.getByText('1'));
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(notifyChange).toHaveBeenCalledTimes(1);
+  });
+
+  // task-annotation-render-direct-manipulation remaining_scope: "No
+  // color/recolor editor for any generic kind". The picker is offered only
+  // for the kinds that actually paint `color` — `image` carries the field in
+  // the model but nothing renders it.
+  describe('colour editor', () => {
+    it.each([
+      ['text', (c) => c.querySelector('.kind-text'), { text: 'x' }],
+      ['frame', (c) => c.querySelector('.kind-frame'), {}],
+      ['icon', (c) => c.querySelector('.kind-icon'), { icon: 'circle' }],
+      ['vote_dot', (c) => c.querySelector('.kind-vote_dot'), { value: 1 }],
+    ])('offers colour swatches for a %s annotation', (kind, find, data) => {
+      const { container } = render(<GenericAnnotationNode id="a1" type={kind} data={data} />);
+      fireEvent.contextMenu(find(container));
+      expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
+    });
+
+    it('offers colour swatches for a shape annotation', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
+    });
+
+    it('offers no colour swatches for an image annotation, which paints no colour', () => {
+      const { container } = render(
+        <GenericAnnotationNode id="im1" type="image" data={{ image: { url: 'x.png' } }} />
+      );
+      fireEvent.contextMenu(container.querySelector('.kind-image'));
+      expect(screen.queryByLabelText('#ef4444')).toBeNull();
+      expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    });
+
+    it("changes a shape's colour from the picker", () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      fireEvent.click(screen.getByLabelText('#22c55e'));
+      expect(applyLatestUpdate({ id: 's1', data: { shape: 'circle' } }).data.color).toBe('#22c55e');
+    });
+
+    it('marks the current colour as the active swatch', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ color: '#3b82f6' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.getByLabelText('#3b82f6').className).toContain('active');
+      expect(screen.getByLabelText('#ef4444').className).not.toContain('active');
+    });
+
+    it('refuses a recolour while another client holds the claim', () => {
+      const notifyRemoteLockedAttempt = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+        >
+          <GenericAnnotationNode
+            id="s1"
+            type="shape"
+            data={{ shape: 'circle', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          />
+        </AnnotationContext.Provider>
+      );
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
+    });
+  });
+
+  // task-annotation-render-direct-manipulation remaining_scope: "No way to
+  // change a `vote_dot`'s value after creation" — it was MCP-only.
+  describe('vote_dot value stepper', () => {
+    it('raises and lowers the value', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 2 }} />);
+      fireEvent.contextMenu(screen.getByText('2'));
+      fireEvent.click(screen.getByLabelText('Increase value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(3);
+      fireEvent.click(screen.getByLabelText('Decrease value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(1);
+    });
+
+    it('never counts below zero', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 0 }} />);
+      fireEvent.contextMenu(screen.getByText('0'));
+      fireEvent.click(screen.getByLabelText('Decrease value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 0 } }).data.value).toBe(0);
+    });
+
+    it('treats a vote dot created without a value as zero', () => {
+      const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      fireEvent.click(screen.getByLabelText('Increase value'));
+      expect(applyLatestUpdate({ id: 'v1', data: {} }).data.value).toBe(1);
+    });
+
+    it('offers no value stepper on a kind that has no value', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.queryByLabelText('Increase value')).toBeNull();
+    });
+  });
+
+  // docs/ANNOTATION_CONTRACT.md: "semantic default layers plus manual
+  // forward/back". The arithmetic itself is covered by
+  // annotationLayers.test.js; these pin the wiring into the menu.
+  describe('layer controls', () => {
+    it('writes the stepped layer onto the annotation as zIndex', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 0 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
+      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.click(screen.getByLabelText('Bring forward'));
+      const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+      expect(updated[0].zIndex).toBe(2);
+      expect(updated[1].zIndex).toBe(1);
+    });
+
+    it('leaves the canvas untouched when the annotation is already at the front', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 5 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      const notifyChange = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{ notifyChange, labels: { layer: 'Layer', layerForward: 'Bring forward' } }}
+        >
+          <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
+        </AnnotationContext.Provider>
+      );
+      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.click(screen.getByLabelText('Bring forward'));
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
+      expect(notifyChange).not.toHaveBeenCalled();
+    });
+
+    it('offers no layer controls on a locked annotation', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />);
+      fireEvent.contextMenu(screen.getByText('1'));
+      expect(screen.queryByLabelText('Bring forward')).toBeNull();
+      expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    });
   });
 
   it('closes the context menu on Escape', async () => {

@@ -2037,6 +2037,12 @@ function App() {
             freehandOpacity: t('context_menu.freehand_opacity'),
             freehandDrawingHint: t('canvas.freehand_drawing_hint'),
             freehandConcurrentInputBlocked: t('canvas.freehand_concurrent_input_blocked'),
+            annotationLayer: t('context_menu.annotation_layer'),
+            annotationLayerForward: t('context_menu.annotation_layer_forward'),
+            annotationLayerBackward: t('context_menu.annotation_layer_backward'),
+            annotationVoteValue: t('context_menu.annotation_vote_value'),
+            annotationVoteValueDecrease: t('context_menu.annotation_vote_value_decrease'),
+            annotationVoteValueIncrease: t('context_menu.annotation_vote_value_increase'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),

@@ -9,19 +9,45 @@ import {
   isRemoteLocked,
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
 
-// A right-click property editor exists only for the kinds that actually have
-// something to edit today: `shape`'s subtype, `icon`'s configured name, and
-// every rotatable generic kind's rotation (docs/ANNOTATION_CONTRACT.md:
-// "there is no GUI control to set a rotation yet" / "no editor to change an
-// existing shape's subtype" / "no icon picker" — `shape` and `icon` are both
-// already members of ROTATABLE_OVERLAY_KINDS, so this is exactly that set).
-// Recolouring stays out of this slice — see remaining_scope on
-// task-annotation-render-direct-manipulation.
+// A right-click property editor exists for every rotatable generic kind:
+// each has at least its rotation and its layer to edit, plus — per kind —
+// `shape`'s subtype, `icon`'s configured name, `vote_dot`'s value and, for
+// the kinds that paint one, a colour. (`shape`, `icon` and `vote_dot` are
+// all already members of ROTATABLE_OVERLAY_KINDS, so this is exactly that
+// set.)
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
+
+// The generic kinds whose `color` field is actually painted by a branch
+// below — text's text colour, frame's and icon's border, shape's and
+// vote_dot's fill. `image` carries a `color` in the model
+// (GENERIC_OVERLAY_FIELDS in utils/annotations.js) but nothing renders it,
+// so offering a recolour there would be a control with no visible effect.
+const COLORABLE_KINDS = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot']);
+
+// Palette for the generic kinds' colour picker. Saturated rather than the
+// pastels NoteNode/LabelNode use, because these paint borders, glyphs and
+// small filled dots rather than a large sticky-note ground — a pastel
+// vote_dot on a light canvas is nearly invisible. DEFAULT_COLOR leads so the
+// picker can always return an annotation to the colour it was created with.
+const GENERIC_COLORS = [
+  DEFAULT_COLOR,
+  '#ef4444',
+  '#f97316',
+  '#eab308',
+  '#22c55e',
+  '#3b82f6',
+  '#a855f7',
+  '#0f172a',
+];
+
+// A vote dot counts votes, so its value is a non-negative integer and the
+// stepper never takes it below zero.
+const VOTE_VALUE_MIN = 0;
 
 const ROTATE_STEP = 15;
 function normalizeAngle(deg) {
@@ -88,8 +114,8 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * for every annotation type; this component adds the visual selection
  * outline, for the sized kinds, model-space resize via ReactFlow's
  * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
- * property editor (shape subtype, icon name, rotation). Recolouring remains
- * out of scope; see the module doc comment on EDITABLE_KINDS.
+ * property editor (colour, shape subtype, icon name, vote value, rotation
+ * and layer order).
  */
 function GenericAnnotationNode({ id, type, data, selected }) {
   const kind = type;
@@ -166,6 +192,31 @@ function GenericAnnotationNode({ id, type, data, selected }) {
     setContextMenu(null);
     notifyChange('style');
   };
+
+  const changeColor = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  const changeValue = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    const clamped = Math.max(VOTE_VALUE_MIN, Math.round(next));
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, value: clamped } } : n))
+    );
+    notifyChange('style');
+  };
+
+  const changeLayer = useAnnotationLayer(id, data);
 
   const changeRotation = (deg) => {
     if (remoteLocked) {
@@ -275,11 +326,16 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       kind={kind}
       shape={data.shape || 'rectangle'}
       icon={data.icon}
+      color={color}
+      value={data.value}
       rotation={currentRotation}
       locked={locked}
       labels={labels}
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
+      onChangeColor={changeColor}
+      onChangeValue={changeValue}
+      onChangeLayer={changeLayer}
       onChangeRotation={changeRotation}
       onDelete={remove}
       onUnlock={unlock}
@@ -452,22 +508,29 @@ function GenericAnnotationNode({ id, type, data, selected }) {
 
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
-// Rotation controls show for every EDITABLE_KINDS member; the shape-subtype
-// grid shows only for `kind === 'shape'`, the icon-name grid only for
-// `kind === 'icon'`. A locked annotation gets neither — the capability
-// baseline is "a locked object remains selectable but offers only unlock or
-// copy" — so this shows only the unlock action instead.
+// Rotation and layer controls show for every EDITABLE_KINDS member; the
+// colour swatches show for COLORABLE_KINDS, the shape-subtype grid only for
+// `kind === 'shape'`, the icon-name grid only for `kind === 'icon'`, and the
+// value stepper only for `kind === 'vote_dot'`. A locked annotation gets
+// none of them — the capability baseline is "a locked object remains
+// selectable but offers only unlock or copy" — so this shows only the unlock
+// action instead.
 function ContextMenuPortal({
   menuRef,
   position,
   kind,
   shape,
   icon,
+  color,
+  value,
   rotation,
   locked,
   labels,
   onChangeShape,
   onChangeIcon,
+  onChangeColor,
+  onChangeValue,
+  onChangeLayer,
   onChangeRotation,
   onDelete,
   onUnlock,
@@ -492,6 +555,23 @@ function ContextMenuPortal({
       className="graph-annotation-context-menu"
       style={{ left: position.x, top: position.y }}
     >
+      {COLORABLE_KINDS.has(kind) && (
+        <>
+          <div className="context-menu-title">{labels.color}</div>
+          <div className="context-menu-colors">
+            {GENERIC_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`color-button${color === c ? ' active' : ''}`}
+                style={{ backgroundColor: c }}
+                aria-label={c}
+                onClick={() => onChangeColor(c)}
+              />
+            ))}
+          </div>
+        </>
+      )}
       {kind === 'shape' && (
         <>
           <div className="context-menu-title">{labels.shape}</div>
@@ -533,6 +613,31 @@ function ContextMenuPortal({
           </div>
         </>
       )}
+      {kind === 'vote_dot' && (
+        <>
+          <div className="context-menu-title">{labels.voteValue}</div>
+          <div className="context-menu-vote-value">
+            <button
+              type="button"
+              className="vote-value-button"
+              aria-label={labels.voteValueDecrease}
+              onClick={() => onChangeValue((value ?? 0) - 1)}
+            >
+              −
+            </button>
+            <span className="vote-value-current">{value ?? 0}</span>
+            <button
+              type="button"
+              className="vote-value-button"
+              aria-label={labels.voteValueIncrease}
+              onClick={() => onChangeValue((value ?? 0) + 1)}
+            >
+              +
+            </button>
+          </div>
+        </>
+      )}
+      <AnnotationLayerControls labels={labels} onChangeLayer={onChangeLayer} />
       <div className="context-menu-title">{labels.rotation}</div>
       <div className="context-menu-rotate">
         <button

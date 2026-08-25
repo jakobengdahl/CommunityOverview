@@ -8,6 +8,7 @@ import {
   isRemoteLocked,
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './NoteNode.css';
 
 /**
@@ -37,6 +38,7 @@ function NoteNode({ id, data, selected }) {
   // to run while it is held, surfacing the attempt instead of silently
   // dropping it or letting two clients race.
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
 
   useEffect(() => {
@@ -349,6 +351,7 @@ function NoteNode({ id, data, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

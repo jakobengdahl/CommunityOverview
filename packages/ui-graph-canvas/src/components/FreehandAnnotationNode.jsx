@@ -4,6 +4,7 @@ import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { buildFreehandPath, hasPressureData, buildPressureSegments } from '../utils/freehandPath';
 import { isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -58,6 +59,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const locked = Boolean(data?.locked);
   const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const { setNodes } = useReactFlow();
   // Another client's live selection claim (task-annotation-shared-session-
   // realtime): dragging is already refused centrally via `draggable`
@@ -288,6 +290,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
                     </button>
                   ))}
                 </div>
+                <AnnotationLayerControls labels={labels} onChangeLayer={changeLayer} />
                 <button type="button" className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>
