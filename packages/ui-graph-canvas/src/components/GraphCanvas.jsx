@@ -2281,7 +2281,7 @@ function GraphCanvasInner({
           // which is all eleven v1 kinds except `group` — from the canvas;
           // graph nodes are hidden, not deleted. Excluding `group` leaves it to
           // its own context menu, so its children stay correctly parented.
-          // Two kinds are skipped: one held by another client's live selection
+          // Two are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
           // unlock or copy — the rule every *overlay* annotation's context menu

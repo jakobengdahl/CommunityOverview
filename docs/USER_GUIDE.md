@@ -243,8 +243,7 @@ underneath, so you can pull a sticky note out from under a frame or tuck a shape
 label. The buttons do nothing once an annotation is already alone at the front or the
 back, and a locked annotation has no Layer row at all — right-click it and choose
 **Unlock** first. Pressing **Delete** will not remove a locked annotation either;
-it stays put and tells you to unlock it first. (Group boxes are the exception —
-locking one does not currently protect it.)
+it stays put and tells you to unlock it first.
 
 Send to back normally goes all the way back, behind your graph's own nodes and edges —
 which is what you want for a frame that should sit behind the nodes it frames. Bring it

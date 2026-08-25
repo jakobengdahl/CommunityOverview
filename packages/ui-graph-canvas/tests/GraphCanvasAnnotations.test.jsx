@@ -213,10 +213,11 @@ describe('GraphCanvas annotation creation', () => {
 
   it('leaves a locked annotation alone on Delete and says why', () => {
     // The contract's baseline is that a locked object stays selectable but
-    // offers only unlock or copy. Every context menu enforces that; the
-    // keyboard path did not, so selecting a locked annotation and pressing
-    // Delete removed it — the one way to destroy a locked object without
-    // unlocking it first.
+    // offers only unlock or copy. Every *overlay* annotation's context menu
+    // enforces that; the keyboard path did not, so selecting a locked overlay
+    // and pressing Delete removed it — the one way left to destroy a locked
+    // overlay without unlocking it first. (`group` is outside this: its own
+    // menu ignores the flag, and Delete never touches a group at all.)
     const onAnnotationChange = vi.fn();
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
     act(() => {
