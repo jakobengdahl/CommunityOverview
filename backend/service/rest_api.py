@@ -1098,11 +1098,16 @@ def _register_session_endpoints(
         as an MCP agent's. It never persists the raw ``image_url``/``image_data``
         the caller sent, only the optimized embedded copy.
 
-        The response body is informational only — the pasting browser's own
-        canvas update comes back over its SSE subscription (`GET
-        .../stream`), not this response, because the annotation is attributed
-        to `_HUMAN_IMAGE_INGEST_CLIENT_ID` rather than `request.client_id` (see
-        that constant's docstring for why the echo would otherwise be dropped).
+        The annotation is attributed to `_HUMAN_IMAGE_INGEST_CLIENT_ID` rather
+        than `request.client_id` (see that constant's docstring for why the
+        echo would otherwise be dropped) so the pasting browser's own SSE
+        subscription (`GET .../stream`) still receives it — this response is
+        no longer the *only* path to seeing it, though: the pasting browser
+        (frontend/web/src/App.jsx's handleImageIngest) applies this response
+        to its canvas immediately, and treats the later SSE echo as a
+        delivery confirmation rather than the sole signal that the upload
+        succeeded. Other collaborators watching the same session still learn
+        of it only via that echo.
 
         Takes the body as raw ``Request`` rather than a typed Pydantic
         parameter — same reason as ``apply_session_ops`` above — so
