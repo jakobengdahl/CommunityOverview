@@ -20,9 +20,12 @@ vi.mock('reactflow', () => ({
 //
 // The `locked` case is the reason this file exists. Four of the five menus
 // hide the whole row behind a `locked ? <unlock only> : <...>` branch, but
-// ArrowNode has no such branch and opens its menu whatever `locked` says —
-// so the refusal has to live in `useAnnotationLayer` itself. A per-caller
-// check would have left exactly one annotation kind relayerable while locked.
+// ArrowNode has no such branch and opens its menu whatever `locked` says, so
+// relying on each caller's markup left exactly one annotation kind
+// relayerable while locked. The row now withholds itself when locked
+// (AnnotationLayerControls returns null) and the hook refuses independently
+// of any markup — the two are pinned separately below, so neither guard can
+// be dropped without a test failing.
 const CASES = [
   {
     name: 'ArrowNode',

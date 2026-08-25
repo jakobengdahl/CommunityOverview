@@ -241,13 +241,14 @@ images all have a **Layer** row in their right-click menu, just above Delete. **
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
 label. The buttons do nothing once an annotation is already alone at the front or the
-back, and a locked annotation has no Layer row at all — unlock it first.
+back, and a locked annotation has no Layer row at all — unlock it first (most annotation
+menus offer **Unlock**; a locked line is the exception, and has to be unlocked by an agent).
 
-Send to back goes all the way back: it will put the annotation behind your graph's own
-nodes and edges, which is what you want for a frame that should sit behind the nodes it
-frames. Bring it forward again with **Bring to front**. One gap worth knowing: a group box
-can be layered *against* by other annotations, but cannot be layered itself — its own menu
-has no Layer row.
+Send to back normally goes all the way back, behind your graph's own nodes and edges —
+which is what you want for a frame that should sit behind the nodes it frames. Bring it
+forward again with **Bring to front**. One gap worth knowing: a group box can be layered
+*against* by other annotations, but cannot be layered itself — its own menu has no Layer
+row.
 
 ### 2.6 Saved views
 

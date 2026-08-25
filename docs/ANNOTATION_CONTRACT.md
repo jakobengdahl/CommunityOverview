@@ -210,10 +210,14 @@ Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
 same as staying within the graph's own band, and should not be read as such.
 Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
-created annotation, and sending an annotation to the back writes a negative
-`z` that does place it behind the graph's nodes and edges. That is intended
-and useful — it is how a `frame` gets behind the nodes it frames — not an
-accident of the arithmetic.
+created annotation, while send-to-back writes one below the backmost
+annotation. Whenever that backmost annotation is itself at or below 0 — the
+default, since every annotation is created at 0 — the result is negative and
+does place the annotation behind the graph's nodes and edges. That is
+intended and useful, and it is how a `frame` gets behind the nodes it frames;
+it is not, however, a guarantee, and a canvas whose annotations have all been
+pushed above 0 will send one back to a layer that still sits in front of the
+graph.
 
 A layer is only ever written when it is an integer strictly past every other
 annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
