@@ -12,6 +12,10 @@ import io
 
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.requests import Request
+
+from backend.service import rest_api as rest_api_module
+from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
@@ -984,3 +988,104 @@ class TestSessionImageIngestEndpoint:
             },
         )
         assert allowed.status_code == 200
+
+
+class TestImageIngestBodyCap:
+    """This endpoint takes its body as raw ``Request`` rather than a typed
+    Pydantic parameter specifically so the Content-Length pre-check can run
+    before FastAPI/Starlette ever buffers or parses the request (see
+    ingest_session_image's docstring). The missing-field/malformed-JSON 422
+    cases below mirror TestOpBatchBodyCap's equivalent pair for the sibling
+    .../ops endpoint; the header-precheck and backstop tests are specific to
+    this endpoint's own cap."""
+
+    def test_oversized_content_length_header_is_rejected_before_body_is_read(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """A Content-Length far above the cap must be rejected from the header
+        alone, before ``Request.body()`` is ever awaited. Proved by making that
+        call blow up if it is ever reached, rather than by actually uploading
+        tens of megabytes: if the pre-check were removed (or moved after the
+        read, as a typed Pydantic body parameter would force), this request
+        would trip the patched body() and fail with an AssertionError instead
+        of a clean 413."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        def _body_must_not_be_read(self):
+            raise AssertionError(
+                "body() must not be read once Content-Length exceeds the cap"
+            )
+
+        monkeypatch.setattr(Request, "body", _body_must_not_be_read)
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=b"{}",
+            headers={
+                "content-type": "application/json",
+                "content-length": str(2 * _MAX_IMAGE_INGEST_BODY_BYTES),
+            },
+        )
+        assert resp.status_code == 413
+
+    def test_oversized_body_without_a_usable_content_length_is_rejected_by_the_backstop(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """The header check only catches a client that declares its size
+        honestly. A chunked request (no ``Content-Length`` at all) must still
+        be rejected once the actually-buffered body exceeds the cap — proved
+        here by shrinking the cap to a few bytes rather than uploading tens
+        of megabytes, since the module reads the cap as a global at call
+        time (see ``ingest_session_image``)."""
+        monkeypatch.setattr(rest_api_module, "_MAX_IMAGE_INGEST_BODY_BYTES", 100)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        def _chunks():
+            yield b"x" * 200
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=_chunks(),
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 413
+
+    def test_legitimately_sized_request_still_works(self, test_app: TestClient):
+        """A normal-sized image upload is nowhere near the cap and must still
+        succeed — the pre-check only guards against the pathological case."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_missing_required_field_returns_422_with_structured_detail(
+        self, test_app: TestClient
+    ):
+        """The body is now parsed manually (for the pre-parse byte cap); a
+        missing required field must still 422 with a FastAPI-shaped error
+        list — mirrors TestOpBatchBodyCap's equivalent test for .../ops."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={"x": 0, "y": 0, "image_data": _png_data_url()},
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert isinstance(detail, list)
+        assert any(err.get("loc") == ["client_id"] for err in detail)
+
+    def test_malformed_json_body_returns_422(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 422
