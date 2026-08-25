@@ -4,6 +4,8 @@ import { GraphCanvas } from '../src/index';
 import { overlayToFlowNode, flowNodeToOverlay } from '../src/utils/annotations';
 import AnnotationErrorBoundary from '../src/components/AnnotationErrorBoundary';
 import { AnnotationContext } from '../src/components/AnnotationContext';
+import NoteNode from '../src/components/NoteNode';
+import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
 
@@ -30,7 +32,10 @@ vi.mock('reactflow', () => {
     default: MockReactFlow,
     ReactFlow: MockReactFlow,
     ReactFlowProvider: ({ children }) => <div>{children}</div>,
-    useNodesState: (initial) => [initial || [], hoisted.setNodes, vi.fn()],
+    // Controllable, so a test can put a node ON the canvas — the saved-view
+    // export reads node state, and with an always-empty list that path can
+    // never be exercised.
+    useNodesState: (initial) => [hoisted.nodes ?? initial ?? [], hoisted.setNodes, vi.fn()],
     useEdgesState: (initial) => [initial || [], vi.fn(), vi.fn()],
     useReactFlow: () => ({
       fitView: vi.fn(),
@@ -87,7 +92,10 @@ const MALFORMED = [
 ];
 
 describe('annotations the current code does not expect', () => {
-  beforeEach(() => hoisted.setNodes.mockClear());
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
 
   it('renders the canvas rather than throwing, whatever is stored', () => {
     // The invariant, stated plainly: the graph survives. An annotation is a
@@ -122,6 +130,49 @@ describe('annotations the current code does not expect', () => {
       if (!Array.isArray(produced)) continue;
       expect(produced.every((n) => n && typeof n.id === 'string')).toBe(true);
     }
+  });
+});
+
+describe('the three crashes this closes, each at its own component', () => {
+  // The per-type test below cannot cover these: its Proxy throws on every read,
+  // so it exercises the boundary whether or not the component is fixed. These
+  // assert the opposite — that the component draws NORMALLY, without falling
+  // through to the placeholder. That distinction is the fix; the boundary is
+  // only the backstop behind it.
+  const noPlaceholder = () => expect(screen.queryByTestId('annotation-broken')).toBeNull();
+
+  it('a note with no payload at all draws as an empty note', () => {
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <NoteNode id="n1" selected={false} />
+      </AnnotationContext.Provider>
+    );
+    noPlaceholder();
+  });
+
+  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+    'a %s with no payload at all draws rather than throwing',
+    (kind) => {
+      render(
+        <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+          <GenericAnnotationNode id={`g-${kind}`} type={kind} selected={false} />
+        </AnnotationContext.Provider>
+      );
+      noPlaceholder();
+    }
+  );
+
+  it('a vote dot carrying a non-primitive value draws empty rather than throwing', () => {
+    // React refuses an object as a child. An array would have rendered as its
+    // joined members, which is why this coerces on type rather than testing
+    // for object-ness.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: { legacy: true } }} />
+      </AnnotationContext.Provider>
+    );
+    noPlaceholder();
+    expect(document.querySelector('.kind-vote_dot').textContent).toBe('');
   });
 });
 
@@ -187,6 +238,46 @@ describe('the registered node types are the ones that are guarded', () => {
   });
 });
 
+describe('every call site drops what the translators refuse', () => {
+  // Three call sites, and the doc section claims all three are guarded. Only
+  // the restore path was asserted; a reviewer showed the other two could have
+  // their guard removed with the suite still green.
+  const brokenNode = { id: '', type: 'note', position: { x: 0, y: 0 }, data: {} };
+
+  // NOT COVERED, and said plainly rather than covered badly: the saved-view
+  // export's own `.filter(Boolean)`. It reads node state, which this harness
+  // mocks, so nothing a test puts on the canvas reaches it — a first attempt
+  // passed with the filter removed, because an empty exported list satisfies
+  // "no nulls" perfectly well. Reaching it needs a harness that runs real node
+  // state, which is a bigger change than this assertion is worth. The filter
+  // is there, and `flowNodeToOverlay` returning null for an id-less node is
+  // covered below; what is untested is the export dropping it.
+
+  it('a malformed remote op does not put a null in the node list', () => {
+    // A peer or an agent sending something this client cannot translate must
+    // not take this client's canvas down.
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[
+          { action: 'upsert-overlay', overlay: brokenNode },
+          { action: 'upsert-overlay', overlay: null },
+          {
+            action: 'upsert-overlay',
+            overlay: { id: 'ok', kind: 'note', position: { x: 0, y: 0 } },
+          },
+        ]}
+      />
+    );
+    for (const call of hoisted.setNodes.mock.calls) {
+      const produced = typeof call[0] === 'function' ? call[0]([]) : call[0];
+      if (!Array.isArray(produced)) continue;
+      expect(produced.every((n) => n && typeof n.id === 'string' && n.id)).toBe(true);
+    }
+  });
+});
+
 describe('overlayToFlowNode / flowNodeToOverlay refuse what they cannot translate', () => {
   it.each([
     ['null', null],
@@ -202,6 +293,7 @@ describe('overlayToFlowNode / flowNodeToOverlay refuse what they cannot translat
     ['null', null],
     ['undefined', undefined],
     ['no id', { type: 'note', position: { x: 0, y: 0 } }],
+    ['an empty id', { id: '', type: 'note' }],
   ])('flowNodeToOverlay returns null for %s', (_name, input) => {
     expect(flowNodeToOverlay(input)).toBeNull();
   });
@@ -240,9 +332,10 @@ describe('AnnotationErrorBoundary', () => {
     expect(notifyRenderFailure).toHaveBeenCalledWith('bad-1', expect.any(Error));
   });
 
-  it('still draws the placeholder when there is no context to report to', () => {
-    // The boundary must never be the thing that throws. A node rendered
-    // outside a provider (a test, a future host) still degrades.
+  it('still draws the placeholder with no provider above it', () => {
+    // The boundary must never be the thing that throws. AnnotationContext has
+    // a default value, so what is missing without a provider is the reporter
+    // key, not the context — the placeholder must appear either way.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(() =>
       render(

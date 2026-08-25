@@ -310,7 +310,7 @@ export function overlayToFlowNode(overlay) {
 
 // Serialize a ReactFlow overlay node back to the host's canvas-shape annotation.
 export function flowNodeToOverlay(node) {
-  if (!node || typeof node !== 'object' || typeof node.id !== 'string') return null;
+  if (!node || typeof node !== 'object' || typeof node.id !== 'string' || !node.id) return null;
   const base = { id: node.id, kind: node.type, position: node.position };
   // Mirrors overlayToFlowNode's envelope fields; see its comment for why these
   // must survive the round trip. `node.zIndex`/`node.data.locked` are undefined

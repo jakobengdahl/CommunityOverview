@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { annotationsToOverlays, overlaysToAnnotations } from '../src/utils/sessionAnnotations';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  annotationsToOverlays,
+  overlaysToAnnotations,
+  annotationsToGroups,
+  legacyMetadataToAnnotationDocument,
+} from '../src/utils/sessionAnnotations';
 
 // The canvas emits overlay descriptors (note/label/arrow) via onSaveView; App
 // stores them in the server annotation model and restores them on load. These
@@ -396,5 +401,61 @@ describe('generic annotation overlay translation', () => {
       'text',
       'vote_dot',
     ]);
+  });
+});
+
+describe('a stored annotation this version cannot read', () => {
+  // The failure this prevents is much worse than the one it looks like. The
+  // normaliser rejects an unknown kind by throwing, and that throw used to
+  // escape the whole document — so a single stored annotation of a kind that
+  // no longer exists made the session fail to load. The user lost the entire
+  // session, not one decoration, and in the deep-link path it surfaced as a
+  // session that silently never opened.
+  //
+  // Annotation kinds may change without migrating what is stored, so meeting
+  // an unknown one is expected input, not a corrupt document.
+  let warn;
+  afterEach(() => warn?.mockRestore());
+
+  const mixed = [
+    { id: 'good-1', kind: 'note', position: { x: 0, y: 0 }, text: 'survives' },
+    { id: 'gone-1', kind: 'wormhole', position: { x: 10, y: 10 } },
+    { id: 'good-2', kind: 'label', position: { x: 5, y: 5 }, text: 'also survives' },
+    null,
+    { id: 'gone-2', position: { x: 0, y: 0 } },
+    'not an annotation at all',
+  ];
+
+  it('does not take the rest of the document down with it', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const overlays = annotationsToOverlays(mixed);
+    expect(overlays.map((o) => o.id)).toEqual(['good-1', 'good-2']);
+    expect(overlays.find((o) => o.id === 'good-1').text).toBe('survives');
+  });
+
+  it('reports what it dropped instead of losing it silently', () => {
+    // A silent drop looks to the user like their annotation was deleted, and
+    // leaves nobody a way to find out which stored shape stopped working.
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    annotationsToOverlays(mixed);
+    expect(warn).toHaveBeenCalled();
+    expect(warn.mock.calls.length).toBe(4);
+  });
+
+  it('survives on the group path and the legacy-metadata path too', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => annotationsToGroups(mixed)).not.toThrow();
+    expect(() => legacyMetadataToAnnotationDocument({ annotation_document: mixed })).not.toThrow();
+    expect(
+      legacyMetadataToAnnotationDocument({ annotation_document: mixed }).annotations.map(
+        (a) => a.id
+      )
+    ).toEqual(['good-1', 'good-2']);
+  });
+
+  it('still refuses a payload whose annotation slot is not a list', () => {
+    // Deliberately still fatal: that is a malformed session, not an
+    // annotation this version cannot read.
+    expect(() => annotationsToOverlays({ annotations: 'nope' })).toThrow(/not an array/);
   });
 });

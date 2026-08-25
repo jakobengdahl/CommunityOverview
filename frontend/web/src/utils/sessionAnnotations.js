@@ -6,17 +6,32 @@ import { createAnnotation, normalizeAnnotationDocument } from '@community-graph/
 // Group boxes persist inside the generic server-side annotation list as
 // `kind: "group"` (design 3.1). These two helpers translate between that
 // server shape and the {groups, parentIds} shape the canvas round-trips.
+// An annotation this version cannot read is dropped, not fatal. It used to
+// take the whole call down, which in the app means the session never opens —
+// the user losing everything because one stored decoration had a kind that no
+// longer exists. Reported to the console so the discard is findable, since a
+// silent drop looks to the user like their annotation was deleted.
+function skippedAnnotation(annotation, error) {
+  console.warn('Skipping an annotation this version cannot read:', annotation, error?.message);
+}
+
 function documentAnnotations(annotations) {
   if (annotations == null) return [];
   if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
-    return normalizeAnnotationDocument(annotations).annotations;
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
   }
-  if (Array.isArray(annotations)) return normalizeAnnotationDocument(annotations).annotations;
+  if (Array.isArray(annotations)) {
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
+  }
+  // Still fatal, deliberately: a payload whose annotation slot is not a list at
+  // all is a malformed session, not an annotation this version cannot read.
   throw new Error('Malformed session payload: state.annotations is not an array');
 }
 
 export function annotationDocumentToLegacyMetadata(documentInput) {
-  const document = normalizeAnnotationDocument(documentInput || []);
+  const document = normalizeAnnotationDocument(documentInput || [], {
+    onSkipped: skippedAnnotation,
+  });
   return {
     annotation_schema_version: document.schema_version,
     annotations: annotationsToOverlays(document),
@@ -25,18 +40,22 @@ export function annotationDocumentToLegacyMetadata(documentInput) {
 }
 
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
+  const skip = { onSkipped: skippedAnnotation };
   if (metadata.annotation_document)
-    return normalizeAnnotationDocument(metadata.annotation_document);
+    return normalizeAnnotationDocument(metadata.annotation_document, skip);
   if (metadata.annotations != null && !Array.isArray(metadata.annotations)) {
     throw new Error('Malformed session payload: state.annotations is not an array');
   }
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
-    return normalizeAnnotationDocument(metadata.annotations);
+    return normalizeAnnotationDocument(metadata.annotations, skip);
   }
-  return normalizeAnnotationDocument([
-    ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
-    ...overlaysToAnnotations(metadata.annotations || []),
-  ]);
+  return normalizeAnnotationDocument(
+    [
+      ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
+      ...overlaysToAnnotations(metadata.annotations || []),
+    ],
+    skip
+  );
 }
 
 export function annotationsToGroups(annotations) {

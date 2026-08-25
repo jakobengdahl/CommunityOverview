@@ -42,7 +42,9 @@ class AnnotationErrorBoundary extends Component {
   componentDidCatch(error) {
     // Reported rather than swallowed: a crash here is a real defect worth
     // finding, it just must not cost the user their canvas.
-    this.context?.notifyRenderFailure?.(this.props.nodeId, error);
+    // AnnotationContext has a default value, so `this.context` is always an
+    // object; what a missing provider leaves out is the key.
+    this.context.notifyRenderFailure?.(this.props.nodeId, error);
   }
 
   render() {
@@ -51,7 +53,7 @@ class AnnotationErrorBoundary extends Component {
       <div
         className="graph-annotation-broken"
         data-testid="annotation-broken"
-        title={this.context?.labels?.brokenAnnotation || 'This annotation could not be drawn'}
+        title={this.context.labels?.brokenAnnotation || 'This annotation could not be drawn'}
       >
         !
       </div>

@@ -231,15 +231,32 @@ thrown while drawing one unmounts everything. An annotation is a decoration and
 the graph is the user's work, so that trade is never worth taking. Two
 mechanisms, deliberately both:
 
-- The translation layer refuses what it cannot represent. `overlayToFlowNode`
-  and `flowNodeToOverlay` return `null` for input that is not an object or has
-  no string id, and every call site drops those rather than letting a `null`
-  into the node list. An *unknown kind* is not refused — it has a real id and a
-  real position, and discarding it here would silently delete it on the next
-  save.
-- Every annotation node type is wrapped in `AnnotationErrorBoundary`. A kind
+- **An annotation that cannot be normalised is skipped, not fatal.**
+  `createAnnotation` throws for a kind this version does not know, and
+  `normalizeAnnotationDocument` used to let that escape — so one stored
+  annotation of a retired kind made the whole document unreadable, which in the
+  app means the session fails to open. That is the worst outcome available: the
+  user loses the session rather than one decoration. Skipped entries are
+  reported to the console, since a silent drop looks like deletion. A payload
+  whose annotation slot is not a list at all is still fatal — that is a
+  malformed session, not an annotation this version cannot read.
+- **The overlay translators refuse what they cannot represent.**
+  `overlayToFlowNode` and `flowNodeToOverlay` return `null` for input that is
+  not an object or has no string id, and all three call sites — session
+  restore, saved-view export, and remote ops from a peer or agent — drop those
+  rather than letting a `null` into the node list, where it would crash one
+  step later and harder to trace.
+- **Every annotation node type is wrapped in `AnnotationErrorBoundary`.** A kind
   that throws anyway renders as a small neutral placeholder the user can select
-  and delete, and the failure is logged once per session rather than as a burst.
+  and delete. The user-facing notice fires once per session — several copies of
+  the same broken shape would otherwise read as something being badly wrong —
+  while each failure is logged to the console separately, for whoever has to
+  find the defect.
+
+An unknown kind therefore never reaches the canvas at all: it is dropped while
+normalising, and the restore path filters by the known overlay kinds besides.
+The translators tolerate one because they are also used on already-built nodes,
+not because a stored unknown kind survives to be rendered.
 
 `custom` — a graph node — is deliberately **not** wrapped. Its data is the
 user's real work, carries no licence to change shape, and a render failure
