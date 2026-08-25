@@ -21,6 +21,15 @@
 // ingest — are never marked pending at all, so `claim` always returns true
 // for them: every other annotation kind, and every OTHER collaborator's own
 // image upload, is completely unaffected by this module.
+//
+// This assumes a genuine third-party edit to the same id can never be
+// delivered *between* this browser's own optimistic apply and its own echo
+// of the same op — true today because the backend serializes writes per
+// session (a single asyncio.Lock) and fans them out over one FIFO queue per
+// subscriber (session_hub.py), so a collaborator's write can only be queued
+// after this one's echo, never interleaved with it. A transport that dropped
+// that per-subscriber ordering guarantee would need this module to key on
+// something more than the annotation id alone.
 export function createSelfEchoDedup() {
   const pending = new Set(); // ids marked before their POST, not yet claimed by either side
   const resolved = new Set(); // ids whose race the first arrival already won

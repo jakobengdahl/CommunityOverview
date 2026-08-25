@@ -1137,6 +1137,15 @@ function App() {
           imageData: dataUrl,
           annotationId,
         });
+        // Re-check after this second await too: the ingest POST is a real
+        // network round trip (server-side fetch/optimize included), long
+        // enough for the user to have switched to a different session while
+        // it was in flight. The annotation is real and correctly created for
+        // `targetId` server-side either way — only applying it to whatever
+        // session happens to be active *now* (a different one) would be
+        // wrong, since applyRemoteOp/foldLocalOp act on the current graph
+        // store and the current sync client, not on `targetId` specifically.
+        if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
         await applyIngestedImageOptimistically({
           annotation: result?.annotation,
           applyRemoteOp,
