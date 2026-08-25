@@ -1092,10 +1092,24 @@ function App() {
   // `whenReady()` waits for the same "session exists server-side" fact the op
   // queue's own flush already guards on (D13/D14: a session is never created
   // until its first real write), since this request bypasses that queue.
+  //
+  // The annotation id is generated *here*, client-side, and marked in the
+  // self-echo dedup before the request is even sent — passed through as
+  // `annotationId` so the server uses it rather than minting its own. Marking
+  // it any later (e.g. after the POST resolves) would race this browser's own
+  // SSE subscription: the echo can arrive before the REST response does, in
+  // which case it would apply normally (finding no mark yet) and the
+  // then-late mark would be left with no future echo to consume it —
+  // wrongly swallowing the next unrelated update for that id. Generating the
+  // id up front removes the race entirely instead of trying to win it.
   const handleImageIngest = useCallback(
     async (dataUrl, position) => {
       const targetId = sessionId;
       const sync = ensureSyncConnected(targetId);
+      const dedup = selfIngestedImageAnnotationIdsRef.current;
+      const annotationId = crypto.randomUUID();
+      dedup.markApplied(annotationId);
+      let delivered = false;
       try {
         await sync?.whenReady();
         if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
@@ -1103,18 +1117,24 @@ function App() {
           x: position.x,
           y: position.y,
           imageData: dataUrl,
+          annotationId,
         });
         applyIngestedImageOptimistically({
           annotation: result?.annotation,
           applyRemoteOp,
           foldLocalOp: (op) => syncRef.current?.foldLocalOp(op),
-          dedup: selfIngestedImageAnnotationIdsRef.current,
         });
+        delivered = true;
         sessionStore.touchSession(targetId);
         setSessionsVersion((v) => v + 1);
       } catch (error) {
         console.error('Error ingesting image:', error);
         showNotification('error', error.message || t('canvas.image_ingest_failed'));
+      } finally {
+        // No annotation was ever created server-side for this attempt (the
+        // request failed, or this bailed out before even sending it) — no
+        // echo is coming for `annotationId`, so the mark must not linger.
+        if (!delivered) dedup.forget(annotationId);
       }
     },
     [sessionId, ensureSyncConnected, syncRef, showNotification, t, applyRemoteOp]

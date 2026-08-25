@@ -39,6 +39,26 @@ describe('createSelfEchoDedup', () => {
     expect(dedup.shouldSkip(null)).toBe(false);
   });
 
+  it('forget() drops a mark whose upload never actually completed, so a later unrelated create for the same id is not swallowed', () => {
+    const dedup = createSelfEchoDedup();
+    dedup.markApplied('ann-1');
+
+    // The POST failed (or the caller bailed before sending it) — no
+    // annotation was ever created server-side, so no echo will ever arrive
+    // for this id.
+    dedup.forget('ann-1');
+
+    // A later, unrelated create that happens to reuse this id must not be
+    // swallowed by the abandoned mark.
+    expect(dedup.shouldSkip('ann-1')).toBe(false);
+  });
+
+  it('forget() on an id that was never marked is a harmless no-op', () => {
+    const dedup = createSelfEchoDedup();
+    expect(() => dedup.forget('never-marked')).not.toThrow();
+    expect(dedup.shouldSkip('never-marked')).toBe(false);
+  });
+
   it('clear() drops a pending mark whose echo never arrived, so a later unrelated update for the same id is not swallowed', () => {
     const dedup = createSelfEchoDedup();
     dedup.markApplied('ann-1');
