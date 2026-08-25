@@ -153,6 +153,9 @@ function genericAnnotationToOverlay(a) {
     overlay.attachment = a.attachment;
   } else if (a.type === 'shape') {
     overlay.shape = a.shape || 'rectangle';
+    // Optional caption (task-annotation-doubleclick-to-edit-text) — same
+    // empty-string default as every other kind's `text` field.
+    overlay.text = a.text || '';
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
@@ -179,8 +182,10 @@ function genericOverlayToAnnotation(o) {
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;
-  } else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
-  else if (o.kind === 'icon') {
+  } else if (o.kind === 'shape') {
+    input.shape = o.shape || 'rectangle';
+    input.text = o.text || '';
+  } else if (o.kind === 'icon') {
     input.icon = o.icon || 'circle';
     input.attachment = o.attachment;
   } else if (o.kind === 'vote_dot') {

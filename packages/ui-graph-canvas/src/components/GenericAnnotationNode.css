@@ -10,6 +10,82 @@
   word-break: break-word;
 }
 
+/* Double-click-to-edit input shared by `text` and `shape` (see
+   EDITABLE_TEXT_KINDS in GenericAnnotationNode.jsx) — sized like
+   graph-note-input/graph-label-input rather than a bare unstyled textarea,
+   with `resize: none` so its own native resize handle can't fight the
+   annotation's own NodeResizer/content-driven sizing. No width/height rule
+   here: `text` has no explicit box (SIZED_GENERIC_KINDS excludes it, so its
+   node has no `style.width/height` to size a percentage against) and relies
+   on the textarea's own default rows/cols, matching how graph-label-input
+   sizes its `<input>` — a `shape`'s inset wrapper below sets the fill rule
+   for the one case that does have a box to fill. */
+.graph-generic-annotation-text-input {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  padding: 2px 6px;
+  min-width: 60px;
+  min-height: 1.4em;
+  box-sizing: border-box;
+  resize: none;
+}
+
+.graph-generic-annotation-text-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+/* The inset text layer a `shape` draws its caption in (see
+   shapeTextInsetStyle) — sits on the unclipped halo, not the clipped shape
+   div, at the per-variant inset that keeps it inside the painted outline. */
+.graph-generic-annotation-shape-text {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Unlike `text`'s bare textarea above, `shape`'s inset wrapper always has an
+   explicit size (from the shape's own `style.width/height`), so filling it
+   is a real percentage, not a circular one. `font-size` is repeated here
+   (rather than left to `font: inherit`/`color: inherit` above) to match
+   `.graph-generic-annotation-shape-text-content` below exactly — neither
+   `.graph-generic-annotation-shape-text` nor the halo/wrapper above it sets
+   any of these, so without this override the textarea would fall back to
+   the browser/ambient default for each while editing (illegible on a dark
+   fill, since the base rule's background is a translucent black) and then
+   visibly change — size, colour and alignment all at once — the instant the
+   caption commits and re-renders as that span. */
+.graph-generic-annotation-shape-text .graph-generic-annotation-text-input {
+  width: 100%;
+  height: 100%;
+  color: #e6edf3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  font-size: 14px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.graph-generic-annotation-shape-text-content {
+  color: #e6edf3;
+  /* Unlike `text`'s own `color` (a font colour), a shape's `color` is its
+     fill — reusing it for the caption would often make it worse, not
+     better (a light fill with matching light text is illegible). The
+     text-shadow LabelNode.css already uses for the same "readable text over
+     an arbitrary background" problem keeps this caption legible across the
+     full GENERIC_COLORS palette (including light fills like #eab308/#f97316)
+     without computing per-fill contrast. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  font-size: 14px;
+  text-align: center;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .graph-generic-annotation-node.kind-frame {
   box-sizing: border-box;
   border: 2px dashed #94a3b8;

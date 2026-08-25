@@ -1244,7 +1244,11 @@ function GraphCanvasInner({
           id,
           type: 'shape',
           position,
-          data: { shape, color: undefined },
+          // `text: ''` (not omitted) matches the `text`-kind branch above —
+          // a freshly created shape has no caption yet
+          // (task-annotation-doubleclick-to-edit-text), but the field
+          // itself already exists rather than being absent until first edit.
+          data: { shape, text: '', color: undefined },
           style: newShapeSize(shape),
         };
       } else if (kind === 'icon') {

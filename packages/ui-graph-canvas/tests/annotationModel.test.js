@@ -300,6 +300,17 @@ describe('annotationModel contract v1', () => {
     expect(createAnnotation({ type: 'shape', shape: 'star' }).shape).toBe('star');
   });
 
+  // task-annotation-doubleclick-to-edit-text: a shape can now carry an
+  // inline-edited caption, the same optional `text` field `text`/`label`
+  // already carry — an omitted one defaults to '', not undefined, so a
+  // shape created before this change keeps rendering identically.
+  it("keeps a shape's optional caption text", () => {
+    expect(createAnnotation({ type: 'shape', shape: 'circle', text: 'Step 1' }).text).toBe(
+      'Step 1'
+    );
+    expect(createAnnotation({ type: 'shape', shape: 'circle' }).text).toBe('');
+  });
+
   // Rotation is accepted for text, labels, notes, images, icons, dots and
   // shapes; it must survive normalization and the transform op the same way
   // x/y/w/h do, or a rotated annotation snaps back on the next round-trip.
