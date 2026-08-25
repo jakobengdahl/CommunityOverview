@@ -323,6 +323,98 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps).toHaveBeenCalledWith([imageOp], { clientId: 'human-image-ingest' });
   });
 
+  // foldLocalOp is App.jsx's other half of the image-ingest fix: applied
+  // directly, ahead of the SSE echo above, so the sync baseline reflects the
+  // new annotation immediately (see foldLocalOp's own docstring for why a
+  // stale baseline would re-emit a redundant create). These cover the flip
+  // side — that the *echo*, when it does arrive afterwards, does not then
+  // re-fold the same (by-then possibly stale) creation-time content over a
+  // baseline a local edit already advanced.
+  describe('foldLocalOp', () => {
+    it('advances the baseline immediately, so re-syncing the same state emits nothing', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const annotation = { id: 'img-1', type: 'image', position: { x: 1, y: 1 } };
+      client.foldLocalOp({ op: 'annotation_created', annotation });
+
+      client.syncState({ annotations: [annotation] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(0);
+    });
+
+    it('marks the annotation so the following echo does not re-fold stale content over a newer local edit', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const created = { id: 'img-1', type: 'image', position: { x: 1, y: 1 } };
+      client.foldLocalOp({ op: 'annotation_created', annotation: created });
+
+      // The user drags the just-created image before the echo arrives; the
+      // normal edit-sync path advances the baseline to the new position.
+      const moved = { id: 'img-1', type: 'image', position: { x: 99, y: 99 } };
+      client.syncState({ annotations: [moved] });
+      await flush();
+      fetchImpl.calls.length = 0; // clear the move's own POST for a clean count below
+
+      // The confirming echo now arrives, carrying the stale, pre-drag
+      // position — folding it over the baseline again would revert the move.
+      es.emit({
+        type: 'op',
+        client_id: 'human-image-ingest',
+        op: { op: 'annotation_created', annotation: created },
+        seq: 1,
+      });
+
+      // If the echo had wrongly re-folded the stale position, the baseline
+      // would now disagree with the still-current (moved) canvas state and
+      // this sync would emit a redundant correction. It must not.
+      client.syncState({ annotations: [moved] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(0);
+    });
+
+    it('only guards the one echo immediately following a local fold — a later, unrelated update for the same id folds normally', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const created = { id: 'img-1', type: 'image', position: { x: 1, y: 1 } };
+      client.foldLocalOp({ op: 'annotation_created', annotation: created });
+      // The one echo this guards against:
+      es.emit({
+        type: 'op',
+        client_id: 'human-image-ingest',
+        op: { op: 'annotation_created', annotation: created },
+        seq: 1,
+      });
+
+      // A genuine later edit from a different collaborator must still fold —
+      // the guard is one-shot, not a permanent block on this annotation id.
+      const editedByOther = { id: 'img-1', type: 'image', position: { x: 50, y: 50 } };
+      es.emit({
+        type: 'op',
+        client_id: 'client-other',
+        op: { op: 'annotation_updated', annotation: editedByOther },
+        seq: 2,
+      });
+
+      // Re-syncing the *original* (pre-edit) content is now a real change
+      // from the baseline's point of view (which the collaborator's edit
+      // should have advanced to `editedByOther`), so it must emit a
+      // correcting op — proving the baseline picked up their update rather
+      // than the guard having swallowed it.
+      client.syncState({ annotations: [created] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(1);
+      expect(fetchImpl.calls[0].body.ops).toContainEqual({
+        op: 'annotation_updated',
+        annotation: created,
+      });
+    });
+  });
+
   describe('whenReady', () => {
     it('resolves immediately once the client is already ready', async () => {
       const { client } = makeClient();

@@ -326,15 +326,20 @@ function App() {
         case 'annotation_created':
         case 'annotation_updated': {
           const ann = op.annotation;
-          if (!ann || !ann.id) break;
+          if (!ann || !ann.id) return false;
           // This function is the one shared place both of an image ingest's
           // two deliveries end up — this browser's own direct optimistic
           // apply (handleImageIngest) and its confirming SSE echo (via
           // onRemoteOps below) — so whichever of the two got here first for
           // this id renders it, and the other is a no-op (see
           // createSelfEchoDedup for why "whichever is second" cannot be
-          // assumed to always be the echo).
-          if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) break;
+          // assumed to always be the echo). The return value tells the
+          // direct-apply caller whether *this* call was the one that won,
+          // so it knows whether to also fold the op into the sync baseline
+          // (see handleImageIngest / SessionSyncClient.foldLocalOp) — the
+          // loser must not, since the winner (or the winner's own baseline
+          // fold, for the echo case) already did.
+          if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) return false;
           if (ann.kind === 'group') {
             const [group] = annotationsToGroups([ann]).groups;
             setRemoteAnnotationOps((prev) => [
@@ -349,7 +354,7 @@ function App() {
                 { action: 'upsert-overlay', overlay },
               ]);
           }
-          break;
+          return true;
         }
         case 'annotation_deleted':
           if (op.annotation_id)
@@ -398,9 +403,19 @@ function App() {
       const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
       syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
       // A full reload re-hydrates every annotation from server truth, so any
-      // image-ingest echo this browser was still waiting on (see
+      // image-ingest race this browser was still waiting to resolve (see
       // createSelfEchoDedup) is moot — drop it rather than let it linger and
-      // wrongly swallow an unrelated later update for the same id.
+      // wrongly veto an unrelated later update for the same id.
+      //
+      // Accepted narrow edge case: a resync landing in the brief window
+      // between markPending(id) and either delivery reaching claim() (an
+      // upload genuinely in flight when the stream drops) clears that
+      // reservation too, so both deliveries would then render unguarded —
+      // the second one, if the annotation was already edited in between,
+      // would revert that edit. This mirrors the same trade-off
+      // resyncFromServer already makes for local edits in general (a resync
+      // "only fires after a dropped stream, when the local user was not
+      // editing", see below) rather than a new risk this dedup introduces.
       selfIngestedImageAnnotationIdsRef.current.clear();
     },
     [syncRef]
@@ -1122,7 +1137,7 @@ function App() {
           imageData: dataUrl,
           annotationId,
         });
-        applyIngestedImageOptimistically({
+        await applyIngestedImageOptimistically({
           annotation: result?.annotation,
           applyRemoteOp,
           foldLocalOp: (op) => syncRef.current?.foldLocalOp(op),
