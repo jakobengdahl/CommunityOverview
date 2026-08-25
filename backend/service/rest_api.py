@@ -485,6 +485,52 @@ def _raise_for_access_denied(result: Dict[str, Any]) -> None:
         )
 
 
+async def _read_body_within_cap(
+    http_request: Request, max_bytes: int, oversized_detail: str
+) -> bytes:
+    """Read a request body, rejecting early once it is known to exceed ``max_bytes``.
+
+    Shared by ``apply_session_ops`` and ``ingest_session_image``, both of
+    which take their body as a raw ``Request`` instead of a typed Pydantic
+    parameter specifically so this check can run *before* the request is
+    buffered — a typed body parameter would let FastAPI/Starlette read and
+    parse the whole thing first, defeating the point of a pre-parse cap.
+
+    Checks the declared ``Content-Length`` header first, so a wildly
+    oversized request is rejected without ever being read into memory; then
+    re-checks the actually-buffered length as a backstop for a request whose
+    header is missing, absent, or understates the truth (e.g. chunked
+    transfer-encoding, or a client that simply lies).
+    """
+    content_length = http_request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_bytes:
+            raise HTTPException(status_code=413, detail=oversized_detail)
+    body = await http_request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail=oversized_detail)
+    return body
+
+
+def _parse_body_or_422(model_cls, body: bytes):
+    """Parse ``body`` as ``model_cls``, matching FastAPI's default 422 shape.
+
+    Automatic body validation no longer runs once the route takes a raw
+    ``Request`` (see ``_read_body_within_cap``), so this reproduces it: a
+    list of error dicts, the same shape ``RequestValidationError`` produces.
+    ``jsonable_encoder`` handles error entries whose ``"input"`` is raw bytes
+    (e.g. an invalid-JSON error embeds the undecoded body).
+    """
+    try:
+        return model_cls.model_validate_json(body)
+    except PydanticValidationError as exc:
+        raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+
+
 # ==================== Route Registration Helpers ====================
 
 
@@ -1019,25 +1065,10 @@ def _register_session_endpoints(
         # admits the larger `max_request_body_bytes` ceiling; apply_ops applies
         # the tighter, per-case cap once it has parsed the ops.
         max_body_bytes = session_manager.max_request_body_bytes
-        content_length = http_request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_length = int(content_length)
-            except ValueError:
-                declared_length = None
-            if declared_length is not None and declared_length > max_body_bytes:
-                raise HTTPException(status_code=413, detail="op batch too large")
-        body = await http_request.body()
-        if len(body) > max_body_bytes:
-            raise HTTPException(status_code=413, detail="op batch too large")
-        try:
-            request = SessionOpsRequest.model_validate_json(body)
-        except PydanticValidationError as exc:
-            # Match FastAPI's default RequestValidationError shape (a list of
-            # error dicts), since automatic body validation no longer runs.
-            # jsonable_encoder handles error entries whose "input" is raw bytes
-            # (e.g. an invalid-JSON error embeds the undecoded body).
-            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+        body = await _read_body_within_cap(
+            http_request, max_body_bytes, "op batch too large"
+        )
+        request = _parse_body_or_422(SessionOpsRequest, body)
         try:
             return await session_manager.apply_ops(
                 session_id, request.client_id, request.base_seq, request.ops
@@ -1074,34 +1105,19 @@ def _register_session_endpoints(
         that constant's docstring for why the echo would otherwise be dropped).
 
         Takes the body as raw ``Request`` rather than a typed Pydantic
-        parameter — same reason as ``apply_session_ops`` above — so the
-        Content-Length pre-check below runs before FastAPI/Starlette buffers
-        and parses the whole request; a typed body parameter would have
-        already done both by the time any size check could run.
+        parameter — same reason as ``apply_session_ops`` above — so
+        ``_read_body_within_cap``'s Content-Length pre-check runs before
+        FastAPI/Starlette buffers and parses the whole request; a typed body
+        parameter would have already done both by the time any size check
+        could run.
         """
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
 
-        content_length = http_request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_length = int(content_length)
-            except ValueError:
-                declared_length = None
-            if (
-                declared_length is not None
-                and declared_length > _MAX_IMAGE_INGEST_BODY_BYTES
-            ):
-                raise HTTPException(status_code=413, detail="image upload too large")
-        body = await http_request.body()
-        if len(body) > _MAX_IMAGE_INGEST_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="image upload too large")
-        try:
-            request = IngestSessionImageRequest.model_validate_json(body)
-        except PydanticValidationError as exc:
-            # Match FastAPI's default RequestValidationError shape (a list of
-            # error dicts), since automatic body validation no longer runs.
-            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+        body = await _read_body_within_cap(
+            http_request, _MAX_IMAGE_INGEST_BODY_BYTES, "image upload too large"
+        )
+        request = _parse_body_or_422(IngestSessionImageRequest, body)
 
         if bool(request.image_data) == bool(request.image_url):
             raise HTTPException(
