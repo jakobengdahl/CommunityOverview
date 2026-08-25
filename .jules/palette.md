@@ -1,3 +1,3 @@
-## 2026-08-21 - Added missing ARIA labels to close buttons
-**Learning:** Found several icon-only close buttons lacking aria-labels, making them inaccessible to screen readers. Specifically in modal dialog components like CreateNodeDialog and EditEdgeDialog.
-**Action:** Ensure all icon-only buttons include descriptive aria-labels. When dealing with generic close buttons across multiple dialogs, standardize on aria-label="Close" to improve screen reader experience.
+## 2024-05-18 - Added ARIA label to FloatingHeader hamburger menu
+**Learning:** Icon-only buttons using `react-bootstrap-icons` (like `<List size={20} />`) need explicit `aria-label`s for screen readers. The `title` attribute provides a tooltip but isn't a substitute for an accessible label.
+**Action:** When adding or reviewing icon-only buttons, ensure an `aria-label` is present using the `t()` localization function if a localized tooltip `title` exists.

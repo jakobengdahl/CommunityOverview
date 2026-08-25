@@ -60,6 +60,7 @@ function FloatingHeader({ title, sessionId, roster, currentClientId, onClear, on
           className="floating-header-hamburger"
           onClick={() => onToggleDrawer?.()}
           title={t('header.menu')}
+          aria-label={t('header.menu')}
         >
           <List size={20} />
         </button>
