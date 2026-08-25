@@ -1185,6 +1185,17 @@ describe('text/shape typography', () => {
     expect(node.style.alignItems).toBe('flex-end');
   });
 
+  // A stored fontSize of 0 is an explicit, if degenerate, value and must be
+  // honored rather than treated as "unset" and replaced by the kind default
+  // (an earlier `data?.fontSize || default` did exactly that, since `||`
+  // treats 0 as falsy the same way it does undefined/null).
+  it('honors an explicit fontSize of 0 instead of falling back to the default', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="text" data={{ text: 'Hi', fontSize: 0 }} />
+    );
+    expect(container.querySelector('.kind-text').style.fontSize).toBe('0px');
+  });
+
   it('renders an overridden fontSize/font/textAlign on a `shape` caption', () => {
     const { container } = render(
       <GenericAnnotationNode
@@ -1217,10 +1228,12 @@ describe('text/shape typography', () => {
       fireEvent.contextMenu(target);
       expect(document.querySelectorAll('.align-picker-button')).toHaveLength(9);
       expect(document.querySelector('.context-menu-sizes')).toBeTruthy();
+      // Button text is the translated family label (labels.fontFamily*), not
+      // the bare stored keyword — packages/ui-graph-canvas's i18n rule.
       expect(screen.getByText('Default')).toBeInTheDocument();
-      expect(screen.getByText('serif')).toBeInTheDocument();
-      expect(screen.getByText('monospace')).toBeInTheDocument();
-      expect(screen.getByText('cursive')).toBeInTheDocument();
+      expect(screen.getByText('Serif')).toBeInTheDocument();
+      expect(screen.getByText('Monospace')).toBeInTheDocument();
+      expect(screen.getByText('Cursive')).toBeInTheDocument();
     }
   );
 
@@ -1281,7 +1294,9 @@ describe('text/shape typography', () => {
   it('sets and clears a font-family override on click', () => {
     render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi', font: 'serif' }} />);
     fireEvent.contextMenu(screen.getByText('Hi'));
-    fireEvent.click(screen.getByText('monospace'));
+    // Clicked by its translated label ("Monospace"), matching what the DOM
+    // actually shows; the stored value it writes is still the bare keyword.
+    fireEvent.click(screen.getByText('Monospace'));
     expect(applyLatestUpdate({ id: 't1', data: { font: 'serif' } }).data.font).toBe('monospace');
     fireEvent.contextMenu(screen.getByText('Hi'));
     fireEvent.click(screen.getByText('Default'));

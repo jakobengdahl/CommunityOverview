@@ -83,6 +83,20 @@ const ALIGN_LABEL_KEYS = Object.freeze({
   right: 'alignRight',
 });
 
+// Maps each GENERIC_FONT_FAMILIES entry to the `labels` key carrying its
+// translated display name. The *stored* value stays the untranslated CSS
+// generic keyword (so it round-trips identically for every locale/host and
+// the font-picker button can still preview it inline via
+// `style={{ fontFamily: family }}`), but per this package's i18n rule (see
+// this repo's root CLAUDE.md: "All user-visible text in
+// packages/ui-graph-canvas must be accepted as props with English
+// defaults"), the *visible button text* must not be the bare keyword itself.
+const FONT_FAMILY_LABEL_KEYS = Object.freeze({
+  serif: 'fontFamilySerif',
+  monospace: 'fontFamilyMonospace',
+  cursive: 'fontFamilyCursive',
+});
+
 // The axis-aligned rectangle each shape variant's clip-path is *guaranteed*
 // to fully contain, as inset percentages (top/right/bottom/left) against the
 // node's own box. A text layer positioned inside this rectangle can never
@@ -307,8 +321,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // them per branch. Harmless for every other kind: nothing reads these.
   const textAlign = data?.textAlign || TEXT_ALIGN_DEFAULT_BY_KIND[kind] || 'top-left';
   const textAlignStyle = TEXT_ALIGN_STYLES[textAlign] || TEXT_ALIGN_STYLES['top-left'];
+  // `??`, not `||`: a stored fontSize of 0 is a real, explicit value (however
+  // degenerate) and must be honored, not silently replaced by the default —
+  // only an *omitted* fontSize (null/undefined) should fall back.
   const textFontSize =
-    data?.fontSize ||
+    data?.fontSize ??
     (kind === 'shape' ? DEFAULT_SHAPE_CAPTION_FONT_SIZE : DEFAULT_GENERIC_TEXT_FONT_SIZE);
   // Unset/falsy means "no override" — the annotation keeps inheriting the
   // app's ambient font exactly as it does today (GENERIC_FONT_FAMILIES has no
@@ -1059,7 +1076,7 @@ function ContextMenuPortal({
                 style={{ fontFamily: family }}
                 onClick={() => onChangeFont(family)}
               >
-                {family}
+                {labels[FONT_FAMILY_LABEL_KEYS[family]] || family}
               </button>
             ))}
           </div>
