@@ -292,8 +292,12 @@ describe('classifyUndoError', () => {
 describe('classifyUndoError × i18n', () => {
   // ActivityDrawer.jsx renders `history.session_undo_${reason}` straight from
   // the classifier's return value, so a reason with no key shows the user the
-  // key name. Driven through the classifier rather than hardcoding the list,
-  // so a reason that changes spelling is caught here and not in the UI.
+  // key name. Driven through the classifier rather than hardcoding the reason
+  // strings, so a reason that changes spelling is caught here and not in the
+  // UI. It does not police the classifier's *shape*: a new branch added here
+  // without a matching input below is not caught — the toHaveLength guard
+  // catches two inputs collapsing onto one reason, which is the branch
+  // deletion this pairs with, not a branch addition.
   const errors = [
     { status: 429 },
     { status: 404, message: 'no undoable action' },
@@ -303,7 +307,7 @@ describe('classifyUndoError × i18n', () => {
     { status: 500 },
   ];
 
-  it('has an en and sv message for every reason the classifier can return', () => {
+  it('has an en and sv message for every reason these inputs classify to', () => {
     const reasons = [...new Set(errors.map(classifyUndoError))];
     expect(reasons).toHaveLength(errors.length);
     for (const reason of reasons) {

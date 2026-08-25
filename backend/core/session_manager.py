@@ -174,8 +174,8 @@ class RevisionConflict(Exception):
 
 
 class ClaimConflict(Exception):
-    """A browser batch (``apply_ops``) tried to mutate an annotation another
-    client currently holds a live selection claim on.
+    """A browser write tried to mutate an annotation another client currently
+    holds a live selection claim on.
 
     Raised from the two ``SessionManager`` paths that check live claims: the
     ``apply_ops`` batch (the REST ``/ops`` endpoint) and ``undo_last_action``
@@ -189,8 +189,9 @@ class ClaimConflict(Exception):
     (``upsert_annotation``/``update_annotation``/``delete_annotation``/
     ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
     client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
-    unaffected by this check; see ``session_hub.ClaimMap``'s docstring for the
-    open decision on whether it should be.
+    unaffected by this check; see the ``ClaimMap`` bullet in ``session_hub``'s
+    module docstring for the open decision on whether it should be (the class
+    docstring is a one-liner and does not carry it).
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
