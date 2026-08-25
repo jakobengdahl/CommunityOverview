@@ -33,7 +33,8 @@ import './FreehandAnnotationNode.css';
 // rather than as mis-coloured. Kept in the swatch list too — a white stroke is
 // still wanted for a dark background — but it is no longer what you get by
 // drawing without choosing.
-const DEFAULT_COLOR = '#111827';
+export const DEFAULT_FREEHAND_COLOR = '#111827';
+const DEFAULT_COLOR = DEFAULT_FREEHAND_COLOR;
 const DEFAULT_STROKE_WIDTH = 2;
 const PAD = 8;
 

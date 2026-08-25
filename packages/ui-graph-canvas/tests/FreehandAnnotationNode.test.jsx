@@ -331,6 +331,21 @@ describe('freehand default colour', () => {
   // invisible. The default was a near-white picked for a dark canvas, so the
   // tool looked broken rather than mis-coloured — the worst failure mode for
   // the one annotation kind whose whole interaction is "draw and see a line".
+  it('is the same constant the canvas writes onto every stroke it creates', async () => {
+    // The bug this fixes was two constants for one default: GraphCanvas had
+    // its own copy, and because a GUI-drawn stroke is always written WITH an
+    // explicit colour, that copy — not the node's fallback below — was what
+    // every drawn stroke actually got. Fixing only the fallback changed
+    // nothing a user could see. Assert the single source directly, since a
+    // second copy reintroducing itself is the failure mode.
+    const canvas = await import('../src/components/GraphCanvas.jsx?raw').catch(() => null);
+    const node = await import('../src/components/FreehandAnnotationNode');
+    expect(node.DEFAULT_FREEHAND_COLOR).toBe('#111827');
+    if (canvas?.default) {
+      expect(canvas.default).not.toMatch(/DEFAULT_FREEHAND_COLOR\s*=\s*'#/);
+    }
+  });
+
   it('renders an unstyled stroke in a colour that is visible on a light canvas', () => {
     const { container } = render(
       <FreehandAnnotationNode id="f-default" data={{ points: straightPoints }} />
@@ -339,9 +354,10 @@ describe('freehand default colour', () => {
     const stroke = container.querySelector('.graph-freehand-stroke path');
     expect(stroke).toBeTruthy();
     const value = stroke.getAttribute('stroke');
-    expect(value).toBe('#111827');
-    // Guard the property rather than only the constant: a near-white default
-    // is the specific bug, so assert darkness, not just inequality.
+    // Darkness, not the exact constant — the test above already pins the
+    // value, and the bug was "the default is too light", not "the default is
+    // not this string". An assertion on the constant alone would pass again
+    // for the next near-white someone picks.
     const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     expect(luminance).toBeLessThan(0.3);

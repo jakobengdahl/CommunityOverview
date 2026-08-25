@@ -86,19 +86,24 @@ const SHAPE_STYLES = Object.freeze(
 );
 
 // Width-to-height ratios that make a subtype's clip-path draw a *regular*
-// figure — equal-length sides. The clip-paths are all percentages, so they
-// resolve against the node box: at the generic 160x96 default a hexagon comes
-// out with long horizontals and short slants, and a rhombus as a squashed
-// diamond. An equilateral triangle and a regular pointy-side hexagon are both
-// 2 : sqrt(3) wide-to-tall; a rhombus with equal sides is a square on its
-// corner, so 1:1.
+// figure. The clip-paths are all percentages, so they resolve against the node
+// box, and at the generic 160x96 default a hexagon comes out with long
+// horizontals and short slants while a triangle is wide and flat.
 //
-// Subtypes absent from this map are meant to fill whatever box they are given
-// — rectangle by definition, and process_arrow because a process step is as
-// long as its label needs. `circle` is deliberately absent too: it draws with
+// For the triangle and the hexagon the ratio is what makes the SIDES equal,
+// and both work out to 2 : sqrt(3) wide-to-tall. The rhombus is a different
+// case worth stating plainly, because it is easy to get wrong: its four sides
+// are sqrt(w^2 + h^2)/2 whatever the box, so a rhombus is equal-sided at EVERY
+// ratio. 1:1 is here to make it a square standing on its corner — equal
+// diagonals and right angles — which is what "a rhombus" is normally drawn as
+// and what a 160x96 box was failing to give.
+//
+// Subtypes absent from this map fill whatever box they are given: rectangle by
+// definition, and process_arrow because a process step's length is how you
+// show a long step. `circle` is deliberately absent too — it draws with
 // border-radius rather than a clip-path and becomes an ellipse in a non-square
-// box, which is the same class of surprise but was not part of what was
-// reported — see task-annotation-shape-equal-sided-geometry.
+// box, the same class of surprise but not part of what was reported. See
+// task-annotation-shape-equal-sided-geometry.
 const REGULAR_SHAPE_ASPECT = Object.freeze(
   Object.assign(Object.create(null), {
     triangle: 2 / Math.sqrt(3),
@@ -109,6 +114,24 @@ const REGULAR_SHAPE_ASPECT = Object.freeze(
 
 export function regularShapeAspect(shape) {
   return REGULAR_SHAPE_ASPECT[shape] ?? null;
+}
+
+// The width a shape is created at, and the width a subtype switch resizes it
+// back to. Kept next to the ratio rather than in GraphCanvas so one test can
+// cover both halves — the created size living in a different file from the
+// ratio that justifies it is exactly why the creation branch went untested.
+export const SHAPE_BASE_WIDTH = 160;
+const SHAPE_FALLBACK_SIZE = Object.freeze({ width: 160, height: 96 });
+
+/**
+ * The box a `shape` of this subtype should occupy. A subtype with a regular
+ * ratio gets the height that ratio implies; every other subtype fills the
+ * generic box.
+ */
+export function regularShapeSize(shape) {
+  const aspect = regularShapeAspect(shape);
+  if (!aspect) return { ...SHAPE_FALLBACK_SIZE };
+  return { width: SHAPE_BASE_WIDTH, height: Math.round(SHAPE_BASE_WIDTH / aspect) };
 }
 
 // The shape-subtype picker's option order — every variant SHAPE_STYLES draws.
@@ -206,9 +229,19 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
-    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, shape } } : n)));
+    // Switching subtype has to move the box too. A rectangle is 160x96; making
+    // it a triangle without resizing gives exactly the squashed figure this
+    // change exists to prevent — and `keepAspectRatio` would then lock that
+    // wrong ratio in place, since it preserves what it measures.
+    const size = regularShapeSize(shape);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id ? { ...n, data: { ...n.data, shape }, style: { ...n.style, ...size } } : n
+      )
+    );
     setContextMenu(null);
-    notifyChange('style');
+    // 'geometry' rather than 'style': the box changed, not just the paint.
+    notifyChange('geometry');
   };
 
   const changeIcon = (name) => {
@@ -330,12 +363,21 @@ function GenericAnnotationNode({ id, type, data, selected }) {
   // Without it the box is free and the percentage clip-path distorts again the
   // moment the user drags a handle, which is how the squashed shapes were
   // reported in the first place.
-  const lockedAspect = kind === 'shape' ? regularShapeAspect(data?.shape || 'rectangle') : null;
+  //
+  // NodeResizer's `keepAspectRatio` is a boolean (reactflow 11.11.4,
+  // @reactflow/node-resizer types.d.ts) — it preserves the ratio the node
+  // MEASURES at drag start, and takes no target ratio. That is enough here
+  // only because every other path now puts the box at the right ratio before
+  // a drag can start: creation and the subtype switch both size it from
+  // regularShapeSize. Passing a number here would be silently truthy and read
+  // as "lock whatever it currently is", which is what it already does.
+  const lockedAspect =
+    kind === 'shape' ? regularShapeAspect(data?.shape || 'rectangle') !== null : false;
   const resizer = RESIZABLE_KINDS.has(kind) && (
     <NodeResizer
       minWidth={MIN_SIZE}
       minHeight={MIN_SIZE}
-      keepAspectRatio={lockedAspect ?? undefined}
+      keepAspectRatio={lockedAspect}
       isVisible={Boolean(selected) && !locked && !remoteLocked}
       lineStyle={{ stroke: color, strokeWidth: 2 }}
       handleStyle={{ width: 10, height: 10, background: color, border: '2px solid white' }}

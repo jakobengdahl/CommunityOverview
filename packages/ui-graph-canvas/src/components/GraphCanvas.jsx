@@ -18,9 +18,9 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode, { regularShapeAspect } from './GenericAnnotationNode';
+import GenericAnnotationNode, { regularShapeSize } from './GenericAnnotationNode';
 import AnnotationToolbox from './AnnotationToolbox';
-import FreehandAnnotationNode from './FreehandAnnotationNode';
+import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -82,14 +82,13 @@ const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
 // four are editable afterwards through FreehandAnnotationNode's right-click
-// property editor (docs/ANNOTATION_CONTRACT.md's freehand row).
-const DEFAULT_FREEHAND_COLOR = '#e6edf3';
+// property editor (docs/ANNOTATION_CONTRACT.md's freehand row). The colour is
+// imported rather than restated: this file used to hold its own copy, and
+// because a GUI-drawn stroke is always written WITH an explicit colour, that
+// copy — not the node's fallback — was the value every drawn stroke actually
+// got. Two constants for one default is what let the invisible near-white
+// survive a fix aimed at the fallback.
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
-
-// The width a new `shape` is created at. A subtype with no regular ratio keeps
-// the generic 160x96 box; one with a ratio gets this width and the height that
-// ratio implies, so it is drawn equal-sided from the start.
-const SHAPE_BASE_WIDTH = 160;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
 // A stroke shorter than this many sampled points is a stray tap, not a
@@ -1218,15 +1217,12 @@ function GraphCanvasInner({
         // the ratio (GenericAnnotationNode's keepAspectRatio), so it stays
         // that way.
         const shape = options.shape || 'rectangle';
-        const aspect = regularShapeAspect(shape);
         newNode = {
           id,
           type: 'shape',
           position,
           data: { shape, color: undefined },
-          style: aspect
-            ? { width: SHAPE_BASE_WIDTH, height: Math.round(SHAPE_BASE_WIDTH / aspect) }
-            : { width: 160, height: 96 },
+          style: regularShapeSize(shape),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size
