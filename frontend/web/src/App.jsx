@@ -2062,6 +2062,20 @@ function App() {
             voteDot: t('annotation_toolbox.vote_dot'),
             image: t('annotation_toolbox.image'),
             freehand: t('annotation_toolbox.freehand'),
+            noteHint: t('annotation_toolbox.note_hint'),
+            textHint: t('annotation_toolbox.text_hint'),
+            labelHint: t('annotation_toolbox.label_hint'),
+            frameHint: t('annotation_toolbox.frame_hint'),
+            shapeRectangleHint: t('annotation_toolbox.shape_rectangle_hint'),
+            shapeCircleHint: t('annotation_toolbox.shape_circle_hint'),
+            shapeTriangleHint: t('annotation_toolbox.shape_triangle_hint'),
+            shapeRhombusHint: t('annotation_toolbox.shape_rhombus_hint'),
+            shapeHexagonHint: t('annotation_toolbox.shape_hexagon_hint'),
+            shapeProcessArrowHint: t('annotation_toolbox.shape_process_arrow_hint'),
+            iconHint: t('annotation_toolbox.icon_hint'),
+            voteDotHint: t('annotation_toolbox.vote_dot_hint'),
+            imageHint: t('annotation_toolbox.image_hint'),
+            freehandHint: t('annotation_toolbox.freehand_hint'),
           }}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}

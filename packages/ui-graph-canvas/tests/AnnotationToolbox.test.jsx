@@ -1,6 +1,15 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import AnnotationToolbox from '../src/components/AnnotationToolbox';
+
+// Read the stylesheet as text: jsdom applies no layout and vitest resolves a
+// CSS import to an empty module, so the only way to assert a rule from here is
+// to read the source. Named so the limitation is obvious at the call site.
+function readStylesheet() {
+  return readFileSync(join(process.cwd(), 'src/components/AnnotationToolbox.css'), 'utf8');
+}
 
 describe('AnnotationToolbox', () => {
   it('renders collapsed by default, showing only the toggle', () => {
@@ -111,6 +120,169 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /lägg till kommentar/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /lägg till kommentar/i }));
     expect(screen.getByRole('button', { name: /^anteckning$/i })).toBeInTheDocument();
+  });
+
+  it('gives every item a fixed square cell and takes the caption out of the flow', () => {
+    // The reported defect: with the caption inside the button, a row holding
+    // a two-word name ("Process arrow") grew taller than the row above it.
+    // flex-wrap sizes each line to its own content, so evenness has to come
+    // from the cells being identical — no amount of stretching inside a
+    // button evens out two lines of different heights.
+    //
+    // jsdom does no layout, so this asserts the rule rather than the rendered
+    // height. That is a real limitation and worth naming: a rule that is
+    // present but overridden would still pass here. It does, however, fail if
+    // the fix is reverted, which the structural assertion it replaces did not
+    // — that one held for main's markup too.
+    const css = readStylesheet();
+    const cell = css.match(/\.annotation-toolbox-item \{([^}]*)\}/);
+    expect(cell).toBeTruthy();
+    expect(cell[1]).toMatch(/width:\s*44px/);
+    expect(cell[1]).toMatch(/height:\s*44px/);
+
+    const caption = css.match(/\.annotation-toolbox-item-label \{([^}]*)\}/);
+    expect(caption).toBeTruthy();
+    expect(caption[1]).toMatch(/display:\s*none/);
+
+    // And the element the rule reveals actually exists, once per item. Every
+    // other assertion about the caption reads the stylesheet, so without this
+    // the touch and keyboard fallback that justifies dropping the visible
+    // names could be deleted from the markup with the suite still green.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    const items = document.querySelectorAll('.annotation-toolbox-item');
+    const captions = document.querySelectorAll('.annotation-toolbox-item-label');
+    expect(items.length).toBeGreaterThan(1);
+    expect(captions.length).toBe(items.length);
+    expect([...captions].every((c) => c.textContent.trim())).toBe(true);
+  });
+
+  it('captions the items on a coarse pointer, which compact alone does not cover', () => {
+    // `compact` is a viewport-WIDTH signal, so it would caption a mouse user
+    // with a narrow window and miss a coarse-pointer user on a wide screen.
+    // The captions therefore hang off `touch`, which the host derives from
+    // its own coarse-pointer flag, and off the hover-capability query.
+    render(<AnnotationToolbox onCreate={vi.fn()} touch />);
+    expect(screen.getByTestId('annotation-toolbox').className).toContain(
+      'annotation-toolbox--touch'
+    );
+
+    const css = readStylesheet();
+    expect(css).toMatch(
+      /\.annotation-toolbox--touch \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
+    );
+    // Take the media block's own body by balanced braces before asserting
+    // anything about it. A regex that merely starts at the @media and runs
+    // forward — even a lazy one — sails past the closing brace and satisfies
+    // itself on the --touch rule further down, which lets the hover-query
+    // caption be deleted with the suite still green. That is the bug this
+    // very test was added to prevent, so it has to not have it.
+    const hoverBlock = css.match(/@media \(hover: none\) \{((?:[^{}]|\{[^{}]*\})*)\}/);
+    expect(hoverBlock).toBeTruthy();
+    expect(hoverBlock[1]).toMatch(/\.annotation-toolbox-item-label \{[^}]*display:\s*inline/);
+    // compact must NOT caption: it is width, not pointer.
+    expect(css).not.toMatch(
+      /\.annotation-toolbox--compact \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
+    );
+  });
+
+  it('keeps the name as the accessible label while the tooltip carries the description', () => {
+    // Losing the visible caption must not lose the accessible name: a hover
+    // description is not reachable by a screen reader or by touch.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    const note = screen.getByRole('button', { name: /^note$/i });
+    // No `title`: it would give the same text a second, native tooltip on top
+    // of the styled one — the clutter this redesign exists to reduce.
+    expect(note).not.toHaveAttribute('title');
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(note).not.toHaveAttribute('aria-describedby');
+
+    fireEvent.mouseEnter(note);
+    const tip = screen.getByRole('tooltip');
+    expect(tip).toHaveTextContent('Add a sticky note');
+    // Referenced, not orphaned: the description reaches assistive tech
+    // through the button rather than as a stray node.
+    expect(note.getAttribute('aria-describedby')).toBe(tip.id);
+    fireEvent.mouseLeave(note);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('dismisses the description when the item is used, so a tap does not strand it', () => {
+    // A tap fires the emulated mouseenter but no mouseleave until the user
+    // touches something else, so without this the tooltip stays on screen
+    // after the item has been used — on exactly the devices where the design
+    // says captions replace it.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    const note = screen.getByRole('button', { name: /^note$/i });
+    fireEvent.mouseEnter(note);
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
+    fireEvent.click(note);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('shows the description on keyboard focus too, not only on hover', () => {
+    // A pointer-only affordance would make the descriptions unreachable by
+    // keyboard, which is the accessibility trap in replacing captions with
+    // hover text.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.focus(screen.getByRole('button', { name: /^freehand$/i }));
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Draw a freehand stroke');
+  });
+
+  it('translates the descriptions through the same labels prop as the names', () => {
+    render(
+      <AnnotationToolbox
+        onCreate={vi.fn()}
+        labels={{
+          toggleExpand: 'Lägg till kommentar',
+          note: 'Anteckning',
+          noteHint: 'Lägg till en klisterlapp',
+        }}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /lägg till kommentar/i }));
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /^anteckning$/i }));
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Lägg till en klisterlapp');
+  });
+
+  it('gives every emoji glyph that needs one its variation selector', () => {
+    // A pictographic code point with Emoji_Presentation=No renders text-style
+    // or as tofu unless U+FE0F follows it. U+1F5D2 (sticky note) and U+270F
+    // (pencil) are both in that class; U+1F518 and U+26AB are
+    // Emoji_Presentation=Yes and correctly carry none.
+    //
+    // This is a checked LIST, not a derived rule — the property is a Unicode
+    // table this package does not carry, so a glyph added later is not
+    // covered until it is added here. Naming that plainly rather than dressing
+    // the list up as a rule, because the first version of this test claimed
+    // the rule and then skipped U+270F, which is in the toolbox already.
+    const NEEDS_SELECTOR = new Set([0x1f5d2, 0x1f3f7, 0x1f5bc, 0x270f]);
+
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    const glyphs = [...document.querySelectorAll('.annotation-toolbox-item-glyph')].map(
+      (el) => el.textContent
+    );
+    expect(glyphs.length).toBeGreaterThan(1);
+
+    const checked = new Set();
+    for (const glyph of glyphs) {
+      const [first, second] = [...glyph].map((c) => c.codePointAt(0));
+      if (!NEEDS_SELECTOR.has(first)) continue;
+      checked.add(first);
+      expect(second).toBe(0xfe0f);
+    }
+    // Guard the other direction: if one of these glyphs leaves the toolbox the
+    // test would otherwise pass for no reason. Distinct code points, so a
+    // second item legitimately reusing one does not read as drift.
+    expect(checked.size).toBe(NEEDS_SELECTOR.size);
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {

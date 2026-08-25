@@ -2885,6 +2885,13 @@ function GraphCanvasInner({
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               labels={atl}
               compact={isCompact}
+              // Distinct from `compact`, which is a viewport-WIDTH signal
+              // (COMPACT_MEDIA_QUERY) and so captions the wrong people in both
+              // directions. This is the pointer signal, and it covers what the
+              // stylesheet's own `@media (hover: none)` cannot: a hybrid device
+              // that reports hover while being driven by finger, and an
+              // explicit touchMode="on" override.
+              touch={isTouchMode}
               activeKind={freehandActive ? 'freehand' : null}
             />
           )}

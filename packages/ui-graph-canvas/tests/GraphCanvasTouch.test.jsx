@@ -115,6 +115,18 @@ describe('GraphCanvas touch interaction', () => {
   });
 
   describe('touchMode prop → ReactFlow pan/selection props', () => {
+    it('hands the annotation toolbox the pointer signal, not the width one', () => {
+      // The defect this closes was the toolbox captioning off `compact`, a
+      // viewport-WIDTH signal, so a coarse pointer on a wide screen got an
+      // unlabelled icon grid. Asserted here, at the wiring, because a test of
+      // the toolbox alone only proves it honours a prop it is handed — not
+      // that GraphCanvas hands it one. Width explicitly off, pointer on.
+      render(<GraphCanvas nodes={[]} edges={[]} touchMode="on" compactMode="off" />);
+      const toolbox = document.querySelector('[data-testid="annotation-toolbox"]');
+      expect(toolbox.className).toContain('annotation-toolbox--touch');
+      expect(toolbox.className).not.toContain('annotation-toolbox--compact');
+    });
+
     it('touchMode="off" keeps the exact desktop values — right-drag pans, left-drag marquee-selects', () => {
       render(<GraphCanvas nodes={[]} edges={[]} touchMode="off" />);
       expect(store.handlers.panOnDrag).toEqual([0, 2]);
