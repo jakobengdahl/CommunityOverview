@@ -3,6 +3,7 @@ import {
   annotationsToOverlays,
   overlaysToAnnotations,
   annotationsToGroups,
+  annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
 } from '../src/utils/sessionAnnotations';
 
@@ -442,10 +443,49 @@ describe('a stored annotation this version cannot read', () => {
     expect(warn.mock.calls.length).toBe(4);
   });
 
-  it('survives on the group path and the legacy-metadata path too', () => {
+  // Each entry point into the normaliser has to pass the reporter, and each is
+  // asserted separately. Wiring it at one call site and forgetting another is
+  // invisible otherwise: the session still loads, so nothing fails — the drop
+  // just becomes silent, which is the outcome this reporting exists to prevent.
+  it.each([
+    ['annotationsToOverlays (bare list)', () => annotationsToOverlays(mixed)],
+    [
+      'annotationsToOverlays (versioned document)',
+      () => annotationsToOverlays({ schema_version: 1, annotations: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (groups + overlays)',
+      // The branch that composes a document out of the older group/overlay
+      // shapes. Only groups are malformed here: the overlay serialiser is a
+      // write path and is deliberately still strict.
+      () =>
+        legacyMetadataToAnnotationDocument({
+          groups: [{ id: 'g-ok', label: 'fine', position: { x: 0, y: 0 } }, null],
+          parentIds: {},
+        }),
+    ],
+    ['annotationsToGroups', () => annotationsToGroups(mixed)],
+    [
+      'annotationDocumentToLegacyMetadata',
+      () => annotationDocumentToLegacyMetadata({ schema_version: 1, annotations: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (document)',
+      () => legacyMetadataToAnnotationDocument({ annotation_document: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (versioned list)',
+      () =>
+        legacyMetadataToAnnotationDocument({ annotation_schema_version: 1, annotations: mixed }),
+    ],
+  ])('%s survives it and reports the drop', (_name, run) => {
     warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(() => annotationsToGroups(mixed)).not.toThrow();
-    expect(() => legacyMetadataToAnnotationDocument({ annotation_document: mixed })).not.toThrow();
+    expect(run).not.toThrow();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('the legacy overlay path keeps the annotations it can read', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(
       legacyMetadataToAnnotationDocument({ annotation_document: mixed }).annotations.map(
         (a) => a.id

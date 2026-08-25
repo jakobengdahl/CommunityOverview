@@ -228,8 +228,9 @@ crash the canvas.**
 
 Annotations render inside the same ReactFlow tree as the graph, so an exception
 thrown while drawing one unmounts everything. An annotation is a decoration and
-the graph is the user's work, so that trade is never worth taking. Two
-mechanisms, deliberately both:
+the graph is the user's work, so that trade is never worth taking. Three
+mechanisms at three depths, deliberately all of them — each catches what the
+one below it cannot reach:
 
 - **An annotation that cannot be normalised is skipped, not fatal.**
   `createAnnotation` throws for a kind this version does not know, and

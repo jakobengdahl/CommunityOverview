@@ -49,6 +49,11 @@ export function legacyMetadataToAnnotationDocument(metadata = {}) {
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
     return normalizeAnnotationDocument(metadata.annotations, skip);
   }
+  // `skip` here is uniformity, not protection: both helpers above have already
+  // filtered what they could not read, so nothing malformed can reach this
+  // call. Kept so the reporter is wired at every entry point rather than at
+  // the ones that happen to be reachable today — but said plainly, because an
+  // unreachable guard that reads as a live one is worse than none.
   return normalizeAnnotationDocument(
     [
       ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
@@ -82,18 +87,34 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
     (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
   }
-  return (viewGroups || []).map((g) =>
-    createAnnotation({
-      id: g.id,
-      type: 'group',
-      position: g.position || { x: 0, y: 0 },
-      label: g.label || '',
-      description: g.description || '',
-      color: g.color,
-      size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
-      member_node_ids: membersByGroup[g.id] || [],
-    })
-  );
+  // A group entry that is not an object dereferences to a crash before the
+  // normaliser downstream ever gets a chance to skip it — the same failure the
+  // normaliser guards against, one step earlier in the chain. A group is an
+  // annotation kind, so it answers to the same rule: skip it, report it, keep
+  // the rest.
+  const annotations = [];
+  for (const g of viewGroups || []) {
+    // The try covers a non-object entry too — dereferencing `g.id` throws
+    // inside it — so there is no separate null check. One was written and
+    // removed: it could not be made to fail a test, because nothing reaches it.
+    try {
+      annotations.push(
+        createAnnotation({
+          id: g.id,
+          type: 'group',
+          position: g.position || { x: 0, y: 0 },
+          label: g.label || '',
+          description: g.description || '',
+          color: g.color,
+          size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
+          member_node_ids: membersByGroup[g.id] || [],
+        })
+      );
+    } catch (error) {
+      skippedAnnotation(g, error);
+    }
+  }
+  return annotations;
 }
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond

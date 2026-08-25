@@ -7,7 +7,7 @@ import { AnnotationContext } from '../src/components/AnnotationContext';
 import NoteNode from '../src/components/NoteNode';
 import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => {
   const MockReactFlow = ({ children, nodes, nodeTypes }) => {
@@ -32,10 +32,7 @@ vi.mock('reactflow', () => {
     default: MockReactFlow,
     ReactFlow: MockReactFlow,
     ReactFlowProvider: ({ children }) => <div>{children}</div>,
-    // Controllable, so a test can put a node ON the canvas — the saved-view
-    // export reads node state, and with an always-empty list that path can
-    // never be exercised.
-    useNodesState: (initial) => [hoisted.nodes ?? initial ?? [], hoisted.setNodes, vi.fn()],
+    useNodesState: (initial) => [initial || [], hoisted.setNodes, vi.fn()],
     useEdgesState: (initial) => [initial || [], vi.fn(), vi.fn()],
     useReactFlow: () => ({
       fitView: vi.fn(),
@@ -92,10 +89,7 @@ const MALFORMED = [
 ];
 
 describe('annotations the current code does not expect', () => {
-  beforeEach(() => {
-    hoisted.setNodes.mockClear();
-    hoisted.nodes = [];
-  });
+  beforeEach(() => hoisted.setNodes.mockClear());
 
   it('renders the canvas rather than throwing, whatever is stored', () => {
     // The invariant, stated plainly: the graph survives. An annotation is a
@@ -139,25 +133,32 @@ describe('the three crashes this closes, each at its own component', () => {
   // assert the opposite — that the component draws NORMALLY, without falling
   // through to the placeholder. That distinction is the fix; the boundary is
   // only the backstop behind it.
+  //
+  // Rendered INSIDE the boundary on purpose. Rendered bare, a broken component
+  // would throw out of `render()` and the "no placeholder" assertion would be
+  // unreachable — true but inert, since nothing could ever produce a
+  // placeholder. Inside it, a regression shows up as the placeholder appearing,
+  // which is what the assertion claims to detect.
+  const draw = (el) =>
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <AnnotationErrorBoundary nodeId="under-test">{el}</AnnotationErrorBoundary>
+      </AnnotationContext.Provider>
+    );
   const noPlaceholder = () => expect(screen.queryByTestId('annotation-broken')).toBeNull();
 
   it('a note with no payload at all draws as an empty note', () => {
-    render(
-      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
-        <NoteNode id="n1" selected={false} />
-      </AnnotationContext.Provider>
-    );
+    draw(<NoteNode id="n1" selected={false} />);
     noPlaceholder();
   });
 
-  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
-    'a %s with no payload at all draws rather than throwing',
+  // `frame` is deliberately absent: its render branch has no bare `data.`
+  // dereference, so it drew fine before the fix too and the row would assert
+  // nothing. The five below each threw.
+  it.each(['text', 'shape', 'icon', 'vote_dot', 'image'])(
+    'a %s with no payload at all draws rather than falling through to the placeholder',
     (kind) => {
-      render(
-        <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
-          <GenericAnnotationNode id={`g-${kind}`} type={kind} selected={false} />
-        </AnnotationContext.Provider>
-      );
+      draw(<GenericAnnotationNode id={`g-${kind}`} type={kind} selected={false} />);
       noPlaceholder();
     }
   );
@@ -166,11 +167,7 @@ describe('the three crashes this closes, each at its own component', () => {
     // React refuses an object as a child. An array would have rendered as its
     // joined members, which is why this coerces on type rather than testing
     // for object-ness.
-    render(
-      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
-        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: { legacy: true } }} />
-      </AnnotationContext.Provider>
-    );
+    draw(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: { legacy: true } }} />);
     noPlaceholder();
     expect(document.querySelector('.kind-vote_dot').textContent).toBe('');
   });
@@ -299,9 +296,10 @@ describe('overlayToFlowNode / flowNodeToOverlay refuse what they cannot translat
   });
 
   it('still translates an unknown kind rather than discarding it', () => {
-    // Refusing input is for what cannot be represented at all. A kind this
-    // version does not know is still a real annotation with a real id, and
-    // dropping it here would silently delete it on the next save.
+    // Refusing input is for what cannot be represented at all. These
+    // translators also run on already-built canvas nodes, where an unfamiliar
+    // type is not a reason to throw the node away — a stored unknown kind is
+    // dropped earlier, while normalising, and never reaches here.
     const node = overlayToFlowNode({ id: 'k', kind: 'wormhole', position: { x: 1, y: 2 } });
     expect(node).toMatchObject({ id: 'k', type: 'wormhole' });
   });
