@@ -1,47 +1,73 @@
-// Tracks ids this browser has already applied optimistically ahead of their
-// own confirming echo. Image ingest (App.jsx's handleImageIngest) is the
-// motivating case: the annotation id is generated client-side and marked
-// *before* the ingest request is even sent, so the mark unconditionally
-// exists before this browser's own SSE echo of the resulting op — attributed
-// to a marker distinct from this browser's own client id specifically so it
-// is not dropped as a self-authored echo (see backend/service/rest_api.py's
-// ingest_session_image) — can possibly arrive, whichever of the REST response
-// or the SSE broadcast this browser's own EventSource happens to receive
-// first. Without this, that echo would reapply the annotation a second time,
-// silently discarding any move/resize the user made in the gap between the
-// optimistic paint and the echo's arrival.
+// Resolves the race between two independent deliveries of the exact same
+// image-ingest annotation to this browser: the direct optimistic apply
+// (handleImageIngest applies the REST response to the canvas immediately)
+// and this browser's own confirming SSE echo of the same op — broadcast
+// under a marker distinct from this browser's own client id specifically so
+// it is not dropped as a self-authored echo (see backend/service/rest_api.py's
+// ingest_session_image). Either one can reach the canvas-apply code first:
+// the server may broadcast the op before it finishes serializing the REST
+// response, or the reverse. Whichever arrives first must render it;
+// whichever arrives second must be a no-op, or the second one would either
+// duplicate the annotation or clobber a move/resize made in between.
 //
-// `shouldSkip` consumes the mark (delete-on-first-sight): only the one echo
-// immediately following an optimistic apply is swallowed. A later update for
-// the same id — a real remote edit, or this same annotation replaced by a
-// fresh upload reusing its id — is not, since by then the mark is gone.
+// `claim(id)` is called from the one shared place both deliveries actually
+// apply an annotation (App.jsx's applyRemoteOp, for its
+// annotation_created/annotation_updated case) — not from two separate call
+// sites — so this module never needs to know which caller is "the echo" and
+// which is "the optimistic apply"; it only needs to know it has seen `id`
+// exactly once before.
+//
+// Ordinary annotations — anything this browser did not itself just image-
+// ingest — are never marked pending at all, so `claim` always returns true
+// for them: every other annotation kind, and every OTHER collaborator's own
+// image upload, is completely unaffected by this module.
 export function createSelfEchoDedup() {
-  const ids = new Set();
+  const pending = new Set(); // ids marked before their POST, not yet claimed by either side
+  const resolved = new Set(); // ids whose race the first arrival already won
+
   return {
-    markApplied(id) {
-      if (typeof id === 'string' && id) ids.add(id);
+    // Call before sending the ingest request, with the client-generated
+    // annotation id — before either delivery can possibly reach `claim`.
+    markPending(id) {
+      if (typeof id === 'string' && id) pending.add(id);
     },
-    shouldSkip(id) {
-      return typeof id === 'string' && id ? ids.delete(id) : false;
+
+    // Returns true if THIS call should actually render the annotation.
+    // - Not a raced id at all (never markPending'd, or already fully
+    //   resolved by an earlier pair) → always true.
+    // - First arrival for a raced id → consumes the pending mark, records
+    //   that the race is now resolved, and returns true (render it).
+    // - Second arrival for the same raced id → consumes the resolved mark
+    //   and returns false (already rendered by the other delivery).
+    claim(id) {
+      if (typeof id !== 'string' || !id) return true;
+      if (pending.delete(id)) {
+        resolved.add(id);
+        return true;
+      }
+      if (resolved.delete(id)) return false;
+      return true;
     },
-    // The request this mark was set for never resulted in a server-side
+
+    // The request this id was reserved for never resulted in a server-side
     // write (the POST failed, or the caller bailed out before even sending
-    // it — see handleImageIngest's `delivered` guard) — no echo is ever
-    // coming for `id`, so there is nothing to wait for. Distinct from
-    // `shouldSkip` only in intent: both delete the same entry, but this one
-    // is called from the failure path, not from a genuine echo arriving.
+    // it — see handleImageIngest's `delivered` guard). Neither delivery is
+    // ever coming for `id`, so nothing should be left waiting for it.
     forget(id) {
-      if (typeof id === 'string' && id) ids.delete(id);
+      if (typeof id !== 'string' || !id) return;
+      pending.delete(id);
+      resolved.delete(id);
     },
-    // A mark whose echo never arrives as a discrete op — the SSE stream
-    // reconnects and resyncs wholesale instead (App.jsx's resyncFromServer)
-    // — would otherwise linger forever and wrongly swallow a *later,
-    // unrelated* update for the same id (a genuine remote edit reusing it).
-    // A full resync already re-hydrates every annotation from server truth,
-    // making any pending marks moot; call this there so none outlive their
-    // purpose.
+
+    // A pending or half-resolved race whose other half never arrives as a
+    // discrete op — the SSE stream reconnects and resyncs wholesale instead
+    // (App.jsx's resyncFromServer) — would otherwise linger forever, and
+    // wrongly veto a later, unrelated update for the same id. A full resync
+    // already re-hydrates every annotation from server truth, making any
+    // pending state moot; call this there so none outlives its purpose.
     clear() {
-      ids.clear();
+      pending.clear();
+      resolved.clear();
     },
   };
 }

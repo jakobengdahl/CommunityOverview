@@ -327,10 +327,14 @@ function App() {
         case 'annotation_updated': {
           const ann = op.annotation;
           if (!ann || !ann.id) break;
-          // This exact annotation was already painted optimistically by this
-          // browser's own handleImageIngest — treat the echo as a delivery
-          // confirmation rather than reapplying it (see createSelfEchoDedup).
-          if (selfIngestedImageAnnotationIdsRef.current.shouldSkip(ann.id)) break;
+          // This function is the one shared place both of an image ingest's
+          // two deliveries end up — this browser's own direct optimistic
+          // apply (handleImageIngest) and its confirming SSE echo (via
+          // onRemoteOps below) — so whichever of the two got here first for
+          // this id renders it, and the other is a no-op (see
+          // createSelfEchoDedup for why "whichever is second" cannot be
+          // assumed to always be the echo).
+          if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) break;
           if (ann.kind === 'group') {
             const [group] = annotationsToGroups([ann]).groups;
             setRemoteAnnotationOps((prev) => [
@@ -1076,39 +1080,38 @@ function App() {
   // onImageIngest). The server validates, optimizes and embeds the image (the
   // same pipeline the MCP create_image_annotation tool uses) and returns the
   // finished annotation, which applyIngestedImageOptimistically applies to
-  // the canvas immediately — the same call site every other remote/self-
-  // authored annotation change goes through (applyRemoteOp) — rather than
-  // waiting on this browser's own SSE subscription to deliver it back. It
-  // also folds the op into the sync client's baseline directly
-  // (foldLocalOp), so a snapshot save triggered before the echo arrives (e.g.
-  // the user repositions the annotation right away) diffs against a baseline
-  // that already has it, instead of re-emitting a redundant create. The SSE
+  // the canvas — through the same call site every other remote/self-authored
+  // annotation change goes through (applyRemoteOp) — rather than waiting on
+  // this browser's own SSE subscription to deliver it back. It also folds
+  // the op into the sync client's baseline directly (foldLocalOp), so a
+  // snapshot save triggered before the echo arrives (e.g. the user
+  // repositions the annotation right away) diffs against a baseline that
+  // already has it, instead of re-emitting a redundant create. The SSE
   // subscription still exists and still receives this op (attributed to a
   // dedicated server client id rather than this browser's own, precisely so
   // sessionSyncClient.js does not drop it as an echo of a self-authored op —
-  // see backend/service/rest_api.py's ingest_session_image): it now serves as
-  // a delivery confirmation and the mechanism by which other collaborators
-  // see it, not as this browser's only path to seeing its own upload.
-  // `whenReady()` waits for the same "session exists server-side" fact the op
-  // queue's own flush already guards on (D13/D14: a session is never created
-  // until its first real write), since this request bypasses that queue.
+  // see backend/service/rest_api.py's ingest_session_image): whichever of
+  // {this direct call, that echo} reaches applyRemoteOp first is the one that
+  // actually renders it (createSelfEchoDedup.claim, consulted inside
+  // applyRemoteOp's annotation_created/updated case) — the other is a no-op,
+  // since the two are not guaranteed to arrive in a fixed order. `whenReady()`
+  // waits for the same "session exists server-side" fact the op queue's own
+  // flush already guards on (D13/D14: a session is never created until its
+  // first real write), since this request bypasses that queue.
   //
-  // The annotation id is generated *here*, client-side, and marked in the
-  // self-echo dedup before the request is even sent — passed through as
-  // `annotationId` so the server uses it rather than minting its own. Marking
-  // it any later (e.g. after the POST resolves) would race this browser's own
-  // SSE subscription: the echo can arrive before the REST response does, in
-  // which case it would apply normally (finding no mark yet) and the
-  // then-late mark would be left with no future echo to consume it —
-  // wrongly swallowing the next unrelated update for that id. Generating the
-  // id up front removes the race entirely instead of trying to win it.
+  // The annotation id is generated *here*, client-side, and reserved in the
+  // dedup (markPending) before the request is even sent — passed through as
+  // `annotationId` so the server uses it rather than minting its own. This
+  // must happen before either of the two deliveries can possibly reach
+  // applyRemoteOp's claim() check, or that first delivery would find nothing
+  // reserved and treat itself as an ordinary, never-raced annotation.
   const handleImageIngest = useCallback(
     async (dataUrl, position) => {
       const targetId = sessionId;
       const sync = ensureSyncConnected(targetId);
       const dedup = selfIngestedImageAnnotationIdsRef.current;
       const annotationId = crypto.randomUUID();
-      dedup.markApplied(annotationId);
+      dedup.markPending(annotationId);
       let delivered = false;
       try {
         await sync?.whenReady();
