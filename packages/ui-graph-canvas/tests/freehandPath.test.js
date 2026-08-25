@@ -9,10 +9,7 @@ import {
 
 // A "jittery" hand-drawn line: an L-shaped stroke (roughly horizontal, then
 // roughly vertical) with small perpendicular wobble at every sample — the
-// shape smoothing/simplification needs to tell apart (keep the sharp elbow,
-// drop the wobble) as smoothing rises. The elbow's deviation from the
-// straight start-to-end line is kept well above MAX_SIMPLIFY_EPSILON so it
-// survives simplification even at smoothing=1.
+// shape a curve algorithm needs to render smoothly without losing the elbow.
 function jitteryLine() {
   const points = [];
   for (let x = 0; x <= 40; x += 2) {
@@ -24,56 +21,67 @@ function jitteryLine() {
   return points;
 }
 
+// A long stroke that crosses the decimation size threshold, to exercise the
+// payload-size safety net independently of smoothing.
+function longStraightLine(count) {
+  const points = [];
+  for (let i = 0; i < count; i++) {
+    points.push({ x: i * 0.5, y: 0 });
+  }
+  return points;
+}
+
 describe('reduceFreehandPoints', () => {
-  it('keeps every distinct point at smoothing=0 (raw path)', () => {
+  it('keeps every distinct point for an ordinary-length stroke', () => {
     const points = [
       { x: 0, y: 0 },
       { x: 1, y: 1 },
       { x: 2, y: 0 },
     ];
-    expect(reduceFreehandPoints(points, 0)).toEqual(points);
+    expect(reduceFreehandPoints(points)).toEqual(points);
   });
 
-  it('drops consecutive duplicate samples even at smoothing=0', () => {
+  it('drops consecutive duplicate samples', () => {
     const points = [
       { x: 0, y: 0 },
       { x: 0, y: 0 },
       { x: 0.001, y: 0.001 },
       { x: 5, y: 5 },
     ];
-    expect(reduceFreehandPoints(points, 0)).toEqual([
+    expect(reduceFreehandPoints(points)).toEqual([
       { x: 0, y: 0 },
       { x: 5, y: 5 },
     ]);
   });
 
-  it('reduces the point count more as smoothing increases, on a jittery input', () => {
+  it('does not simplify a jittery stroke of ordinary length, regardless of how it will be smoothed', () => {
+    // Decimation is a payload-size control, not a smoothing-scaled one: an
+    // ordinary-sized stroke keeps every sample no matter what smoothing the
+    // caller later applies when building a path from it.
     const points = jitteryLine();
-    const raw = reduceFreehandPoints(points, 0);
-    const light = reduceFreehandPoints(points, 0.3);
-    const heavy = reduceFreehandPoints(points, 1);
-    expect(raw.length).toBe(points.length);
-    expect(light.length).toBeLessThan(raw.length);
-    expect(heavy.length).toBeLessThanOrEqual(light.length);
-    // The real corner (around x=40) must survive even heavy simplification —
-    // smoothing should not flatten the stroke into a single straight line.
-    expect(heavy.length).toBeGreaterThanOrEqual(3);
+    expect(reduceFreehandPoints(points)).toEqual(points);
   });
 
-  it('is deterministic: same input and smoothing always reduces to the same output', () => {
-    const points = jitteryLine();
-    expect(reduceFreehandPoints(points, 0.5)).toEqual(reduceFreehandPoints(points, 0.5));
+  it('simplifies only once a stroke crosses the payload-size threshold', () => {
+    const short = longStraightLine(100);
+    const long = longStraightLine(1000);
+    expect(reduceFreehandPoints(short)).toEqual(short);
+    expect(reduceFreehandPoints(long).length).toBeLessThan(long.length);
   });
 
-  it('clamps out-of-range smoothing into [0, 1]', () => {
-    const points = jitteryLine();
-    expect(reduceFreehandPoints(points, 5)).toEqual(reduceFreehandPoints(points, 1));
-    expect(reduceFreehandPoints(points, -3)).toEqual(reduceFreehandPoints(points, 0));
+  it('is deterministic: same input always reduces to the same output', () => {
+    const points = longStraightLine(1000);
+    expect(reduceFreehandPoints(points)).toEqual(reduceFreehandPoints(points));
   });
 
   it('handles empty and single-point input safely', () => {
-    expect(reduceFreehandPoints([], 1)).toEqual([]);
-    expect(reduceFreehandPoints([{ x: 1, y: 2 }], 1)).toEqual([{ x: 1, y: 2 }]);
+    expect(reduceFreehandPoints([])).toEqual([]);
+    expect(reduceFreehandPoints([{ x: 1, y: 2 }])).toEqual([{ x: 1, y: 2 }]);
+  });
+
+  it('ignores non-array input', () => {
+    expect(reduceFreehandPoints(null)).toEqual([]);
+    expect(reduceFreehandPoints(undefined)).toEqual([]);
   });
 });
 
@@ -113,16 +121,15 @@ describe('pointsToPathData', () => {
 });
 
 describe('buildFreehandPath', () => {
-  it('combines reduction and path-building, and is deterministic', () => {
+  it('is deterministic', () => {
     const points = jitteryLine();
     const a = buildFreehandPath(points, 0.4);
     const b = buildFreehandPath(points, 0.4);
     expect(a).toEqual(b);
     expect(a.d.startsWith('M ')).toBe(true);
-    expect(a.points.length).toBeLessThan(points.length);
   });
 
-  it('keeps the minimal raw path at smoothing=0', () => {
+  it('keeps the exact pre-existing quadratic-midpoint path at smoothing=0', () => {
     const points = [
       { x: 0, y: 0 },
       { x: 5, y: 5 },
@@ -131,6 +138,57 @@ describe('buildFreehandPath', () => {
     const { points: reduced, d } = buildFreehandPath(points, 0);
     expect(reduced).toEqual(points);
     expect(d).toBe('M 0 0 Q 5 5 7.5 2.5 L 10 0');
+  });
+
+  it('does NOT reduce point retention as smoothing rises (the bug this fixes)', () => {
+    // Before this fix, raising smoothing fed straight into RDP simplification
+    // and threw points away — the opposite of "smoother". `points` in the
+    // return (the retained-anchor count) must now stay the same across every
+    // smoothing level for a stroke well under the decimation threshold.
+    const points = jitteryLine();
+    const none = buildFreehandPath(points, 0);
+    const light = buildFreehandPath(points, 0.3);
+    const heavy = buildFreehandPath(points, 1);
+    expect(light.points.length).toBe(none.points.length);
+    expect(heavy.points.length).toBe(none.points.length);
+  });
+
+  it('produces a visibly different, curve-fit `d` as smoothing rises, without touching smoothing=0 rendering', () => {
+    const points = jitteryLine();
+    const none = buildFreehandPath(points, 0);
+    const light = buildFreehandPath(points, 0.3);
+    const heavy = buildFreehandPath(points, 1);
+    expect(light.d).not.toBe(none.d);
+    expect(heavy.d).not.toBe(light.d);
+    // Higher smoothing inserts more curve-fit samples, so the `d` string
+    // (one or more path commands per sample) grows longer.
+    expect(heavy.d.length).toBeGreaterThan(light.d.length);
+    expect(light.d.length).toBeGreaterThan(none.d.length);
+  });
+
+  it('never drops or reorders the underlying anchors when curve-fitting a straight line', () => {
+    // A perfectly straight input has no curvature for Catmull-Rom to bend,
+    // so smoothing should not visibly distort it off the line.
+    const points = [
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 20, y: 0 },
+      { x: 30, y: 0 },
+    ];
+    const { d } = buildFreehandPath(points, 1);
+    const ys = d.match(/-?\d+(\.\d+)?/g).map(Number);
+    // Every other number in the M/Q/L stream is a y-coordinate; on a straight
+    // horizontal line they must all be (numerically) zero.
+    for (let i = 1; i < ys.length; i += 2) {
+      expect(Math.abs(ys[i])).toBeLessThan(1e-9);
+    }
+  });
+
+  it('handles empty and short input at any smoothing level', () => {
+    expect(buildFreehandPath([], 1)).toEqual({ points: [], d: '' });
+    const single = buildFreehandPath([{ x: 1, y: 2 }], 1);
+    expect(single.points).toEqual([{ x: 1, y: 2 }]);
+    expect(single.d).toBe('M 1 2 L 1 2');
   });
 });
 
@@ -161,7 +219,7 @@ describe('hasPressureData', () => {
 });
 
 describe('buildPressureSegments', () => {
-  it('returns one fewer segment than reduced points, each a straight M/L pair', () => {
+  it('returns one fewer segment than reduced points, each a straight M/L pair, at smoothing=0', () => {
     const points = [
       { x: 0, y: 0, pressure: 0.2 },
       { x: 10, y: 0, pressure: 0.8 },
@@ -171,6 +229,18 @@ describe('buildPressureSegments', () => {
     expect(segments).toHaveLength(2);
     expect(segments[0].d).toBe('M 0 0 L 10 0');
     expect(segments[1].d).toBe('M 10 0 L 20 0');
+  });
+
+  it('produces more, shorter segments as smoothing rises, tracing the same span', () => {
+    const points = [
+      { x: 0, y: 0, pressure: 0.2 },
+      { x: 10, y: 5, pressure: 0.8 },
+      { x: 20, y: 0, pressure: 0.5 },
+      { x: 30, y: 5, pressure: 0.3 },
+    ];
+    const none = buildPressureSegments(points, 0, 2);
+    const heavy = buildPressureSegments(points, 1, 2);
+    expect(heavy.length).toBeGreaterThan(none.length);
   });
 
   it('scales width up for higher pressure and down for lower pressure, around baseWidth', () => {
