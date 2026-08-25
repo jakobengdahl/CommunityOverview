@@ -18,9 +18,9 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode from './GenericAnnotationNode';
+import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
 import AnnotationToolbox from './AnnotationToolbox';
-import FreehandAnnotationNode from './FreehandAnnotationNode';
+import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -82,8 +82,12 @@ const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
 // four are editable afterwards through FreehandAnnotationNode's right-click
-// property editor (docs/ANNOTATION_CONTRACT.md's freehand row).
-const DEFAULT_FREEHAND_COLOR = '#e6edf3';
+// property editor (docs/ANNOTATION_CONTRACT.md's freehand row). The colour is
+// imported rather than restated: this file used to hold its own copy, and
+// because a GUI-drawn stroke is always written WITH an explicit colour, that
+// copy — not the node's fallback — was the value every drawn stroke actually
+// got. Two constants for one default is what let the invisible near-white
+// survive a fix aimed at the fallback.
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
@@ -1207,12 +1211,18 @@ function GraphCanvasInner({
           style: { width: 220, height: 160 },
         };
       } else if (kind === 'shape') {
+        // A subtype whose clip-path only draws a regular figure at one ratio
+        // is created at that ratio instead of the generic 160x96 box, so it
+        // comes out equal-sided rather than squashed. The resizer then keeps
+        // the ratio (GenericAnnotationNode's keepAspectRatio), so it stays
+        // that way.
+        const shape = options.shape || 'rectangle';
         newNode = {
           id,
           type: 'shape',
           position,
-          data: { shape: options.shape || 'rectangle', color: undefined },
-          style: { width: 160, height: 96 },
+          data: { shape, color: undefined },
+          style: newShapeSize(shape),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size

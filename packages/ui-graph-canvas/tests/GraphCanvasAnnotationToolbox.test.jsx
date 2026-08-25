@@ -107,6 +107,25 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(frame.style).toEqual({ width: 220, height: 160 });
   });
 
+  it.each([
+    ['triangle', { width: 160, height: 139 }],
+    ['hexagon', { width: 160, height: 139 }],
+    ['rhombus', { width: 160, height: 160 }],
+  ])('creates %s at the box its geometry needs, not the generic one', (shape, expected) => {
+    // The reported bug was that these came out squashed, and the cause was the
+    // creation box, not the clip-path. Asserted here, at the call site, rather
+    // than only on the size helper: a helper test cannot see GraphCanvas
+    // reverting to a hardcoded 160x96, which is exactly the mutant that
+    // reproduces the bug.
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${shape}$`, 'i') }));
+
+    const node = findCreatedNode('shape');
+    expect(node.data.shape).toBe(shape);
+    expect(node.style).toEqual(expected);
+  });
+
   it('creates a rectangle shape annotation via the toolbox by default', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
+import GenericAnnotationNode, {
+  regularShapeAspect,
+  newShapeSize,
+  SHAPE_BASE_WIDTH,
+} from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
 const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn(), nodes: [] }));
@@ -810,5 +814,191 @@ describe('GenericAnnotationNode locked context menu', () => {
   it('keeps resize handles hidden for a locked, selected frame', () => {
     render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
+  });
+});
+
+// Parse a `polygon(x% y%, ...)` clip-path into side lengths at a given box
+// size, so the assertions below are about the figure a user sees rather than
+// about the percentages that happen to produce it. This is the whole point of
+// the aspect ratios: the same clip-path draws a regular hexagon or a squashed
+// one depending only on the box it resolves against, and no class-name or
+// style-string assertion can tell those apart.
+function sideLengths(clipPath, w, h) {
+  const pts = clipPath
+    .replace(/^polygon\(/, '')
+    .replace(/\)$/, '')
+    .split(',')
+    .map((pair) => {
+      const [x, y] = pair
+        .trim()
+        .split(/\s+/)
+        .map((v) => parseFloat(v) / 100);
+      return [x * w, y * h];
+    });
+  return pts.map((pt, i) => {
+    const next = pts[(i + 1) % pts.length];
+    return Math.hypot(next[0] - pt[0], next[1] - pt[1]);
+  });
+}
+
+function clipPathFor(shape) {
+  const { container } = render(<GenericAnnotationNode type="shape" data={{ shape }} />);
+  return container.querySelector(`.shape-${shape}`).style.clipPath;
+}
+
+describe('regular shape geometry', () => {
+  // Drive the size from the shipped helper rather than restating it, so a
+  // change to the created box is a change these assertions see. Restating it
+  // is what let a full revert of the creation branch pass.
+  const sidesAt = (shape) => {
+    const { width, height } = newShapeSize(shape);
+    return sideLengths(clipPathFor(shape), width, height);
+  };
+  const spread = (sides) => (Math.max(...sides) - Math.min(...sides)) / Math.max(...sides);
+
+  it.each(['triangle', 'hexagon'])(
+    'draws %s with equal-length sides at the size it is created with',
+    (shape) => {
+      // Tolerance is 0.5%, not 1%: rounding the height to a whole pixel costs
+      // 0.24%, so 1% left a band of about +/-1.5% of wrong ratio passing.
+      expect(spread(sidesAt(shape))).toBeLessThan(0.005);
+    }
+  );
+
+  it('draws a rhombus as a square on its corner, which is the property a ratio can fix', () => {
+    // A rhombus clip-path has four equal sides at EVERY ratio, so the
+    // equal-sides assertion above would pass for any value here and says
+    // nothing. What 1:1 buys is equal diagonals — a square standing on its
+    // corner rather than a wide flat lozenge.
+    const { width, height } = newShapeSize('rhombus');
+    expect(spread(sidesAt('rhombus'))).toBeLessThan(0.005); // true regardless; documents why
+    expect(width).toBe(height);
+  });
+
+  it('would draw them squashed in the generic box the other subtypes use', () => {
+    // The witness for the whole change: the same clip-paths in the box a
+    // shape used to be created in. Read from the helper, so reverting the
+    // creation size to 160x96 makes the equal-sides tests fail and this one
+    // explain why.
+    const generic = newShapeSize('rectangle');
+    expect(
+      spread(sideLengths(clipPathFor('hexagon'), generic.width, generic.height))
+    ).toBeGreaterThan(0.1);
+  });
+
+  it('sizes each subtype from its own ratio, and leaves the rest in the generic box', () => {
+    // The helper only. That GraphCanvas actually calls it is a separate fact
+    // and needs its own assertion — a helper test cannot see the call site
+    // reverting to a hardcoded box, which is exactly the mutant that
+    // reproduces the reported bug. Covered in
+    // GraphCanvasAnnotationToolbox.test.jsx, at the toolbox.
+    expect(newShapeSize('triangle')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('hexagon')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('rhombus')).toEqual({ width: SHAPE_BASE_WIDTH, height: 160 });
+    expect(newShapeSize('rectangle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('circle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('process_arrow')).toEqual({ width: 160, height: 96 });
+  });
+
+  it('resizes the box when the subtype switch needs a different ratio', () => {
+    // The second way to get a squashed shape, and the one keepAspectRatio
+    // makes permanent: right-click a 160x96 rectangle and choose Triangle.
+    // Without moving the box the triangle is drawn in a rectangle's ratio,
+    // and the ratio lock then preserves exactly that.
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('triangle'));
+
+    const updated = applyLatestUpdate({
+      id: 's1',
+      data: { shape: 'rectangle' },
+      style: { width: 160, height: 96 },
+    });
+    expect(updated.data.shape).toBe('triangle');
+    // Height re-proportioned, width kept: 160 is what the node already had.
+    expect(updated.style).toEqual({ width: 160, height: 139 });
+    expect(notifyChange).toHaveBeenCalledWith('geometry');
+  });
+
+  it('keeps a deliberately resized width when the subtype changes', () => {
+    // Re-proportioning must not throw away a resize. A 480-wide triangle
+    // becoming a hexagon stays 480 wide and only gets the height its ratio
+    // needs — the two share a ratio, so nothing was squashed to begin with.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="s2" type="shape" data={{ shape: 'triangle' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('hexagon'));
+
+    const updated = applyLatestUpdate({
+      id: 's2',
+      data: { shape: 'triangle' },
+      style: { width: 480, height: 417 },
+    });
+    expect(updated.style).toEqual({
+      width: 480,
+      height: Math.round(480 / regularShapeAspect('hexagon')),
+    });
+  });
+
+  it('leaves the box untouched when switching to a subtype that fills its box', () => {
+    // A rectangle fills whatever box it is given, so there is nothing to
+    // correct — and resetting it would discard the user's resize.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="s3" type="shape" data={{ shape: 'hexagon' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('rectangle'));
+
+    const updated = applyLatestUpdate({
+      id: 's3',
+      data: { shape: 'hexagon' },
+      style: { width: 480, height: 417 },
+    });
+    expect(updated.style).toEqual({ width: 480, height: 417 });
+    expect(updated.data.shape).toBe('rectangle');
+  });
+
+  it('locks the resize ratio only for the subtypes that need one', () => {
+    // A boolean, not the ratio: reactflow's NodeResizer takes no target ratio
+    // and preserves whatever the node measures at drag start. Asserting the
+    // number here would assert a value the library discards.
+    for (const shape of ['triangle', 'rhombus', 'hexagon']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBe(true);
+    }
+    for (const shape of ['rectangle', 'circle', 'process_arrow']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBe(false);
+    }
+  });
+
+  it('has no ratio for the subtypes meant to fill their box', () => {
+    expect(regularShapeAspect('rectangle')).toBeNull();
+    expect(regularShapeAspect('circle')).toBeNull();
+    expect(regularShapeAspect('process_arrow')).toBeNull();
+    expect(regularShapeAspect('not-a-shape')).toBeNull();
+  });
+});
+
+describe('process arrow', () => {
+  it('is a full-height block with a point, not a thin arrow', () => {
+    const clip = clipPathFor('process_arrow');
+    // The body spans the full height: the leading edge runs 0% to 100%,
+    // where the old arrow glyph ran 25% to 75% and left the rest empty.
+    expect(clip).toBe('polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%)');
+    const sides = sideLengths(clip, 200, 100);
+    // Five sides: back edge, top, two point edges, bottom. An arrow glyph has
+    // seven. The count alone distinguishes the two shapes.
+    expect(sides).toHaveLength(5);
   });
 });
