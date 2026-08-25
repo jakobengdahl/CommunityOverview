@@ -42,8 +42,13 @@ describe('ArrowNode locked context menu', () => {
     expect(document.querySelector('.context-menu-colors')).toBeNull();
   });
 
-  it('unlocks the line and keeps it draggable again', () => {
-    render(<ArrowNode id="a1" type="arrow" data={lockedData} selected={false} />);
+  it('unlocks the line, publishes it, and makes it draggable again', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
+        <ArrowNode id="a1" type="arrow" data={lockedData} selected={false} />
+      </AnnotationContext.Provider>
+    );
     openMenu();
     fireEvent.click(screen.getByText(/Unlock/));
     const updated = hoisted.setNodes.mock.calls.at(-1)[0]([
@@ -53,6 +58,25 @@ describe('ArrowNode locked context menu', () => {
     // patchData recomputes draggability from the new data, so an unlocked,
     // unanchored line becomes draggable in the same update.
     expect(updated.draggable).toBe(true);
+    // Without this the unlock is purely local: no op is published, so the
+    // line is locked again on reload and no other client ever sees it. Every
+    // sibling component's unlock test asserts the same thing.
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('leaves an anchored line non-draggable when unlocked', () => {
+    // An anchored line moves only via its endpoint handles, never as a whole
+    // — enforced at hydration (overlayToFlowNode), in isAnnotationDraggable
+    // and in moveEndpoint. Unlocking must not override that.
+    const anchored = { ...lockedData, endAnchor: 'node-7' };
+    render(<ArrowNode id="a1" type="arrow" data={anchored} selected={false} />);
+    openMenu();
+    fireEvent.click(screen.getByText(/Unlock/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0]([
+      { id: 'a1', data: anchored, draggable: false },
+    ])[0];
+    expect(updated.data.locked).toBe(false);
+    expect(updated.draggable).toBe(false);
   });
 
   it('offers the full menu when the line is not locked', () => {
