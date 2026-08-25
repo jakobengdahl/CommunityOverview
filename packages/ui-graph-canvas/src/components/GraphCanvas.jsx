@@ -2282,7 +2282,7 @@ function GraphCanvasInner({
           // their own context menu so their children stay correctly parented.
           // Two kinds are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
-          // and one the user has locked, which stays selectable but offers only
+          // and one that is locked, which stays selectable but offers only
           // unlock or copy, the same rule every annotation context menu applies.
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
@@ -2292,7 +2292,7 @@ function GraphCanvasInner({
             (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
           );
           const skippedOwnLocked = selectedNodes.some(
-            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && n.data?.locked
+            (n) => OVERLAY_TYPES.has(n.type) && n.data?.locked
           );
           const graphNodeIds = selectedNodes
             .filter((n) => !ANNOTATION_TYPES.has(n.type))

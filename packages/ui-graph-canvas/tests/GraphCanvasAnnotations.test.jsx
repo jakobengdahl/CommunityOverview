@@ -270,4 +270,29 @@ describe('GraphCanvas annotation creation', () => {
     expect(survivors).toContainEqual(['note-locked']);
     expect(screen.getByText('That annotation is locked — unlock it first')).toBeTruthy();
   });
+
+  it('reports the remote claim, not the lock, when a selection holds both', () => {
+    // Both are skipped either way; only the message differs. A remote claim
+    // wins because it is the one the user cannot resolve alone — unlocking is
+    // theirs to do, waiting for someone else to deselect is not.
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(screen.getByText('Someone else is editing this annotation')).toBeTruthy();
+    expect(screen.queryByText('That annotation is locked — unlock it first')).toBeNull();
+    // Nothing was deleted either — the whole selection was skipped, so no
+    // delete is published. This is also the only coverage the remote-claim
+    // skip has ever had; it predates this change and had none of its own.
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+  });
 });
