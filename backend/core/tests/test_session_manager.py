@@ -489,6 +489,15 @@ class TestClaimEnforcement:
         result = mgr.undo_last_action(s.id, "c1")
         assert result["undone_op"] == "annotation_deleted"
 
+    async def test_claim_conflict_message_matches_the_ui_classifier(self):
+        """The browser tells the retryable claim 409 apart from the permanent
+        "state changed since" 409 by matching this substring — see
+        ``classifyUndoError`` in frontend/web/src/utils/sessionActivity.js.
+        Nothing else carries the distinction over the wire (both are a bare
+        409 with a prose ``detail``), so reword the message and the UI silently
+        starts telling users a retryable refusal is permanent."""
+        assert "is claimed by another client" in str(ClaimConflict("note-1", "c2"))
+
     async def test_non_holder_delete_is_rejected(self):
         mgr = _manager()
         s = await self._seeded(mgr)

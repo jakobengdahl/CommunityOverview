@@ -177,10 +177,15 @@ class ClaimConflict(Exception):
     """A browser batch (``apply_ops``) tried to mutate an annotation another
     client currently holds a live selection claim on.
 
-    Raised for the two browser write paths: the ``apply_ops`` batch (the REST
-    ``/ops`` endpoint) and ``undo_last_action`` (``/undo``), which replays a
-    stored inverse op and is reachable from the browser only — no MCP tool
-    calls it. The synchronous MCP write path
+    Raised from the two ``SessionManager`` paths that check live claims: the
+    ``apply_ops`` batch (the REST ``/ops`` endpoint) and ``undo_last_action``
+    (``/undo``), which replays a stored inverse op and is reachable from the
+    browser only — no MCP tool calls it. A third browser write path is gated
+    too without raising this class: the image-ingest endpoint
+    (``POST /sessions/{id}/annotations/image``) replaces an annotation directly
+    rather than through ``apply_ops``, so it checks the same claim snapshot
+    itself and only borrows this class to format its 409 detail. The
+    synchronous MCP write path
     (``upsert_annotation``/``update_annotation``/``delete_annotation``/
     ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
     client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
@@ -1437,11 +1442,14 @@ class SessionManager:
 
         inverse_op = dict(record["inverse_op"])
         # Undo is a browser write like any other, so it answers to the same
-        # claim rule apply_ops does (D3). Checked here — before the
-        # ``_deleted_annotation_ids`` mutation below — so a refused undo
-        # leaves the session exactly as it found it. Actor-scoping is not a
-        # substitute: undo reverts *your own* past action, but the annotation
-        # it touches may have been claimed by someone else since you made it.
+        # claim rule apply_ops does (D3). Actor-scoping is not a substitute:
+        # undo reverts *your own* past action, but the annotation it touches
+        # may have been claimed by someone else since you made it. Placed
+        # ahead of every mutation below so a refusal leaves the session as it
+        # found it; the two do not actually overlap today (the
+        # _deleted_annotation_ids branch runs only for an annotation_created
+        # inverse, whose id undo_conflict_reason has already rejected if it
+        # still exists), but the ordering should not rely on that.
         conflict_id = _claimed_annotation_target(inverse_op, session)
         if conflict_id is not None:
             holder = self.claims.snapshot(session_id).get(conflict_id)

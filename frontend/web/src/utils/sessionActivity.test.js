@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import en from '../i18n/en.json';
+import sv from '../i18n/sv.json';
 import {
   describeActivity,
   isUndoableRecord,
@@ -247,6 +249,27 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 409, message: 'session busy, retry' })).toBe('busy');
   });
 
+  it('maps the ClaimConflict 409 to claimed (retryable), not to conflict', () => {
+    // Verbatim str(ClaimConflict) from backend/core/session_manager.py; the
+    // ids vary, so the classifier matches the invariant middle of the string.
+    expect(
+      classifyUndoError({
+        status: 409,
+        message:
+          "annotation 'note-1' is claimed by another client ('client-b'); " +
+          'wait for the claim to release or expire before editing it',
+      })
+    ).toBe('claimed');
+    expect(
+      classifyUndoError({
+        status: 409,
+        message:
+          "annotation 'sticky-42' is claimed by another client ('someone-else'); " +
+          'wait for the claim to release or expire before editing it',
+      })
+    ).toBe('claimed');
+  });
+
   it('maps every other 409 to conflict (not retryable)', () => {
     expect(
       classifyUndoError({ status: 409, message: 'affected state changed since this action' })
@@ -263,5 +286,29 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 500 })).toBe('failed');
     expect(classifyUndoError({})).toBe('failed');
     expect(classifyUndoError(undefined)).toBe('failed');
+  });
+});
+
+describe('classifyUndoError × i18n', () => {
+  // ActivityDrawer.jsx renders `history.session_undo_${reason}` straight from
+  // the classifier's return value, so a reason with no key shows the user the
+  // key name. Driven through the classifier rather than hardcoding the list,
+  // so a reason that changes spelling is caught here and not in the UI.
+  const errors = [
+    { status: 429 },
+    { status: 404, message: 'no undoable action' },
+    { status: 409, message: 'session busy, retry' },
+    { status: 409, message: "annotation 'note-1' is claimed by another client ('c2'); wait" },
+    { status: 409, message: 'affected state changed since this action' },
+    { status: 500 },
+  ];
+
+  it('has an en and sv message for every reason the classifier can return', () => {
+    const reasons = [...new Set(errors.map(classifyUndoError))];
+    expect(reasons).toHaveLength(errors.length);
+    for (const reason of reasons) {
+      expect(en.history[`session_undo_${reason}`], `en: ${reason}`).toBeTruthy();
+      expect(sv.history[`session_undo_${reason}`], `sv: ${reason}`).toBeTruthy();
+    }
   });
 });

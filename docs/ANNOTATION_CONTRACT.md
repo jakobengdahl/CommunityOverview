@@ -319,7 +319,12 @@ covered too: it replays a stored inverse op, so the same check runs against
 that op before anything is touched. Actor-scoping is not a substitute — undo
 reverts the caller's *own* past action, but the annotation it lands on may
 have been claimed by someone else since. A refused undo changes nothing and
-leaves the record undoable once the claim clears.
+leaves the record undoable once the claim clears — and because the Activity
+drawer's undo button carries no claim awareness of its own, this is the one
+place a claim refusal reaches an ordinary user, so the UI renders it as the
+retryable "someone else has that selected" message rather than the permanent
+"can no longer be undone" one (`classifyUndoError`,
+`frontend/web/src/utils/sessionActivity.js`).
 
 **Remaining gap:** this is scoped to browser-originated writes only. The
 synchronous MCP write path (`upsert_annotation`/`update_annotation`/
