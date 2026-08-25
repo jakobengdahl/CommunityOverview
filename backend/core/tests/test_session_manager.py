@@ -341,9 +341,10 @@ class TestClaimEnforcement:
     """Server-side rejection of a browser (``apply_ops``) write to an
     annotation another client holds a live selection claim on
     (task-annotation-shared-session-realtime's server-side-claim-enforcement
-    slice). Scoped to the ``apply_ops`` batch path only; the last test in this
-    class documents that the synchronous MCP write path is deliberately left
-    unaffected pending the still-open agent-bypass decision.
+    slice). Covers both browser write paths — the ``apply_ops`` batch and
+    ``undo_last_action`` — while the last test in this class documents that
+    the synchronous MCP write path is deliberately left unaffected pending
+    the still-open agent-bypass decision.
     """
 
     async def _seeded(self, mgr, ann_id="note-1"):
@@ -387,6 +388,106 @@ class TestClaimEnforcement:
         assert exc_info.value.held_by == "c1"
         # rejected, so the state never actually changed
         assert s.state["annotations"][0].get("text") != "hijacked"
+
+    async def test_undo_of_own_action_is_rejected_while_another_client_holds_it(self):
+        """Actor-scoping is not a substitute for the claim check.
+
+        Undo reverts the caller's *own* past action, but the annotation it
+        touches can have been claimed by someone else in the meantime — which
+        is exactly the window this closes.
+        """
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        with pytest.raises(ClaimConflict) as exc_info:
+            mgr.undo_last_action(s.id, "c1")
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c2"
+        # Refused before anything was touched: the edit stands and the record
+        # is still undoable once the claim clears.
+        assert s.state["annotations"][0]["text"] == "mine"
+        assert any(not r.get("undone") for r in s.activity_log)
+
+    async def test_undo_is_allowed_while_the_caller_holds_the_claim(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        # Seeded WITH text, so undoing an edit to it demonstrably restores the
+        # old value. `annotation_updated` merges rather than replaces, so
+        # undoing an edit that *added* a field would leave the field in place —
+        # a separate fidelity question, deliberately not what this asserts.
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "note-1", "type": "note", "text": "original"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+        assert s.state["annotations"][0]["text"] == "original"
+
+    async def test_undo_is_allowed_when_nobody_holds_the_claim(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+
+    async def test_undo_of_a_delete_proceeds_since_the_annotation_is_gone(self):
+        """The inverse op is an ``annotation_created`` for an id no longer in
+        state, so ``_claimed_annotation_target`` reports no target and a stale
+        claim on the deleted id cannot block the restore."""
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "annotation_deleted", "annotation_id": "note-1"}]
+        )
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_deleted"
 
     async def test_non_holder_delete_is_rejected(self):
         mgr = _manager()

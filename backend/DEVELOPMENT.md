@@ -720,7 +720,7 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live claim on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 | GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
-| POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict) or the session is mid-write (retry), `429` rate-limited. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
+| POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict), if the annotation the inverse op would touch is held by another client's live selection claim (`ClaimConflict` — undo is a browser write and answers to the same rule as `POST /ops`; actor-scoping does not cover it, since the action is the caller's own but the annotation may have been claimed since), or the session is mid-write (retry), `429` rate-limited. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
 
 Session state is server-owned: the browser no longer uploads canvas state, and
 MCP query tools read visible nodes / selection from the shared-session store
@@ -923,14 +923,16 @@ returned `revision` into the next `expected_revision`.
 
   ```python
   layout = get_visualization_layout(session_id=sid)
-  w = layout["assumed_node_size"]["width"]; h = layout["assumed_node_size"]["height"]
+  w = layout["assumed_node_size"]["width"]
+  h = layout["assumed_node_size"]["height"]
   gap = 60
   positions = {
       node_id: {"x": rank[node_id] * (w + gap), "y": slot[node_id] * (h + gap)}
       for node_id in ranks
   }
-  apply_visualization_layout(session_id=sid, positions=positions,
-                             expected_revision=layout["revision"])
+  apply_visualization_layout(
+      session_id=sid, positions=positions, expected_revision=layout["revision"]
+  )
   ```
 
 - **Grid.** Place N nodes in a `cols`-wide grid:
@@ -959,7 +961,7 @@ returned `revision` into the next `expected_revision`.
   added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
   # then arrange with apply_visualization_layout as above, threading
   # expected_revision=added["revision"], then:
-  link = s["session"]["session_url"]   # server-owned canonical link, or null
+  link = s["session"]["session_url"]  # server-owned canonical link, or null
   ```
 
   Hand `session_url` to the user verbatim; it is `null` only when the deployment

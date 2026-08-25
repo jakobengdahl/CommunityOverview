@@ -177,8 +177,10 @@ class ClaimConflict(Exception):
     """A browser batch (``apply_ops``) tried to mutate an annotation another
     client currently holds a live selection claim on.
 
-    Raised only for the ``apply_ops`` batch path — the REST ``/ops`` endpoint,
-    the sole browser write path (D3/D9). The synchronous MCP write path
+    Raised for the two browser write paths: the ``apply_ops`` batch (the REST
+    ``/ops`` endpoint) and ``undo_last_action`` (``/undo``), which replays a
+    stored inverse op and is reachable from the browser only — no MCP tool
+    calls it. The synchronous MCP write path
     (``upsert_annotation``/``update_annotation``/``delete_annotation``/
     ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
     client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
@@ -1434,6 +1436,18 @@ class SessionManager:
             raise UndoConflict(record["id"], conflict_reason)
 
         inverse_op = dict(record["inverse_op"])
+        # Undo is a browser write like any other, so it answers to the same
+        # claim rule apply_ops does (D3). Checked here — before the
+        # ``_deleted_annotation_ids`` mutation below — so a refused undo
+        # leaves the session exactly as it found it. Actor-scoping is not a
+        # substitute: undo reverts *your own* past action, but the annotation
+        # it touches may have been claimed by someone else since you made it.
+        conflict_id = _claimed_annotation_target(inverse_op, session)
+        if conflict_id is not None:
+            holder = self.claims.snapshot(session_id).get(conflict_id)
+            if holder is not None and holder != client_id:
+                raise ClaimConflict(conflict_id, holder)
+
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):
