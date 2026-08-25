@@ -1158,9 +1158,14 @@ function App() {
         console.error('Error ingesting image:', error);
         showNotification('error', error.message || t('canvas.image_ingest_failed'));
       } finally {
-        // No annotation was ever created server-side for this attempt (the
-        // request failed, or this bailed out before even sending it) — no
-        // echo is coming for `annotationId`, so the mark must not linger.
+        // This attempt never resolved into a rendered-here annotation: either
+        // no server-side write ever happened at all (the request failed, or
+        // this bailed out before even sending it), or one did but this
+        // browser gave up tracking it (switched sessions before or after the
+        // POST — see the two guards above). Either way, forgetting the mark
+        // is correct: there is nothing left for *this* browser's own echo
+        // handling to resolve against, so nothing should stay reserved
+        // waiting for it.
         if (!delivered) dedup.forget(annotationId);
       }
     },
