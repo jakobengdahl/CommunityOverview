@@ -2277,15 +2277,16 @@ function GraphCanvasInner({
 
         if (selectedNodes.length > 0) {
           e.preventDefault();
-          // Delete removes overlay annotations (note/label/arrow) from the
-          // canvas; graph nodes are hidden, not deleted. Groups are left to
-          // their own context menu so their children stay correctly parented.
+          // Delete removes overlay annotations — every kind in OVERLAY_TYPES,
+          // which is all eleven v1 kinds except `group` — from the canvas;
+          // graph nodes are hidden, not deleted. Excluding `group` leaves it to
+          // its own context menu, so its children stay correctly parented.
           // Two kinds are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
           // unlock or copy — the rule every *overlay* annotation's context menu
-          // applies. `group` is the exception and ignores the flag, but Delete
-          // never reaches a group anyway (see below).
+          // applies. `group`'s menu ignores that flag, but the exclusion above
+          // means Delete never reaches a group to begin with.
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
