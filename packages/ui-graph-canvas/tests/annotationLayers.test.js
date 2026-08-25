@@ -139,6 +139,20 @@ describe('resolveLayerZ guards', () => {
     expect(resolveLayerZ([note('a', 0), note('b', -2147483648)], 'a', LAYER_BACK)).toBeNull();
   });
 
+  it('refuses when a neighbour past the bound would drag the result out the other side', () => {
+    // The dangerous direction: an annotation parked above Z_MAX (an agent
+    // writing Date.now() as a bring-to-front) makes send-to-back compute a
+    // layer just under it — still far above Z_MAX, which the browser clamps
+    // back down to Z_MAX and paints at the very front. That is the opposite
+    // of what was asked for, not a no-op, so both bounds are checked in both
+    // directions.
+    expect(resolveLayerZ([note('a', 4e9), note('b', 3e9)], 'a', LAYER_BACK)).toBeNull();
+    expect(resolveLayerZ([note('a', -4e9), note('b', -3e9)], 'a', LAYER_FRONT)).toBeNull();
+    expect(
+      resolveLayerZ([note('a', 1787640438290), note('b', 1787640438282)], 'a', LAYER_BACK)
+    ).toBeNull();
+  });
+
   it('refuses past the range where an integer step survives float precision', () => {
     // Beyond 2^53, Math.floor(max) + 1 === max, so the "strictly past"
     // guarantee cannot be met at all.

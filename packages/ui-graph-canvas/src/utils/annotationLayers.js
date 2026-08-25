@@ -42,6 +42,17 @@ export const LAYER_BACK = 'back';
 const Z_MAX = 2147483647;
 const Z_MIN = -2147483648;
 
+// Both bounds are checked in both directions, not just the one each step
+// moves toward. A neighbour already past the range in the *opposite*
+// direction is the dangerous case: with an annotation at `Date.now()` —
+// the bring-to-front idiom named above — send-to-back computes a layer just
+// under it, still far above Z_MAX, which the browser clamps back down to
+// Z_MAX and paints at the very front. That is not a no-op, it is the
+// opposite of what was asked for.
+function inCssRange(z) {
+  return z >= Z_MIN && z <= Z_MAX;
+}
+
 function layerOf(node) {
   const z = node?.zIndex;
   return Number.isFinite(z) ? z : 0;
@@ -86,11 +97,11 @@ export function resolveLayerZ(nodes, id, direction) {
     // annotation has nowhere further to go, so the click is a no-op like any
     // other already-at-the-front case.
     const z = Math.floor(max) + 1;
-    return z > max && z <= Z_MAX ? z : null;
+    return z > max && inCssRange(z) ? z : null;
   }
   const min = Math.min(...others);
   if (current < min) return null;
-  // Mirror of the front case above, including its two refusals.
+  // Mirror of the front case above, including both refusals.
   const z = Math.ceil(min) - 1;
-  return z < min && z >= Z_MIN ? z : null;
+  return z < min && inCssRange(z) ? z : null;
 }
