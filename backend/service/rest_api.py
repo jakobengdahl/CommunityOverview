@@ -29,6 +29,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
 from backend.core.image_ingest import (
+    DEFAULT_MAX_SOURCE_IMAGE_BYTES,
     ImageFetchError,
     InvalidImageData,
     OptimizedImageTooLarge,
@@ -440,6 +441,23 @@ def _resolve_stream_event(
 # that echo indistinguishable from a self-authored op and it would be
 # silently dropped, so a distinct marker is required, not optional.
 _HUMAN_IMAGE_INGEST_CLIENT_ID = "human-image-ingest"
+
+# Sanity ceiling for the raw HTTP body of one ``POST .../annotations/image``
+# request, checked from ``Content-Length`` (and, as a backstop, the actual
+# buffered body) before any parsing happens — mirrors why
+# ``apply_session_ops`` needs the same kind of pre-parse check just above: a
+# typed Pydantic body parameter lets FastAPI/Starlette read and fully parse
+# the request before this handler, or image_ingest's own size checks, ever
+# run, so an oversized payload would be fully buffered regardless of what
+# decode_image_data later rejects. The legitimate ceiling is a base64
+# ``image_data`` payload of the largest accepted source image
+# (``DEFAULT_MAX_SOURCE_IMAGE_BYTES``, 20MB): base64's 4/3 expansion plus the
+# surrounding JSON puts a real request at roughly 27MB, so this cap uses a
+# clean 2x multiple of the source limit for headroom — comfortably above
+# that so this early, coarse check cannot itself reject a legitimate upload.
+# ``decode_image_data`` still enforces the tight, exact bound once the body
+# is parsed.
+_MAX_IMAGE_INGEST_BODY_BYTES = 2 * DEFAULT_MAX_SOURCE_IMAGE_BYTES
 
 
 def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str]):
@@ -1037,7 +1055,7 @@ def _register_session_endpoints(
 
     @router.post("/sessions/{session_id}/annotations/image")
     async def ingest_session_image(
-        session_id: str, request: IngestSessionImageRequest
+        session_id: str, http_request: Request
     ) -> Dict[str, Any]:
         """Human GUI clipboard-paste / file-upload image ingest.
 
@@ -1054,9 +1072,37 @@ def _register_session_endpoints(
         .../stream`), not this response, because the annotation is attributed
         to `_HUMAN_IMAGE_INGEST_CLIENT_ID` rather than `request.client_id` (see
         that constant's docstring for why the echo would otherwise be dropped).
+
+        Takes the body as raw ``Request`` rather than a typed Pydantic
+        parameter — same reason as ``apply_session_ops`` above — so the
+        Content-Length pre-check below runs before FastAPI/Starlette buffers
+        and parses the whole request; a typed body parameter would have
+        already done both by the time any size check could run.
         """
         if not is_valid_session_id(session_id):
             raise HTTPException(status_code=400, detail="invalid session_id format")
+
+        content_length = http_request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = None
+            if (
+                declared_length is not None
+                and declared_length > _MAX_IMAGE_INGEST_BODY_BYTES
+            ):
+                raise HTTPException(status_code=413, detail="image upload too large")
+        body = await http_request.body()
+        if len(body) > _MAX_IMAGE_INGEST_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="image upload too large")
+        try:
+            request = IngestSessionImageRequest.model_validate_json(body)
+        except PydanticValidationError as exc:
+            # Match FastAPI's default RequestValidationError shape (a list of
+            # error dicts), since automatic body validation no longer runs.
+            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+
         if bool(request.image_data) == bool(request.image_url):
             raise HTTPException(
                 status_code=400,
