@@ -75,11 +75,41 @@ const SHAPE_STYLES = Object.freeze(
     triangle: { clipPath: 'polygon(50% 0%, 100% 100%, 0% 100%)' },
     rhombus: { clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' },
     hexagon: { clipPath: 'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)' },
+    // A full-height block meeting a point of the same height — the process-flow
+    // chevron used to chain steps left to right. It is deliberately not an
+    // arrow glyph (a thin shaft with a wider head), which is what this drew
+    // before and which reads as "direction" rather than "a step".
     process_arrow: {
-      clipPath: 'polygon(0% 25%, 70% 25%, 70% 0%, 100% 50%, 70% 100%, 70% 75%, 0% 75%)',
+      clipPath: 'polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%)',
     },
   })
 );
+
+// Width-to-height ratios that make a subtype's clip-path draw a *regular*
+// figure — equal-length sides. The clip-paths are all percentages, so they
+// resolve against the node box: at the generic 160x96 default a hexagon comes
+// out with long horizontals and short slants, and a rhombus as a squashed
+// diamond. An equilateral triangle and a regular pointy-side hexagon are both
+// 2 : sqrt(3) wide-to-tall; a rhombus with equal sides is a square on its
+// corner, so 1:1.
+//
+// Subtypes absent from this map are meant to fill whatever box they are given
+// — rectangle by definition, and process_arrow because a process step is as
+// long as its label needs. `circle` is deliberately absent too: it draws with
+// border-radius rather than a clip-path and becomes an ellipse in a non-square
+// box, which is the same class of surprise but was not part of what was
+// reported — see task-annotation-shape-equal-sided-geometry.
+const REGULAR_SHAPE_ASPECT = Object.freeze(
+  Object.assign(Object.create(null), {
+    triangle: 2 / Math.sqrt(3),
+    hexagon: 2 / Math.sqrt(3),
+    rhombus: 1,
+  })
+);
+
+export function regularShapeAspect(shape) {
+  return REGULAR_SHAPE_ASPECT[shape] ?? null;
+}
 
 // The shape-subtype picker's option order — every variant SHAPE_STYLES draws.
 const SHAPE_NAMES = ['rectangle', 'circle', 'triangle', 'rhombus', 'hexagon', 'process_arrow'];
@@ -296,10 +326,16 @@ function GenericAnnotationNode({ id, type, data, selected }) {
   // consistent geometry lock rather than only blocking one of two ways to
   // move/resize the object. A remote claim (another client's exclusive lease)
   // hides them the same way.
+  // Locking the ratio is what keeps a regular figure regular through a resize.
+  // Without it the box is free and the percentage clip-path distorts again the
+  // moment the user drags a handle, which is how the squashed shapes were
+  // reported in the first place.
+  const lockedAspect = kind === 'shape' ? regularShapeAspect(data?.shape || 'rectangle') : null;
   const resizer = RESIZABLE_KINDS.has(kind) && (
     <NodeResizer
       minWidth={MIN_SIZE}
       minHeight={MIN_SIZE}
+      keepAspectRatio={lockedAspect ?? undefined}
       isVisible={Boolean(selected) && !locked && !remoteLocked}
       lineStyle={{ stroke: color, strokeWidth: 2 }}
       handleStyle={{ width: 10, height: 10, background: color, border: '2px solid white' }}

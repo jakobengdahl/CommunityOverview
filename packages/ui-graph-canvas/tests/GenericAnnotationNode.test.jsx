@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
+import GenericAnnotationNode, { regularShapeAspect } from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
 const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn(), nodes: [] }));
@@ -810,5 +810,93 @@ describe('GenericAnnotationNode locked context menu', () => {
   it('keeps resize handles hidden for a locked, selected frame', () => {
     render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
+  });
+});
+
+// Parse a `polygon(x% y%, ...)` clip-path into side lengths at a given box
+// size, so the assertions below are about the figure a user sees rather than
+// about the percentages that happen to produce it. This is the whole point of
+// the aspect ratios: the same clip-path draws a regular hexagon or a squashed
+// one depending only on the box it resolves against, and no class-name or
+// style-string assertion can tell those apart.
+function sideLengths(clipPath, w, h) {
+  const pts = clipPath
+    .replace(/^polygon\(/, '')
+    .replace(/\)$/, '')
+    .split(',')
+    .map((pair) => {
+      const [x, y] = pair
+        .trim()
+        .split(/\s+/)
+        .map((v) => parseFloat(v) / 100);
+      return [x * w, y * h];
+    });
+  return pts.map((pt, i) => {
+    const next = pts[(i + 1) % pts.length];
+    return Math.hypot(next[0] - pt[0], next[1] - pt[1]);
+  });
+}
+
+function clipPathFor(shape) {
+  const { container } = render(<GenericAnnotationNode type="shape" data={{ shape }} />);
+  return container.querySelector(`.shape-${shape}`).style.clipPath;
+}
+
+describe('regular shape geometry', () => {
+  // 160 is SHAPE_BASE_WIDTH in GraphCanvas; the height is what the ratio
+  // implies, which is exactly what shape creation now computes.
+  const W = 160;
+  const heightFor = (shape) => Math.round(W / regularShapeAspect(shape));
+
+  it.each(['triangle', 'rhombus', 'hexagon'])(
+    'draws %s with equal-length sides at its created size',
+    (shape) => {
+      const sides = sideLengths(clipPathFor(shape), W, heightFor(shape));
+      const longest = Math.max(...sides);
+      const shortest = Math.min(...sides);
+      // Sub-1% spread. Rounding the height to a whole pixel is the only
+      // source of error, so anything larger means the ratio itself is wrong.
+      expect((longest - shortest) / longest).toBeLessThan(0.01);
+    }
+  );
+
+  it('is the ratio, not the clip-path, that was wrong — the old box squashed them', () => {
+    // Regression witness: at the generic 160x96 box these same clip-paths
+    // produce visibly unequal sides. If someone reverts the created size to
+    // 160x96 the test above starts failing, and this one explains why.
+    const sides = sideLengths(clipPathFor('hexagon'), 160, 96);
+    const spread = (Math.max(...sides) - Math.min(...sides)) / Math.max(...sides);
+    expect(spread).toBeGreaterThan(0.1);
+  });
+
+  it('locks the resize ratio only for the subtypes that need one', () => {
+    for (const shape of ['triangle', 'rhombus', 'hexagon']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBeCloseTo(regularShapeAspect(shape), 6);
+    }
+    for (const shape of ['rectangle', 'circle', 'process_arrow']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBeUndefined();
+    }
+  });
+
+  it('has no ratio for the subtypes meant to fill their box', () => {
+    expect(regularShapeAspect('rectangle')).toBeNull();
+    expect(regularShapeAspect('circle')).toBeNull();
+    expect(regularShapeAspect('process_arrow')).toBeNull();
+    expect(regularShapeAspect('not-a-shape')).toBeNull();
+  });
+});
+
+describe('process arrow', () => {
+  it('is a full-height block with a point, not a thin arrow', () => {
+    const clip = clipPathFor('process_arrow');
+    // The body spans the full height: the leading edge runs 0% to 100%,
+    // where the old arrow glyph ran 25% to 75% and left the rest empty.
+    expect(clip).toBe('polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%)');
+    const sides = sideLengths(clip, 200, 100);
+    // Five sides: back edge, top, two point edges, bottom. An arrow glyph has
+    // seven. The count alone distinguishes the two shapes.
+    expect(sides).toHaveLength(5);
   });
 });

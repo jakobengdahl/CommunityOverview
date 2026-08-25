@@ -18,7 +18,7 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode from './GenericAnnotationNode';
+import GenericAnnotationNode, { regularShapeAspect } from './GenericAnnotationNode';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
@@ -85,6 +85,11 @@ const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // property editor (docs/ANNOTATION_CONTRACT.md's freehand row).
 const DEFAULT_FREEHAND_COLOR = '#e6edf3';
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
+
+// The width a new `shape` is created at. A subtype with no regular ratio keeps
+// the generic 160x96 box; one with a ratio gets this width and the height that
+// ratio implies, so it is drawn equal-sided from the start.
+const SHAPE_BASE_WIDTH = 160;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
 // A stroke shorter than this many sampled points is a stray tap, not a
@@ -1207,12 +1212,21 @@ function GraphCanvasInner({
           style: { width: 220, height: 160 },
         };
       } else if (kind === 'shape') {
+        // A subtype whose clip-path only draws a regular figure at one ratio
+        // is created at that ratio instead of the generic 160x96 box, so it
+        // comes out equal-sided rather than squashed. The resizer then keeps
+        // the ratio (GenericAnnotationNode's keepAspectRatio), so it stays
+        // that way.
+        const shape = options.shape || 'rectangle';
+        const aspect = regularShapeAspect(shape);
         newNode = {
           id,
           type: 'shape',
           position,
-          data: { shape: options.shape || 'rectangle', color: undefined },
-          style: { width: 160, height: 96 },
+          data: { shape, color: undefined },
+          style: aspect
+            ? { width: SHAPE_BASE_WIDTH, height: Math.round(SHAPE_BASE_WIDTH / aspect) }
+            : { width: 160, height: 96 },
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size
