@@ -452,7 +452,21 @@
     "icon": "Icon",
     "vote_dot": "Vote dot",
     "image": "Image",
-    "freehand": "Freehand"
+    "freehand": "Freehand",
+    "note_hint": "Add a sticky note",
+    "text_hint": "Add a block of text",
+    "label_hint": "Add a label or callout",
+    "frame_hint": "Add a frame to group things visually",
+    "shape_rectangle_hint": "Add a rectangle",
+    "shape_circle_hint": "Add a circle",
+    "shape_triangle_hint": "Add a triangle",
+    "shape_rhombus_hint": "Add a rhombus",
+    "shape_hexagon_hint": "Add a hexagon",
+    "shape_process_arrow_hint": "Add a process step",
+    "icon_hint": "Add an icon",
+    "vote_dot_hint": "Add a voting dot",
+    "image_hint": "Add an image from a file",
+    "freehand_hint": "Draw a freehand stroke"
   },
   "common": {
     "saving": "Saving...",

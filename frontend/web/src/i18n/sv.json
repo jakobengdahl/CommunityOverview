@@ -452,7 +452,21 @@
     "icon": "Ikon",
     "vote_dot": "Röstprick",
     "image": "Bild",
-    "freehand": "Frihand"
+    "freehand": "Frihand",
+    "note_hint": "Lägg till en klisterlapp",
+    "text_hint": "Lägg till ett textblock",
+    "label_hint": "Lägg till en etikett eller pratbubbla",
+    "frame_hint": "Lägg till en ram som grupperar visuellt",
+    "shape_rectangle_hint": "Lägg till en rektangel",
+    "shape_circle_hint": "Lägg till en cirkel",
+    "shape_triangle_hint": "Lägg till en triangel",
+    "shape_rhombus_hint": "Lägg till en romb",
+    "shape_hexagon_hint": "Lägg till en hexagon",
+    "shape_process_arrow_hint": "Lägg till ett processteg",
+    "icon_hint": "Lägg till en ikon",
+    "vote_dot_hint": "Lägg till en röstprick",
+    "image_hint": "Lägg till en bild från en fil",
+    "freehand_hint": "Rita ett frihandsstreck"
   },
   "common": {
     "saving": "Sparar...",
