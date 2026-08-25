@@ -1160,11 +1160,13 @@ function App() {
       } finally {
         // This attempt never resolved into a rendered-here annotation: either
         // no server-side write ever happened at all (the request failed, or
-        // this bailed out before even sending it), or one did but this
-        // browser gave up tracking it (switched sessions before or after the
-        // POST — see the two guards above). Either way, forgetting the mark
-        // is correct: there is nothing left for *this* browser's own echo
-        // handling to resolve against, so nothing should stay reserved
+        // this bailed out before ever sending it — the first guard above), or
+        // one did but this browser gave up tracking it (switched sessions
+        // after the POST resolved — the second guard above; a switch caught
+        // by the first guard, before the POST, can never have a completed
+        // write behind it). Either way, forgetting the mark is correct: there
+        // is nothing left for *this* browser's own echo handling to resolve
+        // against, so nothing should stay reserved
         // waiting for it.
         if (!delivered) dedup.forget(annotationId);
       }
