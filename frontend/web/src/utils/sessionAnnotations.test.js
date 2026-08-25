@@ -84,9 +84,15 @@ describe('group description round-trip (R12)', () => {
 // not only the canvas-node round trip overlaySerialization.test.js covers —
 // this is the layer legacyMetadataToAnnotationDocument/
 // annotationDocumentToLegacyMetadata actually use for session save/restore.
-describe("shape caption round-trip", () => {
+describe('shape caption round-trip', () => {
   it('carries a caption through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata', () => {
-    const overlay = { id: 'shape-1', kind: 'shape', position: { x: 0, y: 0 }, shape: 'hexagon', text: 'Step 1' };
+    const overlay = {
+      id: 'shape-1',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'hexagon',
+      text: 'Step 1',
+    };
     const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
     const stored = document.annotations.find((a) => a.id === overlay.id);
     expect(stored.text).toBe('Step 1');

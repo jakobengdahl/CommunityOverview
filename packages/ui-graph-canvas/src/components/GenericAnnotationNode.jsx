@@ -698,10 +698,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               something to show/type, so an empty, untouched shape keeps no
               extra hit-testable element sitting over its resize handles. */}
           {(isEditingText || data.text) && (
-            <div
-              className="graph-generic-annotation-shape-text"
-              style={shapeTextInsetStyle(shape)}
-            >
+            <div className="graph-generic-annotation-shape-text" style={shapeTextInsetStyle(shape)}>
               {isEditingText ? (
                 textEditor
               ) : (

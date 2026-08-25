@@ -894,9 +894,7 @@ describe('GenericAnnotationNode inline text editing', () => {
     );
     fireEvent.doubleClick(screen.getByTestId('shape-halo'));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Step 1' } });
-    expect(
-      applyLatestUpdate({ id: 's1', data: { shape: 'rectangle' } }).data.text
-    ).toBe('Step 1');
+    expect(applyLatestUpdate({ id: 's1', data: { shape: 'rectangle' } }).data.text).toBe('Step 1');
     expect(notifyChange).toHaveBeenCalledWith('text');
   });
 
@@ -915,11 +913,7 @@ describe('GenericAnnotationNode inline text editing', () => {
     'does not open a text editor on double-click for %s (no free-text field to edit)',
     (kind) => {
       const { container } = render(
-        <GenericAnnotationNode
-          id="n1"
-          type={kind}
-          data={{ icon: 'flag', value: 1, image: {} }}
-        />
+        <GenericAnnotationNode id="n1" type={kind} data={{ icon: 'flag', value: 1, image: {} }} />
       );
       const root = container.querySelector(`.kind-${kind}`);
       fireEvent.doubleClick(root);
@@ -941,7 +935,9 @@ describe('GenericAnnotationNode inline text editing', () => {
     ['hexagon', { top: '0%', right: '25%', bottom: '0%', left: '25%' }],
     ['process_arrow', { top: '0%', right: '30%', bottom: '0%', left: '0%' }],
   ])('insets a %s caption to the rectangle its clip-path is proven to contain', (shape, inset) => {
-    const { container } = render(<GenericAnnotationNode type="shape" data={{ shape, text: 'x' }} />);
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape, text: 'x' }} />
+    );
     const overlay = container.querySelector('.graph-generic-annotation-shape-text');
     expect(overlay.style.top).toBe(inset.top);
     expect(overlay.style.right).toBe(inset.right);
