@@ -30,6 +30,8 @@ const TOOLBOX_ITEMS = [
   { kind: 'freehand', glyph: '✏️', labelKey: 'freehand' },
 ];
 
+const TOOLTIP_ID = 'annotation-toolbox-tooltip';
+
 /**
  * AnnotationToolbox - the bottom-mounted GUI creation surface for the v1
  * annotation model (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces").
@@ -52,8 +54,6 @@ const TOOLBOX_ITEMS = [
  * pressed while its armed drawing mode is active, so a user mid-stroke can
  * see which tool is live.
  */
-const TOOLTIP_ID = 'annotation-toolbox-tooltip';
-
 function AnnotationToolbox({
   onCreate,
   labels = {},

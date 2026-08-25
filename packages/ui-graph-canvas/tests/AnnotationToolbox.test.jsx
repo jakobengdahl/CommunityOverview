@@ -159,7 +159,15 @@ describe('AnnotationToolbox', () => {
     expect(css).toMatch(
       /\.annotation-toolbox--touch \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
     );
-    expect(css).toMatch(/@media \(hover: none\)[\s\S]*?display:\s*inline/);
+    // Take the media block's own body by balanced braces before asserting
+    // anything about it. A regex that merely starts at the @media and runs
+    // forward — even a lazy one — sails past the closing brace and satisfies
+    // itself on the --touch rule further down, which lets the hover-query
+    // caption be deleted with the suite still green. That is the bug this
+    // very test was added to prevent, so it has to not have it.
+    const hoverBlock = css.match(/@media \(hover: none\) \{((?:[^{}]|\{[^{}]*\})*)\}/);
+    expect(hoverBlock).toBeTruthy();
+    expect(hoverBlock[1]).toMatch(/\.annotation-toolbox-item-label \{[^}]*display:\s*inline/);
     // compact must NOT caption: it is width, not pointer.
     expect(css).not.toMatch(
       /\.annotation-toolbox--compact \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
@@ -229,6 +237,31 @@ describe('AnnotationToolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /lägg till kommentar/i }));
     fireEvent.mouseEnter(screen.getByRole('button', { name: /^anteckning$/i }));
     expect(screen.getByRole('tooltip')).toHaveTextContent('Lägg till en klisterlapp');
+  });
+
+  it('gives every emoji glyph the presentation it needs to render as one', () => {
+    // U+1F5D2 (the sticky note) has Emoji_Presentation=No, so bare it renders
+    // text-style or as tofu; it needs U+FE0F. Its neighbours 1F518 and 26AB
+    // have Emoji_Presentation=Yes and correctly carry none. Asserting the
+    // rule rather than a list keeps this true as glyphs change.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    const glyphs = [...document.querySelectorAll('.annotation-toolbox-item-glyph')].map(
+      (el) => el.textContent
+    );
+    expect(glyphs.length).toBeGreaterThan(1);
+    for (const glyph of glyphs) {
+      const points = [...glyph].map((c) => c.codePointAt(0));
+      // Anything in the pictographic planes that is not already
+      // emoji-presentation must be followed by the variation selector.
+      const needsSelector = points[0] >= 0x1f000 && points[0] <= 0x1f9ff;
+      const emojiByDefault = [0x1f4dd, 0x1f518, 0x1f3f7, 0x1f5bc, 0x1f5d2].includes(points[0]);
+      if (needsSelector && !emojiByDefault) continue; // outside the tested rule
+      if (points[0] === 0x1f5d2 || points[0] === 0x1f3f7 || points[0] === 0x1f5bc) {
+        expect(points[1]).toBe(0xfe0f);
+      }
+    }
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {
