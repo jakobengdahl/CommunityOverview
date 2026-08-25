@@ -205,10 +205,23 @@ currently holds the claim on (the attempt is surfaced, as for every other
 annotation mutation). A `locked` annotation is not offered the row at all,
 per the capability baseline's "remains selectable but offers only unlock or
 copy" — which every *overlay* annotation's menu now implements, `line`
-included. `group` is the exception and does not: it is lockable over MCP
+included. The canvas `Delete`/`Backspace` handler enforces it too: a locked
+overlay is skipped and the user is told to unlock it first, which closes the
+one path that could destroy a locked annotation without unlocking it. It is
+kind-agnostic, so it needs no per-component change. `group` is the exception
+to the menu rule and does not: it is lockable over MCP
 (`create_group_annotation` takes `locked`), but `annotationsToGroups` drops
 the flag on the way to the canvas and `GroupNode` never reads it, so a locked
-group box still shows its full colour/hide/delete menu.
+group box still shows its full colour/hide/delete menu. The keyboard rule
+never reaches a group either, though for an unrelated reason — `Delete` skips
+groups entirely so their children stay correctly parented, and hands that job
+to the group's own menu.
+
+Enforcement is client-side only. The server accepts a write to a locked
+annotation from any path, MCP included, and `set_annotation_lock`'s own
+docstring says so deliberately. `locked` is a shared UI convention, not a
+permission — unlike a selection claim, which the server now does enforce for
+browser writes.
 
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the

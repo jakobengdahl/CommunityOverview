@@ -328,6 +328,7 @@ function GraphCanvasInner({
     redoNotification: 'Move redone',
     imageIngestFailed: 'Could not add the image',
     annotationRemoteLocked: 'Someone else is editing this annotation',
+    annotationLockedSkipped: 'That annotation is locked — unlock it first',
     freehandColor: 'Colour',
     freehandWidth: 'Stroke width',
     freehandSmoothing: 'Smoothing',
@@ -2279,14 +2280,19 @@ function GraphCanvasInner({
           // Delete removes overlay annotations (note/label/arrow) from the
           // canvas; graph nodes are hidden, not deleted. Groups are left to
           // their own context menu so their children stay correctly parented.
-          // One held by another client's live selection claim is skipped —
-          // leases are exclusive (task-annotation-shared-session-realtime).
+          // Two kinds are skipped: one held by another client's live selection
+          // claim (leases are exclusive — task-annotation-shared-session-realtime)
+          // and one the user has locked, which stays selectable but offers only
+          // unlock or copy, the same rule every annotation context menu applies.
           const deletableOverlays = selectedNodes.filter(
-            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data)
+            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
           const overlayIds = deletableOverlays.map((n) => n.id);
           const skippedLocked = selectedNodes.some(
             (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
+          );
+          const skippedOwnLocked = selectedNodes.some(
+            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && n.data?.locked
           );
           const graphNodeIds = selectedNodes
             .filter((n) => !ANNOTATION_TYPES.has(n.type))
@@ -2296,7 +2302,10 @@ function GraphCanvasInner({
             setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
             onAnnotationChangeRef.current?.('delete');
           }
+          // A remote claim wins the notice when the selection mixes both: it is
+          // the one the user cannot resolve alone.
           if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
+          else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
           if (graphNodeIds.length > 0) {
             if (onHideMultiple) {
               onHideMultiple(graphNodeIds);
@@ -2324,6 +2333,7 @@ function GraphCanvasInner({
     showNotification,
     cml.organizeHint,
     cml.annotationRemoteLocked,
+    cml.annotationLockedSkipped,
     handleUndo,
     handleRedo,
     setNodes,

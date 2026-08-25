@@ -210,4 +210,64 @@ describe('GraphCanvas annotation creation', () => {
     });
     expect(removed).toBe(true);
   });
+
+  it('leaves a locked annotation alone on Delete and says why', () => {
+    // The contract's baseline is that a locked object stays selectable but
+    // offers only unlock or copy. Every context menu enforces that; the
+    // keyboard path did not, so selecting a locked annotation and pressing
+    // Delete removed it — the one way to destroy a locked object without
+    // unlocking it first.
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [{ id: 'note-1', type: 'note', data: { locked: true } }],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+    // setNodes fires for unrelated canvas bookkeeping, so assert on outcome:
+    // no updater drops note-1.
+    const dropped = hoisted.setNodes.mock.calls.some((call) => {
+      if (typeof call[0] !== 'function') return false;
+      try {
+        return call[0]([{ id: 'note-1', type: 'note' }]).every((n) => n.id !== 'note-1');
+      } catch {
+        return false;
+      }
+    });
+    expect(dropped).toBe(false);
+    expect(screen.getByText('That annotation is locked — unlock it first')).toBeTruthy();
+  });
+
+  it('deletes the unlocked half of a mixed selection and keeps the locked half', () => {
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-free', type: 'note', data: {} },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(onAnnotationChange).toHaveBeenCalled();
+    const survivors = hoisted.setNodes.mock.calls
+      .filter((call) => typeof call[0] === 'function')
+      .map((call) => {
+        try {
+          return call[0]([{ id: 'note-locked' }, { id: 'note-free' }]).map((n) => n.id);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    expect(survivors).toContainEqual(['note-locked']);
+    expect(screen.getByText('That annotation is locked — unlock it first')).toBeTruthy();
+  });
 });

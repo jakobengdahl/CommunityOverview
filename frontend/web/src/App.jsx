@@ -2031,6 +2031,7 @@ function App() {
             redoNotification: t('context_menu.redo_notification'),
             imageIngestFailed: t('canvas.image_ingest_failed'),
             annotationRemoteLocked: t('context_menu.annotation_remote_locked'),
+            annotationLockedSkipped: t('context_menu.annotation_locked_skipped'),
             freehandColor: t('context_menu.freehand_color'),
             freehandWidth: t('context_menu.freehand_width'),
             freehandSmoothing: t('context_menu.freehand_smoothing'),

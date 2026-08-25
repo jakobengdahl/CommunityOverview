@@ -423,6 +423,7 @@
     "undo_notification": "Move undone",
     "redo_notification": "Move redone",
     "annotation_remote_locked": "Someone else is editing this annotation",
+    "annotation_locked_skipped": "That annotation is locked — unlock it first",
     "annotation_layer": "Layer",
     "annotation_layer_front": "Bring to front",
     "annotation_layer_back": "Send to back",
