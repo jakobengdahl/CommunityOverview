@@ -334,6 +334,12 @@ function GraphCanvasInner({
     freehandOpacity: 'Opacity',
     freehandDrawingHint: 'Draw a stroke on the canvas — press Escape to cancel',
     freehandConcurrentInputBlocked: 'Finish the current stroke before starting another',
+    annotationLayer: 'Layer',
+    annotationLayerFront: 'Bring to front',
+    annotationLayerBack: 'Send to back',
+    annotationVoteValue: 'Value',
+    annotationVoteValueDecrease: 'Decrease value',
+    annotationVoteValueIncrease: 'Increase value',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -589,6 +595,12 @@ function GraphCanvasInner({
         freehandWidth: cml.freehandWidth,
         freehandSmoothing: cml.freehandSmoothing,
         freehandOpacity: cml.freehandOpacity,
+        layer: cml.annotationLayer,
+        layerFront: cml.annotationLayerFront,
+        layerBack: cml.annotationLayerBack,
+        voteValue: cml.annotationVoteValue,
+        voteValueDecrease: cml.annotationVoteValueDecrease,
+        voteValueIncrease: cml.annotationVoteValueIncrease,
       },
     }),
     [
@@ -612,6 +624,12 @@ function GraphCanvasInner({
       cml.freehandWidth,
       cml.freehandSmoothing,
       cml.freehandOpacity,
+      cml.annotationLayer,
+      cml.annotationLayerFront,
+      cml.annotationLayerBack,
+      cml.annotationVoteValue,
+      cml.annotationVoteValueDecrease,
+      cml.annotationVoteValueIncrease,
     ]
   );
 

@@ -43,5 +43,11 @@ export const AnnotationContext = createContext({
     freehandWidth: 'Stroke width',
     freehandSmoothing: 'Smoothing',
     freehandOpacity: 'Opacity',
+    layer: 'Layer',
+    layerFront: 'Bring to front',
+    layerBack: 'Send to back',
+    voteValue: 'Value',
+    voteValueDecrease: 'Decrease value',
+    voteValueIncrease: 'Increase value',
   },
 });

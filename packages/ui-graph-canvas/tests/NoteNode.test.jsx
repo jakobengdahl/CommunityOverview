@@ -3,14 +3,14 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import NoteNode from '../src/components/NoteNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), resizerProps: [] }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), resizerProps: [], nodes: [] }));
 
 vi.mock('reactflow', () => ({
   NodeResizer: (props) => {
     hoisted.resizerProps.push(props);
     return <div data-testid="resizer" />;
   },
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
 
 function applyUpdate(node) {
@@ -188,5 +188,33 @@ describe('NoteNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('Note'));
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
+  });
+});
+
+// The layer row is shared by every annotation context menu
+// (AnnotationLayerControls); GenericAnnotationNode.test.jsx pins the generic
+// kinds' wiring, this pins that a dedicated per-type editor gets the same
+// control rather than a parallel implementation of its own.
+describe('NoteNode layer controls', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('brings a note in front of the annotation above it', () => {
+    hoisted.nodes = [
+      { id: 'n1', type: 'note', zIndex: 0 },
+      { id: 'a2', type: 'label', zIndex: 1 },
+    ];
+    render(<NoteNode id="n1" data={{ text: 'hi' }} />);
+    fireEvent.contextMenu(screen.getByText('hi'));
+    fireEvent.click(screen.getByLabelText('Bring to front'));
+    expect(hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes)[0].zIndex).toBe(2);
+  });
+
+  it('offers no layer controls on a locked note', () => {
+    render(<NoteNode id="n1" data={{ text: 'hi', locked: true }} />);
+    fireEvent.contextMenu(screen.getByText('hi'));
+    expect(screen.queryByLabelText('Bring to front')).toBeNull();
   });
 });

@@ -227,13 +227,28 @@ keeps rendering even if the original file or URL later disappears. It appears on
 canvas a moment after you paste or drop it, once the server has finished processing.
 
 Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
-the note and label menus offer; a Shape's menu also has a subtype picker to swap its
-variant (circle, triangle, and so on) after it's been placed. An **Icon** annotation
-starts with a generic default glyph — right-click it to open a picker grid covering the
-full icon vocabulary and choose the one you actually want. Icon and voting-dot annotations
-also support the same attach behaviour as labels once placed: drag one near a node or
-another annotation to attach it. Neither has a colour editor yet, and a voting dot's value
-is fixed at creation — change it via an MCP agent.
+the note and label menus offer, plus a colour picker for everything that paints a colour
+(an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype
+picker to swap its variant (circle, triangle, and so on) after it's been placed. An
+**Icon** annotation starts with a generic default glyph — right-click it to open a picker
+grid covering the full icon vocabulary and choose the one you actually want. A **voting
+dot**'s menu has a value stepper, so you can raise or lower the count after it's been
+placed. Icon and voting-dot annotations also support the same attach behaviour as labels
+once placed: drag one near a node or another annotation to attach it.
+
+Notes, labels, arrows, freehand strokes, text, frames, shapes, icons, voting dots and
+images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+front** puts the annotation on top of the other annotations and **Send to back** puts it
+underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
+label. The buttons do nothing once an annotation is already alone at the front or the
+back, and a locked annotation has no Layer row at all — unlock it first (most annotation
+menus offer **Unlock**; a locked line is the exception, and has to be unlocked by an agent).
+
+Send to back normally goes all the way back, behind your graph's own nodes and edges —
+which is what you want for a frame that should sit behind the nodes it frames. Bring it
+forward again with **Bring to front**. One gap worth knowing: a group box can be layered
+*against* by other annotations, but cannot be layered itself — its own menu has no Layer
+row.
 
 ### 2.6 Saved views
 

@@ -262,3 +262,42 @@
   flex: 1.4;
   font-size: 12px;
 }
+
+/* Shared by every annotation context menu (note, label, arrow, freehand and
+   the generic kinds) — the layer row AnnotationLayerControls renders and the
+   vote-dot value stepper, both styled on the rotate row's pattern above so
+   the menu reads as one control set rather than several. */
+.graph-annotation-context-menu .context-menu-layer,
+.graph-annotation-context-menu .context-menu-vote-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .layer-button,
+.graph-annotation-context-menu .vote-value-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .layer-button:hover,
+.graph-annotation-context-menu .vote-value-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .vote-value-current {
+  flex: 1.4;
+  text-align: center;
+  color: #e6edf3;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
