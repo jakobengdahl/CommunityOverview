@@ -820,9 +820,11 @@ export async function getSessionActivity(sessionId, { actor, limit } = {}) {
  * thrown error's `status` is 404 (nothing to undo / session gone), 409 (the
  * affected state changed since; another client holds a live selection claim on
  * the annotation — retry; or the session is mid-write — retry), or 429 (rate
- * limited) — see backend/core/session_manager.py's undo_last_action. The three
- * 409s are told apart by message in sessionActivity.js's classifyUndoError,
- * since only the first is permanent.
+ * limited) — see backend/core/session_manager.py's undo_last_action. A fourth
+ * 409 (a mismatched `expected_revision`) exists at the endpoint but not here,
+ * since this call never sends that field. The three it can reach are told
+ * apart by message in sessionActivity.js's classifyUndoError, since only the
+ * first is permanent.
  * @param {string} sessionId
  * @param {string} clientId
  * @returns {Promise<{undone_activity_id: string, undone_op: string, applied: Object, revision: number}>}

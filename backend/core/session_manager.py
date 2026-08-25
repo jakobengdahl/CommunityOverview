@@ -10,8 +10,9 @@ used by the REST/SSE endpoints and by MCP pushes:
   monotonic ``seq`` to each state op, persists once per batch, and broadcasts
   every applied op to all subscribers including the originator. It also rejects
   (``ClaimConflict``) a batch op that would mutate an annotation another client
-  currently holds a live selection claim on — the one browser write path this
-  goes through; see ``ClaimConflict`` for what stays out of scope.
+  currently holds a live selection claim on — one of three gated browser write
+  paths, alongside ``undo_last_action`` and the image-ingest endpoint;
+  see ``ClaimConflict`` for the full picture and for what stays out of scope.
 * selection claims (``selection_claimed`` / ``selection_released``) are handled
   inline but stay ephemeral — broadcast, never persisted, never sequenced.
 * ``connect`` / ``disconnect`` manage presence and release a departing client's
@@ -260,8 +261,9 @@ class _TokenBucket:
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
-    Used to check a batch op against the live claim snapshot before applying
-    it (``apply_ops``). Only ``annotation_updated``/``annotation_deleted``
+    Used to check an op against the live claim snapshot before applying it —
+    a batch op in ``apply_ops``, or the stored inverse op ``undo_last_action``
+    is about to replay. Only ``annotation_updated``/``annotation_deleted``
     always target an existing annotation; ``annotation_created`` targets one
     only when its id already exists in the session (the upsert-as-replace
     case) — a genuinely new id has no prior claim to protect. Every other
