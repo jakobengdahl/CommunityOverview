@@ -198,7 +198,12 @@ function FreehandAnnotationNode({ id, data, selected }) {
     return { localPoints: lp, curved: smoothAnchors(reduced, smoothing) };
   }, [rawPoints, originX, originY, smoothing]);
   const pressureAware = useMemo(() => hasPressureData(localPoints), [localPoints]);
-  const d = pointsToPathData(curved);
+  // `curved` can hold up to ~7x the reduced point count at high smoothing,
+  // so building `d` (used unconditionally, even for pressure-aware strokes'
+  // hit-target path below) is memoized too — otherwise a re-render that
+  // touches neither points nor smoothing (selection, remote-selection badge,
+  // context menu open/close, locked/opacity) would still re-walk it.
+  const d = useMemo(() => pointsToPathData(curved), [curved]);
   // Splitting into per-segment widths is a cheap single pass over the
   // already curve-fit points (unlike the reduce+curve-fit stage above), so
   // it's fine for this one to depend on `strokeWidth` directly.

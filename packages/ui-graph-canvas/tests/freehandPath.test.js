@@ -90,6 +90,12 @@ describe('reduceFreehandPoints', () => {
     expect(reduceFreehandPoints(points, 0.5)).toEqual(reduceFreehandPoints(points, 0.5));
   });
 
+  it('clamps out-of-range smoothing into [0, 1] rather than treating it specially', () => {
+    const long = longStraightLine(1000);
+    expect(reduceFreehandPoints(long, 5)).toEqual(reduceFreehandPoints(long, 1));
+    expect(reduceFreehandPoints(long, -3)).toEqual(reduceFreehandPoints(long, 0));
+  });
+
   it('handles empty and single-point input safely', () => {
     expect(reduceFreehandPoints([])).toEqual([]);
     expect(reduceFreehandPoints([{ x: 1, y: 2 }])).toEqual([{ x: 1, y: 2 }]);
@@ -268,6 +274,16 @@ describe('smoothAnchors + segmentsFromCurvePoints (shared reduce-and-curve-fit s
     ];
     const curved = smoothAnchors(points, 0.02);
     expect(curved.length).toBeGreaterThan(points.length);
+  });
+
+  it('clamps out-of-range smoothing into [0, 1] rather than treating it specially', () => {
+    const points = [
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 20, y: 0 },
+    ];
+    expect(smoothAnchors(points, 5)).toEqual(smoothAnchors(points, 1));
+    expect(smoothAnchors(points, -3)).toEqual(smoothAnchors(points, 0));
   });
 });
 
