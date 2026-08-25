@@ -143,6 +143,18 @@ describe('AnnotationToolbox', () => {
     const caption = css.match(/\.annotation-toolbox-item-label \{([^}]*)\}/);
     expect(caption).toBeTruthy();
     expect(caption[1]).toMatch(/display:\s*none/);
+
+    // And the element the rule reveals actually exists, once per item. Every
+    // other assertion about the caption reads the stylesheet, so without this
+    // the touch and keyboard fallback that justifies dropping the visible
+    // names could be deleted from the markup with the suite still green.
+    render(<AnnotationToolbox onCreate={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    const items = document.querySelectorAll('.annotation-toolbox-item');
+    const captions = document.querySelectorAll('.annotation-toolbox-item-label');
+    expect(items.length).toBeGreaterThan(1);
+    expect(captions.length).toBe(items.length);
+    expect(captions[0].textContent).toBeTruthy();
   });
 
   it('captions the items on a coarse pointer, which compact alone does not cover', () => {
@@ -260,16 +272,17 @@ describe('AnnotationToolbox', () => {
     );
     expect(glyphs.length).toBeGreaterThan(1);
 
-    const checked = [];
+    const checked = new Set();
     for (const glyph of glyphs) {
       const [first, second] = [...glyph].map((c) => c.codePointAt(0));
       if (!NEEDS_SELECTOR.has(first)) continue;
-      checked.push(first);
+      checked.add(first);
       expect(second).toBe(0xfe0f);
     }
-    // Guard against the list drifting out of the toolbox entirely: if none of
-    // these glyphs is present any more, the test is passing for no reason.
-    expect(checked.length).toBe(NEEDS_SELECTOR.size);
+    // Guard the other direction: if one of these glyphs leaves the toolbox the
+    // test would otherwise pass for no reason. Distinct code points, so a
+    // second item legitimately reusing one does not read as drift.
+    expect(checked.size).toBe(NEEDS_SELECTOR.size);
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {
