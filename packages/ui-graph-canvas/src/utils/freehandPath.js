@@ -192,8 +192,11 @@ export function smoothAnchors(points, smoothing) {
   if (!Array.isArray(points)) return [];
   const level = clampSmoothing(smoothing);
   if (level <= 0 || points.length < 3) return points;
-  const subdivisions = Math.round(level * MAX_CURVE_SUBDIVISIONS);
-  if (subdivisions <= 0) return points;
+  // Ceiling, not round: the module contract is "smoothing=0 is the only
+  // identity case, anything above 0 fits a curve" — rounding down to 0
+  // subdivisions for a small-but-nonzero level (below ~0.083) would silently
+  // break that promise for a value the caller explicitly chose over 0.
+  const subdivisions = Math.ceil(level * MAX_CURVE_SUBDIVISIONS);
   const lastIndex = points.length - 1;
   const out = [points[0]];
   for (let i = 0; i < lastIndex; i++) {
@@ -300,7 +303,6 @@ export function buildPressureSegments(
   baseWidth = DEFAULT_STROKE_WIDTH_FALLBACK
 ) {
   const reduced = reduceFreehandPoints(points, smoothing);
-  if (reduced.length === 0) return [];
   const curved = smoothAnchors(reduced, smoothing);
   return segmentsFromCurvePoints(curved, baseWidth);
 }

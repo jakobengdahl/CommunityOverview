@@ -256,6 +256,19 @@ describe('smoothAnchors + segmentsFromCurvePoints (shared reduce-and-curve-fit s
     expect(smoothAnchors(null, 0.5)).toEqual([]);
     expect(smoothAnchors(undefined, 0.5)).toEqual([]);
   });
+
+  it('inserts at least one curve-fit point for any smoothing above 0, however small', () => {
+    // Rounding (rather than ceiling) the subdivision count would silently
+    // treat a small-but-nonzero smoothing the same as smoothing=0 - the
+    // module's contract is that only exactly 0 is the identity case.
+    const points = [
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 20, y: 0 },
+    ];
+    const curved = smoothAnchors(points, 0.02);
+    expect(curved.length).toBeGreaterThan(points.length);
+  });
 });
 
 describe('hasPressureData', () => {

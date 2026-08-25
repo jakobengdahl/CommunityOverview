@@ -184,28 +184,28 @@ function FreehandAnnotationNode({ id, data, selected }) {
   // recomputed every render. `rawPoints` (`data.points`) is a stable
   // reference across a drag (drag moves the node's flow position, not its
   // points array — see this component's own doc comment), so a stroke's
-  // curve is only rebuilt when its points, smoothing, or width truly change.
-  const { d, segments, pressureAware } = useMemo(() => {
-    const localPoints = rawPoints.map((p) => ({
+  // curve is only rebuilt when its points, smoothing, or origin truly
+  // change — deliberately NOT keyed on `strokeWidth`, which this stage never
+  // reads; splitting it out keeps a plain width change (no effect on the
+  // curve at all) from re-running reduce+curve-fit for nothing.
+  const { localPoints, curved } = useMemo(() => {
+    const lp = rawPoints.map((p) => ({
       x: p.x + originX,
       y: p.y + originY,
       pressure: p.pressure,
     }));
-    const aware = hasPressureData(localPoints);
-    // Reduce + curve-fit exactly once and reuse the result for both the `d`
-    // string and the pressure segments — reduceFreehandPoints/smoothAnchors
-    // are the expensive step (up to ~7x the anchors at high smoothing), and
-    // this component always needs `d` (even pressure-aware strokes use it
-    // for the transparent hit-target path below), so there is no path that
-    // only needs one of the two outputs.
-    const reduced = reduceFreehandPoints(localPoints, smoothing);
-    const curved = smoothAnchors(reduced, smoothing);
-    return {
-      d: pointsToPathData(curved),
-      segments: aware ? segmentsFromCurvePoints(curved, strokeWidth) : null,
-      pressureAware: aware,
-    };
-  }, [rawPoints, originX, originY, smoothing, strokeWidth]);
+    const reduced = reduceFreehandPoints(lp, smoothing);
+    return { localPoints: lp, curved: smoothAnchors(reduced, smoothing) };
+  }, [rawPoints, originX, originY, smoothing]);
+  const pressureAware = useMemo(() => hasPressureData(localPoints), [localPoints]);
+  const d = pointsToPathData(curved);
+  // Splitting into per-segment widths is a cheap single pass over the
+  // already curve-fit points (unlike the reduce+curve-fit stage above), so
+  // it's fine for this one to depend on `strokeWidth` directly.
+  const segments = useMemo(
+    () => (pressureAware ? segmentsFromCurvePoints(curved, strokeWidth) : null),
+    [pressureAware, curved, strokeWidth]
+  );
 
   return (
     <div
