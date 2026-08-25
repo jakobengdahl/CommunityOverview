@@ -260,12 +260,36 @@ export function createAnnotationDocument(input) {
   return normalizeAnnotationDocument(input || {});
 }
 
-export function normalizeAnnotationDocument(input = {}) {
+/**
+ * Normalise a stored annotation document, skipping entries that cannot be
+ * normalised at all.
+ *
+ * `createAnnotation` throws for an unrecognised type, and this function used to
+ * let that escape — so a single stored annotation of a kind this version does
+ * not know made the whole document unreadable, which in the app means the
+ * session fails to open. That is a far worse outcome than the one it was
+ * guarding against: the user loses everything rather than one decoration.
+ *
+ * Annotation kinds are allowed to change without migrating what is stored
+ * (nobody uses the feature yet), so meeting an unknown one is an expected
+ * condition, not a corrupt document. It is dropped here rather than carried
+ * further: the canvas filters unknown kinds out before rendering anyway, so
+ * keeping it would only defer the same discard to a place with less context.
+ *
+ * `onSkipped` lets a caller report what was dropped instead of it vanishing
+ * silently.
+ */
+export function normalizeAnnotationDocument(input = {}, { onSkipped } = {}) {
   const rawAnnotations = Array.isArray(input) ? input : input.annotations || [];
-  return {
-    schema_version: ANNOTATION_SCHEMA_VERSION,
-    annotations: rawAnnotations.map((annotation) => createAnnotation(annotation)),
-  };
+  const annotations = [];
+  for (const annotation of rawAnnotations) {
+    try {
+      annotations.push(createAnnotation(annotation));
+    } catch (error) {
+      onSkipped?.(annotation, error);
+    }
+  }
+  return { schema_version: ANNOTATION_SCHEMA_VERSION, annotations };
 }
 
 function replaceAnnotation(doc, nextAnnotation) {

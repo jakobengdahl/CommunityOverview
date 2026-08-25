@@ -218,6 +218,61 @@ colour/hide/delete menu. The keyboard rule does not cover the gap: `Delete`
 skips groups entirely — so their children stay correctly parented — and hands
 that job to the group's own menu, which is the one that ignores the flag.
 
+### Unrecognised annotation data
+
+Annotations have no users yet, so the shapes below may change without migrating
+what is already stored: a redesign is free to ignore or discard an existing
+annotation rather than carry a compatibility path for it. What replaces that
+guarantee is narrower and firmer — **unrecognised annotation data must never
+crash the canvas.**
+
+Annotations render inside the same ReactFlow tree as the graph, so an exception
+thrown while drawing one unmounts everything. An annotation is a decoration and
+the graph is the user's work, so that trade is never worth taking. Three
+mechanisms at three depths, deliberately all of them — each catches what the
+one below it cannot reach:
+
+- **An annotation that cannot be normalised is skipped, not fatal.**
+  `createAnnotation` throws for a kind this version does not know, and
+  `normalizeAnnotationDocument` used to let that escape — so one stored
+  annotation of a retired kind made the whole document unreadable, which in the
+  app means the session fails to open. That is the worst outcome available: the
+  user loses the session rather than one decoration. Skipped entries are
+  reported to the console, since a silent drop looks like deletion. A payload
+  whose annotation slot is not a list at all is still fatal — that is a
+  malformed session, not an annotation this version cannot read.
+- **The overlay translators refuse what they cannot represent.**
+  `overlayToFlowNode` and `flowNodeToOverlay` return `null` for input that is
+  not an object or has no string id, and all three call sites — session
+  restore, saved-view export, and remote ops from a peer or agent — drop those
+  rather than letting a `null` into the node list, where it would crash one
+  step later and harder to trace.
+- **Every annotation node type is wrapped in `AnnotationErrorBoundary`.** A kind
+  that throws anyway renders as a small neutral placeholder the user can select
+  and delete. The user-facing notice fires once per session — several copies of
+  the same broken shape would otherwise read as something being badly wrong —
+  while each failure is logged to the console separately, for whoever has to
+  find the defect.
+
+Groups are annotations too, and get the same treatment in both places: a
+malformed entry in a restored session's group list is filtered before it can
+throw on `g.id` inside an effect — where no boundary reaches — and a primitive
+entry is refused rather than silently becoming a group annotation with a
+generated id and no members.
+
+An unknown kind therefore never reaches the canvas at all: it is dropped while
+normalising, and the restore path filters by the known overlay kinds besides.
+The translators tolerate one because they are also used on already-built nodes,
+not because a stored unknown kind survives to be rendered.
+
+`custom` — a graph node — is deliberately **not** wrapped. Its data is the
+user's real work, carries no licence to change shape, and a render failure
+there should be loud rather than hidden behind a placeholder.
+
+This is covered by `packages/ui-graph-canvas/tests/AnnotationBadData.test.jsx`,
+which feeds the canvas deliberately malformed annotations. That test is what
+makes every later annotation redesign safe to do without a migration.
+
 All of this is client-side. The server never rejects a write to a locked
 annotation, whatever the type or tool — see [MCP access](#mcp-access) for the
 per-type breakdown of which tool does the writing. `locked` is a shared UI

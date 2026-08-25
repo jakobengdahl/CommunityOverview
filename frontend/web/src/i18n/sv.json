@@ -434,7 +434,8 @@
     "freehand_color": "Färg",
     "freehand_width": "Streckbredd",
     "freehand_smoothing": "Utjämning",
-    "freehand_opacity": "Opacitet"
+    "freehand_opacity": "Opacitet",
+    "annotation_broken": "En annotering kunde inte ritas upp och hoppades över"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",

@@ -6,17 +6,32 @@ import { createAnnotation, normalizeAnnotationDocument } from '@community-graph/
 // Group boxes persist inside the generic server-side annotation list as
 // `kind: "group"` (design 3.1). These two helpers translate between that
 // server shape and the {groups, parentIds} shape the canvas round-trips.
+// An annotation this version cannot read is dropped, not fatal. It used to
+// take the whole call down, which in the app means the session never opens —
+// the user losing everything because one stored decoration had a kind that no
+// longer exists. Reported to the console so the discard is findable, since a
+// silent drop looks to the user like their annotation was deleted.
+function skippedAnnotation(annotation, error) {
+  console.warn('Skipping an annotation this version cannot read:', annotation, error?.message);
+}
+
 function documentAnnotations(annotations) {
   if (annotations == null) return [];
   if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
-    return normalizeAnnotationDocument(annotations).annotations;
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
   }
-  if (Array.isArray(annotations)) return normalizeAnnotationDocument(annotations).annotations;
+  if (Array.isArray(annotations)) {
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
+  }
+  // Still fatal, deliberately: a payload whose annotation slot is not a list at
+  // all is a malformed session, not an annotation this version cannot read.
   throw new Error('Malformed session payload: state.annotations is not an array');
 }
 
 export function annotationDocumentToLegacyMetadata(documentInput) {
-  const document = normalizeAnnotationDocument(documentInput || []);
+  const document = normalizeAnnotationDocument(documentInput || [], {
+    onSkipped: skippedAnnotation,
+  });
   return {
     annotation_schema_version: document.schema_version,
     annotations: annotationsToOverlays(document),
@@ -25,18 +40,29 @@ export function annotationDocumentToLegacyMetadata(documentInput) {
 }
 
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
+  const skip = { onSkipped: skippedAnnotation };
   if (metadata.annotation_document)
-    return normalizeAnnotationDocument(metadata.annotation_document);
+    return normalizeAnnotationDocument(metadata.annotation_document, skip);
   if (metadata.annotations != null && !Array.isArray(metadata.annotations)) {
     throw new Error('Malformed session payload: state.annotations is not an array');
   }
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
-    return normalizeAnnotationDocument(metadata.annotations);
+    return normalizeAnnotationDocument(metadata.annotations, skip);
   }
-  return normalizeAnnotationDocument([
-    ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
-    ...overlaysToAnnotations(metadata.annotations || []),
-  ]);
+  // `skip` here is uniformity, not protection, and for a less comfortable
+  // reason than it first looks: nothing malformed reaches this call because
+  // `overlaysToAnnotations` — the other feeder — still THROWS on input it
+  // cannot read, so it fails before this line runs. That is the write path's
+  // strictness, logged separately, not a filter. Kept so the reporter is wired
+  // at every entry point, and said plainly, because an unreachable guard that
+  // reads as a live one is worse than none.
+  return normalizeAnnotationDocument(
+    [
+      ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
+      ...overlaysToAnnotations(metadata.annotations || []),
+    ],
+    skip
+  );
 }
 
 export function annotationsToGroups(annotations) {
@@ -63,18 +89,39 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
     (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
   }
-  return (viewGroups || []).map((g) =>
-    createAnnotation({
-      id: g.id,
-      type: 'group',
-      position: g.position || { x: 0, y: 0 },
-      label: g.label || '',
-      description: g.description || '',
-      color: g.color,
-      size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
-      member_node_ids: membersByGroup[g.id] || [],
-    })
-  );
+  // A group is an annotation kind, so it answers to the same rule as the rest:
+  // skip what cannot be read, report it, keep the others. Two distinct ways to
+  // be unreadable are handled below, because they fail differently — a
+  // primitive slips through silently, while a bad payload throws.
+  const annotations = [];
+  for (const g of viewGroups || []) {
+    // A primitive entry must be refused explicitly. It does NOT throw on
+    // `g.id` — a string or a number just yields undefined — so without this it
+    // silently becomes a group annotation with a generated id, an empty label
+    // and no members: a phantom box on the canvas, which is worse than the
+    // skip, because nothing anywhere reports it.
+    if (!g || typeof g !== 'object') {
+      skippedAnnotation(g, new Error('group entry is not an object'));
+      continue;
+    }
+    try {
+      annotations.push(
+        createAnnotation({
+          id: g.id,
+          type: 'group',
+          position: g.position || { x: 0, y: 0 },
+          label: g.label || '',
+          description: g.description || '',
+          color: g.color,
+          size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
+          member_node_ids: membersByGroup[g.id] || [],
+        })
+      );
+    } catch (error) {
+      skippedAnnotation(g, error);
+    }
+  }
+  return annotations;
 }
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond

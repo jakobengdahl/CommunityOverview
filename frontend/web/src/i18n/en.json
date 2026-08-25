@@ -434,7 +434,8 @@
     "freehand_color": "Colour",
     "freehand_width": "Stroke width",
     "freehand_smoothing": "Smoothing",
-    "freehand_opacity": "Opacity"
+    "freehand_opacity": "Opacity",
+    "annotation_broken": "An annotation could not be drawn and was left out"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",
