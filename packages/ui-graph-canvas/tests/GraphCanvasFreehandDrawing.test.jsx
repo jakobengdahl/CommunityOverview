@@ -117,6 +117,31 @@ describe('GraphCanvas freehand drawing mode', () => {
     );
   });
 
+  it('previews the in-progress stroke in a visible colour too', () => {
+    // The preview is the first thing a user sees, before any annotation
+    // exists — if it is invisible the tool reads as broken mid-gesture, not
+    // just after. It has its own colour prop, so it needs its own assertion.
+    const { container } = render(
+      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^freehand$/i }));
+
+    const rf = container.querySelector('[data-testid="react-flow"]');
+    act(() => {
+      rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+      rf.dispatchEvent(pointerEvent('pointermove', { clientX: 40, clientY: 25 }));
+    });
+
+    const preview = container.querySelector(
+      '[data-testid="freehand-preview-overlay"] path[stroke]'
+    );
+    expect(preview).toBeTruthy();
+    const value = preview.getAttribute('stroke');
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
+    expect((0.299 * r + 0.587 * g + 0.114 * b) / 255).toBeLessThan(0.3);
+  });
+
   it('draws a stroke end to end and creates a freehand annotation anchored at the first point', () => {
     const onAnnotationChange = vi.fn();
     const { container } = render(
@@ -136,6 +161,13 @@ describe('GraphCanvas freehand drawing mode', () => {
     const node = findCreatedFreehandNode();
     expect(node).toBeTruthy();
     expect(node.position).toEqual({ x: 10, y: 10 });
+    // The stroke a user actually draws is written WITH an explicit colour, so
+    // this — not the node component's fallback — is the value that decides
+    // whether they see anything. It was a near-white on a light canvas, and a
+    // fix aimed at the fallback left this path untouched. Asserted as a
+    // property, since "too light" is the bug, not "not this constant".
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(node.data.color.slice(i, i + 2), 16));
+    expect((0.299 * r + 0.587 * g + 0.114 * b) / 255).toBeLessThan(0.3);
     // node-relative to the anchor (first point) — see annotations.js's
     // GENERIC_OVERLAY_FIELDS comment on freehand's `points` convention.
     expect(node.data.points).toEqual([

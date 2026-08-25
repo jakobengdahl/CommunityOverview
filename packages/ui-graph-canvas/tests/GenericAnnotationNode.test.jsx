@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import GenericAnnotationNode, {
   regularShapeAspect,
-  regularShapeSize,
+  newShapeSize,
   SHAPE_BASE_WIDTH,
 } from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
@@ -851,7 +851,7 @@ describe('regular shape geometry', () => {
   // change to the created box is a change these assertions see. Restating it
   // is what let a full revert of the creation branch pass.
   const sidesAt = (shape) => {
-    const { width, height } = regularShapeSize(shape);
+    const { width, height } = newShapeSize(shape);
     return sideLengths(clipPathFor(shape), width, height);
   };
   const spread = (sides) => (Math.max(...sides) - Math.min(...sides)) / Math.max(...sides);
@@ -870,7 +870,7 @@ describe('regular shape geometry', () => {
     // equal-sides assertion above would pass for any value here and says
     // nothing. What 1:1 buys is equal diagonals — a square standing on its
     // corner rather than a wide flat lozenge.
-    const { width, height } = regularShapeSize('rhombus');
+    const { width, height } = newShapeSize('rhombus');
     expect(spread(sidesAt('rhombus'))).toBeLessThan(0.005); // true regardless; documents why
     expect(width).toBe(height);
   });
@@ -880,21 +880,24 @@ describe('regular shape geometry', () => {
     // shape used to be created in. Read from the helper, so reverting the
     // creation size to 160x96 makes the equal-sides tests fail and this one
     // explain why.
-    const generic = regularShapeSize('rectangle');
+    const generic = newShapeSize('rectangle');
     expect(
       spread(sideLengths(clipPathFor('hexagon'), generic.width, generic.height))
     ).toBeGreaterThan(0.1);
   });
 
   it('sizes each subtype from its own ratio, and leaves the rest in the generic box', () => {
-    // Covers the creation branch: GraphCanvas builds a new shape's style from
-    // exactly this helper, so a revert there fails here.
-    expect(regularShapeSize('triangle')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
-    expect(regularShapeSize('hexagon')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
-    expect(regularShapeSize('rhombus')).toEqual({ width: SHAPE_BASE_WIDTH, height: 160 });
-    expect(regularShapeSize('rectangle')).toEqual({ width: 160, height: 96 });
-    expect(regularShapeSize('circle')).toEqual({ width: 160, height: 96 });
-    expect(regularShapeSize('process_arrow')).toEqual({ width: 160, height: 96 });
+    // The helper only. That GraphCanvas actually calls it is a separate fact
+    // and needs its own assertion — a helper test cannot see the call site
+    // reverting to a hardcoded box, which is exactly the mutant that
+    // reproduces the reported bug. Covered in
+    // GraphCanvasAnnotationToolbox.test.jsx, at the toolbox.
+    expect(newShapeSize('triangle')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('hexagon')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('rhombus')).toEqual({ width: SHAPE_BASE_WIDTH, height: 160 });
+    expect(newShapeSize('rectangle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('circle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('process_arrow')).toEqual({ width: 160, height: 96 });
   });
 
   it('resizes the box when the subtype switch needs a different ratio', () => {
@@ -917,27 +920,52 @@ describe('regular shape geometry', () => {
       style: { width: 160, height: 96 },
     });
     expect(updated.data.shape).toBe('triangle');
-    expect(updated.style).toMatchObject(regularShapeSize('triangle'));
-    // The box moved, so this is a geometry change, not a restyle — the
-    // activity log and the op timing classify the two differently.
+    // Height re-proportioned, width kept: 160 is what the node already had.
+    expect(updated.style).toEqual({ width: 160, height: 139 });
     expect(notifyChange).toHaveBeenCalledWith('geometry');
   });
 
-  it('returns the box to the generic one when switching back to a free subtype', () => {
+  it('keeps a deliberately resized width when the subtype changes', () => {
+    // Re-proportioning must not throw away a resize. A 480-wide triangle
+    // becoming a hexagon stays 480 wide and only gets the height its ratio
+    // needs — the two share a ratio, so nothing was squashed to begin with.
     render(
       <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
-        <GenericAnnotationNode id="s2" type="shape" data={{ shape: 'hexagon' }} selected />
+        <GenericAnnotationNode id="s2" type="shape" data={{ shape: 'triangle' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('hexagon'));
+
+    const updated = applyLatestUpdate({
+      id: 's2',
+      data: { shape: 'triangle' },
+      style: { width: 480, height: 417 },
+    });
+    expect(updated.style).toEqual({
+      width: 480,
+      height: Math.round(480 / regularShapeAspect('hexagon')),
+    });
+  });
+
+  it('leaves the box untouched when switching to a subtype that fills its box', () => {
+    // A rectangle fills whatever box it is given, so there is nothing to
+    // correct — and resetting it would discard the user's resize.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="s3" type="shape" data={{ shape: 'hexagon' }} selected />
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
     fireEvent.click(screen.getByLabelText('rectangle'));
 
     const updated = applyLatestUpdate({
-      id: 's2',
+      id: 's3',
       data: { shape: 'hexagon' },
-      style: regularShapeSize('hexagon'),
+      style: { width: 480, height: 417 },
     });
-    expect(updated.style).toMatchObject(regularShapeSize('rectangle'));
+    expect(updated.style).toEqual({ width: 480, height: 417 });
+    expect(updated.data.shape).toBe('rectangle');
   });
 
   it('locks the resize ratio only for the subtypes that need one', () => {

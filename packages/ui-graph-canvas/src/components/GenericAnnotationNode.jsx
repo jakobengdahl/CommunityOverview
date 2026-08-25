@@ -128,10 +128,22 @@ const SHAPE_FALLBACK_SIZE = Object.freeze({ width: 160, height: 96 });
  * ratio gets the height that ratio implies; every other subtype fills the
  * generic box.
  */
-export function regularShapeSize(shape) {
+export function regularShapeSize(shape, currentWidth) {
   const aspect = regularShapeAspect(shape);
-  if (!aspect) return { ...SHAPE_FALLBACK_SIZE };
-  return { width: SHAPE_BASE_WIDTH, height: Math.round(SHAPE_BASE_WIDTH / aspect) };
+  if (!aspect) return null;
+  // Keep the width the shape already has, so switching subtype re-proportions
+  // the figure without discarding a resize the user did on purpose. Only
+  // creation, which has no width yet, falls back to the base.
+  const width = Number.isFinite(currentWidth) && currentWidth > 0 ? currentWidth : SHAPE_BASE_WIDTH;
+  return { width, height: Math.round(width / aspect) };
+}
+
+/**
+ * The box a newly created `shape` should occupy: its regular ratio if it has
+ * one, otherwise the generic box every unsized annotation gets.
+ */
+export function newShapeSize(shape) {
+  return regularShapeSize(shape) || { ...SHAPE_FALLBACK_SIZE };
 }
 
 // The shape-subtype picker's option order — every variant SHAPE_STYLES draws.
@@ -229,18 +241,29 @@ function GenericAnnotationNode({ id, type, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
-    // Switching subtype has to move the box too. A rectangle is 160x96; making
-    // it a triangle without resizing gives exactly the squashed figure this
-    // change exists to prevent — and `keepAspectRatio` would then lock that
-    // wrong ratio in place, since it preserves what it measures.
-    const size = regularShapeSize(shape);
+    // Switching subtype has to re-proportion the box. A rectangle is 160x96;
+    // making it a triangle without touching the box gives exactly the squashed
+    // figure this change exists to prevent — and `keepAspectRatio` would then
+    // lock that wrong ratio in place, since it preserves what it measures.
+    //
+    // Only the height moves: the width the user has given the shape is theirs,
+    // so a deliberately widened triangle stays that wide when it becomes a
+    // hexagon. Switching to a subtype with no ratio leaves the box alone
+    // entirely — a rectangle fills whatever box it is given, so there is
+    // nothing to correct and resetting it would throw away a resize.
     setNodes((nds) =>
-      nds.map((n) =>
-        n.id === id ? { ...n, data: { ...n.data, shape }, style: { ...n.style, ...size } } : n
-      )
+      nds.map((n) => {
+        if (n.id !== id) return n;
+        const size = regularShapeSize(shape, n.style?.width);
+        const next = { ...n, data: { ...n.data, shape } };
+        return size ? { ...next, style: { ...n.style, ...size } } : next;
+      })
     );
     setContextMenu(null);
-    // 'geometry' rather than 'style': the box changed, not just the paint.
+    // 'geometry' rather than 'style' because the box can move — the documented
+    // vocabulary in AnnotationContext.js, not a timing difference: the
+    // scheduler branches only on 'text' and publishes both of these
+    // immediately, and the kind never reaches the server.
     notifyChange('geometry');
   };
 

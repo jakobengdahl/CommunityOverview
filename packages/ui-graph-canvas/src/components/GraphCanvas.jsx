@@ -18,7 +18,7 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode, { regularShapeSize } from './GenericAnnotationNode';
+import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
@@ -1222,7 +1222,7 @@ function GraphCanvasInner({
           type: 'shape',
           position,
           data: { shape, color: undefined },
-          style: regularShapeSize(shape),
+          style: newShapeSize(shape),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size
