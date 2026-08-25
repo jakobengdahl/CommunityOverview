@@ -315,7 +315,7 @@ export function buildPressureSegments(
  * (including this file's own tests) that only need the segments.
  */
 export function segmentsFromCurvePoints(points, baseWidth = DEFAULT_STROKE_WIDTH_FALLBACK) {
-  if (points.length === 0) return [];
+  if (!Array.isArray(points) || points.length === 0) return [];
   if (points.length === 1) {
     const p = points[0];
     return [

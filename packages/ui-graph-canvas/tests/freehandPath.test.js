@@ -246,6 +246,11 @@ describe('smoothAnchors + segmentsFromCurvePoints (shared reduce-and-curve-fit s
       { d: 'M 5 5 L 5 5', width: expect.any(Number) },
     ]);
   });
+
+  it('segmentsFromCurvePoints degrades gracefully on non-array input, matching pointsToPathData', () => {
+    expect(segmentsFromCurvePoints(null, 2)).toEqual([]);
+    expect(segmentsFromCurvePoints(undefined, 2)).toEqual([]);
+  });
 });
 
 describe('hasPressureData', () => {
