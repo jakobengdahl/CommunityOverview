@@ -97,6 +97,24 @@ function ArrowNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
+  // The only action a locked line's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // matching NoteNode/LabelNode/GenericAnnotationNode/FreehandAnnotationNode,
+  // which have had this branch all along. Until this existed a locked line
+  // was the one annotation kind whose menu still recoloured, toggled
+  // arrowheads and deleted, and the one with no way to unlock from the GUI
+  // at all.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    patchData({ locked: false });
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   // Move one endpoint to a new flow-coordinate point, snapping onto a nearby
   // node/annotation centre when close and recording/clearing its anchor.
   const moveEndpoint = useCallback(
@@ -295,33 +313,41 @@ function ArrowNode({ id, data, selected }) {
             className="graph-annotation-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">{labels.color}</div>
-            <div className="context-menu-colors">
-              {ARROW_COLORS.map((c) => (
-                <button
-                  key={c}
-                  className="color-button"
-                  style={{ backgroundColor: c }}
-                  onClick={() => changeColor(c)}
+            {data.locked ? (
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.color}</div>
+                <div className="context-menu-colors">
+                  {ARROW_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className="color-button"
+                      style={{ backgroundColor: c }}
+                      onClick={() => changeColor(c)}
+                    />
+                  ))}
+                </div>
+                <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
+                  <span>{labels.arrowStartHead}</span>
+                  <span>{startArrow ? '✔' : ''}</span>
+                </button>
+                <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
+                  <span>{labels.arrowEndHead}</span>
+                  <span>{endArrow ? '✔' : ''}</span>
+                </button>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
                 />
-              ))}
-            </div>
-            <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
-              <span>{labels.arrowStartHead}</span>
-              <span>{startArrow ? '✔' : ''}</span>
-            </button>
-            <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
-              <span>{labels.arrowEndHead}</span>
-              <span>{endArrow ? '✔' : ''}</span>
-            </button>
-            <AnnotationLayerControls
-              labels={labels}
-              locked={data.locked}
-              onChangeLayer={changeLayer}
-            />
-            <button className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+                <button className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
+                </button>
+              </>
+            )}
           </div>,
           document.body
         )}

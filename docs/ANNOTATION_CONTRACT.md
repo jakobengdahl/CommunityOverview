@@ -204,7 +204,7 @@ publishes no operation, and so is a click on an annotation another client
 currently holds the claim on (the attempt is surfaced, as for every other
 annotation mutation). A `locked` annotation is not offered the row at all,
 per the capability baseline's "remains selectable but offers only unlock or
-copy".
+copy" — which every annotation context menu now implements, `line` included.
 
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
@@ -764,7 +764,7 @@ rule](#downstream-closure-rule).
 | `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
 | `text` | ⚠ toolbox create (fixed default), rotate/recolor/layer (right-click), attach by dragging near a node/annotation; no font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
+| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/lock-unlock (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype, colour, rotation and layer (front/back) | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |

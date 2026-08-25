@@ -264,20 +264,24 @@ describe('ArrowNode', () => {
     expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
   });
 
-  it('keeps a locked arrow non-draggable after a style change (colour)', () => {
+  // Replaces an earlier case that recoloured a LOCKED arrow and asserted it
+  // stayed non-draggable. That path no longer exists: a locked line's menu
+  // now offers only Unlock, like every other annotation kind's does
+  // (capability baseline: "remains selectable but offers only unlock or
+  // copy"). The draggability invariant it was really guarding — patchData
+  // recomputing `draggable` from the new data — is covered on the unlock
+  // path in ArrowNode.test.jsx, and on the positive path by the sibling case
+  // below.
+  it('offers a locked arrow no style controls at all, only unlock', () => {
     const { notifyChange } = renderWithContext(
       <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected={false} />
     );
     fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
-    const colorButtons = document.querySelectorAll('.color-button');
-    fireEvent.click(colorButtons[1]);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    const updater = hoisted.setNodes.mock.calls[0][0];
-    const result = updater([
-      { id: 'arrow-1', data: { dx: 160, dy: 0, locked: true }, draggable: false },
-    ]);
-    expect(result[0].data.locked).toBe(true);
-    expect(result[0].draggable).toBe(false);
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(document.querySelector('.context-menu-delete')).toBeNull();
+    expect(document.querySelector('.context-menu-unlock')).toBeTruthy();
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
   });
 
   it('stays draggable after a style change on an unlocked, unanchored arrow', () => {
