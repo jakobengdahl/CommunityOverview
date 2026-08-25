@@ -218,6 +218,37 @@ colour/hide/delete menu. The keyboard rule does not cover the gap: `Delete`
 skips groups entirely — so their children stay correctly parented — and hands
 that job to the group's own menu, which is the one that ignores the flag.
 
+### Unrecognised annotation data
+
+Annotations have no users yet, so the shapes below may change without migrating
+what is already stored: a redesign is free to ignore or discard an existing
+annotation rather than carry a compatibility path for it. What replaces that
+guarantee is narrower and firmer — **unrecognised annotation data must never
+crash the canvas.**
+
+Annotations render inside the same ReactFlow tree as the graph, so an exception
+thrown while drawing one unmounts everything. An annotation is a decoration and
+the graph is the user's work, so that trade is never worth taking. Two
+mechanisms, deliberately both:
+
+- The translation layer refuses what it cannot represent. `overlayToFlowNode`
+  and `flowNodeToOverlay` return `null` for input that is not an object or has
+  no string id, and every call site drops those rather than letting a `null`
+  into the node list. An *unknown kind* is not refused — it has a real id and a
+  real position, and discarding it here would silently delete it on the next
+  save.
+- Every annotation node type is wrapped in `AnnotationErrorBoundary`. A kind
+  that throws anyway renders as a small neutral placeholder the user can select
+  and delete, and the failure is logged once per session rather than as a burst.
+
+`custom` — a graph node — is deliberately **not** wrapped. Its data is the
+user's real work, carries no licence to change shape, and a render failure
+there should be loud rather than hidden behind a placeholder.
+
+This is covered by `packages/ui-graph-canvas/tests/AnnotationBadData.test.jsx`,
+which feeds the canvas deliberately malformed annotations. That test is what
+makes every later annotation redesign safe to do without a migration.
+
 All of this is client-side. The server never rejects a write to a locked
 annotation, whatever the type or tool — see [MCP access](#mcp-access) for the
 per-type breakdown of which tool does the writing. `locked` is a shared UI

@@ -19,6 +19,7 @@ import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
 import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
+import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
@@ -333,6 +334,7 @@ function GraphCanvasInner({
     imageIngestFailed: 'Could not add the image',
     annotationRemoteLocked: 'Someone else is editing this annotation',
     annotationLockedSkipped: 'That annotation is locked — unlock it first',
+    annotationBroken: 'An annotation could not be drawn and was left out',
     freehandColor: 'Colour',
     freehandWidth: 'Stroke width',
     freehandSmoothing: 'Smoothing',
@@ -577,10 +579,28 @@ function GraphCanvasInner({
     showNotification('info', cml.annotationRemoteLocked);
   }, [cml.annotationRemoteLocked, showNotification]);
 
+  // An annotation that could not be drawn is reported once per session rather
+  // than once per annotation: a graph carrying several of the same broken
+  // shape would otherwise fire a burst of identical notices, which reads as
+  // something being badly wrong rather than as one decoration being skipped.
+  // The console entry is not deduplicated — that one is for whoever has to
+  // find the defect.
+  const reportedBrokenRef = useRef(false);
+  const reportAnnotationRenderError = useCallback(
+    (nodeId, error) => {
+      console.error(`Annotation ${nodeId} could not be rendered:`, error);
+      if (reportedBrokenRef.current) return;
+      reportedBrokenRef.current = true;
+      showNotification('info', cml.annotationBroken);
+    },
+    [cml.annotationBroken, showNotification]
+  );
+
   const annotationContextValue = useMemo(
     () => ({
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
+      notifyRenderFailure: reportAnnotationRenderError,
       labels: {
         color: cml.annotationColor,
         delete: cml.deleteAnnotation,
@@ -606,6 +626,7 @@ function GraphCanvasInner({
         voteValue: cml.annotationVoteValue,
         voteValueDecrease: cml.annotationVoteValueDecrease,
         voteValueIncrease: cml.annotationVoteValueIncrease,
+        brokenAnnotation: cml.annotationBroken,
       },
     }),
     [
@@ -635,6 +656,8 @@ function GraphCanvasInner({
       cml.annotationVoteValue,
       cml.annotationVoteValueDecrease,
       cml.annotationVoteValueIncrease,
+      cml.annotationBroken,
+      reportAnnotationRenderError,
     ]
   );
 
@@ -1797,7 +1820,10 @@ function GraphCanvasInner({
           style: g.style,
           color: g.data.color,
         })),
-      annotations: viewNodes.filter((n) => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
+      annotations: viewNodes
+        .filter((n) => OVERLAY_TYPES.has(n.type))
+        .map(flowNodeToOverlay)
+        .filter(Boolean),
     });
   }, [nodes, edges, onSaveView, activeFocusRootId]);
 
@@ -2412,9 +2438,14 @@ function GraphCanvasInner({
   // Restore free-floating annotations (note/label/arrow) from a loaded session.
   useEffect(() => {
     if (!annotationsToRestore || annotationsToRestore.length === 0) return;
+    // A stored annotation the translator cannot make a node out of is dropped
+    // rather than allowed to become a null in the node list, which ReactFlow
+    // would throw on. Annotation shapes may change without migrating what is
+    // stored, so this is an expected condition, not a defensive flourish.
     const overlayNodes = annotationsToRestore
       .filter((a) => OVERLAY_TYPES.has(a?.kind))
-      .map(overlayToFlowNode);
+      .map(overlayToFlowNode)
+      .filter(Boolean);
     if (overlayNodes.length === 0) {
       onAnnotationsRestored?.();
       return;
@@ -2567,9 +2598,13 @@ function GraphCanvasInner({
     for (const op of remoteAnnotationOps) {
       if (op.action === 'upsert-overlay' && op.overlay) {
         const flowNode = overlayToFlowNode(op.overlay);
-        setNodes((nds) =>
-          reorderNodesForParentChild([...nds.filter((n) => n.id !== flowNode.id), flowNode])
-        );
+        // A malformed op from a peer or an agent must not take this client's
+        // canvas down with it.
+        if (flowNode) {
+          setNodes((nds) =>
+            reorderNodesForParentChild([...nds.filter((n) => n.id !== flowNode.id), flowNode])
+          );
+        }
       } else if (op.action === 'upsert-group' && op.group) {
         const g = op.group;
         const groupNode = {
@@ -2640,23 +2675,42 @@ function GraphCanvasInner({
     return () => clearTimeout(timer);
   }, [focusNodeId, nodes, setCenter, onFocusComplete]);
 
-  const nodeTypes = useMemo(
-    () => ({
+  // Every annotation type is wrapped; `custom` (a graph node) deliberately is
+  // not. A graph node failing to render is a defect that should be loud, and
+  // its data is the user's real work rather than a decoration whose stored
+  // shape this project reserves the right to change.
+  const nodeTypes = useMemo(() => {
+    // The boundary takes the reporter and its label from AnnotationContext,
+    // which every annotation already consumes. That keeps this map's
+    // dependency list empty: ReactFlow remounts every node when `nodeTypes`
+    // changes identity, so a map that rebuilt on a label or callback change
+    // would blow away the canvas's DOM for a language switch.
+    // The computed key names the component without assigning to it after the
+    // fact — React treats a component as immutable, and devtools read `name`
+    // when there is no displayName.
+    const guard = (Component, kind) =>
+      ({
+        [`Guarded(${kind})`]: (props) => (
+          <AnnotationErrorBoundary nodeId={props.id}>
+            <Component {...props} />
+          </AnnotationErrorBoundary>
+        ),
+      })[`Guarded(${kind})`];
+    return {
       custom: CustomNode,
-      group: GroupNode,
-      note: NoteNode,
-      label: LabelNode,
-      arrow: ArrowNode,
-      text: GenericAnnotationNode,
-      frame: GenericAnnotationNode,
-      shape: GenericAnnotationNode,
-      icon: GenericAnnotationNode,
-      vote_dot: GenericAnnotationNode,
-      image: GenericAnnotationNode,
-      freehand: FreehandAnnotationNode,
-    }),
-    []
-  );
+      group: guard(GroupNode, 'group'),
+      note: guard(NoteNode, 'note'),
+      label: guard(LabelNode, 'label'),
+      arrow: guard(ArrowNode, 'arrow'),
+      text: guard(GenericAnnotationNode, 'text'),
+      frame: guard(GenericAnnotationNode, 'frame'),
+      shape: guard(GenericAnnotationNode, 'shape'),
+      icon: guard(GenericAnnotationNode, 'icon'),
+      vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
+      image: guard(GenericAnnotationNode, 'image'),
+      freehand: guard(FreehandAnnotationNode, 'freehand'),
+    };
+  }, []);
 
   const marksLegend = useMemo(() => {
     const seen = new Map();

@@ -217,6 +217,13 @@ export function isAnnotationDraggable(node) {
 // Build a ReactFlow node for a note/label/arrow overlay from the host's
 // canvas-shape annotation ({id, kind, position, ...payload}).
 export function overlayToFlowNode(overlay) {
+  // Null and id-less input are the two shapes this cannot make a node out of.
+  // Returning null rather than throwing lets the caller drop one bad
+  // annotation instead of failing the whole hydration — annotations may be
+  // redesigned without migrating what is stored, so unrecognised input is an
+  // expected condition here, not an exceptional one.
+  if (!overlay || typeof overlay !== 'object') return null;
+  if (typeof overlay.id !== 'string' || !overlay.id) return null;
   const base = { id: overlay.id, type: overlay.kind, position: overlay.position || { x: 0, y: 0 } };
   // `z` (layer order) and `locked` (the canvas UI's own edit-lock convention,
   // set via the generic MCP annotation tools) are envelope fields on every v1
@@ -303,6 +310,7 @@ export function overlayToFlowNode(overlay) {
 
 // Serialize a ReactFlow overlay node back to the host's canvas-shape annotation.
 export function flowNodeToOverlay(node) {
+  if (!node || typeof node !== 'object' || typeof node.id !== 'string') return null;
   const base = { id: node.id, kind: node.type, position: node.position };
   // Mirrors overlayToFlowNode's envelope fields; see its comment for why these
   // must survive the round trip. `node.zIndex`/`node.data.locked` are undefined

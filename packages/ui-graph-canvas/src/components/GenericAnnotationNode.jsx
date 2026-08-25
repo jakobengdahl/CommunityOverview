@@ -182,7 +182,10 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * property editor (colour, shape subtype, icon name, vote value, rotation
  * and layer order).
  */
-function GenericAnnotationNode({ id, type, data, selected }) {
+// See NoteNode's equivalent default: an annotation whose payload is missing
+// should draw empty rather than throw. Every read below already uses `?.` or a
+// fallback; this closes the two that dereferenced `data` directly.
+function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const kind = type;
   const color = data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
@@ -553,7 +556,10 @@ function GenericAnnotationNode({ id, type, data, selected }) {
           style={{ backgroundColor: color, ...rotation }}
           onContextMenu={openContextMenu}
         >
-          {data.value ?? ''}
+          {/* Coerced: a stored value that is not a primitive (an object from
+              some earlier shape of this field) is not a valid React child and
+              would throw where a wrong-looking dot would do. */}
+          {typeof data.value === 'number' || typeof data.value === 'string' ? data.value : ''}
         </div>
         {menu}
         {remoteBadge}
