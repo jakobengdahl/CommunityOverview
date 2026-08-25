@@ -589,6 +589,22 @@ export class SessionSyncClient {
   }
 
   /**
+   * Fold one op into the baseline directly, the same way the SSE `onmessage`
+   * handler folds a remote op before dispatching it (see `_handleEvent`'s
+   * 'op' case) — for a caller that applied an op to the canvas *without* it
+   * having come over that stream (image ingest: the REST response is applied
+   * immediately, ahead of this browser's own confirming echo — see App.jsx's
+   * handleImageIngest). Skipping this would leave the baseline stale until
+   * the echo arrives, so the next `syncState()` diff (e.g. the user
+   * repositioning the just-created annotation before the echo lands) would
+   * see it as absent from the baseline and re-emit a redundant
+   * `annotation_created` for something the server already has.
+   */
+  foldLocalOp(op) {
+    this._baseline = applyOpToMirror(this._baseline, op);
+  }
+
+  /**
    * Diff a full host-state snapshot against the baseline and enqueue the
    * resulting ops. The baseline advances optimistically; transient POST
    * failures are retried so it never claims un-delivered state.

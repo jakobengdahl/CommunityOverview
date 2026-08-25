@@ -22,5 +22,15 @@ export function createSelfEchoDedup() {
     shouldSkip(id) {
       return typeof id === 'string' && id ? ids.delete(id) : false;
     },
+    // A mark whose echo never arrives as a discrete op — the SSE stream
+    // reconnects and resyncs wholesale instead (App.jsx's resyncFromServer),
+    // or this browser navigates away from the annotation before it lands —
+    // would otherwise linger forever and wrongly swallow a *later, unrelated*
+    // update for the same id (a genuine remote edit reusing it). A full
+    // resync already re-hydrates every annotation from server truth, making
+    // any pending marks moot; call this there so none outlive their purpose.
+    clear() {
+      ids.clear();
+    },
   };
 }

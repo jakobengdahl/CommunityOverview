@@ -30,6 +30,7 @@ import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessi
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
+import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import './App.css';
 
 const _urlParams = new URLSearchParams(window.location.search);
@@ -392,6 +393,11 @@ function App() {
       applyServerSessionRef.current?.(payload);
       const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
       syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+      // A full reload re-hydrates every annotation from server truth, so any
+      // image-ingest echo this browser was still waiting on (see
+      // createSelfEchoDedup) is moot — drop it rather than let it linger and
+      // wrongly swallow an unrelated later update for the same id.
+      selfIngestedImageAnnotationIdsRef.current.clear();
     },
     [syncRef]
   );
@@ -1069,19 +1075,23 @@ function App() {
   // Human clipboard-paste / file-upload image creation (GraphCanvas's
   // onImageIngest). The server validates, optimizes and embeds the image (the
   // same pipeline the MCP create_image_annotation tool uses) and returns the
-  // finished annotation, which is applied to the canvas immediately below —
-  // the same call site every other remote/self-authored annotation change
-  // goes through (applyRemoteOp) — rather than waiting on this browser's own
-  // SSE subscription to deliver it back. That subscription still exists and
-  // still receives this op (attributed to a dedicated server client id rather
-  // than this browser's own, precisely so sessionSyncClient.js does not drop
-  // it as an echo of a self-authored op — see backend/service/rest_api.py's
-  // ingest_session_image): it now serves as a delivery confirmation and the
-  // mechanism by which other collaborators see it, not as this browser's only
-  // path to seeing its own upload. `whenReady()` waits for the same "session
-  // exists server-side" fact the op queue's own flush already guards on
-  // (D13/D14: a session is never created until its first real write), since
-  // this request bypasses that queue.
+  // finished annotation, which applyIngestedImageOptimistically applies to
+  // the canvas immediately — the same call site every other remote/self-
+  // authored annotation change goes through (applyRemoteOp) — rather than
+  // waiting on this browser's own SSE subscription to deliver it back. It
+  // also folds the op into the sync client's baseline directly
+  // (foldLocalOp), so a snapshot save triggered before the echo arrives (e.g.
+  // the user repositions the annotation right away) diffs against a baseline
+  // that already has it, instead of re-emitting a redundant create. The SSE
+  // subscription still exists and still receives this op (attributed to a
+  // dedicated server client id rather than this browser's own, precisely so
+  // sessionSyncClient.js does not drop it as an echo of a self-authored op —
+  // see backend/service/rest_api.py's ingest_session_image): it now serves as
+  // a delivery confirmation and the mechanism by which other collaborators
+  // see it, not as this browser's only path to seeing its own upload.
+  // `whenReady()` waits for the same "session exists server-side" fact the op
+  // queue's own flush already guards on (D13/D14: a session is never created
+  // until its first real write), since this request bypasses that queue.
   const handleImageIngest = useCallback(
     async (dataUrl, position) => {
       const targetId = sessionId;
@@ -1094,13 +1104,12 @@ function App() {
           y: position.y,
           imageData: dataUrl,
         });
-        if (result?.annotation?.id) {
-          // Apply first, mark second: applyRemoteOp's dedup check runs
-          // synchronously and this very call must not see its own id as
-          // already marked — only the later SSE echo should.
-          applyRemoteOp({ op: 'annotation_created', annotation: result.annotation });
-          selfIngestedImageAnnotationIdsRef.current.markApplied(result.annotation.id);
-        }
+        applyIngestedImageOptimistically({
+          annotation: result?.annotation,
+          applyRemoteOp,
+          foldLocalOp: (op) => syncRef.current?.foldLocalOp(op),
+          dedup: selfIngestedImageAnnotationIdsRef.current,
+        });
         sessionStore.touchSession(targetId);
         setSessionsVersion((v) => v + 1);
       } catch (error) {
