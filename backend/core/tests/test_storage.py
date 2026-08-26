@@ -857,6 +857,10 @@ class TestGraphStorageSimilarity:
 class TestGraphStorageStats:
     """Tests for statistics"""
 
+    def test_get_node_count(self, storage_with_data):
+        """get_node_count returns the plain total without building per-type breakdowns."""
+        assert storage_with_data.get_node_count() == 4
+
     def test_get_stats(self, storage_with_data):
         """Test getting graph statistics"""
         stats = storage_with_data.get_stats()
@@ -872,6 +876,16 @@ class TestGraphStorageStats:
 
         assert "Theme" in stats.nodes_by_type
         assert stats.nodes_by_type["Theme"] == 1
+
+    def test_get_stats_counts_edges_by_type(self, storage_with_data):
+        """Test that stats include edge counts by relationship type."""
+        stats = storage_with_data.get_stats()
+
+        assert stats.edges_by_type == {
+            "BELONGS_TO": 1,
+            "RELATES_TO": 1,
+            "PART_OF": 1,
+        }
 
 
 class TestGraphStorageSubtypes:
@@ -976,6 +990,26 @@ class TestGraphStorageSubtypes:
         assert stats.nodes_by_type.get("EventSubscription") == 1
         assert stats.nodes_by_type.get("Agent") == 1
         assert stats.nodes_by_type.get("Actor") == 1
+
+    def test_get_stats_with_string_typed_edges_does_not_crash(self, temp_storage):
+        """get_stats must not crash when edges have config-defined string types.
+
+        Mirrors test_get_stats_with_string_typed_nodes_does_not_crash: a
+        relationship type defined only in schema_config.json (not the
+        RelationshipType enum) is stored as a plain string.
+        """
+        nodes = [
+            Node(id="agent-1", type="Agent", name="My Agent"),
+            Node(id="skill-1", type="Skill", name="My Skill"),
+        ]
+        edges = [
+            Edge(id="edge-1", source="agent-1", target="skill-1", type="USES_SKILL"),
+        ]
+        temp_storage.add_nodes(nodes, edges)
+
+        stats = temp_storage.get_stats()
+
+        assert stats.edges_by_type.get("USES_SKILL") == 1
 
 
 class TestGraphStoragePersistence:

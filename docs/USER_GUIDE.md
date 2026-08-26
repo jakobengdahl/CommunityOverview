@@ -648,6 +648,19 @@ The top of the dialog shows the total number of nodes and edges currently in the
 followed by a colour-coded breakdown by node type. If there are more than five types,
 a **Details** button opens a full node-type statistics dialog.
 
+#### Metamodel explorer
+
+**Explore metamodel** opens an interactive, read-only view of the graph's active
+schema — the node types and relationship types this deployment is configured with,
+rendered as a network you can pan and zoom. Click a node type to see its
+description, fields and current node count; relationship types are drawn as
+directed, labelled connections between the node types they are configured to
+apply to. Relationship types with no configured source/target rule are listed
+separately rather than drawn to every node type, since no rule was actually
+configured. A **Table** tab presents the same information as two accessible
+data tables, for screen readers or a quick text scan. This view never lets you
+change the schema — editing the metamodel is not part of the open-source core.
+
 #### View settings
 
 | Option | Effect |
@@ -946,3 +959,4 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
 | `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
+| `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |

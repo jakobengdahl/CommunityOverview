@@ -1184,6 +1184,11 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}",
                 )
 
+    def get_node_count(self) -> int:
+        """Total node count, for callers that only need a count and should not
+        pay for building the full per-type breakdown get_stats() computes."""
+        return len(self.nodes)
+
     def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
         # Count nodes per type
@@ -1194,10 +1199,19 @@ class GraphStorage:
             )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
+        # Count edges per type, for the metamodel explorer's relationship counts.
+        edges_by_type = {}
+        for edge in self.edges.values():
+            type_name = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
+            edges_by_type[type_name] = edges_by_type.get(type_name, 0) + 1
+
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
+            edges_by_type=edges_by_type,
             last_updated=datetime.now(timezone.utc),
         )
 

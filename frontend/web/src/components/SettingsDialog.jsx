@@ -1,11 +1,20 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Map, Eye, ChatDotsFill, BoxArrowRight, X } from 'react-bootstrap-icons';
+import {
+  Download,
+  Map,
+  Eye,
+  ChatDotsFill,
+  BoxArrowRight,
+  X,
+  Diagram3Fill,
+} from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
 import { getDisplayName, setDisplayName } from '../services/api';
 import { resolveColor } from './FloatingToolbar';
 import NodeTypeStatsDialog from './NodeTypeStatsDialog';
+import MetamodelExplorerDialog from './MetamodelExplorerDialog';
 import './SettingsDialog.css';
 
 const MAX_INLINE_TYPES = 5;
@@ -30,13 +39,16 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
     schema,
   } = useGraphStore();
   const [statsDialogOpen, setStatsDialogOpen] = useState(false);
+  const [metamodelExplorerOpen, setMetamodelExplorerOpen] = useState(false);
   const [displayName, setDisplayNameState] = useState(() => getDisplayName() || '');
 
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        if (statsDialogOpen) {
+        if (metamodelExplorerOpen) {
+          setMetamodelExplorerOpen(false);
+        } else if (statsDialogOpen) {
           setStatsDialogOpen(false);
         } else {
           onClose();
@@ -45,7 +57,7 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [onClose, statsDialogOpen]);
+  }, [onClose, statsDialogOpen, metamodelExplorerOpen]);
 
   return (
     <div className="settings-dialog-overlay" onClick={onClose}>
@@ -106,6 +118,16 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
                     ))}
                 </div>
               )}
+
+              <button
+                className="settings-dialog-menu-item"
+                aria-haspopup="dialog"
+                onClick={() => setMetamodelExplorerOpen(true)}
+              >
+                <Diagram3Fill size={14} />
+                <span>{t('settings.metamodel_explorer')}</span>
+              </button>
+              <p className="settings-dialog-field-hint">{t('settings.metamodel_explorer_hint')}</p>
 
               <div className="settings-dialog-section-divider" />
             </>
@@ -217,6 +239,16 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             nodesByType={stats.nodes_by_type}
             schema={schema}
             onClose={() => setStatsDialogOpen(false)}
+          />,
+          document.body
+        )}
+
+      {metamodelExplorerOpen &&
+        createPortal(
+          <MetamodelExplorerDialog
+            schema={schema}
+            stats={stats}
+            onClose={() => setMetamodelExplorerOpen(false)}
           />,
           document.body
         )}
