@@ -577,3 +577,42 @@ describe('a stored annotation this version cannot read', () => {
     expect(() => annotationsToOverlays({ annotations: 'nope' })).toThrow(/not an array/);
   });
 });
+
+describe('malformed overlay data on the write path', () => {
+  let warn;
+  afterEach(() => warn?.mockRestore());
+
+  it('skips a freehand overlay with malformed points and keeps the rest', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const annotations = overlaysToAnnotations([
+      {
+        id: 'bad-freehand',
+        kind: 'freehand',
+        position: { x: 10, y: 20 },
+        points: [null],
+      },
+      {
+        id: 'good-note',
+        kind: 'note',
+        position: { x: 1, y: 2 },
+        text: 'survives',
+      },
+    ]);
+
+    expect(annotations.map((a) => a.id)).toEqual(['good-note']);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips null and malformed overlay entries without blocking valid overlays', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const annotations = overlaysToAnnotations([
+      null,
+      'not an overlay',
+      { id: 'bad-kind', kind: 'wormhole', position: { x: 0, y: 0 } },
+      { id: 'good-label', kind: 'label', position: { x: 5, y: 6 }, text: 'ok' },
+    ]);
+
+    expect(annotations.map((a) => a.id)).toEqual(['good-label']);
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+});
