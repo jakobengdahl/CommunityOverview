@@ -712,18 +712,27 @@ either, and for a further reason: its shape is not in a box at all but in its
 sampled `points`, so there is nothing for a resize to scale. The canvas
 offers it no handles. The MCP tools do accept a `w`/`h` patch: the server
 stores it and `list_annotations` echoes it back, and nothing ever draws from
-it. Nor does it survive contact with a browser — `freehand` is the one type
-whose canvas translator carries no size across (`freehandAnnotationToOverlay`
-in `sessionAnnotations.js`, unlike `genericAnnotationToOverlay` beside it), so
-the next autosave after any client touches the stroke writes the model's
-default box back over whatever an agent set. That is the same
-"unsized-geometry clobber" class of bug already closed for `icon`/`vote_dot`/
-`text` (see [Persistence](#persistence)), still open for `freehand` and
-tracked as `smallfix-annotation-freehand-geometry-clobber`. Like the
-never-drawn `rotation` below, it is a tracked gap rather than a decided
-non-goal: scaling the sampled points on a `w`/`h` patch remains open, and
-would need that translator fixed first, or an agent's resize would be
-undone by the next client to touch the stroke. A locked annotation of any
+it. Nor does it survive contact with a browser. `freehand` is one of the
+three types whose canvas translator carries no size across —
+`freehandAnnotationToOverlay` in `sessionAnnotations.js`, alongside the
+`label` and `line` branches beside it, and unlike
+`genericAnnotationToOverlay`, which does carry it for all six generic kinds
+— so hydrating a stroke resets its box to the model's 160×96 default. The
+next autosave after any client touches that stroke writes the default back
+over whatever an agent set, and saving a view is worse than that: it runs
+the whole document through the same lossy transform
+(`annotationDocumentToLegacyMetadata`), so every freehand in the view loses
+its `w`/`h`, touched or not. Its `rotation` is not affected — the same
+translator does carry that across in both directions. This is the
+"unsized-geometry clobber" class of bug already closed for `icon`/
+`vote_dot`/`text` (`smallfix-annotation-unsized-generic-geometry-clobber`),
+still open for `freehand` and tracked as
+`smallfix-annotation-freehand-geometry-clobber`; `label` and `line` carry it
+too, and their rows below do not yet say so. Like the never-drawn `rotation`
+below, it is a tracked gap rather than a decided non-goal: scaling the
+sampled points on a `w`/`h` patch remains open, and would need that
+translator fixed first, or an agent's resize would be undone by the next
+client to touch the stroke. A locked annotation of any
 generic kind hides its resize handles the same way a locked `note` does.
 `text` and `shape` now have their own inline text editing too
 (task-annotation-doubleclick-to-edit-text) — see below — so inline text
@@ -957,7 +966,7 @@ rule](#downstream-closure-rule).
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
-| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer row (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen — and is not preserved across a browser round trip either (`smallfix-annotation-freehand-geometry-clobber`); both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
+| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer row (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-annotation-freehand-geometry-clobber`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-annotation-freehand-geometry-clobber`), so a `w`/`h` an agent set is reset to the model default by the next autosave that touches the stroke, and by any saved view whether it was touched or not — every other stored field survives | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule

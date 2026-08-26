@@ -1134,9 +1134,10 @@ class TestFreehandOverGenericTools:
         docs/ANNOTATION_CONTRACT.md.
 
         This pins the *server* half only. What a stored w/h means end to end
-        is not yet stable: the canvas translator drops it on the way back, so
-        the next browser autosave overwrites it with the model default
-        (`smallfix-annotation-freehand-geometry-clobber`). Fixing that, or
+        is not yet stable: the canvas translator drops it on the way out to
+        the overlay, so the next browser autosave writes the model default
+        back over it (`smallfix-annotation-freehand-geometry-clobber`). Fixing
+        that, or
         implementing a real resize on top of it, has to amend the contract
         rather than quietly reinterpret the w/h existing strokes carry.
         """
