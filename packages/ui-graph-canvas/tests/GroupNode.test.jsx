@@ -176,46 +176,43 @@ describe('GroupNode locked context menu', () => {
   // Offering it while locked hands the user a second, differently-labelled
   // Delete — the one thing the lock exists to refuse. So the locked menu
   // offers Unlock and nothing else, and this case pins that by the menu's
-  // text and shape rather than by its buttons: see the three assertions at
-  // the end.
+  // text and its element count rather than by its buttons: see the three
+  // assertions at the end, and the note there on what they do not cover.
   it('offers unlock and nothing else when the group is locked', () => {
-    const { notifyChange } = renderGroup(lockedData);
+    renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /unlock/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
     expect(document.querySelectorAll('.color-button')).toHaveLength(0);
-    // Shape first. A `div` or `a` carrying onClick is a working control that
-    // every role- and button-scoped assertion above sees as absent, so the
-    // menu is pinned by its text, its one direct child, and that child's
-    // identity. Together those forbid both holes earlier rounds shipped: a
-    // sibling control, and one wrapped in a div that made the wrapper the
-    // single child. The identity check is what the queries above cannot
-    // give, since they are bound to `document.body` and so never say which
-    // element sits in this menu.
+    // The menu holds exactly one element, it is the unlock button, and the
+    // only text is that button's label. A `div` or `a` carrying onClick is a
+    // working control that every role- and button-scoped assertion above sees
+    // as absent, so the guard has to be structural rather than by role.
     //
-    // Then behaviour, because shape alone cannot finish the job. `textContent`
-    // only sees controls that carry text, and none of the three reaches inside
-    // the unlock button — so a text-free span nested there, styled into a hit
-    // area by CSS, satisfies all three while running whatever it likes. A
-    // subtree element count would forbid that, but it also forbids a plain
-    // icon `<span>`, which is a refactor someone will legitimately make.
-    // Clicking every element in the menu except the unlock button settles it
-    // on the axis that actually matters: not what the menu is built from, but
-    // whether anything in it destroys the group. The unlock button is skipped
-    // so the menu stays open for the sweep; its own behaviour is pinned by
-    // the unlock case below.
+    // The subtree count is deliberate and it is the assertion that does the
+    // work. Counting direct children instead lets a control hide one wrapper
+    // down; not counting elements at all lets a text-free span nest inside
+    // the unlock button, styled into a hit area by CSS, where `textContent`
+    // cannot see it. Both of those shipped on this branch before being
+    // caught. Counting the whole subtree forbids every one of them at once,
+    // whatever tag it uses and whatever event it listens for.
+    //
+    // The price is that a legitimate icon `<span>` inside the unlock button
+    // fails this case. That is the intended trade, not an oversight: adding
+    // an element to a locked group's menu is exactly the change that should
+    // stop and make someone confirm the menu still offers nothing but
+    // Unlock. Update this assertion deliberately if that day comes.
+    //
+    // What this does NOT cover: a destructive handler added to the unlock
+    // button itself, which changes no shape. Its click path is caught by the
+    // unlock case below; other event paths on that one button are not
+    // covered here.
     const menu = document.querySelector('.graph-group-context-menu');
-    const unlockButton = screen.getByRole('button', { name: /unlock/i });
     expect(menu.textContent).toBe('🔓 Unlock');
-    expect(menu.children).toHaveLength(1);
-    expect(menu.firstElementChild).toBe(unlockButton);
-
-    menu.querySelectorAll('*').forEach((el) => {
-      if (el !== unlockButton) fireEvent.click(el);
-    });
-    expect(notifyChange).not.toHaveBeenCalledWith('delete');
+    expect(menu.querySelectorAll('*')).toHaveLength(1);
+    expect(menu.firstElementChild).toBe(screen.getByRole('button', { name: /unlock/i }));
   });
 
   // The destructive handler stays reachable from the unlocked menu, so this
