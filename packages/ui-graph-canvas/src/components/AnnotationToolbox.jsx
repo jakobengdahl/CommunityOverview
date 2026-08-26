@@ -96,11 +96,15 @@ function AnnotationToolbox({
   // Sole purpose: swallow the click that follows a completed pointer drag
   // (pointerup fires, then the browser's synthetic click fires next in the
   // same task) so a drag never also creates a second, click-positioned copy.
-  // Keyed by item (the same `${kind}-${labelKey}` string used as the React
-  // `key` below), not a single shared boolean: a click on button B must never
-  // be swallowed by a suppression window that button A's drag opened, and two
-  // pointers can each have a drag in flight on two different buttons at once.
-  const suppressClickRef = useRef(new Set());
+  // A pending-suppression COUNT per item (the same `${kind}-${labelKey}`
+  // string used as the React `key` below), not a Set membership flag or a
+  // single shared boolean: a click on button B must never be swallowed by a
+  // suppression window that button A's drag opened (a different key), and
+  // two *different pointers* can each complete a drag on the very SAME
+  // button close together (e.g. a fast two-finger touch) — each opens its
+  // own suppression window that must survive independently of the other's
+  // cleanup, which a single membership flag per key cannot represent.
+  const suppressClickCountsRef = useRef(new Map());
   // Teardown for every currently-attached window pointermove/up/cancel
   // listener set (see handlePointerDown) — a Set rather than a single slot
   // because two pointers (e.g. two fingers on two different items) can each
@@ -166,20 +170,26 @@ function AnnotationToolbox({
       activeDragCleanupsRef.current.delete(cleanup);
       setDragGhost(null);
       if (create && drag.dragging) {
-        suppressClickRef.current.add(itemKey);
+        const counts = suppressClickCountsRef.current;
+        counts.set(itemKey, (counts.get(itemKey) || 0) + 1);
         onDragCreate?.(drag.kind, drag.options, {
           x: finishEvent.clientX,
           y: finishEvent.clientY,
         });
         // A real drag usually releases away from this button, so the
         // browser's synthetic click (if it fires one for the touch release
-        // at all) never reaches this element's onClick to consume the entry
-        // — it would otherwise stay set and silently swallow the next
-        // unrelated tap on this same item. A click genuinely headed for
-        // this button fires synchronously before this callback runs, so
-        // clearing on the next tick never masks it.
+        // at all) never reaches this element's onClick to consume this
+        // gesture's count — it would otherwise stay incremented and silently
+        // swallow a later, unrelated tap on this same item. A click
+        // genuinely headed for this button fires synchronously before this
+        // callback runs, so clearing on the next tick never masks it.
+        // Decrementing (not deleting the key outright) is what keeps this
+        // gesture's own count from erasing a DIFFERENT pointer's still-open
+        // suppression window on the same item — see the ref's declaration.
         setTimeout(() => {
-          suppressClickRef.current.delete(itemKey);
+          const remaining = (counts.get(itemKey) || 0) - 1;
+          if (remaining > 0) counts.set(itemKey, remaining);
+          else counts.delete(itemKey);
         }, 0);
       }
     };
@@ -283,9 +293,15 @@ function AnnotationToolbox({
                   // the annotation, so this would otherwise create a second,
                   // click-positioned one. Keyed by itemKey so a completed
                   // drag on THIS button can never swallow a click landing on
-                  // a different one.
-                  if (suppressClickRef.current.has(itemKey)) {
-                    suppressClickRef.current.delete(itemKey);
+                  // a different one; a per-item COUNT (not a membership flag)
+                  // so that if two pointers each completed a drag on this
+                  // same button close together, consuming one pointer's
+                  // suppression here never erases the other's.
+                  const counts = suppressClickCountsRef.current;
+                  const pending = counts.get(itemKey) || 0;
+                  if (pending > 0) {
+                    if (pending > 1) counts.set(itemKey, pending - 1);
+                    else counts.delete(itemKey);
                     return;
                   }
                   // A tap on a touch device fires the emulated mouseenter but no

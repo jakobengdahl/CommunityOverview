@@ -500,6 +500,43 @@ describe('AnnotationToolbox', () => {
       expect(onDragCreate).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps two pointers’ suppression windows on the same item independent, so consuming one never erases the other’s', () => {
+      // Regression test: suppression is a per-item COUNT, not a per-item
+      // membership flag. Two different pointers can each complete a drag on
+      // the very same button close together (e.g. a fast two-finger touch);
+      // each drag's own pending synthetic click must be suppressed, and
+      // consuming the first must not erase the second's still-open window.
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+
+      // Pointer 1 completes a drag on `note`.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+
+      // Before pointer 1's synthetic click arrives, pointer 2 also completes
+      // a drag on the SAME button.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 2, clientX: 1, clientY: 1 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 2, clientX: 60, clientY: 60 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 60, clientY: 60 }));
+
+      expect(onDragCreate).toHaveBeenCalledTimes(2);
+
+      // Both gestures' synthetic clicks arrive — both must be suppressed.
+      fireEvent.click(note);
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // A genuine third tap, after both suppression windows are consumed,
+      // still works normally.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
     it('cleans up in-flight pointer listeners on unmount mid-drag, without throwing or creating anything', () => {
       const onCreate = vi.fn();
       const onDragCreate = vi.fn();
