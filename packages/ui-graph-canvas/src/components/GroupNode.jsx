@@ -309,10 +309,10 @@ function GroupNode({ id, data, selected }) {
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The lock is meant to protect the group's
-              // content rather than its visibility, so Hide Group would
-              // belong here on the merits — but Hide is not a hide: it runs
-              // the identical handler Delete runs (removeGroupKeepChildren),
+              // every other kind. The lock is meant to protect the group box
+              // itself rather than whether it is on screen, so Hide Group
+              // would belong here on the merits — but Hide is not a hide: it
+              // runs the identical handler Delete runs (removeGroupKeepChildren),
               // taking the group off the canvas and publishing a delete. An
               // action that destroys the group is refused while locked
               // whatever its label says. Once a genuine reversible hide

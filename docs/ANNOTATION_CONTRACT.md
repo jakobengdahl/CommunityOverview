@@ -230,10 +230,10 @@ the overlays' is a tracked gap. The keyboard rule still does not reach a group
 — `Delete` skips them entirely, so their children stay correctly parented —
 and hands that job to the group's own menu, which now honours the flag.
 
-**Why Hide is withheld too, though the lock is about content and not
-visibility.** The lock is meant to protect the group box itself rather than
-whether it is on screen, so a genuinely reversible Hide would belong in the
-locked menu on the merits — and for a while it was rendered there on exactly
+**Why Hide is withheld too, though the lock is not about visibility.** The
+lock is meant to protect the group box itself rather than whether it is on
+screen, so a genuinely reversible Hide would belong in the locked menu on the
+merits — and for a while it was rendered there on exactly
 that reasoning. But Hide is not a hide: `handleHideGroup` and
 `handleDeleteGroup` in `GroupNode.jsx` run the identical handler,
 `removeGroupKeepChildren`, which takes the group off the canvas, un-parents
@@ -251,8 +251,8 @@ group re-parents it (`computeGroupPlacement` in `GraphCanvas.jsx` never
 consults the flag) and publishes `group_membership_changed`, so the locked
 annotation's own `member_node_ids` changes from the GUI. What a group *is* is
 largely its membership, so "a locked group is protected" is true of its box
-and false of its contents. Tracked separately; stated here so the paragraph
-above is not read as more than it claims.
+and false of its contents. Tracked separately; stated here so this section's
+account of what the flag reaches is not read as more than it claims.
 
 What `group` still lacks is the layer row, not the lock: see
 [Layer order](#layer-order) above. Its `z` is carried through the same
@@ -983,11 +983,11 @@ paint order comes from the node array rather than from `zIndex` (see
 [Layer order](#layer-order)).
 
 Its `locked` refuses broadly what every other kind's does, with two
-differences worth knowing. One is described under
-[Layer order](#layer-order) above: the rename guard is stricter. The other is
-here — an unlocked group resolves `draggable` to
-`undefined` rather than `true`, so it still defers to the canvas-wide
-`nodesDraggable` switch the way it did before it was lock-aware. ReactFlow
+differences worth knowing. One is described under [Layer order](#layer-order)
+above: the rename guard is stricter. The other is here — an unlocked group
+resolves `draggable` to `undefined` rather than `true`, so it still defers to
+the canvas-wide `nodesDraggable` switch the way it did before it was
+lock-aware. ReactFlow
 tests `typeof node.draggable === 'undefined'`, so an explicit `undefined` and
 an absent key behave alike, and a literal `true` would override the switch.
 
