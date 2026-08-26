@@ -136,12 +136,17 @@ function AnnotationToolbox({
   // (there, listening on the canvas wrapper is enough since the gesture never
   // needs to leave it; here it does, so `window` is the listened-on target).
   const handlePointerDown = (event, kind, options, glyph) => {
-    // Defensive: a stale suppress flag would otherwise be able to swallow
-    // this fresh gesture's own eventual click (see the note near
-    // `finishDrag` below about why the flag can outlive the drag it was set
-    // for).
-    suppressClickRef.current = false;
-
+    // Deliberately NOT resetting suppressClickRef here. It is a single flag
+    // shared across every item/pointer on this toolbox (not per-gesture), so
+    // two pointers can be mid-drag at once (e.g. a two-finger touch on a
+    // touch-mode device): clearing it unconditionally on every pointerdown
+    // would let pointer B's fresh press erase pointer A's still-pending
+    // suppression window (set moments ago in `finishDrag`, below, and always
+    // self-clearing via its own `setTimeout`), letting A's completed drag's
+    // synthetic click through to create a second, click-positioned copy. The
+    // flag only ever needs clearing by the gesture that set it — `finishDrag`
+    // does that itself, either synchronously in `onClick` or via the
+    // `setTimeout` fallback — so no reset belongs here.
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
