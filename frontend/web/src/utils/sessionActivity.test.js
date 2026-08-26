@@ -306,7 +306,6 @@ describe('describeActivity', () => {
         id: `srv-${type}`,
         geometry: { x, y, w: 0, h: 0, rotation: 0 },
         position: { x, y },
-        style: {},
         z: 0,
         locked: false,
         ...content,
@@ -383,6 +382,107 @@ describe('describeActivity', () => {
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_resized'
       );
+    });
+
+    it.each([
+      {
+        name: 'freehand whose stored position disagrees with its first point',
+        ann: () =>
+          serverAnnotation('freehand', {
+            x: 0,
+            y: 0,
+            points: [
+              { x: 120, y: 340 },
+              { x: 130, y: 350 },
+            ],
+          }),
+      },
+      {
+        name: 'line whose stored position disagrees with its from-endpoint',
+        ann: () =>
+          serverAnnotation('line', {
+            x: 0,
+            y: 0,
+            from: { x: 100, y: 100 },
+            to: { x: 300, y: 100 },
+          }),
+      },
+    ])('does not read the browser rebuilding $name as a move', ({ ann }) => {
+      // The translators derive these kinds' position from their own content,
+      // so an untouched round trip rewrites position without the user having
+      // dragged anything. Nothing else changed either, so there is nothing to
+      // report.
+      const stored = ann();
+      const r = browserMove(stored, 0);
+      expect(r.before.position).not.toEqual(r.after.position);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it.each([
+      {
+        name: 'freehand',
+        ann: () => serverAnnotation('freehand', { x: 120, y: 340, points: [{ x: 120, y: 340 }] }),
+      },
+      {
+        name: 'line',
+        ann: () =>
+          serverAnnotation('line', {
+            x: 100,
+            y: 100,
+            from: { x: 100, y: 100 },
+            to: { x: 300, y: 100 },
+          }),
+      },
+    ])('still reads a genuine drag of a $name as a move', ({ ann }) => {
+      // A real drag shifts the derived content too, which is what separates it
+      // from the rewrite above.
+      expect(describeActivity(browserMove(ann(), 250)).key).toBe(
+        'history.desc.annotation_updated_moved'
+      );
+    });
+
+    it('still reports a genuine resize of an annotation the server left unsized', () => {
+      // The materialised-default guard must key on the default itself, not on
+      // "either side is 0", or a first-touch resize disappears.
+      const before = serverAnnotation('label', { text: 'hi' });
+      const after = {
+        ...before,
+        geometry: { x: 10, y: 20, w: 400, h: 220, rotation: 0 },
+      };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
+      );
+    });
+
+    it('still reports an agent resizing a dimension down to zero', () => {
+      // build_annotation_patch accepts w=0; only MCP can reach this, since the
+      // canvas resizer has a minimum.
+      const before = serverAnnotation('frame');
+      before.geometry = { x: 10, y: 20, w: 800, h: 400, rotation: 0 };
+      const after = { ...before, geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
+      );
+    });
+
+    it('reads a move onto and off the origin as a move', () => {
+      // Pins the asymmetry the geometry branch rests on: `x`/`y` are compared
+      // plainly while `w`/`h` are guarded, so a coordinate of 0 stays a real
+      // position. Collapsing the two onto one rule would pass every other test
+      // here while silently dropping these.
+      const at = (x, y) => ({
+        type: 'note',
+        geometry: { x, y, w: 160, h: 96, rotation: 0 },
+        position: { x, y },
+      });
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(250, 80), after: at(0, 0) }))
+          .key
+      ).toBe('history.desc.annotation_updated_moved');
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(0, 0), after: at(250, 80) }))
+          .key
+      ).toBe('history.desc.annotation_updated_moved');
     });
 
     it('does not claim a move when only the size was materialised', () => {

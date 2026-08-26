@@ -5,13 +5,15 @@
  * human-readable description, and deciding undo eligibility for the current
  * actor.
  *
- * Pure functions (no React, no i18n) so the description logic is unit-testable
- * without a translation layer — the caller renders `describeActivity`'s
- * `{key, params}` via `t(key, params)`, the same contract utils/history.js
- * uses for relativeTime.
+ * No React and no i18n, so the description logic is unit-testable without a
+ * translation layer — the caller renders `describeActivity`'s `{key, params}`
+ * via `t(key, params)`, the same contract utils/history.js uses for
+ * relativeTime. It does import the canvas package's own normalisers, so that
+ * the rules deciding whether a field really changed are the ones the browser
+ * applied when it wrote the field, rather than a second copy that can drift.
  */
 
-import { normalizeShapeName } from '@community-graph/ui-graph-canvas';
+import { DEFAULT_ANNOTATION_SIZE, normalizeShapeName } from '@community-graph/ui-graph-canvas';
 
 const ANNOTATION_TYPE_KEYS = new Set([
   'note',
@@ -96,13 +98,44 @@ function fieldsEqual(key, before, after) {
 }
 
 /**
- * A change between two values that both carry information — as opposed to a
- * field being filled in for the first time. Used where a producer supplies a
- * non-zero default for a field the other producer leaves at nothing, which
- * `isEmptyValue` alone cannot absorb because the default is not empty.
+ * Whether one dimension's difference is only the browser filling in its
+ * default size over a size the server never had.
+ *
+ * `label`, `line` and `freehand` carry no size through the overlay
+ * translators, so `normalizeGeometry` fills DEFAULT_SIZE where
+ * `build_annotation` left 0 — and a plain drag of any agent-created one used
+ * to announce "Resized". Keyed on that exact default rather than on "either
+ * side is 0", which would be broader than the divergence it exists for and
+ * would swallow real resizes: an unsized annotation the user then genuinely
+ * resizes, or an agent setting a dimension to 0 over MCP, are both changes
+ * worth reporting.
  */
-function realChange(before, after) {
-  return !isEmptyValue(before) && !isEmptyValue(after) && !sameValue(before, after);
+function materialisedDimension(before, after, fallback) {
+  return isEmptyValue(before) && after === fallback;
+}
+
+/**
+ * Kinds whose `position` the overlay translators rebuild from the kind's own
+ * content instead of carrying it through: a `line`'s from-endpoint and a
+ * `freehand`'s first sampled point (utils/sessionAnnotations.js).
+ *
+ * `build_annotation` takes `x`/`y` as required arguments and merges `content`
+ * verbatim, so nothing makes an agent's stated position agree with the
+ * content it will be derived from — and the first browser write-back then
+ * rewrites the position to match. A drag moves the content too (every point
+ * shifts by the same delta; a line's endpoints move together), so requiring
+ * the source to have changed separates a real move from that artefact.
+ */
+const POSITION_DERIVED_FROM = new Map([
+  ['line', 'from'],
+  ['freehand', 'points'],
+]);
+
+function positionIsOnlyNormalised(record) {
+  const type = record.after && (record.after.type || record.after.kind);
+  const source = POSITION_DERIVED_FROM.get(type);
+  if (!source) return false;
+  return sameValue(record.before[source], record.after[source]);
 }
 
 // Rewritten by the store on every write whatever the user touched
@@ -163,16 +196,19 @@ function classifyAnnotationUpdate(record) {
   }
   if (changed.has('geometry') || changed.has('position')) {
     if (!sameValue(before.rotation, after.rotation)) return 'rotated';
-    // `w`/`h` only, not `x`/`y`: an unsized annotation gains 160x96 the first
-    // time the browser writes it back, because `label`, `line` and `freehand`
-    // carry no size through the overlay translators and `normalizeGeometry`
-    // fills DEFAULT_SIZE, while the server defaults both to 0. That is a
-    // materialised default, not a resize — reporting it as one told a user
-    // who dragged an agent-created line that they had resized it. `x`/`y`
-    // need no such guard: both are required by `build_annotation`, so a
-    // coordinate of 0 is a real position and moving off it is a real move.
-    if (realChange(before.w, after.w) || realChange(before.h, after.h)) return 'resized';
-    if (!sameValue(before.x, after.x) || !sameValue(before.y, after.y)) return 'moved';
+    const resizedW =
+      !sameValue(before.w, after.w) &&
+      !materialisedDimension(before.w, after.w, DEFAULT_ANNOTATION_SIZE.w);
+    const resizedH =
+      !sameValue(before.h, after.h) &&
+      !materialisedDimension(before.h, after.h, DEFAULT_ANNOTATION_SIZE.h);
+    if (resizedW || resizedH) return 'resized';
+    // `x`/`y` themselves need no empty-value guard: `build_annotation`
+    // requires both, so a coordinate of 0 is a real position and moving on or
+    // off it is a real move. What they do need is the derived-position rule —
+    // for the two kinds whose position is rebuilt from their content.
+    const moved = !sameValue(before.x, after.x) || !sameValue(before.y, after.y);
+    if (moved && !positionIsOnlyNormalised(record)) return 'moved';
     // Nothing in the geometry actually moved — fall through to whatever else
     // this update touched rather than asserting a move that did not happen.
   }

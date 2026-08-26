@@ -36,6 +36,7 @@ export {
   applyAnnotationOperation,
   createAnnotation,
   createAnnotationDocument,
+  DEFAULT_SIZE as DEFAULT_ANNOTATION_SIZE,
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
   normalizeShapeName,

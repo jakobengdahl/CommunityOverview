@@ -47,7 +47,7 @@ export function normalizeShapeName(value) {
 
 const TYPE_SET = new Set(ANNOTATION_TYPES);
 const LEGACY_KIND_ALIASES = Object.freeze({ arrow: 'line' });
-const DEFAULT_SIZE = Object.freeze({ w: 160, h: 96 });
+export const DEFAULT_SIZE = Object.freeze({ w: 160, h: 96 });
 const DEFAULT_LINE_DELTA = Object.freeze({ x: 160, y: 0 });
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 
