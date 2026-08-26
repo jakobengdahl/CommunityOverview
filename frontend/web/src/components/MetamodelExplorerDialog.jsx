@@ -229,6 +229,17 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     zoomBy(delta);
   };
   const handlePointerDown = (e) => {
+    // Pointer events (rather than mouse-only) so touch dragging works too —
+    // the canvas sets touch-action: none precisely so touch panning is
+    // handled here instead of the browser's native scroll/pinch gesture.
+    // Capturing keeps move/up events targeted here even if the pointer
+    // strays outside the SVG mid-drag; not universally supported (falls
+    // back to plain event delivery when unavailable, e.g. some test DOMs).
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Ignored — see comment above.
+    }
     // CSS-pixel-to-viewBox-unit ratio, measured once per drag: the <svg> is
     // styled to fill a flexible container, so its rendered size rarely
     // matches the viewBox's own 600x520 units — a 1:1 use of clientX/Y deltas
@@ -346,10 +357,11 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
                   role="img"
                   aria-label={t('metamodel.network_aria_label')}
                   onWheel={handleWheel}
-                  onMouseDown={handlePointerDown}
-                  onMouseMove={handlePointerMove}
-                  onMouseUp={handlePointerUp}
-                  onMouseLeave={handlePointerUp}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
+                  onPointerLeave={handlePointerUp}
                 >
                   <defs>
                     <marker

@@ -13,6 +13,19 @@ vi.mock('../store/graphStore', () => ({
   default: () => null,
 }));
 
+// This jsdom doesn't implement the PointerEvent constructor, so
+// fireEvent.pointerDown/pointerMove deliver clientX/clientY/pointerId as
+// undefined here (verified directly against this environment) even though
+// every real target browser supports PointerEvent fully. A MouseEvent
+// constructed with a pointer* type carries the same clientX/clientY (Pointer
+// events extend MouseEvent) and lets pointerId be attached explicitly, so
+// pan-by-drag can still be exercised under this test environment.
+function pointerLikeEvent(type, init) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+  Object.defineProperty(event, 'pointerId', { value: init.pointerId, configurable: true });
+  return event;
+}
+
 const SCHEMA = {
   node_types: {
     Actor: {
@@ -251,6 +264,27 @@ describe('MetamodelExplorerDialog', () => {
     expect(screen.getByRole('button', { name: 'metamodel.zoom_in' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'metamodel.zoom_out' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'metamodel.reset_view' })).toBeInTheDocument();
+  });
+
+  it('pans the diagram on pointer drag (works for touch as well as mouse)', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const svg = container.querySelector('.mme-svg');
+    const group = container.querySelector('.mme-svg > g');
+
+    fireEvent(svg, pointerLikeEvent('pointerdown', { clientX: 100, clientY: 100, pointerId: 1 }));
+    fireEvent(svg, pointerLikeEvent('pointermove', { clientX: 140, clientY: 130, pointerId: 1 }));
+
+    // jsdom reports a zero-size bounding rect, so the CSS-pixel-to-viewBox
+    // ratio falls back to 1:1 here — a 40/30px drag becomes a 40/30 unit pan.
+    expect(group.getAttribute('transform')).toBe('translate(40,30) scale(1)');
+
+    fireEvent(svg, pointerLikeEvent('pointerup', { clientX: 140, clientY: 130, pointerId: 1 }));
+    fireEvent(svg, pointerLikeEvent('pointermove', { clientX: 999, clientY: 999, pointerId: 1 }));
+
+    // Movement after pointer-up must not keep panning.
+    expect(group.getAttribute('transform')).toBe('translate(40,30) scale(1)');
   });
 
   it('zooms in place around the diagram center rather than drifting from the origin', () => {
