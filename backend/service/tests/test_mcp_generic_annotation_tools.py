@@ -1135,10 +1135,10 @@ class TestFreehandOverGenericTools:
 
         This pins the *server* half only. What a stored w/h means end to end
         is not yet stable: the canvas translator drops it on the way out to
-        the overlay, so the next browser autosave writes the model default
-        back over it (`smallfix-annotation-freehand-geometry-clobber`). Fixing
-        that, or
-        implementing a real resize on top of it, has to amend the contract
+        the overlay, so the next autosave that ships the annotation writes the
+        model default back over it
+        (`smallfix-browser-clobbers-unsized-annotation-geometry`). Fixing that,
+        or implementing a real resize on top of it, has to amend the contract
         rather than quietly reinterpret the w/h existing strokes carry.
         """
         tools_map, manager = annotation_tools
