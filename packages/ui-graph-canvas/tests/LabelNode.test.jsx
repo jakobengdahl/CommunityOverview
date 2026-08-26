@@ -100,7 +100,7 @@ describe('LabelNode locked context menu', () => {
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
 
-  it('unlocks a locked label and notifies the annotation context', () => {
+  it('unlocks a locked label, notifies the annotation context, and makes it draggable again', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider
@@ -112,8 +112,9 @@ describe('LabelNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('Label'));
     fireEvent.click(screen.getByText(/Unlock/));
     const call = hoisted.setNodes.mock.calls.at(-1);
-    const [updated] = call[0]([{ id: 'l1', data: { locked: true } }]);
+    const [updated] = call[0]([{ id: 'l1', data: { locked: true }, draggable: false }]);
     expect(updated.data.locked).toBe(false);
+    expect(updated.draggable).toBe(true);
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
