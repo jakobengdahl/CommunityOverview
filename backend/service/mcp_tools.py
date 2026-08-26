@@ -1136,9 +1136,13 @@ def register_mcp_tools(
         """
         Get the current visualization state of a session.
 
-        Returns the node IDs currently displayed and selected in the canvas.
-        Use this to understand what the user is looking at before deciding
-        which nodes to add or which view to load.
+        Returns the node IDs currently displayed and selected in the canvas,
+        plus which nodes/edges are session-locally dimmed (visible but
+        de-emphasised — see ``dimmed_node_ids``/``dimmed_edge_ids``) and the
+        session's global edge-intensity baseline. Use this to understand what
+        the user is looking at, and how prominently, before deciding which
+        nodes to add, which view to load, or whether a dim/restore action is
+        still needed.
 
         The state is server-owned, so it reads back for any session that exists
         — including one created over MCP that no browser has opened yet, where
@@ -1148,12 +1152,19 @@ def register_mcp_tools(
         taken on an edge, but this field is narrowed to the session's nodes, so
         it is safe to pass into any argument that expects node ids.
 
+        Dimming is session-local visualization state, not a graph edit: it
+        never changes the underlying nodes or edges, only how this session
+        currently renders them.
+
         Args:
             session_id: The session ID shown in the browser header, or the one
                 returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with visible_node_ids, selected_node_ids, and node_count
+            Dict with visible_node_ids, selected_node_ids, node_count,
+            dimmed_node_ids, dimmed_edge_ids and edge_intensity (0.0-1.0, the
+            baseline opacity every non-dimmed edge renders at; 1.0 is full
+            prominence).
         """
         if session_registry is None and session_manager is None:
             return {"error": "Visualization sessions are not available"}
@@ -1174,11 +1185,26 @@ def register_mcp_tools(
                 )
             }
         visible, selected = _session_view_state(session_id)
+        dimmed_node_ids: list = []
+        dimmed_edge_ids: list = []
+        edge_intensity = 1.0
+        if session_manager is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                visible_set = set(visible)
+                dimmed_node_ids = [
+                    n for n in session.state.get("dimmed_node_ids", []) if n in visible_set
+                ]
+                dimmed_edge_ids = list(session.state.get("dimmed_edge_ids", []))
+                edge_intensity = session.state.get("edge_intensity", 1.0)
         return {
             "session_id": session_id,
             "visible_node_ids": visible,
             "selected_node_ids": selected,
             "node_count": len(visible),
+            "dimmed_node_ids": dimmed_node_ids,
+            "dimmed_edge_ids": dimmed_edge_ids,
+            "edge_intensity": edge_intensity,
         }
 
     # ==================== Visualization Layout (geometry) ====================
@@ -1231,12 +1257,16 @@ def register_mcp_tools(
           be passed straight back to ``apply_visualization_layout``. The visible
           set is not repeated here: it is this response's nodes with
           ``hidden`` false.
+        - ``dimmed`` is session-local focus state (independent of ``hidden``):
+          the node is still on the canvas but rendered at reduced prominence.
+          See ``get_visualization_session_state`` for the session's global
+          ``edge_intensity`` baseline and the dimmed edge ids.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
         Returns:
-            Dict with revision, node_count, nodes (id/x/y/hidden/type/status),
+            Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
             selected_node_ids, assumed_node_size
         """
         if session_manager is None:
@@ -1258,6 +1288,7 @@ def register_mcp_tools(
             }
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
+        dimmed = set(session.state.get("dimmed_node_ids", []))
         node_refs = session.state.get("node_refs", [])
         # Read scope, and this tool's own name as the target: same rule the
         # write path follows, so a target-aware hook is never asked about the
@@ -1282,6 +1313,7 @@ def register_mcp_tools(
                     "x": pos["x"] if pos else None,
                     "y": pos["y"] if pos else None,
                     "hidden": node_id in hidden,
+                    "dimmed": node_id in dimmed,
                     "type": meaning.get("type"),
                     "status": meaning.get("status"),
                 }
