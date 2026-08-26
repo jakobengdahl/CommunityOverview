@@ -191,7 +191,9 @@ def get_saved_view(
     results = storage.search_nodes(
         query=name,
         node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW],
-        limit=max(100, storage.get_node_count()) if decision.graph_access.enabled else 1,
+        limit=max(100, storage.get_node_count())
+        if decision.graph_access.enabled
+        else 1,
     )
 
     visible_views = [
