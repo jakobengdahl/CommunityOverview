@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { createAnnotation } from '@community-graph/ui-graph-canvas';
-import { annotationsToOverlays, overlaysToAnnotations } from './sessionAnnotations';
+import {
+  annotationsToGroups,
+  annotationsToOverlays,
+  groupsToAnnotations,
+  overlaysToAnnotations,
+} from './sessionAnnotations';
 import en from '../i18n/en.json';
 import sv from '../i18n/sv.json';
 import {
@@ -500,6 +505,167 @@ describe('describeActivity', () => {
     });
   });
 
+  // Groups are the kind two rounds of per-field fixes never reached, because
+  // they are not overlays: `useSharedSession` mirrors them through
+  // annotationsToGroups/groupsToAnnotations, which carry neither `z` nor
+  // `locked` nor rotation. So the browser's write-back of an agent-created
+  // group dropped all three, and renaming a locked group announced
+  // "Unlocked" — the literal string this whole change exists to eliminate.
+  describe('annotation_updated classification, groups', () => {
+    // build_group_annotation's output shape (backend/core/session_annotations.py).
+    function serverGroup({ x = 10, y = 20, w = 320, h = 200, ...rest } = {}) {
+      const { color, ...fields } = rest;
+      return {
+        type: 'group',
+        kind: 'group',
+        id: 'srv-group',
+        position: { x, y },
+        geometry: { x, y, w, h, rotation: 0 },
+        size: { w, h },
+        label: '',
+        description: '',
+        z: 0,
+        locked: false,
+        ...(color ? { color, style: { color } } : {}),
+        ...fields,
+      };
+    }
+
+    // The round trip a group edit actually takes.
+    function groupEdit(stored, mutate = (g) => g) {
+      const { groups, parentIds } = annotationsToGroups([stored]);
+      const edited = groups.map((g) => mutate({ ...g }));
+      const incoming = JSON.parse(JSON.stringify(groupsToAnnotations(edited, parentIds)[0]));
+      return record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        before: stored,
+        after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
+      });
+    }
+
+    it('does not report renaming a LOCKED group as an unlock', () => {
+      const r = groupEdit(serverGroup({ label: 'Team', locked: true }), (g) => ({
+        ...g,
+        label: 'Team B',
+      }));
+      expect(r.before.locked).toBe(true);
+      expect(r.after.locked).toBe(false); // the translators really do drop it
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it.each([
+      {
+        what: 'dragging',
+        mutate: (g) => ({ ...g, position: { x: 300, y: 20 } }),
+        expected: 'moved',
+      },
+      { what: 'recolouring', mutate: (g) => ({ ...g, color: 'crimson' }), expected: 'style' },
+    ])('does not report $what a locked group as an unlock', ({ mutate, expected }) => {
+      const r = groupEdit(serverGroup({ label: 'Team', locked: true }), mutate);
+      expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
+    });
+
+    it('does not report renaming a group as a layer or rotation change', () => {
+      // `z` and rotation are dropped by the group translators the same way.
+      const withZ = groupEdit(serverGroup({ label: 'Team', z: 3 }), (g) => ({
+        ...g,
+        label: 'Team B',
+      }));
+      expect(describeActivity(withZ).key).toBe('history.desc.annotation_updated_text');
+
+      const rotated = serverGroup({ label: 'Team' });
+      rotated.geometry = { ...rotated.geometry, rotation: 45 };
+      expect(describeActivity(groupEdit(rotated, (g) => ({ ...g, label: 'B' }))).key).toBe(
+        'history.desc.annotation_updated_text'
+      );
+    });
+  });
+
+  // Round 3's remaining findings: every one is a producer rewriting a field
+  // the user never touched, on a path the per-field guards did not cover.
+  describe('annotation_updated classification, other producer rewrites', () => {
+    function serverAnn(type, content = {}) {
+      return {
+        type,
+        kind: type,
+        id: `srv-${type}`,
+        geometry: { x: 10, y: 20, w: 0, h: 0, rotation: 0 },
+        position: { x: 10, y: 20 },
+        z: 0,
+        locked: false,
+        ...content,
+      };
+    }
+
+    function browserRoundTrip(stored, mutate = (o) => o) {
+      const overlays = annotationsToOverlays([stored]).map((o) => mutate({ ...o }));
+      const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(overlays)[0]));
+      return record({
+        op: 'annotation_updated',
+        before: stored,
+        after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
+      });
+    }
+
+    it.each(['text', 'label', 'icon', 'vote_dot'])(
+      'does not report an attachment gaining target_type on a dragged %s as "attached"',
+      (type) => {
+        // normalizeAttachment fills target_type:'node'; the backend makes it
+        // optional, so an agent may legally omit it.
+        const stored = serverAnn(type, { attachment: { target_id: 'n2' }, text: 'hi' });
+        const r = browserRoundTrip(stored, (o) => ({
+          ...o,
+          position: { x: 300, y: 20 },
+        }));
+        expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+      }
+    );
+
+    it('does not report normalising freehand point metadata as a move', () => {
+      // normalizeFreehandPoint clamps pressure and drops unknown keys; the
+      // backend stores points verbatim.
+      const stored = serverAnn('freehand', {
+        points: [
+          { x: 120, y: 340, pressure: 5 },
+          { x: 130, y: 350, t: 17 },
+        ],
+      });
+      expect(describeActivity(browserRoundTrip(stored)).key).toBe(
+        'history.desc.annotation_updated_generic'
+      );
+    });
+
+    it('does not report normalising a line endpoint as a move', () => {
+      const stored = serverAnn('line', {
+        from: { x: 100, y: 100, anchor: 'left' },
+        to: { x: 300, y: 100 },
+      });
+      expect(describeActivity(browserRoundTrip(stored)).key).toBe(
+        'history.desc.annotation_updated_generic'
+      );
+    });
+
+    it('reports a text edit as text even when the write-back drops a style key', () => {
+      // The translators carry a fixed style key list, so style.opacity is
+      // dropped on the way out. That must not outrank what the user did.
+      const stored = serverAnn('text', { text: 'before', style: { color: 'red', opacity: 0.5 } });
+      const r = browserRoundTrip(stored, (o) => ({ ...o, text: 'after' }));
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it('still reports an agent resizing a kind whose overlay carries its size', () => {
+      // A frame's overlay preserves w/h, so 0 -> 160x96 there can only be an
+      // agent resize. A guard keyed on the value rather than the round trip
+      // swallowed exactly this.
+      const before = serverAnn('frame');
+      const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
+      );
+    });
+  });
+
   describe('sameValue equivalences', () => {
     // classifyAnnotationUpdate's whole correctness rests on this table, and
     // nothing else pins it: a later edit here changes what the activity log
@@ -732,8 +898,12 @@ describe('describeActivity × i18n', () => {
     { before: { type: 'note', shape: 'rectangle' }, after: { type: 'note', shape: 'ellipse' } },
     { before: { type: 'note', locked: false }, after: { type: 'note', locked: true } },
     { before: { type: 'note', locked: true }, after: { type: 'note', locked: false } },
-    { before: { type: 'note' }, after: { type: 'note', attachment: { target_id: 'n1' } } },
-    { before: { type: 'note', attachment: { target_id: 'n1' } }, after: { type: 'note' } },
+    // `label`, not `note`: only label/text/icon/vote_dot carry an attachment
+    // through the overlay translators, so a note is never attached or
+    // detached and using one here would assert a transition that cannot
+    // happen.
+    { before: { type: 'label' }, after: { type: 'label', attachment: { target_id: 'n1' } } },
+    { before: { type: 'label', attachment: { target_id: 'n1' } }, after: { type: 'label' } },
     {
       before: { type: 'note', geometry: { x: 0, y: 0, w: 1, h: 1, rotation: 0 } },
       after: { type: 'note', geometry: { x: 0, y: 0, w: 1, h: 1, rotation: 9 } },

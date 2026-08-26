@@ -13,7 +13,12 @@
  * applied when it wrote the field, rather than a second copy that can drift.
  */
 
-import { DEFAULT_ANNOTATION_SIZE, normalizeShapeName } from '@community-graph/ui-graph-canvas';
+import {
+  annotationsToGroups,
+  annotationsToOverlays,
+  groupsToAnnotations,
+  overlaysToAnnotations,
+} from './sessionAnnotations';
 
 const ANNOTATION_TYPE_KEYS = new Set([
   'note',
@@ -42,21 +47,9 @@ function geometryOf(annotation) {
 }
 
 /**
- * Whether a value carries no information: the state an annotation is in
- * before anything has been set on that field.
- *
- * This exists because the two producers of an `annotation_updated` record
- * disagree about which absent fields they spell out. The browser ships the
- * whole annotation on every edit, and its translators materialise every
- * envelope default on the way out (`z: a.z ?? 0`, `locked: Boolean(a.locked)`,
- * `text: o.text || ''` — see utils/sessionAnnotations.js); an agent writing
- * the same annotation over MCP may simply omit them. So the first browser
- * touch of an agent-created annotation turns `z: undefined` into `z: 0` and
- * `locked: undefined` into `locked: false` without the user having done
- * anything to either. Counting those as changes would put this classifier
- * straight back to announcing an unlock that never happened, which is the
- * defect it is being fixed for — so an absent field and its own default read
- * as the same value here.
+ * Whether a value carries no information: the state a field is in before
+ * anything has been set on it. Every spelling of "unset" reads as one value,
+ * so a producer writing `0` where another wrote nothing is not a change.
  */
 function isEmptyValue(value) {
   if (value === undefined || value === null || value === false || value === '' || value === 0) {
@@ -80,62 +73,59 @@ function sameValue(a, b) {
 }
 
 /**
- * Whether a field's two spellings mean the same value.
+ * What the browser would send back for `annotation` if the user changed
+ * nothing: the annotation through the same overlay translators every browser
+ * edit passes through on its way out.
  *
- * `shape` needs more than `sameValue`: the server stores `content.shape`
- * verbatim (`_validate_generic_content` only type-checks it, and
- * `ANNOTATION_SHAPES` is deliberately not a rejection list), while the
- * browser runs it through `normalizeShapeName` on load. So an agent-created
- * shape with no `shape` at all, or one spelled "Process Arrow", comes back
- * from the first browser touch as "rectangle" / "process_arrow" — a
- * normalisation artefact that would otherwise announce "Changed the shape
- * of" for a user who only dragged it. Compared through the browser's own
- * normaliser rather than a second copy of the rule, so the two cannot drift.
+ * This exists because the browser and an agent writing over MCP do not spell
+ * the same annotation the same way, and `computeOps` ships the WHOLE
+ * annotation in every op — so the first browser touch of anything an agent
+ * created rewrites every field where the two disagree, without the user
+ * having done a thing to it. Those rewrites are numerous and keep being
+ * found one at a time: envelope defaults (`z`, `locked`, `text`), a shape
+ * name run through `normalizeShapeName`, a default 160x96 size on the kinds
+ * whose overlays carry none, a `freehand`/`line` position rebuilt from its
+ * own points, an attachment gaining `target_type: 'node'`, style and group
+ * fields the translators simply drop. Reconstructing the no-op write-back
+ * catches all of them by construction rather than one branch at a time, and
+ * catches the ones nobody has thought of yet.
+ *
+ * Groups take the other translator pair — they are not overlays, and
+ * `useSharedSession` mirrors them through `annotationsToGroups` — which is
+ * exactly why they were the kind still producing the original false
+ * "Unlocked" after two rounds of per-field fixes.
+ *
+ * Returns null when the annotation cannot be round-tripped, in which case the
+ * caller falls back to comparing the snapshots directly.
  */
-function fieldsEqual(key, before, after) {
-  if (key === 'shape') return sameValue(normalizeShapeName(before), normalizeShapeName(after));
-  return sameValue(before, after);
+function browserWriteBack(annotation) {
+  if (!annotation || typeof annotation !== 'object') return null;
+  try {
+    if ((annotation.type || annotation.kind) === 'group') {
+      const { groups, parentIds } = annotationsToGroups([annotation]);
+      return groupsToAnnotations(groups, parentIds)[0] || null;
+    }
+    return overlaysToAnnotations(annotationsToOverlays([annotation]))[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Whether one dimension's difference is only the browser filling in its
- * default size over a size the server never had.
+ * Whether the user changed this field, as opposed to a producer rewriting it.
  *
- * `label`, `line` and `freehand` carry no size through the overlay
- * translators, so `normalizeGeometry` fills DEFAULT_SIZE where
- * `build_annotation` left 0 — and a plain drag of any agent-created one used
- * to announce "Resized". Keyed on that exact default rather than on "either
- * side is 0", which would be broader than the divergence it exists for and
- * would swallow real resizes: an unsized annotation the user then genuinely
- * resizes, or an agent setting a dimension to 0 over MCP, are both changes
- * worth reporting.
+ * Two conditions, and both are needed. The values must actually differ — or
+ * an agent re-sending an identical annotation would look like an edit, since
+ * the normal form differs from what it stored. And the new value must not be
+ * the one the no-op write-back produces — that is what separates "the user
+ * set this" from "the browser normalised it on the way past". A genuine edit
+ * fails the second test precisely because it lands somewhere the round trip
+ * would not have.
  */
-function materialisedDimension(before, after, fallback) {
-  return isEmptyValue(before) && after === fallback;
-}
-
-/**
- * Kinds whose `position` the overlay translators rebuild from the kind's own
- * content instead of carrying it through: a `line`'s from-endpoint and a
- * `freehand`'s first sampled point (utils/sessionAnnotations.js).
- *
- * `build_annotation` takes `x`/`y` as required arguments and merges `content`
- * verbatim, so nothing makes an agent's stated position agree with the
- * content it will be derived from — and the first browser write-back then
- * rewrites the position to match. A drag moves the content too (every point
- * shifts by the same delta; a line's endpoints move together), so requiring
- * the source to have changed separates a real move from that artefact.
- */
-const POSITION_DERIVED_FROM = new Map([
-  ['line', 'from'],
-  ['freehand', 'points'],
-]);
-
-function positionIsOnlyNormalised(record) {
-  const type = record.after && (record.after.type || record.after.kind);
-  const source = POSITION_DERIVED_FROM.get(type);
-  if (!source) return false;
-  return sameValue(record.before[source], record.after[source]);
+function userChanged(before, after, normalised, haveNormalised) {
+  if (sameValue(before, after)) return false;
+  if (!haveNormalised) return true;
+  return !sameValue(after, normalised);
 }
 
 // Rewritten by the store on every write whatever the user touched
@@ -144,49 +134,61 @@ function positionIsOnlyNormalised(record) {
 const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
 
 /**
- * The annotation fields this update actually changed, by comparing the
- * record's own before/after snapshots.
+ * The annotation fields this update actually changed, from the record's own
+ * before/after snapshots.
  *
  * Deliberately not `affected.fields`: that is the *incoming payload's* key
  * set, not a change set (session_store.py's `annotation_updated` branch
- * records `sorted(incoming.keys())`), and the browser's computeOps sends the
- * whole annotation in every op (services/sessionSyncClient.js). For any
- * browser-originated edit `fields` is therefore the annotation's entire key
- * set and is identical whatever the user did — reading it as a change set
- * made a move, a recolour or a text edit on a note/label/icon all render as
- * "Unlocked", asserting a security-relevant state change that never
- * happened. before/after are populated for every producer, because
+ * records `sorted(incoming.keys())`), and the browser sends the whole
+ * annotation in every op. For any browser-originated edit `fields` is
+ * therefore the annotation's entire key set and is identical whatever the
+ * user did — reading it as a change set made a move, a recolour or a text
+ * edit all render as "Unlocked", asserting a security-relevant state change
+ * that never happened. before/after are populated for every producer, because
  * `apply_state_op` is the single choke point both the browser batch and the
  * MCP write path go through, so the diff is authoritative for both.
  *
  * Returns null when there is no before snapshot to compare against, which is
  * the one case where nothing about the change can be asserted.
  */
-function changedFields(before, after) {
+function changedFields(before, after, normalised) {
   if (!before || typeof before !== 'object') return null;
   if (!after || typeof after !== 'object') return null;
+  const have = Boolean(normalised);
   const changed = new Set();
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (BOOKKEEPING_FIELDS.has(key)) continue;
-    if (!fieldsEqual(key, before[key], after[key])) changed.add(key);
+    if (userChanged(before[key], after[key], have ? normalised[key] : undefined, have)) {
+      changed.add(key);
+    }
   }
   return changed;
 }
 
 /**
- * Classify what an `annotation_updated` record actually changed, from a
- * before/after comparison, so "moved" / "resized" / "rotated" / "raised"
- * read distinctly instead of a blanket "updated" — and so a kind is only
- * ever reported when that field genuinely changed. Order matters: the most
- * specific, most visible change wins when several plausibly apply (e.g. a
- * drag-resize touches both size and position, and bringing an annotation to
- * the front while dragging it reads as the move).
+ * Classify what an `annotation_updated` record actually changed, so "moved" /
+ * "resized" / "rotated" / "raised" read distinctly instead of a blanket
+ * "updated" — and so a kind is only ever reported when the user genuinely did
+ * that. Order matters: the most specific, most visible change wins when
+ * several plausibly apply (e.g. a drag-resize touches both size and position,
+ * and bringing an annotation to the front while dragging it reads as the
+ * move).
  */
 function classifyAnnotationUpdate(record) {
-  const changed = changedFields(record.before, record.after);
+  const normalised = browserWriteBack(record.before);
+  const changed = changedFields(record.before, record.after, normalised);
   if (!changed) return 'generic';
+
   const before = geometryOf(record.before);
   const after = geometryOf(record.after);
+  const normalisedGeometry = normalised ? geometryOf(normalised) : null;
+  const geometryChanged = (key) =>
+    userChanged(
+      before[key],
+      after[key],
+      normalisedGeometry ? normalisedGeometry[key] : undefined,
+      Boolean(normalisedGeometry)
+    );
 
   if (changed.has('shape')) return 'shape';
   if (changed.has('locked')) return record.after && record.after.locked ? 'locked' : 'unlocked';
@@ -195,20 +197,9 @@ function classifyAnnotationUpdate(record) {
     return attached ? 'attached' : 'detached';
   }
   if (changed.has('geometry') || changed.has('position')) {
-    if (!sameValue(before.rotation, after.rotation)) return 'rotated';
-    const resizedW =
-      !sameValue(before.w, after.w) &&
-      !materialisedDimension(before.w, after.w, DEFAULT_ANNOTATION_SIZE.w);
-    const resizedH =
-      !sameValue(before.h, after.h) &&
-      !materialisedDimension(before.h, after.h, DEFAULT_ANNOTATION_SIZE.h);
-    if (resizedW || resizedH) return 'resized';
-    // `x`/`y` themselves need no empty-value guard: `build_annotation`
-    // requires both, so a coordinate of 0 is a real position and moving on or
-    // off it is a real move. What they do need is the derived-position rule —
-    // for the two kinds whose position is rebuilt from their content.
-    const moved = !sameValue(before.x, after.x) || !sameValue(before.y, after.y);
-    if (moved && !positionIsOnlyNormalised(record)) return 'moved';
+    if (geometryChanged('rotation')) return 'rotated';
+    if (geometryChanged('w') || geometryChanged('h')) return 'resized';
+    if (geometryChanged('x') || geometryChanged('y')) return 'moved';
     // Nothing in the geometry actually moved — fall through to whatever else
     // this update touched rather than asserting a move that did not happen.
   }
