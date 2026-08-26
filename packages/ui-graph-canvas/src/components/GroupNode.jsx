@@ -205,11 +205,6 @@ function GroupNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
-  const handleHideGroup = () => {
-    removeGroupKeepChildren();
-    setContextMenu(null);
-  };
-
   const handleDeleteGroup = () => {
     removeGroupKeepChildren();
   };
@@ -309,15 +304,11 @@ function GroupNode({ id, data, selected }) {
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The lock is meant to protect the group box
-              // itself rather than whether it is on screen, so Hide Group
-              // would belong here on the merits — but Hide is not a hide: it
-              // runs the identical handler Delete runs (removeGroupKeepChildren),
-              // taking the group off the canvas and publishing a delete. An
-              // action that destroys the group is refused while locked
-              // whatever its label says. Once a genuine reversible hide
-              // exists (smallfix-group-hide-actually-deletes), Hide belongs
-              // in this branch and this comment goes with it.
+              // every other kind. The unlocked menu has exactly two other
+              // actions — recolour, which is an edit, and Delete Group, which
+              // destroys the box — so there is nothing a lock could allow
+              // through. Anything added to the unlocked menu later has to be
+              // decided against this branch as well, not just dropped in.
               <button type="button" className="context-menu-unlock" onClick={unlock}>
                 🔓 {labels.unlock}
               </button>
@@ -334,9 +325,6 @@ function GroupNode({ id, data, selected }) {
                     />
                   ))}
                 </div>
-                <button className="context-menu-action" onClick={handleHideGroup}>
-                  👁️ Hide Group
-                </button>
                 <button className="context-menu-delete" onClick={handleDeleteGroup}>
                   🗑️ Delete Group
                 </button>

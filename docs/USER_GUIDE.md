@@ -191,19 +191,23 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group box can be locked, the same way an annotation can. A locked group stays where it
-is: you cannot drag it, resize it, rename it by double-clicking, or recolour it, and
-neither **Hide Group** nor **Delete Group** is offered. Its right-click menu has a single
-action — **Unlock** — and choosing it gives the full menu back. Locking is done by an
-assistant or an agent on your behalf, so a group you did not lock yourself may already be
-locked when you open a shared board.
+A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
+the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
+simply no longer grouped. There is no undo from the menu, so you would have to draw the
+group again, but nothing in it is lost.
+
+If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
+what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
+it is the same action you were already getting, named for what it does.
+
+A group box can also be locked, the same way an annotation can. A locked group stays where
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
+it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
+menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
+not lock yourself may already be locked when you open a shared board.
 
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
-
-**Hide Group** is worth knowing about before you use it on any group: it currently removes
-the box and releases the nodes inside it, and there is no "unhide" — you would have to draw
-the group again. That is also why it is not offered on a locked group.
 
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:

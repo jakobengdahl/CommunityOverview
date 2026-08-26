@@ -3689,7 +3689,8 @@ def register_mcp_tools(
                 anything.
             locked: Whether the group starts locked against edits. The canvas
                 honours it: a locked group refuses recolour, rename, resize,
-                drag, hide and delete, and offers only unlock.
+                drag and delete, and offers only unlock. A group's menu has
+                no hide action at all, locked or not.
             annotation_id: Stable id to create or replace. Omit to let the
                 server assign one.
             expected_revision: If given, the write is rejected unless it

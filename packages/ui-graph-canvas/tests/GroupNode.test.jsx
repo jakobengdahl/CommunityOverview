@@ -168,16 +168,12 @@ describe('GroupNode locked context menu', () => {
 
   const lockedData = { label: 'G', color: '#646cff', locked: true };
 
-  // The lock protects the group box itself rather than whether it is on
-  // screen, so a truly reversible Hide would belong in this menu — the same
-  // reasoning the component and the contract give. Hide is not that: it and
-  // Delete run the identical handler (removeGroupKeepChildren), which takes
-  // the group off the canvas, un-parents its members and publishes a delete.
-  // Offering it while locked hands the user a second, differently-labelled
-  // Delete — the one thing the lock exists to refuse. So the locked menu
-  // offers Unlock and nothing else, and this case pins that by the menu's
-  // text and its element count rather than by its buttons: see the three
-  // assertions at the end, and the note there on what they do not cover.
+  // The locked menu offers Unlock and nothing else. The unlocked menu has two
+  // other actions — recolour, an edit, and Delete Group, which destroys the
+  // box — and a lock refuses both, so there is nothing left for this branch to
+  // carry. This case pins that by the menu's text and its element count rather
+  // than by its buttons: see the three assertions at the end, and the note
+  // there on what they do not cover.
   it('offers unlock and nothing else when the group is locked', () => {
     renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
@@ -192,12 +188,12 @@ describe('GroupNode locked context menu', () => {
     // as absent, so the guard has to be structural rather than by role.
     //
     // The subtree count is deliberate and it is the assertion that does the
-    // work. Counting direct children instead lets a control hide one wrapper
-    // down; not counting elements at all lets a text-free span nest inside
-    // the unlock button, styled into a hit area by CSS, where `textContent`
-    // cannot see it. Both of those shipped on this branch before being
-    // caught. Counting the whole subtree forbids every one of them at once,
-    // whatever tag it uses and whatever event it listens for.
+    // work. Counting direct children instead — which is what shipped here
+    // twice — lets a control hide one wrapper down, or nest a text-free span
+    // inside the unlock button where `textContent` cannot see it. Both
+    // survivors were found against exactly that. Counting the whole subtree
+    // forbids every one of them at once, whatever tag it uses and whatever
+    // event it listens for.
     //
     // The price is that a legitimate icon `<span>` inside the unlock button
     // fails this case. That is the intended trade, not an oversight: adding
@@ -206,38 +202,68 @@ describe('GroupNode locked context menu', () => {
     // Unlock. Update this assertion deliberately if that day comes.
     //
     // What this does NOT cover: a destructive handler added to the unlock
-    // button itself, which changes no shape. Its click path is caught by the
-    // unlock case below; other event paths on that one button are not
-    // covered here.
+    // button itself, which changes no shape. The unlock case below covers its
+    // click path — but only because that case counts calls; asserting on the
+    // last `setNodes` and on `toHaveBeenCalledWith` alone missed a
+    // `removeGroupKeepChildren()` added ahead of the unlock body, since the
+    // destructive call was neither the last one nor the one matched. A
+    // handler on a strictly non-click event of that one button is still
+    // uncovered.
     const menu = document.querySelector('.graph-group-context-menu');
     expect(menu.textContent).toBe('🔓 Unlock');
     expect(menu.querySelectorAll('*')).toHaveLength(1);
     expect(menu.firstElementChild).toBe(screen.getByRole('button', { name: /unlock/i }));
   });
 
-  // The destructive handler stays reachable from the unlocked menu, so this
-  // pins that it is only the locked menu that withholds it — not the handler
-  // that changed. Whichever button runs it, it removes the group and keeps the
-  // members; that is the behaviour a locked group must never be able to reach.
-  it('still destroys the group when Hide is used on an unlocked one', () => {
+  // Delete Group is now the single path to removeGroupKeepChildren. It used to
+  // share that handler with a Hide Group button whose label promised something
+  // it did not do — both dissolved the box and kept the members — so Hide was
+  // removed rather than made real. This pins what the surviving button does,
+  // because "keeps the members" is the part a user has to be able to rely on:
+  // deleting a group must not take the nodes inside it with it.
+  it('dissolves the group but keeps its members when Delete Group is used', () => {
     const { notifyChange } = renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));
-    fireEvent.click(screen.getByRole('button', { name: /hide group/i }));
+    fireEvent.click(screen.getByRole('button', { name: /delete group/i }));
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const remaining = updater([
-      { id: 'group-1', data: { label: 'G' }, position: { x: 0, y: 0 } },
+      { id: 'group-1', data: { label: 'G' }, position: { x: 10, y: 20 } },
       { id: 'n1', parentId: 'group-1', position: { x: 5, y: 5 } },
     ]);
     expect(remaining.map((n) => n.id)).toEqual(['n1']);
-    // The member survives, re-based to absolute coordinates and un-parented.
+    // Un-parented and re-based to absolute coordinates, so the member stays
+    // where it looked rather than jumping to the canvas origin.
     expect(remaining[0].parentId).toBeUndefined();
+    expect(remaining[0].position).toEqual({ x: 15, y: 25 });
     expect(notifyChange).toHaveBeenCalledWith('delete');
+  });
+
+  // The unlocked menu is pinned as a whole for the same reason the locked one
+  // is: Hide Group was a second, differently-labelled Delete, and nothing
+  // should re-add it — or anything else — without this failing first.
+  it('offers colour and delete on an unlocked group, and no Hide Group', () => {
+    renderGroup();
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
+    expect(document.querySelector('.context-menu-title').textContent).toBe('Group Color');
+    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
+    expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
+    // Six swatches and Delete Group, and nothing else that can be pressed.
+    const menu = document.querySelector('.graph-group-context-menu');
+    expect(menu.querySelectorAll('button')).toHaveLength(7);
   });
 
   it('unlocks the group and publishes the change', () => {
     const { notifyChange } = renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
     fireEvent.click(screen.getByRole('button', { name: /unlock/i }));
+    // Counts, not just contents. Reading only the last `setNodes` call and
+    // matching `notifyChange` with any call let a `removeGroupKeepChildren()`
+    // inserted ahead of the unlock body pass every assertion here — clicking
+    // Unlock destroyed the group and 21/21 still went green. Unlock does
+    // exactly one of each; anything else on this button is a second.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const updated = updater([{ id: 'group-1', data: lockedData, draggable: false }])[0];
     expect(updated.data.locked).toBe(false);
@@ -266,7 +292,6 @@ describe('GroupNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.queryByRole('button', { name: /unlock/i })).toBeNull();
     expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /hide group/i })).toBeInTheDocument();
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
   });
 
