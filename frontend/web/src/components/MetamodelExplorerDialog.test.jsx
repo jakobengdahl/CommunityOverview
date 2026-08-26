@@ -64,6 +64,11 @@ const SCHEMA = {
       source_types: ['Agent'],
       target_types: ['Skill'],
     },
+    ASSIGNED_TO: {
+      description: 'Agent assigned to an initiative',
+      source_types: ['Agent'],
+      target_types: ['Initiative'],
+    },
   },
 };
 
@@ -103,12 +108,29 @@ describe('MetamodelExplorerDialog', () => {
     );
 
     // Only IMPLEMENTS (Initiative -> Legislation) is drawn as an SVG edge:
-    // RELATES_TO has no configured applicability and USES_SKILL's endpoints
-    // (Agent, Skill) are hidden system types by default.
+    // RELATES_TO has no configured applicability; USES_SKILL's endpoints
+    // (Agent, Skill) are both hidden system types by default; and
+    // ASSIGNED_TO has one endpoint hidden (Agent) and one visible
+    // (Initiative), so it has no drawable pair either.
     const edgeLabels = Array.from(container.querySelectorAll('.mme-edge-label')).map(
       (el) => el.textContent
     );
     expect(edgeLabels).toEqual(['IMPLEMENTS']);
+  });
+
+  it('hides a relationship type with only one endpoint hidden, in both network and table', () => {
+    render(<MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />);
+
+    // ASSIGNED_TO (Agent -> Initiative): Agent is a hidden system type,
+    // Initiative is visible — a relationship with a hidden endpoint on
+    // either side has no pair it could actually draw.
+    expect(screen.queryByText('ASSIGNED_TO')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: /metamodel.view_table/ }));
+    expect(screen.queryByText('ASSIGNED_TO')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('metamodel.show_system_types'));
+    expect(screen.getByText('ASSIGNED_TO')).toBeInTheDocument();
   });
 
   it('lists fully unconstrained relationship types separately instead of inventing edges', () => {

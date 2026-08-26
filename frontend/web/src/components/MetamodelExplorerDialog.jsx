@@ -43,6 +43,21 @@ function nodeRadius(typeName, stats) {
   return Math.min(34, 16 + Math.sqrt(count) * 2.2);
 }
 
+// True iff this relationship type can draw at least one edge between
+// currently-visible node types — i.e. it has some source that is visible (or
+// unconstrained) AND some target that is visible (or unconstrained). A
+// relationship with one endpoint hidden and one visible (e.g. bound to a
+// system type that's currently hidden on one side) has no drawable edge and
+// must not appear as if it did; a relationship left fully unconstrained is
+// not tied to any specific node type, so it always qualifies.
+function relationshipHasVisibleEdge(rt, visibleTypeNames) {
+  const sources = rt.source_types.length > 0 ? rt.source_types : [ANY_TYPE];
+  const targets = rt.target_types.length > 0 ? rt.target_types : [ANY_TYPE];
+  const sourceVisible = sources.some((s) => s === ANY_TYPE || visibleTypeNames.has(s));
+  const targetVisible = targets.some((t) => t === ANY_TYPE || visibleTypeNames.has(t));
+  return sourceVisible && targetVisible;
+}
+
 function matchesFilter(nodeTypeEntry, filterText, language) {
   if (!filterText) return true;
   const needle = filterText.trim().toLowerCase();
@@ -121,22 +136,16 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     [visibleNodeTypes]
   );
 
-  // A relationship type stays visible only if it is still relevant to what's
-  // on screen: unconstrained-on-both-sides relationships aren't tied to any
-  // specific node type so they always qualify, but one bound only to hidden
-  // system types (e.g. USES_SKILL: Agent -> Skill, while system types are
-  // hidden) would otherwise reference node types the table/network no
-  // longer show at all.
+  // A relationship type stays visible only if it can draw at least one edge
+  // between the node types currently shown — the same test the network
+  // view's edge-building loop applies below, so the table never lists a
+  // relationship the diagram can't draw a single line for (e.g. one endpoint
+  // hidden by the system-types toggle while the other stays visible).
   const visibleRelationshipTypes = useMemo(
     () =>
       allRelationshipTypes
         .filter((rt) => matchesFilter(rt, filterText, language))
-        .filter((rt) => {
-          if (rt.source_types.length === 0 && rt.target_types.length === 0) return true;
-          return [...rt.source_types, ...rt.target_types].some((type) =>
-            visibleTypeNames.has(type)
-          );
-        }),
+        .filter((rt) => relationshipHasVisibleEdge(rt, visibleTypeNames)),
     [allRelationshipTypes, filterText, language, visibleTypeNames]
   );
 
