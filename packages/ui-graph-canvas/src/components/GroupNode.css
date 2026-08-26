@@ -135,6 +135,25 @@
   color: white;
 }
 
+/* Matches the overlay menus' unlock button (NoteNode.css); the group menu has
+   its own class prefix, so the rule cannot simply be shared. */
+.graph-group-context-menu .context-menu-unlock {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #60a5fa;
+  color: #60a5fa;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .context-menu-unlock:hover {
+  background: #60a5fa;
+  color: white;
+}
+
 /* React Flow NodeResizer handles */
 .react-flow__resize-control.handle {
   width: 10px;

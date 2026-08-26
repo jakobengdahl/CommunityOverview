@@ -393,10 +393,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   };
 
   // Double-click entry point for EDITABLE_TEXT_KINDS, matching NoteNode/
-  // LabelNode's onDoubleClick exactly: only a live remote claim refuses entry
-  // (a persisted `locked` flag does not — neither dedicated component checks
-  // it here either, so this stays consistent rather than inventing a
-  // stricter rule only for the generic kinds).
+  // LabelNode's onDoubleClick exactly: only a live remote claim refuses entry,
+  // and a persisted `locked` flag does not. That is no longer the whole story
+  // — GroupNode's rename now does refuse on the persisted flag, so this is a
+  // gap in these three rather than the consistent house rule it was written
+  // as. The capability baseline says a locked object offers only unlock or
+  // copy, and an in-place text edit is not that. Tracked as its own fix; left
+  // alone here so all three change together rather than one at a time.
   const startEditingText = (e) => {
     if (!EDITABLE_TEXT_KINDS.has(kind)) return;
     e.stopPropagation();
