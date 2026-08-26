@@ -607,10 +607,15 @@ describe('describeActivity', () => {
     it('under-reports naming an unlabelled group literally "Group"', () => {
       // The other half of the asymmetry, by a different route: the pair does
       // not drop `label`, it substitutes `'Group'` for an empty one, which
-      // states a value the user never set just the same. Deliberate — without
-      // it every drag of an unlabelled group would report a rename — but it
-      // means `rotation` is not the only field in that position, which the
-      // browserWriteBack docstring has to say and this pins.
+      // states a value the user never set just the same. Deliberate, but not
+      // for the reason it is tempting to write down: a drag is safe either
+      // way, because geometry is read before `label` and reports itself. What
+      // this prevents is a write-back of an unlabelled group in which nothing
+      // higher-priority changed reading as a rename the user never made.
+      //
+      // Note this is now the only thing guarding the `'Group'` substitution —
+      // sessionAnnotations' own tests do not pin it — so removing it would
+      // let that default change silently.
       const at = (v) => serverGroup({ label: v });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Group') }))
@@ -627,7 +632,11 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_text');
     });
 
-    it('still under-reports an agent unrotating a group, the one field still dropped', () => {
+    it('still under-reports unrotating a group, the one field still dropped', () => {
+      // Latent rather than live: no shipped producer sets a group's rotation
+      // (build_group_annotation hardcodes 0 and takes no parameter, and the
+      // generic rotation tools refuse group ids), so this guards the invariant
+      // ahead of a group rotation control shipping rather than a path in use.
       // Rotation is the remaining asymmetry: the group translators carry
       // `locked` and `z` but not rotation, so the write-back always says 0. A
       // change away from 0 is visible; a change back to it is not

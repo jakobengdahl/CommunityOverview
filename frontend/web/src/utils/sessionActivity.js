@@ -109,8 +109,21 @@ function sameValue(a, b) {
  * reports it and one rotated back to 0 does not; and `label`, which
  * `annotationsToGroups` substitutes `'Group'` for when it is empty, so
  * naming an unlabelled group literally "Group" reads as a plain update.
- * Holding `label` to this rule is not a wart to be fixed — without it every
- * drag of an unlabelled group would report a rename.
+ *
+ * Holding `label` to this rule is not a wart to be fixed — but the exposure
+ * is narrower than it first looks, and worth stating precisely so a
+ * follow-up aims at the right place. A drag is safe either way: `shape`,
+ * `locked`, `attachment`, geometry, `z` and `style` are all read before
+ * `label`, so an edit that touches any of them reports itself and never
+ * reaches the text branch. What the rule actually prevents is a write-back
+ * of an unlabelled group in which nothing higher-priority changed being
+ * reported as a rename the user never made.
+ *
+ * `rotation`'s asymmetry is latent rather than live: no shipped producer can
+ * set a group's rotation — `build_group_annotation` hardcodes 0 and exposes
+ * no parameter, and the rotation-carrying generic tools refuse group ids — so
+ * it is guarded here ahead of a group rotation control existing, not because
+ * something writes it today.
  *
  * `locked` and `z` were there too until the translators were fixed to carry
  * them, at which point this module started reporting a group's lock and layer
