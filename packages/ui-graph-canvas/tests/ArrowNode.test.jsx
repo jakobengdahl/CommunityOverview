@@ -137,23 +137,22 @@ describe('ArrowNode default colour', () => {
     expect(luminance).toBeLessThan(0.3);
   });
 
-  // The canvas creates an arrow with `color: undefined` (pinned by
-  // GraphCanvasAnnotations' "creates an arrow with default vector"), so this
-  // fallback is what a drawn line actually gets — unlike freehand, where a
-  // second explicit copy in the create path meant fixing the fallback alone
-  // changed nothing a user could see.
+  // A consistency guard on the one `color` const the line, both arrowhead
+  // markers and the endpoint handles all read — not a second regression test
+  // for this defect. What keeps the fallback on the path a user actually
+  // takes is GraphCanvasAnnotations' "creates an arrow with default vector",
+  // which pins `color: undefined` on a created arrow; freehand needed its own
+  // version of that check because a second explicit copy of the default in
+  // the create path meant fixing the fallback alone changed nothing visible.
   it('paints both arrowheads in the same fallback colour as the line', () => {
     const { container } = render(
-      <ArrowNode
-        id="a-default"
-        type="arrow"
-        data={{ dx: 100, dy: 0, startArrow: true }}
-        selected={false}
-      />
+      <ArrowNode id="a-default" type="arrow" data={{ dx: 100, dy: 0 }} selected={false} />
     );
     const stroke = [...container.querySelectorAll('line')].find(
       (line) => line.getAttribute('stroke') !== 'transparent'
     );
+    // Both markers are emitted into <defs> regardless of the head toggles,
+    // so this covers the tail as well without arming startArrow.
     const heads = [...container.querySelectorAll('marker path')];
     expect(heads).toHaveLength(2);
     for (const head of heads) {
