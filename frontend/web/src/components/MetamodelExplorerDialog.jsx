@@ -19,6 +19,8 @@ import './MetamodelExplorerDialog.css';
 // relationship type actually needs it.
 const ANY_TYPE = '__any__';
 
+const VIEWBOX_WIDTH = 600;
+const VIEWBOX_HEIGHT = 520;
 const CENTER_X = 300;
 const CENTER_Y = 260;
 const MIN_ZOOM = 0.5;
@@ -72,6 +74,7 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
   const [selectedType, setSelectedType] = useState(null);
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const dragState = useRef(null);
+  const svgRef = useRef(null);
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -203,17 +206,27 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     zoomBy(delta);
   };
   const handlePointerDown = (e) => {
+    // CSS-pixel-to-viewBox-unit ratio, measured once per drag: the <svg> is
+    // styled to fill a flexible container, so its rendered size rarely
+    // matches the viewBox's own 600x520 units — a 1:1 use of clientX/Y deltas
+    // would pan faster or slower than the cursor, and by a different amount
+    // on each axis. Falls back to 1 when the rect isn't measurable (e.g. jsdom).
+    const rect = svgRef.current?.getBoundingClientRect();
+    const ratioX = rect?.width ? VIEWBOX_WIDTH / rect.width : 1;
+    const ratioY = rect?.height ? VIEWBOX_HEIGHT / rect.height : 1;
     dragState.current = {
       startX: e.clientX,
       startY: e.clientY,
       origX: transform.x,
       origY: transform.y,
+      ratioX,
+      ratioY,
     };
   };
   const handlePointerMove = (e) => {
     if (!dragState.current) return;
-    const dx = e.clientX - dragState.current.startX;
-    const dy = e.clientY - dragState.current.startY;
+    const dx = (e.clientX - dragState.current.startX) * dragState.current.ratioX;
+    const dy = (e.clientY - dragState.current.startY) * dragState.current.ratioY;
     setTransform((tr) => ({
       ...tr,
       x: dragState.current.origX + dx,
@@ -223,6 +236,14 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
   const handlePointerUp = () => {
     dragState.current = null;
   };
+
+  // Applied group transform: pans by `transform.x/y` while keeping zoom
+  // anchored on the diagram's fixed center (CENTER_X/CENTER_Y) rather than
+  // the viewBox's top-left corner — otherwise zooming in drifts the whole
+  // diagram toward the bottom-right instead of scaling in place.
+  const groupTransform = `translate(${CENTER_X * (1 - transform.k) + transform.x},${
+    CENTER_Y * (1 - transform.k) + transform.y
+  }) scale(${transform.k})`;
 
   const anyLabel = t('metamodel.any_type');
 
@@ -296,8 +317,9 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
                 <div className="mme-empty">{t('metamodel.no_matches')}</div>
               ) : (
                 <svg
+                  ref={svgRef}
                   className="mme-svg"
-                  viewBox="0 0 600 520"
+                  viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
                   role="img"
                   aria-label={t('metamodel.network_aria_label')}
                   onWheel={handleWheel}
@@ -319,7 +341,7 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
                       <path d="M0,0 L10,5 L0,10 z" className="mme-arrowhead-path" />
                     </marker>
                   </defs>
-                  <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
+                  <g transform={groupTransform}>
                     {edges.map((edge) => {
                       const p1 = positions[edge.source];
                       const p2 = positions[edge.target];
@@ -508,7 +530,10 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
                               />
                               {nt.type}
                             </th>
-                            <td>{nt.labels?.[language] || '—'}</td>
+                            {/* This column is explicitly "Label (sv)" — the schema's labels
+                                map only ever carries an sv translation (see METAMODEL.md), so
+                                it always shows that, independent of the current UI language. */}
+                            <td>{nt.labels?.sv || '—'}</td>
                             <td>{nt.category || 'domain'}</td>
                             <td>{nt.description || '—'}</td>
                             <td>{(nt.fields || []).join(', ') || '—'}</td>

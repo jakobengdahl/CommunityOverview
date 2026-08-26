@@ -153,6 +153,10 @@ describe('MetamodelExplorerDialog', () => {
     const nodeTable = tables[0];
     expect(within(nodeTable).getByText('Actor')).toBeInTheDocument();
     expect(within(nodeTable).getByText('5')).toBeInTheDocument();
+    // The "Label (sv)" column always shows the schema's sv translation,
+    // regardless of the current UI language (the mocked language is 'en',
+    // and the schema never carries an 'en' entry in `labels`).
+    expect(within(nodeTable).getByText('Aktör')).toBeInTheDocument();
     // System types stay hidden in the table too, honouring the same toggle.
     expect(within(nodeTable).queryByText('Agent')).not.toBeInTheDocument();
 
@@ -211,5 +215,38 @@ describe('MetamodelExplorerDialog', () => {
     expect(screen.getByRole('button', { name: 'metamodel.zoom_in' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'metamodel.zoom_out' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'metamodel.reset_view' })).toBeInTheDocument();
+  });
+
+  it('zooms in place around the diagram center rather than drifting from the origin', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const group = container.querySelector('.mme-svg > g');
+    expect(group.getAttribute('transform')).toBe('translate(0,0) scale(1)');
+
+    fireEvent.click(screen.getByRole('button', { name: 'metamodel.zoom_in' }));
+
+    // At k=1.2 with no pan, the anchor point (300, 260) must stay fixed:
+    // translate = CENTER * (1 - k) = 300*(1-1.2) = -60, 260*(1-1.2) = -52.
+    const match = group
+      .getAttribute('transform')
+      .match(/^translate\(([-.\d]+),([-.\d]+)\) scale\(([-.\d]+)\)$/);
+    expect(match).not.toBeNull();
+    const [, tx, ty, k] = match.map(Number);
+    expect(tx).toBeCloseTo(-60);
+    expect(ty).toBeCloseTo(-52);
+    expect(k).toBeCloseTo(1.2);
+  });
+
+  it('resets zoom and pan together', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const group = container.querySelector('.mme-svg > g');
+
+    fireEvent.click(screen.getByRole('button', { name: 'metamodel.zoom_in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'metamodel.reset_view' }));
+
+    expect(group.getAttribute('transform')).toBe('translate(0,0) scale(1)');
   });
 });
