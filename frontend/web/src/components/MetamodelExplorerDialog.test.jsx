@@ -287,6 +287,32 @@ describe('MetamodelExplorerDialog', () => {
     expect(group.getAttribute('transform')).toBe('translate(40,30) scale(1)');
   });
 
+  it('ignores a second pointer touching down mid-drag instead of hijacking the pan', () => {
+    const { container } = render(
+      <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />
+    );
+    const svg = container.querySelector('.mme-svg');
+    const group = container.querySelector('.mme-svg > g');
+
+    // Finger A starts a drag.
+    fireEvent(svg, pointerLikeEvent('pointerdown', { clientX: 100, clientY: 100, pointerId: 1 }));
+    // Finger B touches down mid-drag (a resting finger, or a pinch attempt) —
+    // must not reset the in-progress drag's origin.
+    fireEvent(svg, pointerLikeEvent('pointerdown', { clientX: 200, clientY: 200, pointerId: 2 }));
+    // Finger B moving must not pan either — it was never accepted as a drag.
+    fireEvent(svg, pointerLikeEvent('pointermove', { clientX: 500, clientY: 500, pointerId: 2 }));
+    expect(group.getAttribute('transform')).toBe('translate(0,0) scale(1)');
+
+    // Finger A continuing its drag still pans correctly, from its own origin.
+    fireEvent(svg, pointerLikeEvent('pointermove', { clientX: 140, clientY: 130, pointerId: 1 }));
+    expect(group.getAttribute('transform')).toBe('translate(40,30) scale(1)');
+
+    // Finger B lifting must not end finger A's still-active drag.
+    fireEvent(svg, pointerLikeEvent('pointerup', { clientX: 500, clientY: 500, pointerId: 2 }));
+    fireEvent(svg, pointerLikeEvent('pointermove', { clientX: 150, clientY: 140, pointerId: 1 }));
+    expect(group.getAttribute('transform')).toBe('translate(50,40) scale(1)');
+  });
+
   it('zooms in place around the diagram center rather than drifting from the origin', () => {
     const { container } = render(
       <MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />

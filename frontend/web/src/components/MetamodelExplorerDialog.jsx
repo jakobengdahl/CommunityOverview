@@ -232,6 +232,10 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     // Pointer events (rather than mouse-only) so touch dragging works too —
     // the canvas sets touch-action: none precisely so touch panning is
     // handled here instead of the browser's native scroll/pinch gesture.
+    // Ignore a second pointer touching down mid-drag (e.g. a resting finger,
+    // or a pinch attempt) rather than letting it hijack the single shared
+    // drag state — same guard as BottomSheet.jsx's handlePointerDown.
+    if (dragState.current) return;
     // Capturing keeps move/up events targeted here even if the pointer
     // strays outside the SVG mid-drag; not universally supported (falls
     // back to plain event delivery when unavailable, e.g. some test DOMs).
@@ -249,6 +253,7 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     const ratioX = rect?.width ? VIEWBOX_WIDTH / rect.width : 1;
     const ratioY = rect?.height ? VIEWBOX_HEIGHT / rect.height : 1;
     dragState.current = {
+      pointerId: e.pointerId,
       startX: e.clientX,
       startY: e.clientY,
       origX: transform.x,
@@ -258,7 +263,7 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     };
   };
   const handlePointerMove = (e) => {
-    if (!dragState.current) return;
+    if (!dragState.current || e.pointerId !== dragState.current.pointerId) return;
     const dx = (e.clientX - dragState.current.startX) * dragState.current.ratioX;
     const dy = (e.clientY - dragState.current.startY) * dragState.current.ratioY;
     setTransform((tr) => ({
@@ -267,7 +272,8 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
       y: dragState.current.origY + dy,
     }));
   };
-  const handlePointerUp = () => {
+  const handlePointerUp = (e) => {
+    if (dragState.current && e.pointerId !== dragState.current.pointerId) return;
     dragState.current = null;
   };
 
