@@ -239,14 +239,21 @@ describe('GroupNode locked context menu', () => {
   });
 
   // Hide Group was a second, differently-labelled Delete. This guards against
-  // it coming back, which is what this PR exists to prevent — but note what it
-  // is and is not. Unlike the locked menu, this one is NOT pinned as a whole:
-  // it is a surface that may legitimately grow, so a subtree element count
-  // would fail on every honest addition. The guard is therefore the text —
-  // nothing in this menu may say "hide", whatever tag carries it — plus the
-  // button count, which catches a re-added `<button>` and a stray swatch. A
-  // differently-worded control added as a `div` or `a` would pass both; that
-  // is the accepted cost of letting this menu grow.
+  // it coming back, which is what this PR exists to prevent. Two assertions,
+  // and it is worth being exact about what each one forbids, because they are
+  // not the same shape.
+  //
+  // The text is the on-axis guard: nothing in this menu may say "hide",
+  // whatever tag carries it. That is the claim this PR is about, so a future
+  // "Unhide" or "Hidden members" failing here is correct — it should stop and
+  // make someone confirm the button is not creeping back.
+  //
+  // The button count is a deliberate pin, not a growth allowance. An honest
+  // new `<button>` — a Rename, say — fails it, and whoever adds one should
+  // update the number consciously, the same trade the locked case takes with
+  // its subtree count above. What slips through both is a differently-worded
+  // non-button control (`<div role="button">Archive Group</div>`); that gap is
+  // real and accepted, but it is a gap, not a policy of letting the menu grow.
   it('offers colour and delete on an unlocked group, and nothing that hides', () => {
     renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));

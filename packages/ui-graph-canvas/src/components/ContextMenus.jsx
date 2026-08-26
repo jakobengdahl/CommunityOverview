@@ -508,8 +508,10 @@ export function MultiNodeContextMenu({
   onShowOnly,
   onHide,
   onHideMultiple,
+  onHideSelection,
   onDelete,
   onDeleteMultiple,
+  onDeleteSelection,
   selectNodesByType,
   onOrganize,
   dimmedNodeIds = [],
@@ -526,7 +528,8 @@ export function MultiNodeContextMenu({
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
-  const nodeIds = menu.nodes.map((n) => n.id);
+  const actionNodes = menu.actionNodes ?? menu.nodes;
+  const nodeIds = actionNodes.map((n) => n.id);
   const nodeIdSet = new Set(nodeIds);
   const allNodesDimmed = nodeIds.length > 0 && nodeIds.every((id) => dimmedNodeIds.includes(id));
   const incidentEdgeIds = Array.from(
@@ -560,12 +563,11 @@ export function MultiNodeContextMenu({
       <div className="context-menu-header">
         {cml.nodesSelected.replace('{count}', menu.nodes.length)}
       </div>
-      {onShowOnly && (
+      {onShowOnly && nodeIds.length > 0 && (
         <button
           type="button"
           data-menu-item="root"
           onClick={() => {
-            const nodeIds = menu.nodes.map((n) => n.id);
             onShowOnly(nodeIds);
             onClose();
           }}
@@ -573,16 +575,18 @@ export function MultiNodeContextMenu({
           🔍 {cml.showOnly}
         </button>
       )}
-      <button
-        type="button"
-        data-menu-item="root"
-        onClick={() => {
-          const types = menu.nodes.map((n) => n.data?.nodeType || n.data?.type);
-          selectNodesByType(types);
-        }}
-      >
-        🎯 {cml.selectSameType}
-      </button>
+      {nodeIds.length > 0 && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            const types = actionNodes.map((n) => n.data?.nodeType || n.data?.type);
+            selectNodesByType(types);
+          }}
+        >
+          🎯 {cml.selectSameType}
+        </button>
+      )}
       {onOrganize && (
         <>
           <div className="context-menu-separator"></div>
@@ -595,13 +599,14 @@ export function MultiNodeContextMenu({
           />
         </>
       )}
-      {(onHideMultiple || onHide) && (
+      {(onHideSelection || onHideMultiple || onHide) && (
         <button
           type="button"
           data-menu-item="root"
           onClick={() => {
-            const nodeIds = menu.nodes.map((n) => n.id);
-            if (onHideMultiple) {
+            if (onHideSelection) {
+              onHideSelection();
+            } else if (onHideMultiple) {
               onHideMultiple(nodeIds);
             } else if (onHide) {
               nodeIds.forEach((id) => onHide(id));
@@ -636,7 +641,7 @@ export function MultiNodeContextMenu({
           🔅 {incidentEdgesDimmed ? cml.restoreIncidentEdges : cml.dimIncidentEdges}
         </button>
       )}
-      {(onDeleteMultiple || onDelete) && (
+      {(onDeleteSelection || onDeleteMultiple || onDelete) && (
         <>
           <div className="context-menu-separator"></div>
           <button
@@ -644,8 +649,9 @@ export function MultiNodeContextMenu({
             data-menu-item="root"
             className="context-menu-danger"
             onClick={() => {
-              const nodeIds = menu.nodes.map((n) => n.id);
-              if (onDeleteMultiple) {
+              if (onDeleteSelection) {
+                onDeleteSelection();
+              } else if (onDeleteMultiple) {
                 onDeleteMultiple(nodeIds);
               } else if (onDelete) {
                 nodeIds.forEach((id) => onDelete(id));
