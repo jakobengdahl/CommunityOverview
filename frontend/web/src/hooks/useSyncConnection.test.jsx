@@ -159,6 +159,27 @@ describe('useSyncConnection.ensureSyncConnected', () => {
 
     expect(appOnDropped).toHaveBeenCalledWith([{ op: 'annotation_created' }], 400);
   });
+
+  it('drops remote ops delivered by a stale session client after switching sessions', () => {
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    const appOnRemoteOps = vi.fn();
+    result.current.syncHandlersRef.current = { onRemoteOps: appOnRemoteOps };
+
+    let staleClient;
+    act(() => {
+      staleClient = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      result.current.ensureSyncConnected('3333-4444');
+    });
+    act(() => {
+      staleClient.handlers.onRemoteOps([{ op: 'nodes_added', node_ids: ['stale-node'] }], {
+        clientId: 'client-other',
+      });
+    });
+
+    expect(appOnRemoteOps).not.toHaveBeenCalled();
+  });
 });
 
 describe('useSyncConnection teardown', () => {
