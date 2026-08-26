@@ -2554,10 +2554,15 @@ function GraphCanvasInner({
             locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
-          // Mirrors overlayToFlowNode's `draggable: !locked`: a locked group
-          // box stays selectable but cannot be dragged. Its members are
-          // separate nodes and keep their own draggability.
-          draggable: !g.locked,
+          // A locked group box stays selectable but cannot be dragged; its
+          // members are separate nodes and keep their own draggability.
+          // `undefined` rather than `true` when unlocked, deliberately:
+          // ReactFlow reads an explicit boolean as an override and only falls
+          // back to the canvas-wide `nodesDraggable` switch when the key is
+          // absent. A plain `!g.locked` would therefore keep an unlocked group
+          // draggable while a freehand stroke is being drawn, which is exactly
+          // what that switch turns off.
+          draggable: g.locked ? false : undefined,
         }));
       // Built from what survived, not the raw input. A group with a numeric id
       // — which JSON permits — is dropped by the filter but would land in a
@@ -2765,7 +2770,7 @@ function GraphCanvasInner({
             locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
-          draggable: !g.locked,
+          draggable: g.locked ? false : undefined,
         };
         const members = new Set(op.members || []);
         setNodes((nds) =>

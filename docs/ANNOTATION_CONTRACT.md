@@ -237,6 +237,15 @@ visibility, so a destructive Delete is refused while a reversible Hide is not.
 Hide is a group-only action; no other kind has it, so no other kind is
 affected.
 
+A second hole in the same paragraph, and a real one: **a locked group's
+membership is not locked.** Dragging a graph node into or out of a locked
+group re-parents it (`computeGroupPlacement` in `GraphCanvas.jsx` never
+consults the flag) and publishes `group_membership_changed`, so the locked
+annotation's own `member_node_ids` changes from the GUI. What a group *is* is
+largely its membership, so "a locked group is protected" is true of its box
+and false of its contents. Tracked separately; stated here so the paragraph
+above is not read as more than it claims.
+
 One caveat a reader of the paragraph above would otherwise be misled by, and
 which the decision's own wording assumes away: **Hide is not currently
 reversible.** `handleHideGroup` and `handleDeleteGroup` in `GroupNode.jsx` run

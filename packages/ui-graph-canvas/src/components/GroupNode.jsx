@@ -41,6 +41,22 @@ function GroupNode({ id, data, selected }) {
     }
   }, [isEditing]);
 
+  // A lock can arrive from MCP or a collaborator while the rename input is
+  // open. Close it the moment that happens rather than letting the user keep
+  // typing into a field whose commit will refuse the text: the blur guard
+  // below is correct but silent, and silence there reads as the edit having
+  // been accepted. Adjusted during render rather than in an effect — React's
+  // documented pattern for state that must follow a prop, and the one that
+  // does not cost a second render pass.
+  const [lockedWhenLastRendered, setLockedWhenLastRendered] = useState(locked);
+  if (locked !== lockedWhenLastRendered) {
+    setLockedWhenLastRendered(locked);
+    if (locked && isEditing) {
+      setIsEditing(false);
+      setEditedLabel(data.label || 'Group');
+    }
+  }
+
   useEffect(() => {
     if (!contextMenu) return;
 
@@ -99,9 +115,10 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
-    // Covers the lock arriving while the input is already open: the component
-    // re-renders with the new flag, so the commit sees it and discards the
-    // pending edit rather than writing it.
+    // Backstop for the lock arriving while the input is open. The effect above
+    // normally closes the editor first, so this is rarely the path that runs —
+    // it stays because this is the branch that would otherwise write, and a
+    // guard on a write is worth keeping even when the reachable case is small.
     if (locked) {
       setEditedLabel(data.label || 'Group');
       return;
@@ -206,14 +223,16 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
-    // `draggable` is recomputed here, not just cleared on `data`. It is set
-    // once when the group flow node is built, and nothing rebuilds a group for
-    // the rest of the session, so leaving it false would unlock the menu while
-    // the box stayed pinned until reload. ArrowNode's patchData recomputes it
-    // for the same reason.
+    // `draggable` is recomputed here, not just cleared on `data`: no local
+    // path recomputes it, so leaving it false would unlock the menu while the
+    // box stayed pinned until reload. (A remote upsert-group rebuilds the node
+    // and the remote-selection effect recomputes the flag, but neither is
+    // reachable from a local unlock.) ArrowNode's patchData recomputes it for
+    // the same reason. `undefined`, not `true` — see the builders in
+    // GraphCanvas for why an explicit boolean is the wrong value here.
     setNodes((nds) =>
       nds.map((n) =>
-        n.id === id ? { ...n, data: { ...n.data, locked: false }, draggable: true } : n
+        n.id === id ? { ...n, data: { ...n.data, locked: false }, draggable: undefined } : n
       )
     );
     setContextMenu(null);

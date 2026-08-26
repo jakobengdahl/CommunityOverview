@@ -97,7 +97,11 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(false);
     expect(group.data.z).toBe(0);
-    expect(group.draggable).toBe(true);
+    // Not `true`: ReactFlow reads an explicit boolean as an override of the
+    // canvas-wide `nodesDraggable` switch, so an unlocked group must leave the
+    // key unset and keep honouring it — otherwise it stays draggable during a
+    // freehand stroke, which that switch exists to prevent.
+    expect(group.draggable).toBeUndefined();
   });
 
   it('carries locked and z through a remote upsert-group op', () => {

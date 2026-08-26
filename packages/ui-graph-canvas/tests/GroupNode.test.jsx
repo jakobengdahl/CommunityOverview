@@ -208,10 +208,14 @@ describe('GroupNode locked context menu', () => {
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const updated = updater([{ id: 'group-1', data: lockedData, draggable: false }])[0];
     expect(updated.data.locked).toBe(false);
-    // A group flow node's `draggable` is computed once, when the node is built,
-    // and nothing rebuilds a group afterwards. Clearing only `data.locked`
-    // would give back the menu but leave the box pinned until reload.
-    expect(updated.draggable).toBe(true);
+    // No local path recomputes a group's `draggable`, so clearing only
+    // `data.locked` would give back the menu but leave the box pinned until
+    // reload. It must go back to `undefined`, not `true`: ReactFlow treats an
+    // explicit boolean as an override of the canvas-wide `nodesDraggable`
+    // switch, so `true` would keep the group draggable during a freehand
+    // stroke, which that switch exists to prevent.
+    expect(updated.draggable).toBeUndefined();
+    expect('draggable' in updated).toBe(true);
     // Without this the unlock is purely local: no op is published, so the
     // group is locked again on reload and no collaborator ever sees it.
     expect(notifyChange).toHaveBeenCalledWith('style');
@@ -240,7 +244,7 @@ describe('GroupNode locked context menu', () => {
     expect(notifyChange).not.toHaveBeenCalled();
   });
 
-  it('discards a pending rename when the lock arrives while the input is open', () => {
+  it('closes the rename input as soon as the lock arrives, rather than letting it fill', () => {
     const notifyChange = vi.fn();
     const notifyRemoteLockedAttempt = vi.fn();
     const { rerender } = renderGroup(
@@ -257,7 +261,7 @@ describe('GroupNode locked context menu', () => {
         <GroupNode id="group-1" data={lockedData} selected />
       </AnnotationContext.Provider>
     );
-    fireEvent.blur(screen.getByRole('textbox'));
+    expect(screen.queryByRole('textbox')).toBeNull();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
     expect(notifyChange).not.toHaveBeenCalled();
   });

@@ -563,6 +563,48 @@ class TestGraphServiceSavedViews:
         assert result["groups"][0]["locked"] is True
         assert result["groups"][0]["z"] == 3
 
+    def test_get_saved_view_defaults_a_non_numeric_group_z_instead_of_passing_it_on(
+        self, service_with_view: GraphService
+    ):
+        """A stored `z` that is not a number must not reach the canvas as-is.
+
+        The browser's own translator only ever sees a `z` that `createAnnotation`
+        has already coerced through `finiteNumber`, so it can afford a bare
+        `?? 0`. This path reads stored metadata directly and has no such
+        guarantee - including `True`, which is an `int` in Python and would
+        otherwise arrive as a layer of 1.
+        """
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_schema_version"] = 1
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [
+                {
+                    "id": "group-1",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Odd z",
+                    "z": True,
+                },
+                {
+                    "id": "group-2",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Stringy z",
+                    "z": "3",
+                },
+            ],
+        }
+        view.metadata.pop("groups", None)
+        view.metadata.pop("annotations", None)
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert result["success"] is True
+        assert [g["z"] for g in result["groups"]] == [0, 0]
+
     def test_get_saved_view_derives_legacy_fields_from_v1_only_document(
         self, service_with_view: GraphService
     ):
