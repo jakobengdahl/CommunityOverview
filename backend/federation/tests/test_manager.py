@@ -872,20 +872,46 @@ async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_currently_treats_a_payload_without_nodes_as_an_empty_graph(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("bad_payload", "error_fragment"),
+    [
+        ({}, "nodes"),
+        ({"nodes": None, "edges": []}, "nodes"),
+        ({"nodes": {}, "edges": []}, "nodes"),
+        ({"nodes": [], "edges": {}}, "edges"),
+    ],
+)
+async def test_sync_graph_degrades_and_keeps_cache_when_payload_is_malformed(
+    monkeypatch, bad_payload, error_fragment
 ):
-    """Documents current behaviour rather than endorsing it.
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, bad_payload))
+    _sealed(monkeypatch, remote)
 
-    A 200 carrying neither key empties the cache and reports success, so a
-    remote that starts serving `{}` — malformed, truncated, or an error
-    envelope — silently drops every federated node and announces it as
-    deletions. That is the same outcome the non-2xx path deliberately guards
-    against, reached through a response the guard never sees. Tracked
-    separately as smallfix-federation-empty-payload-wipes-cache; this test is
-    the one to flip when that is decided.
-    """
-    remote = _ScriptedTransport((200, _ONE_NODE), (200, {}))
+    node_events = []
+    manager = FederationManager(
+        _single_graph_config(),
+        on_node_event=lambda op, before, after: node_events.append(op),
+    )
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        await manager.sync_graph("esam-main", client)
+        node_events.clear()
+        result = await manager.sync_graph("esam-main", client)
+
+    assert result["success"] is False
+    assert result["graph_id"] == "esam-main"
+    assert error_fragment in result["error"]
+
+    graph_status = manager.get_status()["graphs"][0]
+    assert graph_status["status"] == "degraded"
+    assert graph_status["last_error"]
+    assert graph_status["cached_nodes"] == 1
+    assert node_events == []
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_accepts_an_explicit_empty_node_list(monkeypatch):
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, {"nodes": [], "edges": []}))
     _sealed(monkeypatch, remote)
 
     node_events = []
