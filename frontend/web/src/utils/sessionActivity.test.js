@@ -545,12 +545,18 @@ describe('describeActivity', () => {
     }
 
     it('does not report renaming a LOCKED group as an unlock', () => {
+      // The case this whole change exists for. It used to report "Unlocked",
+      // because the group translators dropped `locked` and the write-back
+      // therefore always said false. PR #483 made them carry it, so the flag
+      // now survives the round trip and the rename reads as a rename either
+      // way — the assertion below pins that the lock is preserved, where it
+      // once pinned the clobber.
       const r = groupEdit(serverGroup({ label: 'Team', locked: true }), (g) => ({
         ...g,
         label: 'Team B',
       }));
       expect(r.before.locked).toBe(true);
-      expect(r.after.locked).toBe(false); // the translators really do drop it
+      expect(r.after.locked).toBe(true);
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
 
@@ -566,62 +572,51 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
-    it('does not report a group z that the translators drop as a layer change', () => {
-      // The group pair carries no `z`, so the write-back always yields 0.
+    it('does not report renaming a group carrying a z as a layer change', () => {
+      // `z` survives the round trip too (PR #483), so a rename is a rename.
       const r = groupEdit(serverGroup({ label: 'Team', z: 4 }), (g) => ({ ...g, label: 'B' }));
       expect(r.before.z).toBe(4);
-      expect(r.after.z).toBe(0);
+      expect(r.after.z).toBe(4);
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
 
     it.each([
       { edit: 'locking', field: 'locked', from: false, to: true, expected: 'locked' },
+      { edit: 'unlocking', field: 'locked', from: true, to: false, expected: 'unlocked' },
       { edit: 'raising', field: 'z', from: 0, to: 5, expected: 'raised' },
-      { edit: 'rotating', field: 'rotation', from: 0, to: 45, expected: 'rotated' },
-    ])('reports an agent $edit a group, since it moves AWAY from the dropped default', (c) => {
-      // The asymmetry the browserWriteBack docstring describes, pinned so the
-      // comment cannot drift back to the easier and wrong "these fields are
-      // ignored for groups". The write-back always states the default, so a
-      // change away from it is visible...
-      const at = (v) =>
-        c.field === 'rotation'
-          ? serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } })
-          : serverGroup({ [c.field]: v });
+      { edit: 'lowering to zero', field: 'z', from: 5, to: 0, expected: 'lowered' },
+    ])('reports an agent $edit a group in both directions', (c) => {
+      // Once the translators carry a field, the write-back states the real
+      // value rather than a default, so the asymmetry disappears for it —
+      // "Unlocked" and "Lowered" can now be reported truly for a group. The
+      // classifier needed no change for this: it reads whatever the round trip
+      // preserves, so an upstream translator fix improves it for free. Pinned
+      // in both directions so a regression in either is caught here.
+      const at = (v) => serverGroup({ [c.field]: v });
       expect(
         describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
           .key
       ).toBe(`history.desc.annotation_updated_${c.expected}`);
     });
 
-    it.each([
-      { edit: 'unlocking', field: 'locked', from: true, to: false },
-      { edit: 'lowering to zero', field: 'z', from: 5, to: 0 },
-      { edit: 'unrotating', field: 'rotation', from: 45, to: 0 },
-    ])('under-reports an agent $edit a group, which it cannot distinguish', (c) => {
-      // ...and a change TO the default is indistinguishable from the
-      // translators dropping the field, so it is not reported. Unlocking is
-      // the one that matters: this classifier can say "Locked" truly but can
-      // never say "Unlocked" truly for a group. Under-reporting is the safe
-      // direction; the real fix is in the group translators, logged
-      // separately.
-      const at = (v) =>
-        c.field === 'rotation'
-          ? serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } })
-          : serverGroup({ [c.field]: v });
+    it('still under-reports an agent unrotating a group, the one field still dropped', () => {
+      // Rotation is the remaining asymmetry: the group translators carry
+      // `locked` and `z` but not rotation, so the write-back always says 0. A
+      // change away from 0 is visible; a change back to it is not
+      // distinguishable from the drop, so it reads as a plain update. Safe
+      // direction, and the same shape the other two had before PR #483.
+      const at = (v) => serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } });
       expect(
-        describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
-          .key
+        describeActivity(record({ op: 'annotation_updated', before: at(0), after: at(45) })).key
+      ).toBe('history.desc.annotation_updated_rotated');
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(45), after: at(0) })).key
       ).toBe('history.desc.annotation_updated_generic');
     });
 
-    it('does not report renaming a group as a layer or rotation change', () => {
-      // `z` and rotation are dropped by the group translators the same way.
-      const withZ = groupEdit(serverGroup({ label: 'Team', z: 3 }), (g) => ({
-        ...g,
-        label: 'Team B',
-      }));
-      expect(describeActivity(withZ).key).toBe('history.desc.annotation_updated_text');
-
+    it('does not report renaming a rotated group as a rotation change', () => {
+      // Rotation is still dropped, so a rename of a rotated group must not
+      // surface as an unrotate.
       const rotated = serverGroup({ label: 'Team' });
       rotated.geometry = { ...rotated.geometry, rotation: 45 };
       expect(describeActivity(groupEdit(rotated, (g) => ({ ...g, label: 'B' }))).key).toBe(

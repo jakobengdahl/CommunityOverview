@@ -94,22 +94,22 @@ function sameValue(a, b) {
  * Groups take the other translator pair — they are not overlays, and
  * `useSharedSession` mirrors them through `annotationsToGroups` — which is
  * exactly why they were the kind still producing the original false
- * "Unlocked" after two rounds of per-field fixes. That pair carries neither
- * `locked` nor `z` nor rotation, so the write-back for a group always states
- * the default: `locked: false`, `z: 0`, `rotation: 0`.
+ * "Unlocked" after two rounds of per-field fixes.
  *
- * That makes a group's reading of those three fields ASYMMETRIC, which is
- * worth being precise about because `locked` is the field this whole
- * classifier exists to get right. A change TO the dropped default is
- * indistinguishable from the translators dropping it, so it is not reported;
- * a change AWAY from it is. Concretely: locking a group reports "Locked",
- * but unlocking one can never report "Unlocked" — it reads as a plain
- * update. Likewise a group raised off `z: 0` reports the layer change, while
- * one sent back down to `z: 0` does not. Under-reporting is the safe
- * direction of the two, but it is not "these fields are ignored", and a
- * follow-up scoped from that misreading would be scoped wrong. The real fix
- * is to carry the three fields through the group translators, which is
- * logged separately.
+ * Whatever that pair does not carry, the write-back states as the default,
+ * and reading such a field becomes ASYMMETRIC: a change AWAY from the default
+ * is visible, a change TO it is indistinguishable from the drop and so reads
+ * as a plain update. Under-reporting is the safe direction, but it is not
+ * "the field is ignored", and a follow-up scoped from that misreading would
+ * be scoped wrong. Today only `rotation` is in that position — a group
+ * rotated off 0 reports it, one rotated back to 0 does not.
+ *
+ * `locked` and `z` were there too until the translators were fixed to carry
+ * them, at which point this module started reporting a group's lock and layer
+ * correctly in both directions with no change of its own. That is the point
+ * of reconstructing the write-back rather than enumerating known rewrites:
+ * what the round trip preserves is what gets reported, so the classifier
+ * tracks the translators instead of drifting from them.
  *
  * Returns null when the annotation cannot be round-tripped — reachable by a
  * `before` snapshot written by an older build, carrying a kind this one
