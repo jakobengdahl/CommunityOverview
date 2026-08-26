@@ -1129,12 +1129,16 @@ class TestFreehandOverGenericTools:
     ):
         """A `freehand` stroke's shape is entirely in its `points`; unlike
         `frame`/`shape`/`image` it carries no box the renderer scales to. A
-        w/h patch is therefore accepted and reported back, but changes
-        nothing a viewer sees — the same "stored, never drawn" shape as
-        freehand's rotation above, and documented alongside it in
-        docs/ANNOTATION_CONTRACT.md. Pinned so a later resize *implementation*
-        has to update the contract rather than silently changing what a
-        stored w/h means.
+        w/h patch is therefore accepted and echoed back by the server while
+        changing nothing a viewer sees — documented under Canvas rendering in
+        docs/ANNOTATION_CONTRACT.md.
+
+        This pins the *server* half only. What a stored w/h means end to end
+        is not yet stable: the canvas translator drops it on the way back, so
+        the next browser autosave overwrites it with the model default
+        (`smallfix-annotation-freehand-geometry-clobber`). Fixing that, or
+        implementing a real resize on top of it, has to amend the contract
+        rather than quietly reinterpret the w/h existing strokes carry.
         """
         tools_map, manager = annotation_tools
         session = manager.create_session()
