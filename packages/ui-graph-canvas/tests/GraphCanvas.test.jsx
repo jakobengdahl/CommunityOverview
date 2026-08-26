@@ -27,6 +27,8 @@ vi.mock('reactflow', () => {
             data-animated={String(!!edge.animated)}
             data-stroke={edge.style?.stroke ?? ''}
             data-stroke-width={String(edge.style?.strokeWidth ?? '')}
+            data-stroke-opacity={String(edge.style?.strokeOpacity ?? '')}
+            data-edge-opacity-var={String(edge.style?.['--edge-opacity'] ?? '')}
             data-marker-end={edge.markerEnd ? String(edge.markerEnd.type) : ''}
             data-marker-start={edge.markerStart ? String(edge.markerStart.type) : ''}
             onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
@@ -127,6 +129,34 @@ describe('GraphCanvas', () => {
     expect(edge).toHaveAttribute('data-marker-end', '');
     expect(edge).toHaveAttribute('data-marker-start', '');
     expect(edge.className).toBe('react-flow__edge');
+  });
+
+  // task-session-focus-dimming-controls: a dimmed edge's opacity must reach
+  // the rendered edge both as a plain inline style (the non-animated case)
+  // and as the `--edge-opacity` custom property the rf-edge-pulse keyframe
+  // reads via calc() — a CSS animation overrides a plain inline style for
+  // the property it drives, so without this second copy an animated edge's
+  // dim/edge-intensity opacity would be silently cancelled by its own pulse.
+  it('carries the resolved edge opacity both as stroke-opacity and as --edge-opacity', () => {
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        edgeIntensity={0.6}
+        dimmedEdgeIds={['edge-1']}
+      />
+    );
+    const edge = screen.getByTestId('edge-edge-1');
+    // Dimmed at intensity 0.6 caps at the dimmed ceiling (0.25).
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.25');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.25');
+  });
+
+  it('renders a non-dimmed edge at the plain edge-intensity baseline', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} edgeIntensity={0.6} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.6');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.6');
   });
 
   // Endpoint-presence contract behind edge recovery on reload: when a load hands

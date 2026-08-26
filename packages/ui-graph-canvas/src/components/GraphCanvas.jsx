@@ -44,6 +44,7 @@ import {
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
   resolveEdgeVisuals,
+  resolveEdgeOpacity,
 } from '../utils/constants';
 import {
   OVERLAY_TYPES,
@@ -193,6 +194,14 @@ function GraphCanvasInner({
   highlightedNodeIds = [],
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden*) but render at reduced prominence.
+  // edgeIntensity is the session's global baseline opacity for every
+  // non-dimmed edge (1 = full prominence); a dimmed edge always renders
+  // below that baseline. Never a graph edit — visualization-session state.
+  dimmedNodeIds = [],
+  dimmedEdgeIds = [],
+  edgeIntensity = 1,
   nodeMarks = {},
   pulsedNodeIds = {},
   clearGroupsFlag = false,
@@ -205,6 +214,13 @@ function GraphCanvasInner({
   onHideMultiple,
   onHideEdge,
   onDeleteEdge,
+  // Bulk dim/restore primitives (arrays of node/edge ids). A single-object
+  // context-menu action passes a one-element array; a multi-selection or an
+  // incident-edges action passes the whole set in one call.
+  onDimNodes,
+  onRestoreNodes,
+  onDimEdges,
+  onRestoreEdges,
   onEditEdge,
   onSetEdgeType,
   onConnect: onConnectCallback,
@@ -310,6 +326,14 @@ function GraphCanvasInner({
     organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
+    dimNode: 'Dim node',
+    restoreNode: 'Restore node',
+    dimSelected: 'Dim selected',
+    restoreSelected: 'Restore selected',
+    dimIncidentEdges: 'Dim incident edges',
+    restoreIncidentEdges: 'Restore incident edges',
+    dimEdge: 'Dim connection',
+    restoreEdge: 'Restore connection',
     changeType: 'Change type',
     generalConnection: 'General connection',
     addNote: 'Add note',
@@ -814,6 +838,7 @@ function GraphCanvasInner({
   const reactFlowEdges = useMemo(() => {
     return visibleEdges.map((edge) => {
       const visuals = resolveEdgeVisuals(edge.metadata);
+      const opacity = resolveEdgeOpacity(edgeIntensity, dimmedEdgeIds.includes(edge.id));
       return {
         id: edge.id,
         source: edge.source,
@@ -822,7 +847,11 @@ function GraphCanvasInner({
         type: 'floating',
         animated: visuals.animated,
         selectable: true,
-        style: visuals.style,
+        // `--edge-opacity` mirrors `strokeOpacity` as a CSS custom property:
+        // the rf-edge-pulse keyframe (GraphCanvas.css) reads it via calc() so
+        // an animated edge's pulse scales relative to this opacity instead of
+        // the animation silently overriding it back to a fixed 1/0.35.
+        style: { ...visuals.style, strokeOpacity: opacity, '--edge-opacity': opacity },
         markerStart: visuals.markerStart,
         markerEnd: visuals.markerEnd,
         className: visuals.className,
@@ -831,7 +860,7 @@ function GraphCanvasInner({
         labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
       };
     });
-  }, [visibleEdges]);
+  }, [visibleEdges, dimmedEdgeIds, edgeIntensity]);
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
@@ -849,6 +878,7 @@ function GraphCanvasInner({
           nodeType: node.type,
           color: (nodeColorResolver || getNodeColor)(node.type),
           isHighlighted: highlightedNodeIds.includes(node.id),
+          isDimmed: dimmedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
@@ -893,6 +923,7 @@ function GraphCanvasInner({
     onExpand,
     onEdit,
     highlightedNodeIds,
+    dimmedNodeIds,
     nodeMarks,
     pulsedNodeIds,
     remoteSelections,
@@ -1917,18 +1948,28 @@ function GraphCanvasInner({
     [onNodeDoubleClickCallback]
   );
 
-  // Edge context menu handler
-  const onEdgeContextMenu = useCallback((event, edge) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setNodeContextMenu(null);
-    setMultiNodeContextMenu(null);
-    setEdgeContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      edge: edge,
-    });
-  }, []);
+  // Edge context menu handler. When the right-clicked edge is part of a
+  // larger multi-edge selection, dim/restore (and the future bulk actions
+  // this same array shape supports) apply to the whole selection — mirroring
+  // onNodeContextMenu's single-vs-multi-selection branch above — rather than
+  // silently acting on just the one edge under the cursor.
+  const onEdgeContextMenu = useCallback(
+    (event, edge) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setNodeContextMenu(null);
+      setMultiNodeContextMenu(null);
+      const isMultiSelected =
+        selectedEdges.length > 1 && selectedEdges.some((e) => e.id === edge.id);
+      setEdgeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        edge: edge,
+        edgeIds: isMultiSelected ? selectedEdges.map((e) => e.id) : [edge.id],
+      });
+    },
+    [selectedEdges]
+  );
 
   // Reuses the same context-menu handlers a desktop right-click calls,
   // instead of duplicating their menu-opening logic, for a touch long-press.
@@ -3059,6 +3100,13 @@ function GraphCanvasInner({
           selectNodesByType={selectNodesByType}
           onSelectRelated={selectRelatedNodes}
           onViewHistory={onViewNodeHistory}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          graphEdges={inputEdges}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setNodeContextMenu(null)}
         />
 
@@ -3072,6 +3120,13 @@ function GraphCanvasInner({
           onDeleteMultiple={onDeleteMultiple}
           selectNodesByType={selectNodesByType}
           onOrganize={organizeSelection}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          graphEdges={inputEdges}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setMultiNodeContextMenu(null)}
         />
 
@@ -3083,6 +3138,9 @@ function GraphCanvasInner({
           onEditEdge={onEditEdge}
           onHideEdge={onHideEdge}
           onDeleteEdge={onDeleteEdge}
+          dimmedEdgeIds={dimmedEdgeIds}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setEdgeContextMenu(null)}
         />
 

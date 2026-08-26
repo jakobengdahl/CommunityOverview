@@ -58,6 +58,9 @@ function App() {
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
+    dimmedNodeIds,
+    dimmedEdgeIds,
+    edgeIntensity,
     clearGroupsFlag,
     canvasBaselineEpoch,
     addNodesToVisualization,
@@ -66,6 +69,13 @@ function App() {
     toggleEdgeVisibility,
     setHiddenNodeIds,
     setHiddenEdgeIds,
+    dimNodes,
+    restoreNodes,
+    setDimmedNodeIds,
+    dimEdges,
+    restoreEdges,
+    setDimmedEdgeIds,
+    setEdgeIntensity,
     stats,
     setStats,
     llmAvailable,
@@ -298,6 +308,29 @@ function App() {
           setHiddenEdgeIds((store.hiddenEdgeIds || []).filter((id) => !drop.has(id)));
           break;
         }
+        case 'nodes_dimmed':
+          setDimmedNodeIds(
+            Array.from(new Set([...(store.dimmedNodeIds || []), ...(op.node_ids || [])]))
+          );
+          break;
+        case 'nodes_undimmed': {
+          const drop = new Set(op.node_ids || []);
+          setDimmedNodeIds((store.dimmedNodeIds || []).filter((id) => !drop.has(id)));
+          break;
+        }
+        case 'edges_dimmed':
+          setDimmedEdgeIds(
+            Array.from(new Set([...(store.dimmedEdgeIds || []), ...(op.edge_ids || [])]))
+          );
+          break;
+        case 'edges_undimmed': {
+          const drop = new Set(op.edge_ids || []);
+          setDimmedEdgeIds((store.dimmedEdgeIds || []).filter((id) => !drop.has(id)));
+          break;
+        }
+        case 'edge_intensity_set':
+          if (typeof op.value === 'number') setEdgeIntensity(op.value);
+          break;
         case 'node_moved':
           // Merge, don't replace: a burst of moves in one tick must not lose all
           // but the last node's position.
@@ -380,6 +413,9 @@ function App() {
       updateEdgeData,
       setHiddenNodeIds,
       setHiddenEdgeIds,
+      setDimmedNodeIds,
+      setDimmedEdgeIds,
+      setEdgeIntensity,
       setRemotePositions,
       setAnimatedLayout,
       setRemoteAnnotationOps,
@@ -880,6 +916,42 @@ function App() {
     [toggleEdgeVisibility, showNotification]
   );
 
+  // Dim/restore actions (task-session-focus-dimming-controls): session-local
+  // focus, never a graph edit. Bulk primitives — a single node/edge context
+  // menu action passes a one-element array, a multi-selection or an
+  // incident-edges action passes the whole set.
+  const handleDimNodes = useCallback(
+    (nodeIds) => {
+      dimNodes(nodeIds);
+      showNotification('info', t('history.desc.nodes_dimmed', { count: nodeIds.length }));
+    },
+    [dimNodes, showNotification, t]
+  );
+
+  const handleRestoreNodes = useCallback(
+    (nodeIds) => {
+      restoreNodes(nodeIds);
+      showNotification('info', t('history.desc.nodes_undimmed', { count: nodeIds.length }));
+    },
+    [restoreNodes, showNotification, t]
+  );
+
+  const handleDimEdges = useCallback(
+    (edgeIds) => {
+      dimEdges(edgeIds);
+      showNotification('info', t('history.desc.edges_dimmed', { count: edgeIds.length }));
+    },
+    [dimEdges, showNotification, t]
+  );
+
+  const handleRestoreEdges = useCallback(
+    (edgeIds) => {
+      restoreEdges(edgeIds);
+      showNotification('info', t('history.desc.edges_undimmed', { count: edgeIds.length }));
+    },
+    [restoreEdges, showNotification, t]
+  );
+
   // Callback: Delete edge (from backend and visualization)
   const handleDeleteEdge = useCallback(
     async (edgeId) => {
@@ -1076,6 +1148,9 @@ function App() {
         positions,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
+        dimmed_node_ids: state.dimmedNodeIds || [],
+        dimmed_edge_ids: state.dimmedEdgeIds || [],
+        edge_intensity: typeof state.edgeIntensity === 'number' ? state.edgeIntensity : 1.0,
         annotation_schema_version: annotationDocument.schema_version,
         annotations: annotationDocument.annotations,
       };
@@ -1273,7 +1348,16 @@ function App() {
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, scheduleAutoSave]);
+  }, [
+    nodes,
+    edges,
+    hiddenNodeIds,
+    hiddenEdgeIds,
+    dimmedNodeIds,
+    dimmedEdgeIds,
+    edgeIntensity,
+    scheduleAutoSave,
+  ]);
 
   // Callback: Create group (called when group is created inside GraphCanvas).
   // A group box is itself an annotation kind (ANNOTATION_TYPES includes
@@ -1586,6 +1670,9 @@ function App() {
     addNodesToVisualization,
     setHiddenNodeIds,
     setHiddenEdgeIds,
+    setDimmedNodeIds,
+    setDimmedEdgeIds,
+    setEdgeIntensity,
     setPendingGroups,
     setPendingAnnotations,
     ensureSyncConnected,
@@ -1997,6 +2084,9 @@ function App() {
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          edgeIntensity={edgeIntensity}
           nodeMarks={nodeMarks}
           pulsedNodeIds={pulsedNodeIds}
           clearGroupsFlag={clearGroupsFlag}
@@ -2008,6 +2098,10 @@ function App() {
           onHideMultiple={handleHideMultiple}
           onHideEdge={handleHideEdge}
           onDeleteEdge={handleDeleteEdge}
+          onDimNodes={handleDimNodes}
+          onRestoreNodes={handleRestoreNodes}
+          onDimEdges={handleDimEdges}
+          onRestoreEdges={handleRestoreEdges}
           onEditEdge={handleEditEdge}
           onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
@@ -2090,6 +2184,14 @@ function App() {
             organizeHint: t('context_menu.organize_hint'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
+            dimNode: t('context_menu.dim_node'),
+            restoreNode: t('context_menu.restore_node'),
+            dimSelected: t('context_menu.dim_selected'),
+            restoreSelected: t('context_menu.restore_selected'),
+            dimIncidentEdges: t('context_menu.dim_incident_edges'),
+            restoreIncidentEdges: t('context_menu.restore_incident_edges'),
+            dimEdge: t('context_menu.dim_edge'),
+            restoreEdge: t('context_menu.restore_edge'),
             changeType: t('context_menu.change_type'),
             generalConnection: t('context_menu.general_connection'),
             addNote: t('context_menu.add_note'),

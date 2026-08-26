@@ -31,6 +31,8 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
     setShowMinimap,
     nodePreviewEnabled,
     setNodePreviewEnabled,
+    edgeIntensity,
+    setEdgeIntensity,
     chatPanelOpen,
     toggleChatPanel,
     resetChatPanelToDefault,
@@ -148,6 +150,21 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <span>{t('menu.show_node_preview')}</span>
             <span className={`settings-dialog-toggle${nodePreviewEnabled ? ' active' : ''}`} />
           </button>
+          <div className="settings-dialog-field">
+            <label className="settings-dialog-field-label" htmlFor="settings-edge-intensity">
+              {t('menu.edge_intensity')}
+            </label>
+            <input
+              id="settings-edge-intensity"
+              type="range"
+              min="0.2"
+              max="1"
+              step="0.05"
+              value={edgeIntensity}
+              onChange={(e) => setEdgeIntensity(e.target.value)}
+            />
+            <p className="settings-dialog-field-hint">{t('menu.edge_intensity_hint')}</p>
+          </div>
           <button className="settings-dialog-menu-item" onClick={() => toggleChatPanel()}>
             <ChatDotsFill size={14} />
             <span>{t('menu.show_assistant_panel')}</span>
