@@ -293,8 +293,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       if (isStaleSessionEpoch(requestEpoch)) return;
 
-      console.log('[ChatPanel] Response:', response);
-
       const toolResult = response.toolResult;
 
       await applyToolResultSideEffects(toolResult);
