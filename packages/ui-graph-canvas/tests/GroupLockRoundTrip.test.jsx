@@ -44,6 +44,20 @@ vi.mock('reactflow', () => {
 
 // setNodes fires from several effects; apply every captured updater to the
 // given starting list and return the first result that contains a group.
+// setNodes fires from several effects and only one of them is the
+// remote-selection reconciler; find its result by the marker it clears rather
+// than by position, which is not stable.
+function groupAfterClaimReconcile(from) {
+  for (const call of hoisted.setNodes.mock.calls) {
+    const updater = call[0];
+    const result = typeof updater === 'function' ? updater(from) : updater;
+    if (!Array.isArray(result)) continue;
+    const group = result.find((n) => n?.type === 'group');
+    if (group && group.data?.remoteSelection === null) return group;
+  }
+  return null;
+}
+
 function producedGroups(from = []) {
   for (const call of hoisted.setNodes.mock.calls) {
     const updater = call[0];
@@ -77,9 +91,10 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(3);
-    // Mirrors overlayToFlowNode's `draggable: !locked`. Without it the lock is
-    // cosmetic: the menu refuses, but the box still moves and takes its
-    // members with it.
+    // Without this the lock is cosmetic: the menu refuses, but the box still
+    // moves and takes its members with it. Note groups deliberately do NOT
+    // mirror overlayToFlowNode's `draggable: !locked` — see the unlocked case
+    // below for why only the locked half is an explicit boolean.
     expect(group.draggable).toBe(false);
   });
 
@@ -121,6 +136,50 @@ describe('group lock/layer round trip through the canvas', () => {
     const [group] = producedGroups();
     expect(group.data.locked).toBe(true);
     expect(group.data.z).toBe(2);
+    expect(group.draggable).toBe(false);
+  });
+
+  // The remote-selection effect rewrites `draggable` for every annotation node
+  // that carries or carried a claim marker. Groups must come out of it the same
+  // way the builders make them, or the first collaborator to click a group and
+  // let go pins it draggable for the rest of the session — overriding the
+  // canvas-wide switch exactly as an explicit boolean from the builders would.
+  it('leaves an unlocked group deferring to the canvas switch after a claim is released', () => {
+    hoisted.seededNodes = [
+      {
+        id: 'g1',
+        type: 'group',
+        position: { x: 0, y: 0 },
+        data: {
+          label: 'Team',
+          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+        },
+        draggable: false,
+      },
+    ];
+    render(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    const group = groupAfterClaimReconcile(hoisted.seededNodes);
+    expect(group).not.toBeNull();
+    expect(group.draggable).toBeUndefined();
+  });
+
+  it('still pins a locked group after a claim is released', () => {
+    hoisted.seededNodes = [
+      {
+        id: 'g1',
+        type: 'group',
+        position: { x: 0, y: 0 },
+        data: {
+          label: 'Team',
+          locked: true,
+          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+        },
+        draggable: false,
+      },
+    ];
+    render(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    const group = groupAfterClaimReconcile(hoisted.seededNodes);
+    expect(group).not.toBeNull();
     expect(group.draggable).toBe(false);
   });
 

@@ -115,10 +115,10 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
-    // Backstop for the lock arriving while the input is open. The effect above
-    // normally closes the editor first, so this is rarely the path that runs —
-    // it stays because this is the branch that would otherwise write, and a
-    // guard on a write is worth keeping even when the reachable case is small.
+    // Backstop for the lock arriving while the input is open. The render-phase
+    // adjustment above closes the editor first, so no ordinary path reaches
+    // this — it stays because this is the branch that would otherwise write,
+    // and a guard on a write is cheap next to a rename nobody asked for.
     if (locked) {
       setEditedLabel(data.label || 'Group');
       return;

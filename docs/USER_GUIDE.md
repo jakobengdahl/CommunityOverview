@@ -194,8 +194,9 @@ the underlying data model.
 A group box can be locked, the same way an annotation can. A locked group stays where it
 is: you cannot drag it, resize it, rename it by double-clicking, or recolour it, and
 **Delete Group** is not offered. Its right-click menu keeps just two actions — **Unlock**
-and **Hide Group** — because locking is meant to protect what a group contains rather than
-whether it is on screen. Choose **Unlock** to get the full menu back. Locking is done by an
+and **Hide Group** — because locking is meant to protect the group box itself rather than
+whether it is on screen. It does not lock the group's membership: dragging a node into or out
+of a locked group still works, so what the group holds can change even while the box cannot. Choose **Unlock** to get the full menu back. Locking is done by an
 assistant or an agent on your behalf, so a group you did not lock yourself may already be
 locked when you open a shared board.
 

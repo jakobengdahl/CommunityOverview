@@ -2445,9 +2445,10 @@ function GraphCanvasInner({
           // Two are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
-          // unlock or copy — the rule every annotation's context menu applies,
-          // `group`'s included as of this change. Delete never reaches a group
-          // anyway, because of the exclusion above.
+          // unlock or copy — the rule every overlay annotation's context menu
+          // applies. `group` honours the flag too but keeps Hide as a decided
+          // exception; either way Delete never reaches a group, because of the
+          // exclusion above.
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
@@ -2721,7 +2722,18 @@ function GraphCanvasInner({
         const marker = remoteSelections?.[n.id] ?? null;
         if (!marker && !n.data?.remoteSelection) return n;
         const nextData = { ...n.data, remoteSelection: marker };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        const draggable = isAnnotationDraggable({ ...n, data: nextData });
+        // A group that may be dragged carries no `draggable` key at all, so it
+        // keeps deferring to the canvas-wide `nodesDraggable` switch (see the
+        // group builders below). Writing an explicit `true` here would pin that
+        // decision for the rest of the session the first time a collaborator
+        // claimed the group and let go — leaving it draggable during a freehand
+        // stroke. Overlays keep the explicit boolean they are hydrated with.
+        return {
+          ...n,
+          data: nextData,
+          draggable: n.type === 'group' && draggable ? undefined : draggable,
+        };
       })
     );
   }, [remoteSelections, setNodes]);

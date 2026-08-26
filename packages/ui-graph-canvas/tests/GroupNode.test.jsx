@@ -266,6 +266,33 @@ describe('GroupNode locked context menu', () => {
     expect(notifyChange).not.toHaveBeenCalled();
   });
 
+  it('drops the abandoned draft, so a later unlock does not resurrect it', () => {
+    // Closing the input is not enough on its own: `editedLabel` is component
+    // state that outlives it. Without the reset, unlocking and double-clicking
+    // again pre-fills the input with the text the lock refused, and the next
+    // blur commits it as a rename nobody asked for.
+    const notifyChange = vi.fn();
+    const notifyRemoteLockedAttempt = vi.fn();
+    const unlockedData = { label: 'G', color: '#646cff' };
+    const { rerender } = renderGroup(unlockedData, notifyChange, notifyRemoteLockedAttempt);
+    const withData = (data) => (
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
+        <GroupNode id="group-1" data={data} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('G'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Abandoned' } });
+    rerender(withData(lockedData));
+    rerender(withData(unlockedData));
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.getByRole('textbox')).toHaveValue('G');
+    fireEvent.blur(screen.getByRole('textbox'));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
   it('surfaces the attempt instead of unlocking while another client holds the claim', () => {
     // The menu cannot be opened under a remote claim, so the unlock handler is
     // reached only if the claim arrives while the menu is already open. It must

@@ -942,7 +942,11 @@ the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
 this: it has no `rotation` at all, and its `z` is carried on the flow node's
 `data` rather than mapped to `zIndex`, because a group's paint order comes
 from the node array rather than from `zIndex` (see [Layer order](#layer-order)).
-Its `locked` behaves like every other kind's. This is the canvas UI's own
+Its `locked` refuses the same edits every other kind's does, with two
+differences worth knowing: the menu keeps Hide (below), and an unlocked group
+carries no `draggable` key at all rather than `draggable: true`, so it still
+defers to the canvas-wide `nodesDraggable` switch the way it did before it was
+lock-aware. This is the canvas UI's own
 enforcement of `locked` — the server never rejects a write to a locked
 annotation — but which *tool* performs that write differs by type:
 
