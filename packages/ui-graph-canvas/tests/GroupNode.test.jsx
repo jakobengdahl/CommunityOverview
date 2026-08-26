@@ -167,13 +167,38 @@ describe('GroupNode locked context menu', () => {
 
   const lockedData = { label: 'G', color: '#646cff', locked: true };
 
-  it('offers only unlock when the group is locked', () => {
+  // dec-annotation-lock-semantics (3): group is a deliberate exception to the
+  // baseline's "only unlock or copy" — it keeps Hide as well, because Hide is
+  // meant to be reversible while Delete is destructive. Colour and rename are
+  // edits and stay refused.
+  it('offers unlock and hide when the group is locked, but nothing that edits or destroys', () => {
     renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /unlock/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /hide group/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
-    expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+  });
+
+  it('hides a locked group from its own menu', () => {
+    const { notifyChange } = renderGroup(lockedData);
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: /hide group/i }));
+    // Hide currently runs removeGroupKeepChildren, the same handler Delete
+    // runs: the group leaves the canvas and a delete is published. That is
+    // what the code does today, so it is what this asserts — the decision's
+    // premise that Hide is reversible is tracked as its own fix, and this
+    // case is where it will have to change when that lands.
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    const remaining = updater([
+      { id: 'group-1', data: lockedData, position: { x: 0, y: 0 } },
+      { id: 'n1', parentId: 'group-1', position: { x: 5, y: 5 } },
+    ]);
+    expect(remaining.map((n) => n.id)).toEqual(['n1']);
+    // The member survives, re-based to absolute coordinates and un-parented.
+    expect(remaining[0].parentId).toBeUndefined();
+    expect(notifyChange).toHaveBeenCalledWith('delete');
   });
 
   it('unlocks the group and publishes the change', () => {
@@ -204,6 +229,7 @@ describe('GroupNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.queryByRole('button', { name: /unlock/i })).toBeNull();
     expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /hide group/i })).toBeInTheDocument();
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
   });
 

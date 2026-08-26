@@ -197,9 +197,8 @@ function GroupNode({ id, data, selected }) {
     removeGroupKeepChildren();
   };
 
-  // The only action a locked group's context menu offers (besides the
-  // capability baseline's "copy", which has no GUI action yet at all) —
-  // matching every overlay kind, the last of which got this branch in PR #455.
+  // One of the two actions a locked group's context menu offers, alongside
+  // Hide (see the menu below for why group departs from the baseline here).
   // Locking is MCP-only; this is the sole GUI path back out of it.
   const unlock = () => {
     if (remoteLocked) {
@@ -291,9 +290,26 @@ function GroupNode({ id, data, selected }) {
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
-              <button type="button" className="context-menu-unlock" onClick={unlock}>
-                🔓 {labels.unlock}
-              </button>
+              // Group is a deliberate, owner-decided exception to the
+              // capability baseline's "a locked object offers only unlock or
+              // copy": it keeps Hide Group as well. Colour and rename are
+              // edits and stay refused; Delete is destructive and stays
+              // refused. Hide is a group-only action no other kind has.
+              //
+              // Note for whoever touches this next: Hide and Delete currently
+              // run the identical handler (removeGroupKeepChildren), so Hide
+              // does remove the group and publish a delete, and the decision's
+              // premise that it is reversible does not hold in this code yet.
+              // Rendering it here is what was decided; making it reversible is
+              // tracked separately.
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <button className="context-menu-action" onClick={handleHideGroup}>
+                  👁️ Hide Group
+                </button>
+              </>
             ) : (
               <>
                 <div className="context-menu-title">Group Color</div>

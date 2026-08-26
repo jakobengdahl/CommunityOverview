@@ -214,20 +214,39 @@ overlay is skipped and the user is told to unlock it first, which closes the
 one path that could destroy a locked *overlay* without unlocking it. It is
 kind-agnostic, so it needs no per-component change.
 
-`group` now implements the same baseline. It was the one exception until its
-translators started carrying `locked`: the flag was persisted server-side
-(`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
-the way to the canvas, so `GroupNode` never saw it and a locked group box
-still showed its full colour/hide/delete menu with no way back out of the
-lock. A locked group now offers only unlock; its resize handles and drag are
-withheld the same way a locked overlay's are, and its label cannot be renamed
-by double-clicking the header. That last guard goes one step further than the
+`group` now honours the flag, with one deliberate exception to the baseline.
+It honoured it nowhere until its translators started carrying `locked`: the
+flag was persisted server-side (`create_group_annotation` takes it) but
+dropped in `annotationsToGroups` on the way to the canvas, so `GroupNode`
+never saw it and a locked group box still showed its full colour/hide/delete
+menu with no way back out of the lock. A locked group's resize handles and
+drag are now withheld the same way a locked overlay's are, its label cannot be
+renamed by double-clicking the header, and its colour swatches and Delete
+Group are out of reach. The rename guard goes one step further than the
 overlay kinds, whose double-click text editors still refuse only a live remote
 claim and not the persisted flag — the group's behaviour is the one this
 baseline describes, and the overlays' is a tracked gap. The keyboard rule still
 does not reach a group — `Delete` skips them entirely, so their children stay
 correctly parented — and hands that job to the group's own menu, which now
 honours the flag.
+
+**The exception: a locked group's menu also keeps Hide Group**, so it offers
+two actions rather than the baseline's one. This is a product decision, not an
+oversight: the lock is meant to protect an annotation's content, not its
+visibility, so a destructive Delete is refused while a reversible Hide is not.
+Hide is a group-only action; no other kind has it, so no other kind is
+affected.
+
+One caveat a reader of the paragraph above would otherwise be misled by, and
+which the decision's own wording assumes away: **Hide is not currently
+reversible.** `handleHideGroup` and `handleDeleteGroup` in `GroupNode.jsx` run
+the identical handler, `removeGroupKeepChildren`, which takes the group off
+the canvas and publishes `notifyChange('delete')`; there is no hidden-group
+state anywhere in the codebase to restore from. So today Hide removes a locked
+group exactly as Delete would, and the only thing standing between a locked
+group and destruction is which button the user picks. Closing that gap — by
+making Hide genuinely reversible — is tracked separately; until it lands, this
+exception is wider in practice than it reads.
 
 What `group` still lacks is the layer row, not the lock: see
 [Layer order](#layer-order) above. Its `z` is carried through the same
