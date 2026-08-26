@@ -32,7 +32,7 @@ describe('ArrowNode locked context menu', () => {
 
   const lockedData = { dx: 100, dy: 0, locked: true };
 
-  it('offers only unlock when the line is locked', () => {
+  it('hides recolour and delete controls when the line is locked', () => {
     render(<ArrowNode id="a1" type="arrow" data={lockedData} selected={false} />);
     openMenu();
     expect(screen.getByText(/Unlock/)).toBeInTheDocument();
@@ -79,12 +79,13 @@ describe('ArrowNode locked context menu', () => {
     expect(updated.draggable).toBe(false);
   });
 
-  it('offers the full menu when the line is not locked', () => {
+  it('keeps recolour and delete controls available when the line is not locked', () => {
     render(<ArrowNode id="a1" type="arrow" data={{ dx: 100, dy: 0 }} selected={false} />);
     openMenu();
     expect(screen.queryByText(/Unlock/)).toBeNull();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
     expect(document.querySelector('.context-menu-colors')).toBeTruthy();
+    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
   });
 
   it('surfaces the attempt instead of unlocking while another client holds the claim', () => {
