@@ -68,7 +68,10 @@ export function useSyncConnection(sessionId) {
             syncHandlersRef.current.onReady?.(...a);
           },
           onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
-          onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
+          onRemoteOps: (...a) => {
+            if (syncRef.current?.sessionId !== targetId) return;
+            syncHandlersRef.current.onRemoteOps?.(...a);
+          },
           onPresence: (...a) => syncHandlersRef.current.onPresence?.(...a),
           onSelections: (...a) => syncHandlersRef.current.onSelections?.(...a),
           onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
