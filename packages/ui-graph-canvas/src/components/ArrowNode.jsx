@@ -18,7 +18,28 @@ import './ArrowNode.css';
  * Arrows never anchor to other arrows. Stored in the session's annotation list
  * (kind: "arrow").
  */
-const ARROW_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+// Black, because a connector has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// line drawn without choosing a colour is invisible, so the tool reads as
+// broken rather than as mis-coloured. Same value and same fix shape as
+// FreehandAnnotationNode's DEFAULT_FREEHAND_COLOR — the other kind whose
+// whole interaction is "draw and see a line". Not exported: unlike freehand,
+// the canvas creates an arrow with `color: undefined` and leaves the fallback
+// below as the single source, so there is no second copy to keep in step.
+const DEFAULT_ARROW_COLOR = '#111827';
+
+// DEFAULT_ARROW_COLOR leads so the picker can always return a line to the
+// colour it was created with; '#e6edf3' stays available for a dark background.
+const ARROW_COLORS = [
+  DEFAULT_ARROW_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
 const PAD = 12;
 
 function ArrowNode({ id, data, selected }) {
@@ -197,7 +218,7 @@ function ArrowNode({ id, data, selected }) {
 
   const dx = Number(data.dx ?? 160);
   const dy = Number(data.dy ?? 0);
-  const color = data.color || ARROW_COLORS[0];
+  const color = data.color || DEFAULT_ARROW_COLOR;
   const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
