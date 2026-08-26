@@ -191,6 +191,20 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
+A group box can be locked, the same way an annotation can. A locked group stays where it
+is: you cannot drag it, resize it, rename it by double-clicking, or recolour it, and
+**Delete Group** is not offered. Its right-click menu keeps just two actions — **Unlock**
+and **Hide Group** — because locking is meant to protect the group box itself rather than
+whether it is on screen. It does not lock the group's membership: dragging a node into or
+out of a locked group still works, so what the group holds can change even while the box
+cannot. Choose **Unlock** to get the full menu back. Locking is done by an assistant or an
+agent on your behalf, so a group you did not lock yourself may already be locked when you
+open a shared board.
+
+One thing to know before you use **Hide Group** on a locked group: hiding a group currently
+removes the box and releases the nodes inside it, and there is no "unhide" — you would have
+to draw the group again. Treat it as you would Delete until that changes.
+
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
 

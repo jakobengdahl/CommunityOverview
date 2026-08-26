@@ -1902,6 +1902,11 @@ function GraphCanvasInner({
           position: g.position,
           style: g.style,
           color: g.data.color,
+          // Re-emitted so a value that arrived from the server survives the
+          // canvas leg. Dropping either here is what made a locked group's
+          // flag revert on the next autosave, whatever the translators did.
+          z: g.data.z ?? 0,
+          locked: Boolean(g.data.locked),
         })),
       annotations: viewNodes
         .filter((n) => OVERLAY_TYPES.has(n.type))
@@ -2440,9 +2445,10 @@ function GraphCanvasInner({
           // Two are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
-          // unlock or copy — the rule every *overlay* annotation's context menu
-          // applies. `group`'s menu ignores that flag, but the exclusion above
-          // means Delete never reaches a group to begin with.
+          // unlock or copy — the rule every overlay annotation's context menu
+          // applies. `group` honours the flag too but keeps Hide as a decided
+          // exception; either way Delete never reaches a group, because of the
+          // exclusion above.
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
@@ -2545,8 +2551,20 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
+          // A locked group box stays selectable but cannot be dragged; its
+          // members are separate nodes and keep their own draggability.
+          // `undefined` rather than `true` when unlocked, deliberately:
+          // ReactFlow resolves `node.draggable || (nodesDraggable &&
+          // typeof node.draggable === 'undefined')`, so an explicit boolean
+          // overrides the canvas-wide switch while `undefined` (present or
+          // absent alike) defers to it. A plain `!g.locked` would therefore
+          // keep an unlocked group draggable while a freehand stroke is being
+          // drawn, which is exactly what that switch turns off.
+          draggable: g.locked ? false : undefined,
         }));
       // Built from what survived, not the raw input. A group with a numeric id
       // — which JSON permits — is dropped by the filter but would land in a
@@ -2705,7 +2723,19 @@ function GraphCanvasInner({
         const marker = remoteSelections?.[n.id] ?? null;
         if (!marker && !n.data?.remoteSelection) return n;
         const nextData = { ...n.data, remoteSelection: marker };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        const draggable = isAnnotationDraggable({ ...n, data: nextData });
+        // A group that may be dragged resolves `draggable` to `undefined`, so
+        // it keeps deferring to the canvas-wide `nodesDraggable` switch — the
+        // same value the two group builders write. Writing an explicit `true`
+        // here would pin that decision for the rest of the session the first
+        // time a collaborator claimed the group and let go, leaving it
+        // draggable during a freehand stroke. Overlays keep the explicit
+        // boolean they are hydrated with.
+        return {
+          ...n,
+          data: nextData,
+          draggable: n.type === 'group' && draggable ? undefined : draggable,
+        };
       })
     );
   }, [remoteSelections, setNodes]);
@@ -2750,8 +2780,11 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
+          draggable: g.locked ? false : undefined,
         };
         const members = new Set(op.members || []);
         setNodes((nds) =>
