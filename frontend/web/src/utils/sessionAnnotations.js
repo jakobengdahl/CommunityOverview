@@ -15,6 +15,10 @@ function skippedAnnotation(annotation, error) {
   console.warn('Skipping an annotation this version cannot read:', annotation, error?.message);
 }
 
+function skippedOverlay(overlay, error) {
+  console.warn('Skipping an annotation overlay that cannot be saved:', overlay, error?.message);
+}
+
 function documentAnnotations(annotations) {
   if (annotations == null) return [];
   if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
@@ -49,13 +53,8 @@ export function legacyMetadataToAnnotationDocument(metadata = {}) {
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
     return normalizeAnnotationDocument(metadata.annotations, skip);
   }
-  // `skip` here is uniformity, not protection, and for a less comfortable
-  // reason than it first looks: nothing malformed reaches this call because
-  // `overlaysToAnnotations` — the other feeder — still THROWS on input it
-  // cannot read, so it fails before this line runs. That is the write path's
-  // strictness, logged separately, not a filter. Kept so the reporter is wired
-  // at every entry point, and said plainly, because an unreachable guard that
-  // reads as a live one is worse than none.
+  // Groups and overlays now both apply the same "skip the unreadable entry,
+  // keep the rest" rule before handing the composed document to the normalizer.
   return normalizeAnnotationDocument(
     [
       ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
@@ -342,59 +341,79 @@ export function annotationsToOverlays(annotations) {
 }
 
 export function overlaysToAnnotations(overlays) {
-  return (overlays || []).map((o) => {
-    if (o.kind === 'note') {
-      return createAnnotation({
+  const annotations = [];
+  for (const o of overlays || []) {
+    try {
+      if (!o || typeof o !== 'object') {
+        throw new Error('overlay entry is not an object');
+      }
+      if (o.kind === 'note') {
+        annotations.push(
+          createAnnotation({
+            id: o.id,
+            type: 'note',
+            position: o.position || { x: 0, y: 0 },
+            text: o.text || '',
+            color: o.color,
+            fontSize: o.fontSize,
+            size: o.size,
+            z: o.z ?? 0,
+            locked: Boolean(o.locked),
+            rotation: o.rotation ?? 0,
+          })
+        );
+        continue;
+      }
+      if (o.kind === 'label') {
+        annotations.push(
+          createAnnotation({
+            id: o.id,
+            type: 'label',
+            position: o.position || { x: 0, y: 0 },
+            text: o.text || '',
+            style: { color: o.color, fontSize: o.fontSize },
+            attachment: o.attachment,
+            z: o.z ?? 0,
+            locked: Boolean(o.locked),
+            rotation: o.rotation ?? 0,
+          })
+        );
+        continue;
+      }
+      if (o.kind === 'freehand') {
+        annotations.push(freehandOverlayToAnnotation(o));
+        continue;
+      }
+      if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
+        annotations.push(genericOverlayToAnnotation(o));
+        continue;
+      }
+      if (o.kind !== 'arrow') {
+        throw new Error(`Unsupported overlay kind: ${o.kind || '<missing>'}`);
+      }
+      // arrow: store both endpoints as absolute points (design 3.1)
+      const from = o.position || { x: 0, y: 0 };
+      const dx = o.dx ?? 160;
+      const dy = o.dy ?? 0;
+      const ann = {
         id: o.id,
-        type: 'note',
-        position: o.position || { x: 0, y: 0 },
-        text: o.text || '',
-        color: o.color,
-        fontSize: o.fontSize,
-        size: o.size,
+        type: 'line',
+        position: { x: from.x, y: from.y },
+        from: { x: from.x, y: from.y },
+        to: { x: from.x + dx, y: from.y + dy },
+        style: { color: o.color },
+        startArrow: o.startArrow ?? false,
+        endArrow: o.endArrow ?? true,
         z: o.z ?? 0,
         locked: Boolean(o.locked),
         rotation: o.rotation ?? 0,
-      });
+      };
+      if (o.startAnchor) ann.startAnchor = o.startAnchor;
+      if (o.endAnchor) ann.endAnchor = o.endAnchor;
+      annotations.push(createAnnotation(ann));
+    } catch (error) {
+      skippedOverlay(o, error);
     }
-    if (o.kind === 'label') {
-      return createAnnotation({
-        id: o.id,
-        type: 'label',
-        position: o.position || { x: 0, y: 0 },
-        text: o.text || '',
-        style: { color: o.color, fontSize: o.fontSize },
-        attachment: o.attachment,
-        z: o.z ?? 0,
-        locked: Boolean(o.locked),
-        rotation: o.rotation ?? 0,
-      });
-    }
-    if (o.kind === 'freehand') {
-      return freehandOverlayToAnnotation(o);
-    }
-    if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
-      return genericOverlayToAnnotation(o);
-    }
-    // arrow: store both endpoints as absolute points (design 3.1)
-    const from = o.position || { x: 0, y: 0 };
-    const dx = o.dx ?? 160;
-    const dy = o.dy ?? 0;
-    const ann = {
-      id: o.id,
-      type: 'line',
-      position: { x: from.x, y: from.y },
-      from: { x: from.x, y: from.y },
-      to: { x: from.x + dx, y: from.y + dy },
-      style: { color: o.color },
-      startArrow: o.startArrow ?? false,
-      endArrow: o.endArrow ?? true,
-      z: o.z ?? 0,
-      locked: Boolean(o.locked),
-      rotation: o.rotation ?? 0,
-    };
-    if (o.startAnchor) ann.startAnchor = o.startAnchor;
-    if (o.endAnchor) ann.endAnchor = o.endAnchor;
-    return createAnnotation(ann);
-  });
+  }
+  return annotations;
 }
