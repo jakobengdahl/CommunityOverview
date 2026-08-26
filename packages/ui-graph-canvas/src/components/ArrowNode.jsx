@@ -198,6 +198,7 @@ function ArrowNode({ id, data, selected }) {
   const dx = Number(data.dx ?? 160);
   const dy = Number(data.dy ?? 0);
   const color = data.color || ARROW_COLORS[0];
+  const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
 
@@ -277,7 +278,7 @@ function ArrowNode({ id, data, selected }) {
             markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
             markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
           />
-          {selected && !data.locked && !remoteLocked && (
+          {selected && !locked && !remoteLocked && (
             <>
               <circle
                 className="graph-arrow-handle nodrag"
@@ -313,7 +314,7 @@ function ArrowNode({ id, data, selected }) {
             className="graph-annotation-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            {data.locked ? (
+            {locked ? (
               <button type="button" className="context-menu-unlock" onClick={unlock}>
                 🔓 {labels.unlock}
               </button>
