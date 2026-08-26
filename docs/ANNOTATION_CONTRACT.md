@@ -219,8 +219,12 @@ translators started carrying `locked`: the flag was persisted server-side
 (`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
 the way to the canvas, so `GroupNode` never saw it and a locked group box
 still showed its full colour/hide/delete menu with no way back out of the
-lock. A locked group now offers only unlock, and its resize handles and drag
-are withheld the same way a locked overlay's are. The keyboard rule still
+lock. A locked group now offers only unlock; its resize handles and drag are
+withheld the same way a locked overlay's are, and its label cannot be renamed
+by double-clicking the header. That last guard goes one step further than the
+overlay kinds, whose double-click text editors still refuse only a live remote
+claim and not the persisted flag — the group's behaviour is the one this
+baseline describes, and the overlays' is a tracked gap. The keyboard rule still
 does not reach a group — `Delete` skips them entirely, so their children stay
 correctly parented — and hands that job to the group's own menu, which now
 honours the flag.
@@ -906,7 +910,11 @@ representation (`overlayToFlowNode`/`flowNodeToOverlay` in
 `packages/ui-graph-canvas/src/utils/annotations.js`, and the server-model
 translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
 the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
-`rotation` travels on the flow node's `data`. This is the canvas UI's own
+`rotation` travels on the flow node's `data`. `group` is partly apart from
+this: it has no `rotation` at all, and its `z` is carried on the flow node's
+`data` rather than mapped to `zIndex`, because a group's paint order comes
+from the node array rather than from `zIndex` (see [Layer order](#layer-order)).
+Its `locked` behaves like every other kind's. This is the canvas UI's own
 enforcement of `locked` — the server never rejects a write to a locked
 annotation — but which *tool* performs that write differs by type:
 
@@ -925,8 +933,12 @@ annotation — but which *tool* performs that write differs by type:
   notes — just through their own dedicated tool, not the generic three.
 - For `group`, none of the three apply — group annotations are not exposed
   through the generic tool set at all (`create_group_annotation`/
-  `update_group_members`/`delete_group_annotation` are its own dedicated set,
-  and none of them models `z`/`locked`/`rotation`).
+  `update_group_members`/`delete_group_annotation` are its own dedicated set).
+  `create_group_annotation` is the equivalent write: it takes `z` and `locked`
+  and `build_group_annotation` persists both, so a group can be created or
+  upserted locked and at a given layer, and like the note tools it does not
+  check the group's current `locked` value. Only `rotation` is genuinely
+  unmodelled for a group — `build_group_annotation` hardcodes it to 0.
 
 A translator that dropped any of `z`/`locked`/`rotation` would make the
 browser's own next autosave diff the annotation back to its `z: 0` /

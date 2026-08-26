@@ -524,6 +524,45 @@ class TestGraphServiceSavedViews:
         assert result["annotation_document"]["annotations"][0]["type"] == "group"
         assert result["annotations"][0]["kind"] == "note"
 
+    def test_get_saved_view_keeps_a_group_locked_when_derived_from_the_document(
+        self, service_with_view: GraphService
+    ):
+        """A locked group must not come back unlocked through the v1-only path.
+
+        This helper is the server-side twin of the browser's annotationsToGroups.
+        It used to build the legacy group dict without `z` or `locked`, so a view
+        whose metadata carries an annotation_document but no legacy `groups` list
+        handed the canvas an unlocked group at the base layer however it was
+        stored - the flag survived every other leg of the round trip and died
+        here.
+        """
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_schema_version"] = 1
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [
+                {
+                    "id": "group-1",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Locked area",
+                    "geometry": {"x": 0, "y": 0, "w": 300, "h": 200},
+                    "z": 3,
+                    "locked": True,
+                }
+            ],
+        }
+        view.metadata.pop("groups", None)
+        view.metadata.pop("annotations", None)
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert result["success"] is True
+        assert result["groups"][0]["locked"] is True
+        assert result["groups"][0]["z"] == 3
+
     def test_get_saved_view_derives_legacy_fields_from_v1_only_document(
         self, service_with_view: GraphService
     ):
@@ -568,6 +607,8 @@ class TestGraphServiceSavedViews:
                 "position": {"x": 10, "y": 20},
                 "style": {"width": 320, "height": 180},
                 "color": "#f5a623",
+                "z": 0,
+                "locked": False,
             }
         ]
         assert result["parentIds"] == {"actor-1": "group-1"}
