@@ -85,7 +85,7 @@ describe('ArrowNode locked context menu', () => {
     expect(screen.queryByText(/Unlock/)).toBeNull();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
     expect(document.querySelector('.context-menu-colors')).toBeTruthy();
-    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
+    expect(document.querySelectorAll('.color-button')).toHaveLength(7);
   });
 
   it('surfaces the attempt instead of unlocking while another client holds the claim', () => {
@@ -106,5 +106,68 @@ describe('ArrowNode locked context menu', () => {
     fireEvent.click(screen.getByText(/Unlock/));
     expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArrowNode default colour', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  // Reported from owner testing of the sibling kinds: a line drawn without
+  // choosing a colour was invisible. The default was a near-white picked for
+  // a dark canvas, so — as with freehand before it (PR #458) — the tool read
+  // as broken rather than as mis-coloured.
+  it('renders an unstyled line in a colour that is visible on a light canvas', () => {
+    const { container } = render(
+      <ArrowNode id="a-default" type="arrow" data={{ dx: 100, dy: 0 }} selected={false} />
+    );
+    // The painted line, not the transparent wide hit target drawn beneath it.
+    const stroke = [...container.querySelectorAll('line')].find(
+      (line) => line.getAttribute('stroke') !== 'transparent'
+    );
+    expect(stroke).toBeTruthy();
+    const value = stroke.getAttribute('stroke');
+    // Darkness, not the exact constant — the bug was "the default is too
+    // light", not "the default is not this string". Asserting the literal
+    // would pass again for the next near-white someone picks.
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    expect(luminance).toBeLessThan(0.3);
+  });
+
+  // The canvas creates an arrow with `color: undefined` (pinned by
+  // GraphCanvasAnnotations' "creates an arrow with default vector"), so this
+  // fallback is what a drawn line actually gets — unlike freehand, where a
+  // second explicit copy in the create path meant fixing the fallback alone
+  // changed nothing a user could see.
+  it('paints both arrowheads in the same fallback colour as the line', () => {
+    const { container } = render(
+      <ArrowNode
+        id="a-default"
+        type="arrow"
+        data={{ dx: 100, dy: 0, startArrow: true }}
+        selected={false}
+      />
+    );
+    const stroke = [...container.querySelectorAll('line')].find(
+      (line) => line.getAttribute('stroke') !== 'transparent'
+    );
+    const heads = [...container.querySelectorAll('marker path')];
+    expect(heads).toHaveLength(2);
+    for (const head of heads) {
+      expect(head.getAttribute('fill')).toBe(stroke.getAttribute('stroke'));
+    }
+  });
+
+  it('keeps the near-white colour available as a selectable swatch', () => {
+    render(<ArrowNode id="a-default" type="arrow" data={{ dx: 100, dy: 0 }} selected={false} />);
+    openMenu();
+
+    const swatches = [...document.querySelectorAll('.color-button')].map(
+      (button) => button.style.backgroundColor
+    );
+    expect(swatches).toContain('rgb(230, 237, 243)');
   });
 });
