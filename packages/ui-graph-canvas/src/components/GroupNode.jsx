@@ -25,10 +25,14 @@ function GroupNode({ id, data, selected }) {
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
-  const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live claim makes
   // this group's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  // The persisted flag, distinct from the remote claim above. It only started
+  // reaching this component when the group translators began carrying it;
+  // before that a group locked over MCP rendered its full menu.
+  const locked = Boolean(data?.locked);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -36,6 +40,22 @@ function GroupNode({ id, data, selected }) {
       inputRef.current.select();
     }
   }, [isEditing]);
+
+  // A lock can arrive from MCP or a collaborator while the rename input is
+  // open. Close it the moment that happens rather than letting the user keep
+  // typing into a field whose commit will refuse the text: the blur guard
+  // below is correct but silent, and silence there reads as the edit having
+  // been accepted. Adjusted during render rather than in an effect — React's
+  // documented pattern for state that must follow a prop, and the one that
+  // does not cost a second render pass.
+  const [lockedWhenLastRendered, setLockedWhenLastRendered] = useState(locked);
+  if (locked !== lockedWhenLastRendered) {
+    setLockedWhenLastRendered(locked);
+    if (locked && isEditing) {
+      setIsEditing(false);
+      setEditedLabel(data.label || 'Group');
+    }
+  }
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -76,6 +96,11 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
+    // A rename is an edit, so the persisted lock refuses it as the menu does.
+    // Silently, unlike the remote claim above: that one is somebody else
+    // holding the object right now and worth surfacing, while this one is a
+    // standing state the menu already explains with its Unlock button.
+    if (locked) return;
     setIsEditing(true);
   };
 
@@ -88,6 +113,14 @@ function GroupNode({ id, data, selected }) {
     if (remoteLocked) {
       setEditedLabel(data.label || 'Group');
       notifyRemoteLockedAttempt();
+      return;
+    }
+    // Backstop for the lock arriving while the input is open. The render-phase
+    // adjustment above closes the editor first, so no ordinary path reaches
+    // this — it stays because this is the branch that would otherwise write,
+    // and a guard on a write is cheap next to a rename nobody asked for.
+    if (locked) {
+      setEditedLabel(data.label || 'Group');
       return;
     }
     if (editedLabel.trim() && editedLabel.trim() !== data.label) {
@@ -181,6 +214,31 @@ function GroupNode({ id, data, selected }) {
     removeGroupKeepChildren();
   };
 
+  // One of the two actions a locked group's context menu offers, alongside
+  // Hide (see the menu below for why group departs from the baseline here).
+  // Locking is MCP-only; this is the sole GUI path back out of it.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    // `draggable` is recomputed here, not just cleared on `data`: no local
+    // path recomputes it, so leaving it false would unlock the menu while the
+    // box stayed pinned until reload. (A remote upsert-group rebuilds the node
+    // and the remote-selection effect recomputes the flag, but neither is
+    // reachable from a local unlock.) ArrowNode's patchData recomputes it for
+    // the same reason. `undefined`, not `true` — see the builders in
+    // GraphCanvas for why an explicit boolean is the wrong value here.
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === id ? { ...n, data: { ...n.data, locked: false }, draggable: undefined } : n
+      )
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
 
   return (
@@ -189,7 +247,7 @@ function GroupNode({ id, data, selected }) {
         minWidth={200}
         minHeight={150}
         onResizeEnd={() => notifyChange('geometry')}
-        isVisible={selected && !remoteLocked}
+        isVisible={selected && !remoteLocked && !locked}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
           width: 14,
@@ -250,23 +308,48 @@ function GroupNode({ id, data, selected }) {
             className="graph-group-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">Group Color</div>
-            <div className="context-menu-colors">
-              {colors.map((color) => (
-                <button
-                  key={color}
-                  className="color-button"
-                  style={{ backgroundColor: color }}
-                  onClick={() => handleChangeColor(color)}
-                />
-              ))}
-            </div>
-            <button className="context-menu-action" onClick={handleHideGroup}>
-              👁️ Hide Group
-            </button>
-            <button className="context-menu-delete" onClick={handleDeleteGroup}>
-              🗑️ Delete Group
-            </button>
+            {locked ? (
+              // Group is a deliberate, owner-decided exception to the
+              // capability baseline's "a locked object offers only unlock or
+              // copy": it keeps Hide Group as well. Colour and rename are
+              // edits and stay refused; Delete is destructive and stays
+              // refused. Hide is a group-only action no other kind has.
+              //
+              // Note for whoever touches this next: Hide and Delete currently
+              // run the identical handler (removeGroupKeepChildren), so Hide
+              // does remove the group and publish a delete, and the decision's
+              // premise that it is reversible does not hold in this code yet.
+              // Rendering it here is what was decided; making it reversible is
+              // tracked separately.
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <button className="context-menu-action" onClick={handleHideGroup}>
+                  👁️ Hide Group
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="context-menu-title">Group Color</div>
+                <div className="context-menu-colors">
+                  {colors.map((color) => (
+                    <button
+                      key={color}
+                      className="color-button"
+                      style={{ backgroundColor: color }}
+                      onClick={() => handleChangeColor(color)}
+                    />
+                  ))}
+                </div>
+                <button className="context-menu-action" onClick={handleHideGroup}>
+                  👁️ Hide Group
+                </button>
+                <button className="context-menu-delete" onClick={handleDeleteGroup}>
+                  🗑️ Delete Group
+                </button>
+              </>
+            )}
           </div>,
           document.body
         )}
