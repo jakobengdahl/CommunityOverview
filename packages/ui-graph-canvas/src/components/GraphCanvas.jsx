@@ -847,7 +847,11 @@ function GraphCanvasInner({
         type: 'floating',
         animated: visuals.animated,
         selectable: true,
-        style: { ...visuals.style, strokeOpacity: opacity },
+        // `--edge-opacity` mirrors `strokeOpacity` as a CSS custom property:
+        // the rf-edge-pulse keyframe (GraphCanvas.css) reads it via calc() so
+        // an animated edge's pulse scales relative to this opacity instead of
+        // the animation silently overriding it back to a fixed 1/0.35.
+        style: { ...visuals.style, strokeOpacity: opacity, '--edge-opacity': opacity },
         markerStart: visuals.markerStart,
         markerEnd: visuals.markerEnd,
         className: visuals.className,

@@ -923,33 +923,33 @@ function App() {
   const handleDimNodes = useCallback(
     (nodeIds) => {
       dimNodes(nodeIds);
-      showNotification('info', `${nodeIds.length} node(s) dimmed`);
+      showNotification('info', t('history.desc.nodes_dimmed', { count: nodeIds.length }));
     },
-    [dimNodes, showNotification]
+    [dimNodes, showNotification, t]
   );
 
   const handleRestoreNodes = useCallback(
     (nodeIds) => {
       restoreNodes(nodeIds);
-      showNotification('info', `${nodeIds.length} node(s) restored`);
+      showNotification('info', t('history.desc.nodes_undimmed', { count: nodeIds.length }));
     },
-    [restoreNodes, showNotification]
+    [restoreNodes, showNotification, t]
   );
 
   const handleDimEdges = useCallback(
     (edgeIds) => {
       dimEdges(edgeIds);
-      showNotification('info', `${edgeIds.length} connection(s) dimmed`);
+      showNotification('info', t('history.desc.edges_dimmed', { count: edgeIds.length }));
     },
-    [dimEdges, showNotification]
+    [dimEdges, showNotification, t]
   );
 
   const handleRestoreEdges = useCallback(
     (edgeIds) => {
       restoreEdges(edgeIds);
-      showNotification('info', `${edgeIds.length} connection(s) restored`);
+      showNotification('info', t('history.desc.edges_undimmed', { count: edgeIds.length }));
     },
-    [restoreEdges, showNotification]
+    [restoreEdges, showNotification, t]
   );
 
   // Callback: Delete edge (from backend and visualization)

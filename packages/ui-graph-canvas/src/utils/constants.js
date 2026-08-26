@@ -115,7 +115,14 @@ export const ACCESSIBLE_MIN_EDGE_OPACITY = 0.12;
 export function resolveEdgeOpacity(edgeIntensity, isDimmed) {
   const intensity = Number.isFinite(edgeIntensity) ? Math.max(0, Math.min(1, edgeIntensity)) : 1;
   if (!isDimmed) return intensity;
-  return Math.max(ACCESSIBLE_MIN_EDGE_OPACITY, Math.min(intensity, DIMMED_EDGE_OPACITY_CEILING));
+  // The accessibility floor must never exceed the baseline itself: the UI
+  // slider keeps edgeIntensity at 0.2+, but MCP/a foreign session document
+  // can set it anywhere in [0,1] (see edge_intensity_set's backend clamp).
+  // Without capping the floor at `intensity`, a baseline below the floor
+  // (e.g. 0.05) would make a *dimmed* edge render more opaque than the
+  // "normal" edges around it — the opposite of what dimming means.
+  const floor = Math.min(ACCESSIBLE_MIN_EDGE_OPACITY, intensity);
+  return Math.max(floor, Math.min(intensity, DIMMED_EDGE_OPACITY_CEILING));
 }
 
 // Lazy loading thresholds
