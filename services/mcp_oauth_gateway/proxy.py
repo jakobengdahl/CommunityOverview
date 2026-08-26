@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse, Response
 
 import config
+import upstream_auth
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def proxy_sse(request: Request) -> StreamingResponse:
 
     # Forward a safe subset of request headers and ensure the upstream
     # MCPBrowserHandler sees the SSE accept type (otherwise it returns JSON).
-    headers = _forward_headers(request)
+    headers = await _upstream_headers(request)
     headers["accept"] = "text/event-stream"
 
     logger.info("Proxying SSE to %s params=%s", upstream_url, params)
@@ -93,7 +94,7 @@ async def proxy_post_mcp(request: Request) -> Response:
     upstream_url = config.UPSTREAM_MCP_BASE_URL + path
 
     params = dict(request.query_params)
-    headers = _forward_headers(request)
+    headers = await _upstream_headers(request)
     body = await request.body()
 
     logger.info("Proxying POST to %s params=%s", upstream_url, params)
@@ -117,7 +118,7 @@ async def proxy_post(request: Request) -> Response:
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/messages"
 
     params = dict(request.query_params)
-    headers = _forward_headers(request)
+    headers = await _upstream_headers(request)
     body = await request.body()
 
     logger.info("Proxying POST to %s", upstream_url)
@@ -151,7 +152,7 @@ async def proxy_streamable_http(request: Request) -> Response:
     """
     upstream_url = config.UPSTREAM_MCP_BASE_URL + "/mcp/"
     params = dict(request.query_params)
-    headers = _forward_headers(request)
+    headers = await _upstream_headers(request)
     body = await request.body()
 
     logger.info("Proxying %s /mcp (streamable http) to %s", request.method, upstream_url)
@@ -218,6 +219,24 @@ def _forward_headers(request: Request) -> dict:
         for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
+
+
+async def _upstream_headers(request: Request) -> dict:
+    """Forwardable headers, plus the gateway's own credential for the upstream.
+
+    Every proxied call goes through here, so the upstream never sees a request
+    that skipped the identity header — adding it at each call site instead would
+    make a newly added route silently anonymous.
+
+    ``authorization`` is already in ``_HOP_BY_HOP``: the client's bearer is the
+    gateway-issued or Google OAuth token this gateway has *already* validated,
+    it means nothing to Cloud Run's invoker check, and it is deliberately not
+    forwarded. So the slot is free, and the ID token cannot collide with a
+    client-supplied value in either casing.
+    """
+    headers = _forward_headers(request)
+    headers.update(await upstream_auth.id_token_header())
+    return headers
 
 
 def _response_headers(headers) -> dict:
