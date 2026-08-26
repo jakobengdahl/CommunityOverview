@@ -107,6 +107,7 @@ describe('ChatPanel', () => {
     });
 
     it('sends message and displays response', async () => {
+      const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       api.sendChatMessage.mockResolvedValueOnce({
         content: 'I found 3 nodes.',
         toolUsed: 'search_graph',
@@ -129,6 +130,7 @@ describe('ChatPanel', () => {
       await waitFor(() => {
         expect(screen.getByText('I found 3 nodes.')).toBeInTheDocument();
       });
+      expect(consoleLogSpy).not.toHaveBeenCalled();
     });
 
     it('shows loading state while processing', async () => {
