@@ -37,6 +37,30 @@ TEST_USERS: List[str] = [e.strip().lower() for e in _raw_test_users.split(",") i
 # URL of the upstream CommunityOverview service (no trailing slash)
 UPSTREAM_MCP_BASE_URL: str = _required("UPSTREAM_MCP_BASE_URL").rstrip("/")
 
+# Present a Google ID token for the gateway's own service account when calling
+# the upstream, so the upstream's Cloud Run service can require
+# roles/run.invoker instead of allowing allUsers.
+#
+# Off by default, and deliberately so: this must be deployable before the
+# invoker binding exists. Turning it on against a still-open upstream is
+# harmless — the call succeeds either way — so the binding and this flag can be
+# sequenced in whichever order is convenient. What must NOT happen is the
+# reverse: closing the upstream while the gateway still calls it anonymously
+# takes MCP down.
+UPSTREAM_USE_ID_TOKEN: bool = _optional("UPSTREAM_USE_ID_TOKEN", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# Audience the upstream ID token is minted for. Cloud Run expects the receiving
+# service's URL. Defaults to the upstream URL, which is what it is in every
+# current deployment; overridable for the case where the upstream is reached
+# through a different hostname than the one it validates.
+UPSTREAM_ID_TOKEN_AUDIENCE: str = (
+    _optional("UPSTREAM_ID_TOKEN_AUDIENCE", "") or UPSTREAM_MCP_BASE_URL
+).rstrip("/")
+
 # Public base URL of this gateway (no trailing slash)
 PUBLIC_BASE_URL: str = _required("PUBLIC_BASE_URL").rstrip("/")
 
