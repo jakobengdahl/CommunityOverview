@@ -161,38 +161,43 @@ describe('GroupNode remote selection claim exclusivity', () => {
 // claim above but never the persisted flag, which the group translators were
 // dropping before it could reach this component. A group locked over MCP
 // therefore showed its full Group Color / Hide Group / Delete Group menu with
-// no way to unlock it from the GUI at all.
+// no way to unlock it from the GUI at all. `group` now follows the baseline
+// exactly: Unlock and nothing else.
 describe('GroupNode locked context menu', () => {
   beforeEach(() => vi.clearAllMocks());
 
   const lockedData = { label: 'G', color: '#646cff', locked: true };
 
-  // dec-annotation-lock-semantics (3): group is a deliberate exception to the
-  // baseline's "only unlock or copy" — it keeps Hide as well, because Hide is
-  // meant to be reversible while Delete is destructive. Colour and rename are
-  // edits and stay refused.
-  it('offers unlock and hide when the group is locked, but nothing that edits or destroys', () => {
+  // The lock protects the group's content, not its visibility, so a truly
+  // reversible Hide would belong in this menu. Hide is not that: it and Delete
+  // run the identical handler (removeGroupKeepChildren), which takes the group
+  // off the canvas, un-parents its members and publishes a delete. Offering it
+  // while locked hands the user a second, differently-labelled Delete — the
+  // one thing the lock exists to refuse. So the locked menu offers Unlock and
+  // nothing else, and this case pins the whole menu rather than only the
+  // buttons that were wrong, so a later addition cannot slip in unasserted.
+  it('offers unlock and nothing else when the group is locked', () => {
     renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /unlock/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /hide group/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
     expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(document.querySelectorAll('.graph-group-context-menu button')).toHaveLength(1);
   });
 
-  it('hides a locked group from its own menu', () => {
-    const { notifyChange } = renderGroup(lockedData);
+  // The destructive handler stays reachable from the unlocked menu, so this
+  // pins that it is only the locked menu that withholds it — not the handler
+  // that changed. Whichever button runs it, it removes the group and keeps the
+  // members; that is the behaviour a locked group must never be able to reach.
+  it('still destroys the group when Hide is used on an unlocked one', () => {
+    const { notifyChange } = renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));
     fireEvent.click(screen.getByRole('button', { name: /hide group/i }));
-    // Hide currently runs removeGroupKeepChildren, the same handler Delete
-    // runs: the group leaves the canvas and a delete is published. That is
-    // what the code does today, so it is what this asserts — the decision's
-    // premise that Hide is reversible is tracked as its own fix, and this
-    // case is where it will have to change when that lands.
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const remaining = updater([
-      { id: 'group-1', data: lockedData, position: { x: 0, y: 0 } },
+      { id: 'group-1', data: { label: 'G' }, position: { x: 0, y: 0 } },
       { id: 'n1', parentId: 'group-1', position: { x: 5, y: 5 } },
     ]);
     expect(remaining.map((n) => n.id)).toEqual(['n1']);

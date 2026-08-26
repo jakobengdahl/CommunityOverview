@@ -214,8 +214,7 @@ function GroupNode({ id, data, selected }) {
     removeGroupKeepChildren();
   };
 
-  // One of the two actions a locked group's context menu offers, alongside
-  // Hide (see the menu below for why group departs from the baseline here).
+  // The only action a locked group's context menu offers (see the menu below).
   // Locking is MCP-only; this is the sole GUI path back out of it.
   const unlock = () => {
     if (remoteLocked) {
@@ -309,26 +308,19 @@ function GroupNode({ id, data, selected }) {
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
-              // Group is a deliberate, owner-decided exception to the
-              // capability baseline's "a locked object offers only unlock or
-              // copy": it keeps Hide Group as well. Colour and rename are
-              // edits and stay refused; Delete is destructive and stays
-              // refused. Hide is a group-only action no other kind has.
-              //
-              // Note for whoever touches this next: Hide and Delete currently
-              // run the identical handler (removeGroupKeepChildren), so Hide
-              // does remove the group and publish a delete, and the decision's
-              // premise that it is reversible does not hold in this code yet.
-              // Rendering it here is what was decided; making it reversible is
-              // tracked separately.
-              <>
-                <button type="button" className="context-menu-unlock" onClick={unlock}>
-                  🔓 {labels.unlock}
-                </button>
-                <button className="context-menu-action" onClick={handleHideGroup}>
-                  👁️ Hide Group
-                </button>
-              </>
+              // A locked group offers Unlock and nothing else, the same as
+              // every other kind. The lock is meant to protect the group's
+              // content rather than its visibility, so Hide Group would
+              // belong here on the merits — but Hide is not a hide: it runs
+              // the identical handler Delete runs (removeGroupKeepChildren),
+              // taking the group off the canvas and publishing a delete. An
+              // action that destroys the group is refused while locked
+              // whatever its label says. Once a genuine reversible hide
+              // exists (smallfix-group-hide-actually-deletes), Hide belongs
+              // in this branch and this comment goes with it.
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
             ) : (
               <>
                 <div className="context-menu-title">Group Color</div>

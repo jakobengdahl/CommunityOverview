@@ -214,31 +214,38 @@ overlay is skipped and the user is told to unlock it first, which closes the
 one path that could destroy a locked *overlay* without unlocking it. It is
 kind-agnostic, so it needs no per-component change.
 
-`group` now honours the flag, with one deliberate exception to the baseline.
-It honoured it nowhere until its translators started carrying `locked`: the
-flag was persisted server-side (`create_group_annotation` takes it) but
-dropped in `annotationsToGroups` on the way to the canvas, so `GroupNode`
-never saw it and a locked group box still showed its full colour/hide/delete
-menu with no way back out of the lock. A locked group's resize handles and
-drag are now withheld the same way a locked overlay's are, its label cannot be
-renamed by double-clicking the header, and its colour swatches and Delete
-Group are out of reach. The rename guard goes one step further than the
-overlay kinds, whose double-click text editors still refuse only a live remote
-claim and not the persisted flag — the group's behaviour is the one this
-baseline describes, and the overlays' is a tracked gap. The keyboard rule still
-does not reach a group — `Delete` skips them entirely, so their children stay
-correctly parented — and hands that job to the group's own menu, which now
-honours the flag.
+`group` now honours the flag, and follows the baseline exactly: **a locked
+group's menu offers Unlock and nothing else.** It honoured it nowhere until
+its translators started carrying `locked`: the flag was persisted server-side
+(`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
+the way to the canvas, so `GroupNode` never saw it and a locked group box
+still showed its full colour/hide/delete menu with no way back out of the
+lock. A locked group's resize handles and drag are now withheld the same way a
+locked overlay's are, its label cannot be renamed by double-clicking the
+header, and its colour swatches, Hide Group and Delete Group are all out of
+reach. The rename guard goes one step further than the overlay kinds, whose
+double-click text editors still refuse only a live remote claim and not the
+persisted flag — the group's behaviour is the one this baseline describes, and
+the overlays' is a tracked gap. The keyboard rule still does not reach a group
+— `Delete` skips them entirely, so their children stay correctly parented —
+and hands that job to the group's own menu, which now honours the flag.
 
-**The exception: a locked group's menu also keeps Hide Group**, so it offers
-two actions rather than the baseline's one. This is a product decision, not an
-oversight: the lock is meant to protect the group box itself, not whether it
-is on screen, so a destructive Delete is refused while a reversible Hide is
-not. Read narrowly — it protects the box's own fields, not what the box holds
-(see the membership paragraph below). Hide is a group-only action; no other
-kind has it, so no other kind is affected.
+**Why Hide is withheld too, though the lock is about content and not
+visibility.** The lock is meant to protect the group box itself rather than
+whether it is on screen, so a genuinely reversible Hide would belong in the
+locked menu on the merits — and for a while it was rendered there on exactly
+that reasoning. But Hide is not a hide: `handleHideGroup` and
+`handleDeleteGroup` in `GroupNode.jsx` run the identical handler,
+`removeGroupKeepChildren`, which takes the group off the canvas, un-parents
+its members and publishes `notifyChange('delete')`. There is no hidden-group
+state anywhere in the codebase to restore from. Offering it while locked is
+therefore offering a second, differently-labelled Delete — the one thing the
+lock exists to refuse. It stays withheld until a genuine reversible hide
+exists, at which point it belongs in the locked menu and this paragraph goes
+with it. Hide's behaviour on an *unlocked* group is unchanged and is its own
+tracked defect: the button destroys what its label says it conceals.
 
-A second hole in the same paragraph, and a real one: **a locked group's
+A real hole remains, and it is not about the menu: **a locked group's
 membership is not locked.** Dragging a graph node into or out of a locked
 group re-parents it (`computeGroupPlacement` in `GraphCanvas.jsx` never
 consults the flag) and publishes `group_membership_changed`, so the locked
@@ -246,17 +253,6 @@ annotation's own `member_node_ids` changes from the GUI. What a group *is* is
 largely its membership, so "a locked group is protected" is true of its box
 and false of its contents. Tracked separately; stated here so the paragraph
 above is not read as more than it claims.
-
-One caveat a reader of the Hide exception above would otherwise be misled by,
-and which the decision's own wording assumes away: **Hide is not currently
-reversible.** `handleHideGroup` and `handleDeleteGroup` in `GroupNode.jsx` run
-the identical handler, `removeGroupKeepChildren`, which takes the group off
-the canvas and publishes `notifyChange('delete')`; there is no hidden-group
-state anywhere in the codebase to restore from. So today Hide removes a locked
-group exactly as Delete would, and the only thing standing between a locked
-group and destruction is which button the user picks. Closing that gap — by
-making Hide genuinely reversible — is tracked separately; until it lands, this
-exception is wider in practice than it reads.
 
 What `group` still lacks is the layer row, not the lock: see
 [Layer order](#layer-order) above. Its `z` is carried through the same
@@ -986,10 +982,10 @@ lands on the flow node's `data` rather than on `zIndex`, because a group's
 paint order comes from the node array rather than from `zIndex` (see
 [Layer order](#layer-order)).
 
-Its `locked` refuses broadly what every other kind's does, with three
-differences worth knowing. Two are described under
-[Layer order](#layer-order) above: the rename guard is stricter, and the menu
-keeps Hide. The third is here — an unlocked group resolves `draggable` to
+Its `locked` refuses broadly what every other kind's does, with two
+differences worth knowing. One is described under
+[Layer order](#layer-order) above: the rename guard is stricter. The other is
+here — an unlocked group resolves `draggable` to
 `undefined` rather than `true`, so it still defers to the canvas-wide
 `nodesDraggable` switch the way it did before it was lock-aware. ReactFlow
 tests `typeof node.draggable === 'undefined'`, so an explicit `undefined` and
