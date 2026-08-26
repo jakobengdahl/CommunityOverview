@@ -857,6 +857,10 @@ class TestGraphStorageSimilarity:
 class TestGraphStorageStats:
     """Tests for statistics"""
 
+    def test_get_node_count(self, storage_with_data):
+        """get_node_count returns the plain total without building per-type breakdowns."""
+        assert storage_with_data.get_node_count() == 4
+
     def test_get_stats(self, storage_with_data):
         """Test getting graph statistics"""
         stats = storage_with_data.get_stats()

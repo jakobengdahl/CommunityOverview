@@ -97,7 +97,7 @@ def search_graph(
     # candidate set instead of dropping matches that fell outside a `limit`-sized
     # text window.
     search_limit = (
-        max(limit, storage.get_stats().total_nodes)
+        max(limit, storage.get_node_count())
         if decision.graph_access.enabled or has_generic_filters
         else limit
     )

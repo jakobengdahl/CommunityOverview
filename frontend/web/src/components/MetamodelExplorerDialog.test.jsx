@@ -165,6 +165,20 @@ describe('MetamodelExplorerDialog', () => {
     // Unconfigured applicability renders as "any type", never an invented rule.
     const relatesRow = within(relTable).getByText('RELATES_TO').closest('tr');
     expect(within(relatesRow).getAllByText('metamodel.any_type')).toHaveLength(2);
+    // USES_SKILL is bound entirely to system types (Agent, Skill), which are
+    // hidden by default — it must not reference types the table doesn't show.
+    expect(within(relTable).queryByText('USES_SKILL')).not.toBeInTheDocument();
+  });
+
+  it('reveals a relationship type in the table once its system-type endpoints are shown', () => {
+    render(<MetamodelExplorerDialog schema={SCHEMA} stats={STATS} onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: /metamodel.view_table/ }));
+    expect(screen.queryByText('USES_SKILL')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('metamodel.show_system_types'));
+
+    expect(screen.getByText('USES_SKILL')).toBeInTheDocument();
   });
 
   it('shows an unknown-count placeholder rather than fabricating a zero when stats are absent', () => {

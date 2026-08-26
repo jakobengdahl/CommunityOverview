@@ -1184,6 +1184,11 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}",
                 )
 
+    def get_node_count(self) -> int:
+        """Total node count, for callers that only need a count and should not
+        pay for building the full per-type breakdown get_stats() computes."""
+        return len(self.nodes)
+
     def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
         # Count nodes per type

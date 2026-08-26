@@ -116,9 +116,28 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
     [allNodeTypes, showSystemTypes, filterText, language]
   );
 
+  const visibleTypeNames = useMemo(
+    () => new Set(visibleNodeTypes.map((nt) => nt.type)),
+    [visibleNodeTypes]
+  );
+
+  // A relationship type stays visible only if it is still relevant to what's
+  // on screen: unconstrained-on-both-sides relationships aren't tied to any
+  // specific node type so they always qualify, but one bound only to hidden
+  // system types (e.g. USES_SKILL: Agent -> Skill, while system types are
+  // hidden) would otherwise reference node types the table/network no
+  // longer show at all.
   const visibleRelationshipTypes = useMemo(
-    () => allRelationshipTypes.filter((rt) => matchesFilter(rt, filterText, language)),
-    [allRelationshipTypes, filterText, language]
+    () =>
+      allRelationshipTypes
+        .filter((rt) => matchesFilter(rt, filterText, language))
+        .filter((rt) => {
+          if (rt.source_types.length === 0 && rt.target_types.length === 0) return true;
+          return [...rt.source_types, ...rt.target_types].some((type) =>
+            visibleTypeNames.has(type)
+          );
+        }),
+    [allRelationshipTypes, filterText, language, visibleTypeNames]
   );
 
   const configuredRelationships = useMemo(
@@ -132,11 +151,6 @@ function MetamodelExplorerDialog({ schema, stats, onClose }) {
         (rt) => rt.source_types.length === 0 && rt.target_types.length === 0
       ),
     [visibleRelationshipTypes]
-  );
-
-  const visibleTypeNames = useMemo(
-    () => new Set(visibleNodeTypes.map((nt) => nt.type)),
-    [visibleNodeTypes]
   );
 
   // One edge per (source, target) pair a configured relationship type
