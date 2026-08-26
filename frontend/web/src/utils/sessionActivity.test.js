@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { createAnnotation } from '@community-graph/ui-graph-canvas';
 import en from '../i18n/en.json';
 import sv from '../i18n/sv.json';
 import {
@@ -53,8 +54,16 @@ describe('describeActivity', () => {
       const r = record({
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'shape-1', fields: ['shape', 'geometry'] },
-        before: { type: 'shape', geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 } },
-        after: { type: 'shape', geometry: { x: 5, y: 5, w: 10, h: 10, rotation: 0 } },
+        before: {
+          type: 'shape',
+          shape: 'rectangle',
+          geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 },
+        },
+        after: {
+          type: 'shape',
+          shape: 'ellipse',
+          geometry: { x: 5, y: 5, w: 10, h: 10, rotation: 0 },
+        },
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_shape');
     });
@@ -150,9 +159,142 @@ describe('describeActivity', () => {
         op: 'annotation_updated',
         affected: { kind: 'annotation', id: 'a1', fields: ['some_future_field'] },
         before: { type: 'note' },
-        after: { type: 'note' },
+        after: { type: 'note', some_future_field: 'x' },
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('falls back to "generic" rather than guessing when there is no before snapshot', () => {
+      const r = record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: 'a1', fields: ['locked', 'z', 'geometry'] },
+        before: null,
+        after: { type: 'note', locked: false, z: 0 },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+  });
+
+  // The regression suite for the defect these records are shaped after: the
+  // browser's computeOps (services/sessionSyncClient.js) puts the WHOLE
+  // annotation in every annotation_updated op, so `affected.fields` — which
+  // session_store.py fills with the incoming payload's key set — is the
+  // annotation's entire key set no matter what the user actually did. Every
+  // annotation carries `locked` and `z` as mandatory envelope fields
+  // (createAnnotation), so a classifier reading `fields` as a change set
+  // announced "Unlocked" for a note/label/icon that had merely been moved or
+  // relayered, and "Changed the shape of" for every edit of a shape.
+  //
+  // The pre-existing cases above all feed SPARSE fields, which is the shape
+  // the MCP patch path produces — the producer the classifier happened to be
+  // correct for. These feed the browser's shape, built through the real
+  // createAnnotation so the payload is the one the canvas actually ships.
+  describe('annotation_updated classification, browser-shaped full payloads', () => {
+    function browserEdit(base, changes) {
+      // What the store records for a browser-originated edit: `before` is the
+      // stored annotation, `after` is the whole incoming annotation merged
+      // over it, and `fields` is that payload's entire key set.
+      const incoming = createAnnotation({ ...base, ...changes });
+      const before = { ...createAnnotation(base), updated_at: '2026-08-26T09:00:00Z' };
+      return record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: base.id, fields: Object.keys(incoming).sort() },
+        before,
+        after: { ...before, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
+      });
+    }
+
+    const KINDS = [
+      { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 } },
+      { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 } },
+      { id: 'i1', type: 'icon', icon: 'circle', position: { x: 0, y: 0 } },
+      { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 } },
+    ];
+
+    it.each(KINDS)('classifies a bring-to-front on $type as "raised", not "unlocked"', (base) => {
+      expect(describeActivity(browserEdit(base, { z: 5 })).key).toBe(
+        'history.desc.annotation_updated_raised'
+      );
+    });
+
+    it.each(KINDS)('classifies a send-to-back on $type as "lowered", not "unlocked"', (base) => {
+      expect(describeActivity(browserEdit(base, { z: -1 })).key).toBe(
+        'history.desc.annotation_updated_lowered'
+      );
+    });
+
+    it.each(KINDS)('classifies a plain move of $type as "moved", not "unlocked"', (base) => {
+      expect(describeActivity(browserEdit(base, { position: { x: 300, y: 200 } })).key).toBe(
+        'history.desc.annotation_updated_moved'
+      );
+    });
+
+    it.each(KINDS)('classifies a recolour of $type as "style", not "unlocked"', (base) => {
+      expect(describeActivity(browserEdit(base, { color: 'crimson' })).key).toBe(
+        'history.desc.annotation_updated_style'
+      );
+    });
+
+    it.each(KINDS)('still reports a genuine lock and unlock of $type as itself', (base) => {
+      expect(describeActivity(browserEdit(base, { locked: true })).key).toBe(
+        'history.desc.annotation_updated_locked'
+      );
+      const locked = { ...base, locked: true };
+      expect(describeActivity(browserEdit(locked, { locked: false })).key).toBe(
+        'history.desc.annotation_updated_unlocked'
+      );
+    });
+
+    it('reads a resize as "resized" and a rotation as "rotated" through a full payload', () => {
+      const base = KINDS[0];
+      expect(describeActivity(browserEdit(base, { size: { w: 400, h: 300 } })).key).toBe(
+        'history.desc.annotation_updated_resized'
+      );
+      expect(describeActivity(browserEdit(base, { rotation: 30 })).key).toBe(
+        'history.desc.annotation_updated_rotated'
+      );
+    });
+
+    it('reads a text edit through a full payload as "text"', () => {
+      expect(describeActivity(browserEdit(KINDS[0], { text: 'rewritten' })).key).toBe(
+        'history.desc.annotation_updated_text'
+      );
+    });
+
+    it('reports a re-sent but unchanged annotation as "generic", not as an unlock', () => {
+      // computeOps only emits an op when something differs, but a retried
+      // batch or an undo replay can re-apply an identical payload.
+      expect(describeActivity(browserEdit(KINDS[0], {})).key).toBe(
+        'history.desc.annotation_updated_generic'
+      );
+    });
+
+    it('does not read the browser materialising envelope defaults as a change', () => {
+      // The first browser touch of an agent-created annotation spells out the
+      // envelope fields the agent left off (`z`, `locked`, `text`). Counting
+      // those as changes is the same false-unlock defect by another route, so
+      // the move is what gets reported.
+      const r = record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: 'a1', fields: ['id', 'locked', 'position', 'z'] },
+        before: { id: 'a1', type: 'note', position: { x: 0, y: 0 } },
+        after: { id: 'a1', type: 'note', position: { x: 40, y: 0 }, z: 0, locked: false, text: '' },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+    });
+
+    it('reports an agent-only sparse patch from the same before/after diff', () => {
+      // The MCP path sends a sparse patch, but the store still snapshots the
+      // whole annotation either side, so the diff serves both producers and
+      // `affected.fields` is not consulted for either.
+      const before = createAnnotation({ id: 'n1', type: 'note', text: 'before' });
+      const r = record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: 'n1', fields: ['id', 'text'] },
+        before,
+        after: { ...before, text: 'after' },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
   });
 
@@ -313,6 +455,53 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 500 })).toBe('failed');
     expect(classifyUndoError({})).toBe('failed');
     expect(classifyUndoError(undefined)).toBe('failed');
+  });
+});
+
+describe('describeActivity × i18n', () => {
+  // ActivityDrawer.jsx renders describeActivity's key straight through t(),
+  // so a classification with no key shows the user the key name. Driven
+  // through the classifier for the same reason the undo-reason pairing below
+  // is: a kind that changes spelling is caught here, not in the UI.
+  const cases = [
+    { before: { type: 'note', shape: 'rectangle' }, after: { type: 'note', shape: 'ellipse' } },
+    { before: { type: 'note', locked: false }, after: { type: 'note', locked: true } },
+    { before: { type: 'note', locked: true }, after: { type: 'note', locked: false } },
+    { before: { type: 'note' }, after: { type: 'note', attachment: { target_id: 'n1' } } },
+    { before: { type: 'note', attachment: { target_id: 'n1' } }, after: { type: 'note' } },
+    {
+      before: { type: 'note', geometry: { x: 0, y: 0, w: 1, h: 1, rotation: 0 } },
+      after: { type: 'note', geometry: { x: 0, y: 0, w: 1, h: 1, rotation: 9 } },
+    },
+    {
+      before: { type: 'note', geometry: { x: 0, y: 0, w: 1, h: 1, rotation: 0 } },
+      after: { type: 'note', geometry: { x: 0, y: 0, w: 9, h: 1, rotation: 0 } },
+    },
+    {
+      before: { type: 'note', position: { x: 0, y: 0 } },
+      after: { type: 'note', position: { x: 9, y: 0 } },
+    },
+    { before: { type: 'note', z: 0 }, after: { type: 'note', z: 5 } },
+    { before: { type: 'note', z: 0 }, after: { type: 'note', z: -5 } },
+    {
+      before: { type: 'note', style: { color: 'a' } },
+      after: { type: 'note', style: { color: 'b' } },
+    },
+    { before: { type: 'note', text: 'a' }, after: { type: 'note', text: 'b' } },
+    { before: { type: 'note' }, after: { type: 'note', future_field: 'x' } },
+  ];
+
+  it('has an en and sv message for every annotation_updated kind these inputs classify to', () => {
+    const keys = cases.map((c) => describeActivity(record({ op: 'annotation_updated', ...c })).key);
+    const unique = [...new Set(keys)];
+    // Every case must reach a kind of its own; two collapsing onto one means
+    // a branch was lost.
+    expect(unique).toHaveLength(cases.length);
+    for (const key of unique) {
+      const name = key.replace('history.desc.', '');
+      expect(en.history.desc[name], `en: ${name}`).toBeTruthy();
+      expect(sv.history.desc[name], `sv: ${name}`).toBeTruthy();
+    }
   });
 });
 

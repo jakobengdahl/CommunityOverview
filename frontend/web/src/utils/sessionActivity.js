@@ -37,36 +37,116 @@ function geometryOf(annotation) {
   return (annotation && (annotation.geometry || annotation.position)) || {};
 }
 
-function numbersDiffer(a, b) {
-  return a !== b;
+/**
+ * Whether a value carries no information: the state an annotation is in
+ * before anything has been set on that field.
+ *
+ * This exists because the two producers of an `annotation_updated` record
+ * disagree about which absent fields they spell out. The browser ships the
+ * whole annotation on every edit, and its translators materialise every
+ * envelope default on the way out (`z: a.z ?? 0`, `locked: Boolean(a.locked)`,
+ * `text: o.text || ''` — see utils/sessionAnnotations.js); an agent writing
+ * the same annotation over MCP may simply omit them. So the first browser
+ * touch of an agent-created annotation turns `z: undefined` into `z: 0` and
+ * `locked: undefined` into `locked: false` without the user having done
+ * anything to either. Counting those as changes would put this classifier
+ * straight back to announcing an unlock that never happened, which is the
+ * defect it is being fixed for — so an absent field and its own default read
+ * as the same value here.
+ */
+function isEmptyValue(value) {
+  if (value === undefined || value === null || value === false || value === '' || value === 0) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/** Deep value equality, with every "unset" spelling treated as one value. */
+function sameValue(a, b) {
+  if (a === b) return true;
+  if (isEmptyValue(a) || isEmptyValue(b)) return isEmptyValue(a) && isEmptyValue(b);
+  if (typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (!sameValue(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+// Rewritten by the store on every write whatever the user touched
+// (session_store.py sets `updated_at` on each applied op), so a diff that
+// counted them would report every update as a change to them.
+const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
+
+/**
+ * The annotation fields this update actually changed, by comparing the
+ * record's own before/after snapshots.
+ *
+ * Deliberately not `affected.fields`: that is the *incoming payload's* key
+ * set, not a change set (session_store.py's `annotation_updated` branch
+ * records `sorted(incoming.keys())`), and the browser's computeOps sends the
+ * whole annotation in every op (services/sessionSyncClient.js). For any
+ * browser-originated edit `fields` is therefore the annotation's entire key
+ * set and is identical whatever the user did — reading it as a change set
+ * made a move, a recolour or a text edit on a note/label/icon all render as
+ * "Unlocked", asserting a security-relevant state change that never
+ * happened. before/after are populated for every producer, because
+ * `apply_state_op` is the single choke point both the browser batch and the
+ * MCP write path go through, so the diff is authoritative for both.
+ *
+ * Returns null when there is no before snapshot to compare against, which is
+ * the one case where nothing about the change can be asserted.
+ */
+function changedFields(before, after) {
+  if (!before || typeof before !== 'object') return null;
+  if (!after || typeof after !== 'object') return null;
+  const changed = new Set();
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (BOOKKEEPING_FIELDS.has(key)) continue;
+    if (!sameValue(before[key], after[key])) changed.add(key);
+  }
+  return changed;
 }
 
 /**
- * Classify what an `annotation_updated` record actually changed, from the
- * updated top-level fields (`affected.fields`, the incoming update's own
- * keys — see session_store.py) plus a before/after geometry comparison, so
- * "moved" / "resized" / "rotated" read distinctly instead of a blanket
- * "updated". Order matters: the most specific, most visible change wins when
- * several plausibly apply (e.g. a drag-resize touches both size and position).
+ * Classify what an `annotation_updated` record actually changed, from a
+ * before/after comparison, so "moved" / "resized" / "rotated" / "raised"
+ * read distinctly instead of a blanket "updated" — and so a kind is only
+ * ever reported when that field genuinely changed. Order matters: the most
+ * specific, most visible change wins when several plausibly apply (e.g. a
+ * drag-resize touches both size and position, and bringing an annotation to
+ * the front while dragging it reads as the move).
  */
 function classifyAnnotationUpdate(record) {
-  const fields = new Set((record.affected && record.affected.fields) || []);
+  const changed = changedFields(record.before, record.after);
+  if (!changed) return 'generic';
   const before = geometryOf(record.before);
   const after = geometryOf(record.after);
 
-  if (fields.has('shape')) return 'shape';
-  if (fields.has('locked')) return record.after && record.after.locked ? 'locked' : 'unlocked';
-  if (fields.has('attachment')) {
+  if (changed.has('shape')) return 'shape';
+  if (changed.has('locked')) return record.after && record.after.locked ? 'locked' : 'unlocked';
+  if (changed.has('attachment')) {
     const attached = Boolean(record.after && record.after.attachment);
     return attached ? 'attached' : 'detached';
   }
-  if (fields.has('geometry') || fields.has('position')) {
-    if (numbersDiffer(before.rotation, after.rotation)) return 'rotated';
-    if (numbersDiffer(before.w, after.w) || numbersDiffer(before.h, after.h)) return 'resized';
+  if (changed.has('geometry') || changed.has('position')) {
+    if (!sameValue(before.rotation, after.rotation)) return 'rotated';
+    if (!sameValue(before.w, after.w) || !sameValue(before.h, after.h)) return 'resized';
     return 'moved';
   }
-  if (fields.has('style')) return 'style';
-  if (fields.has('text') || fields.has('label') || fields.has('value')) return 'text';
+  if (changed.has('z')) {
+    // Strictly the direction the layer moved, not "is now frontmost": a
+    // bring-to-front click always raises and a send-to-back always lowers
+    // (utils/annotationLayers.js resolveLayerZ), but an agent may set any
+    // `z` over MCP, and neither producer guarantees the result is past
+    // everything else on someone else's canvas.
+    const raised = (record.after.z || 0) > (record.before.z || 0);
+    return raised ? 'raised' : 'lowered';
+  }
+  if (changed.has('style')) return 'style';
+  if (changed.has('text') || changed.has('label') || changed.has('value')) return 'text';
   return 'generic';
 }
 

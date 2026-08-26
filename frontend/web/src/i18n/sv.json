@@ -159,6 +159,8 @@
       "annotation_updated_rotated": "Roterade {type}",
       "annotation_updated_resized": "Ändrade storlek på {type}",
       "annotation_updated_moved": "Flyttade {type}",
+      "annotation_updated_raised": "Höjde lagret för {type}",
+      "annotation_updated_lowered": "Sänkte lagret för {type}",
       "annotation_updated_style": "Ändrade stil på {type}",
       "annotation_updated_text": "Redigerade texten i {type}",
       "annotation_updated_locked": "Låste {type}",
