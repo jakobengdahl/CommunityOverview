@@ -611,8 +611,10 @@ with it; graph history is the permanent audit trail.
 
 Every annotation or canvas change you or a collaborator makes in the current
 session appears here as a plain-language entry — "Created a sticky note",
-"Moved \"Acme Corp\"", "Rotated a shape" — with who did it (your own actions are
-marked *(You)*) and when.
+"Moved \"Acme Corp\"", "Rotated a shape", "Raised the layer of a shape" — with
+who did it (your own actions are marked *(You)*) and when. The entry names what
+actually changed: moving an annotation reads as a move and changing its layer as
+a layer change, distinct from locking or unlocking it.
 
 - **Undo** appears only on *your own* most recent undoable action — you can
   never undo someone else's change. The same action is also available as

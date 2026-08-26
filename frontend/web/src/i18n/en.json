@@ -159,6 +159,8 @@
       "annotation_updated_rotated": "Rotated {type}",
       "annotation_updated_resized": "Resized {type}",
       "annotation_updated_moved": "Moved {type}",
+      "annotation_updated_raised": "Raised the layer of {type}",
+      "annotation_updated_lowered": "Lowered the layer of {type}",
       "annotation_updated_style": "Restyled {type}",
       "annotation_updated_text": "Edited the text of {type}",
       "annotation_updated_locked": "Locked {type}",
