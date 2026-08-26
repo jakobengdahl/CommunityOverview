@@ -501,11 +501,12 @@ describe('AnnotationToolbox', () => {
     });
 
     it('keeps two pointers’ suppression windows on the same item independent, so consuming one never erases the other’s', () => {
-      // Regression test: suppression is a per-item COUNT, not a per-item
-      // membership flag. Two different pointers can each complete a drag on
-      // the very same button close together (e.g. a fast two-finger touch);
-      // each drag's own pending synthetic click must be suppressed, and
-      // consuming the first must not erase the second's still-open window.
+      // Regression test: suppression is a per-item FIFO queue of per-gesture
+      // tokens, not a per-item membership flag. Two different pointers can
+      // each complete a drag on the very same button close together (e.g. a
+      // fast two-finger touch); each drag's own pending synthetic click must
+      // be suppressed, and consuming the first must not erase the second's
+      // still-open window.
       const onCreate = vi.fn();
       const onDragCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
@@ -533,6 +534,62 @@ describe('AnnotationToolbox', () => {
 
       // A genuine third tap, after both suppression windows are consumed,
       // still works normally.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('leaves nothing behind once every stale fallback timer has actually run, so a later genuine tap still works', async () => {
+      // Regression test for a gap the token-queue design (see the
+      // `pendingSuppressionsRef` declaration) specifically closes: each
+      // completed drag schedules a REAL fallback timer that removes its own
+      // gesture's specific token (a no-op if a click already consumed it,
+      // which is the ordinary case — a synthetic click fires synchronously
+      // with its own pointerup, before any later macrotask). With a bare
+      // count instead of per-gesture tokens, a stale timer left over from an
+      // earlier, already-consumed gesture could blindly decrement whatever
+      // the CURRENT count was for that item — including a different,
+      // still-open gesture's on the very same button — once the event loop
+      // got a chance to run it, silently letting a later gesture's own
+      // synthetic click through as an unwanted extra creation. Real timers
+      // (not fake) are used deliberately: firing both gestures' fallback
+      // timers together via fake-timer flush cannot be avoided since they
+      // share the same nominal delay, so the only way to observe each
+      // timer's real no-op behaviour is to let the actual event loop run it
+      // after both suppressions are already consumed by their own clicks.
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+
+      // Pointer 1 completes a drag and its own click consumes the
+      // suppression immediately, matching real browsers (a completed
+      // gesture's synthetic click is synchronous with its own pointerup;
+      // its fallback timer is a later macrotask, still pending here).
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // Pointer 2 completes its own drag on the SAME button before pointer
+      // 1's stale timer has run, and its own click likewise consumes its
+      // suppression immediately.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 2, clientX: 1, clientY: 1 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 2, clientX: 60, clientY: 60 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 60, clientY: 60 }));
+      expect(onDragCreate).toHaveBeenCalledTimes(2);
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // Only now let both gestures' now-superfluous fallback timers actually
+      // run in the real event loop. Each should find its own token already
+      // gone (removed by its own click above) and do nothing.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // A later, genuinely unrelated tap must still work normally — nothing
+      // from either stale timer is left behind to swallow it.
       fireEvent.click(note);
       expect(onCreate).toHaveBeenCalledWith('note', undefined);
     });

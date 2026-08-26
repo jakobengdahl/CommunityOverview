@@ -96,15 +96,23 @@ function AnnotationToolbox({
   // Sole purpose: swallow the click that follows a completed pointer drag
   // (pointerup fires, then the browser's synthetic click fires next in the
   // same task) so a drag never also creates a second, click-positioned copy.
-  // A pending-suppression COUNT per item (the same `${kind}-${labelKey}`
-  // string used as the React `key` below), not a Set membership flag or a
-  // single shared boolean: a click on button B must never be swallowed by a
-  // suppression window that button A's drag opened (a different key), and
-  // two *different pointers* can each complete a drag on the very SAME
-  // button close together (e.g. a fast two-finger touch) — each opens its
-  // own suppression window that must survive independently of the other's
-  // cleanup, which a single membership flag per key cannot represent.
-  const suppressClickCountsRef = useRef(new Map());
+  // Per item (the same `${kind}-${labelKey}` string used as the React `key`
+  // below), a FIFO queue of per-gesture tokens — not a shared boolean, not a
+  // Set membership flag, and not a bare count. Each completed drag mints its
+  // own token (a fresh, unique object) and queues it; `onClick` consumes the
+  // oldest queued token for that item (order doesn't matter semantically,
+  // since any pending token means "some drag on this item is still owed a
+  // suppressed click" — first-in-first-out is just a deterministic pick).
+  // The token, not a count, is why this survives the fallback timeout below:
+  // a count can't tell whether the specific unit it decrements belongs to
+  // the gesture that scheduled it or to an unrelated later one that reused
+  // the same slot, so an early-consumed gesture's stale timeout can end up
+  // decrementing a DIFFERENT gesture's pending suppression. A token can only
+  // ever remove itself — if `onClick` already consumed it, the timeout's
+  // removal of that same token is a harmless no-op on a queue that no longer
+  // contains it, and it never touches whatever token(s) a later gesture on
+  // the same item queued in the meantime.
+  const pendingSuppressionsRef = useRef(new Map());
   // Teardown for every currently-attached window pointermove/up/cancel
   // listener set (see handlePointerDown) — a Set rather than a single slot
   // because two pointers (e.g. two fingers on two different items) can each
@@ -170,8 +178,14 @@ function AnnotationToolbox({
       activeDragCleanupsRef.current.delete(cleanup);
       setDragGhost(null);
       if (create && drag.dragging) {
-        const counts = suppressClickCountsRef.current;
-        counts.set(itemKey, (counts.get(itemKey) || 0) + 1);
+        // A fresh, unique token for THIS gesture. Object identity (not a
+        // count) is what lets the fallback timeout below remove only its
+        // own entry, never a different gesture's — see the ref's
+        // declaration for why a count can't guarantee that.
+        const token = {};
+        const queue = pendingSuppressionsRef.current.get(itemKey) ?? [];
+        queue.push(token);
+        pendingSuppressionsRef.current.set(itemKey, queue);
         onDragCreate?.(drag.kind, drag.options, {
           x: finishEvent.clientX,
           y: finishEvent.clientY,
@@ -179,17 +193,18 @@ function AnnotationToolbox({
         // A real drag usually releases away from this button, so the
         // browser's synthetic click (if it fires one for the touch release
         // at all) never reaches this element's onClick to consume this
-        // gesture's count — it would otherwise stay incremented and silently
+        // gesture's token — it would otherwise stay queued and silently
         // swallow a later, unrelated tap on this same item. A click
         // genuinely headed for this button fires synchronously before this
-        // callback runs, so clearing on the next tick never masks it.
-        // Decrementing (not deleting the key outright) is what keeps this
-        // gesture's own count from erasing a DIFFERENT pointer's still-open
-        // suppression window on the same item — see the ref's declaration.
+        // callback runs, so clearing on the next tick never masks it. If
+        // `onClick` already consumed this exact token, removing it here
+        // again is a harmless no-op.
         setTimeout(() => {
-          const remaining = (counts.get(itemKey) || 0) - 1;
-          if (remaining > 0) counts.set(itemKey, remaining);
-          else counts.delete(itemKey);
+          const q = pendingSuppressionsRef.current.get(itemKey);
+          if (!q) return;
+          const at = q.indexOf(token);
+          if (at !== -1) q.splice(at, 1);
+          if (q.length === 0) pendingSuppressionsRef.current.delete(itemKey);
         }, 0);
       }
     };
@@ -293,15 +308,17 @@ function AnnotationToolbox({
                   // the annotation, so this would otherwise create a second,
                   // click-positioned one. Keyed by itemKey so a completed
                   // drag on THIS button can never swallow a click landing on
-                  // a different one; a per-item COUNT (not a membership flag)
-                  // so that if two pointers each completed a drag on this
-                  // same button close together, consuming one pointer's
-                  // suppression here never erases the other's.
-                  const counts = suppressClickCountsRef.current;
-                  const pending = counts.get(itemKey) || 0;
-                  if (pending > 0) {
-                    if (pending > 1) counts.set(itemKey, pending - 1);
-                    else counts.delete(itemKey);
+                  // a different one. Consumes the oldest queued token (any
+                  // pending token means some drag on this item is still owed
+                  // a suppressed click) rather than a count, so that if two
+                  // pointers each completed a drag on this same button close
+                  // together, consuming one here never erases the other's —
+                  // see the ref's declaration for why a count can't promise
+                  // that once its fallback timeout is in the picture.
+                  const queue = pendingSuppressionsRef.current.get(itemKey);
+                  if (queue && queue.length > 0) {
+                    queue.shift();
+                    if (queue.length === 0) pendingSuppressionsRef.current.delete(itemKey);
                     return;
                   }
                   // A tap on a touch device fires the emulated mouseenter but no
