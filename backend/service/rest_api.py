@@ -1225,6 +1225,17 @@ def _register_session_endpoints(
                 _HUMAN_IMAGE_INGEST_CLIENT_ID,
                 annotation,
                 optimized_image_bytes=len(optimized.data),
+                # Throttle by request source, not by the marker above (which is
+                # the same string for every human upload server-wide, so it
+                # would put every user in one bucket) and not by the caller's
+                # `client_id` either: that is a browser-chosen localStorage
+                # value, so a caller could rotate it to mint an unlimited
+                # supply of fresh buckets. `_lookup_rate_key` is the same
+                # spoof-resistant source key the lookup throttle already uses,
+                # and so shares its precondition: behind a reverse proxy this
+                # separates users only if `trusted_proxy_hops` is configured
+                # for the deployment.
+                rate_limit_key=_lookup_rate_key(http_request),
                 expected_revision=request.expected_revision,
             )
         except RevisionConflict as exc:
