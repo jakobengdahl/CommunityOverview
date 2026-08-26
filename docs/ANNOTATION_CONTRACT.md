@@ -235,15 +235,15 @@ lock is meant to protect the group box itself rather than whether it is on
 screen, so a genuinely reversible Hide would belong in the locked menu on the
 merits — and for a while it was rendered there on exactly that reasoning. But
 Hide is not a hide: `handleHideGroup` and `handleDeleteGroup` in
-`GroupNode.jsx` run the identical handler,
-`removeGroupKeepChildren`, which takes the group off the canvas, un-parents
-its members and publishes `notifyChange('delete')`. There is no hidden-group
-state anywhere in the codebase to restore from. Offering it while locked is
-therefore offering a second, differently-labelled Delete — the one thing the
-lock exists to refuse. It stays withheld until a genuine reversible hide
-exists, at which point it belongs in the locked menu and this paragraph goes
-with it. Hide's behaviour on an *unlocked* group is unchanged and is its own
-tracked defect: the button destroys what its label says it conceals.
+`GroupNode.jsx` run the identical handler, `removeGroupKeepChildren`, which
+takes the group off the canvas, un-parents its members and publishes
+`notifyChange('delete')`. There is no hidden-group state anywhere in the
+codebase to restore from. Offering it while locked is therefore offering a
+second, differently-labelled Delete — the one thing the lock exists to refuse.
+It stays withheld until a genuine reversible hide exists, at which point it
+belongs in the locked menu and this paragraph goes with it. Hide's behaviour
+on an *unlocked* group is unchanged and is its own tracked defect: the button
+destroys what its label says it conceals.
 
 A real hole remains, and it is not about the menu: **a locked group's
 membership is not locked.** Dragging a graph node into or out of a locked
@@ -987,9 +987,9 @@ differences worth knowing. One is described under [Layer order](#layer-order)
 above: the rename guard is stricter. The other is here — an unlocked group
 resolves `draggable` to `undefined` rather than `true`, so it still defers to
 the canvas-wide `nodesDraggable` switch the way it did before it was
-lock-aware. ReactFlow
-tests `typeof node.draggable === 'undefined'`, so an explicit `undefined` and
-an absent key behave alike, and a literal `true` would override the switch.
+lock-aware. ReactFlow tests `typeof node.draggable === 'undefined'`, so an
+explicit `undefined` and an absent key behave alike, and a literal `true`
+would override the switch.
 
 This is the canvas UI's own enforcement of `locked` — the server never rejects
 a write to a locked annotation — but which *tool* performs that write differs
