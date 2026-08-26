@@ -861,6 +861,57 @@ describe('describeActivity', () => {
     });
   });
 
+  describe('an annotation kind this build cannot read', () => {
+    // The activity log keeps 7 days, so it outlives a deploy that drops a
+    // kind. `browserWriteBack` cannot reconstruct a write-back for a kind the
+    // translators cannot parse, and diffing such a record raw reproduces the
+    // exact defect this module exists to remove — the records the OLDER
+    // build's browser wrote are whole-annotation rewrites, so every field the
+    // new build would normalise reads as a user edit.
+    const stored = {
+      id: 's1',
+      type: 'sticker',
+      kind: 'sticker',
+      locked: true,
+      text: 'hi',
+      z: 3,
+      position: { x: 0, y: 0 },
+    };
+
+    it('never claims an unlock for a whole-annotation rewrite it cannot verify', () => {
+      // What an older build's browser wrote: everything shipped, the envelope
+      // fields landing on the values that build normalised them to.
+      const wholeWrite = {
+        ...stored,
+        locked: false,
+        z: 0,
+        text: 'bye',
+      };
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: stored, after: wholeWrite }))
+          .key
+      ).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('reports a plain update for a sparse agent patch too, rather than guessing', () => {
+      // The safe direction of the trade: naming the field here would require
+      // trusting a raw diff, which is what mislabels the case above. An
+      // unreadable kind gets an honest "something changed" either way.
+      const patched = { ...stored, text: 'bye' };
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: stored, after: patched })).key
+      ).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('still describes the record rather than failing', () => {
+      const r = record({ op: 'annotation_updated', before: stored, after: { ...stored, z: 9 } });
+      expect(describeActivity(r)).toEqual({
+        key: 'history.desc.annotation_updated_generic',
+        params: { type: 'history.annotation_type.unknown' },
+      });
+    });
+  });
+
   describe('sameValue equivalences', () => {
     // classifyAnnotationUpdate's whole correctness rests on this table, and
     // nothing else pins it: a later edit here changes what the activity log

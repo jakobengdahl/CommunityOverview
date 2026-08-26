@@ -111,15 +111,25 @@ function sameValue(a, b) {
  * is to carry the three fields through the group translators, which is
  * logged separately.
  *
- * Returns null when the annotation cannot be round-tripped, in which case the
- * caller falls back to comparing the snapshots directly. That fallback is a
- * raw diff — the pre-fix behaviour for that record — rather than a safe
- * default. It is reachable: a `before` snapshot written by an older build,
- * carrying a kind this one cannot read, skips the translators (the activity
- * log keeps 7 days, so that outlives a deploy). It stays correct rather than
- * lucky because the only producer that can then write such a record is an
- * MCP patch, which is sparse, so before/after differ only where the agent
- * actually changed something.
+ * Returns null when the annotation cannot be round-tripped — reachable by a
+ * `before` snapshot written by an older build, carrying a kind this one
+ * cannot read: the log keeps 7 days, so it outlives a deploy that drops a
+ * kind. The caller then reports a plain update rather than diffing the
+ * snapshots raw.
+ *
+ * That is deliberate, and the reasoning is worth keeping because two earlier
+ * attempts at it were wrong. A raw diff looks safe for such a record on the
+ * argument that only a sparse MCP patch can write one — this build's browser
+ * drops an unreadable kind from its mirror entirely, so `computeOps` emits
+ * nothing for it. But the same 7-day window also holds records the OLDER
+ * build's browser wrote, back when it could read the kind, and those are
+ * whole-annotation rewrites. Diffing one raw reproduces the exact defect
+ * this module exists to remove — measured: a text edit on a locked
+ * annotation of a since-removed kind reports "Unlocked". Nothing here can
+ * reconstruct a write-back for a kind it cannot parse, so the honest answer
+ * is to assert nothing about which field changed. The cost is that a sparse
+ * agent patch on such a record reads as a plain update instead of naming the
+ * field, which is the safe direction of the two.
  */
 function browserWriteBack(annotation) {
   if (!annotation || typeof annotation !== 'object') return null;
@@ -153,9 +163,8 @@ function browserWriteBack(annotation) {
  * fails the second test precisely because it lands somewhere the round trip
  * would not have.
  */
-function userChanged(before, after, normalised, haveNormalised) {
+function userChanged(before, after, normalised) {
   if (sameValue(before, after)) return false;
-  if (!haveNormalised) return true;
   return !sameValue(after, normalised);
 }
 
@@ -205,13 +214,10 @@ const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'c
 function changedFields(before, after, normalised) {
   if (!before || typeof before !== 'object') return null;
   if (!after || typeof after !== 'object') return null;
-  const have = Boolean(normalised);
   const changed = new Set();
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (BOOKKEEPING_FIELDS.has(key)) continue;
-    if (userChanged(before[key], after[key], have ? normalised[key] : undefined, have)) {
-      changed.add(key);
-    }
+    if (userChanged(before[key], after[key], normalised[key])) changed.add(key);
   }
   return changed;
 }
@@ -250,19 +256,17 @@ function classifyAnnotationUpdate(record) {
 
 function computeAnnotationUpdateKind(record) {
   const normalised = browserWriteBack(record.before);
+  // No write-back means no way to tell a user's edit from a producer's
+  // rewrite, so nothing about the change can be asserted — see
+  // `browserWriteBack`.
+  if (!normalised) return 'generic';
   const changed = changedFields(record.before, record.after, normalised);
   if (!changed) return 'generic';
 
   const before = geometryOf(record.before);
   const after = geometryOf(record.after);
-  const normalisedGeometry = normalised ? geometryOf(normalised) : null;
-  const geometryChanged = (key) =>
-    userChanged(
-      before[key],
-      after[key],
-      normalisedGeometry ? normalisedGeometry[key] : undefined,
-      Boolean(normalisedGeometry)
-    );
+  const normalisedGeometry = geometryOf(normalised);
+  const geometryChanged = (key) => userChanged(before[key], after[key], normalisedGeometry[key]);
 
   if (changed.has('shape') && shapeChanged(record.before, record.after)) return 'shape';
   if (changed.has('locked')) return record.after && record.after.locked ? 'locked' : 'unlocked';
