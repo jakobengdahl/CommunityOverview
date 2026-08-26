@@ -171,13 +171,12 @@ describe('GroupNode locked context menu', () => {
   // The lock protects the group box itself rather than whether it is on
   // screen, so a truly reversible Hide would belong in this menu — the same
   // reasoning the component and the contract give. Hide is not that: it and
-  // Delete
-  // run the identical handler (removeGroupKeepChildren), which takes the group
-  // off the canvas, un-parents its members and publishes a delete. Offering it
-  // while locked hands the user a second, differently-labelled Delete — the
-  // one thing the lock exists to refuse. So the locked menu offers Unlock and
-  // nothing else, and this case pins the whole menu rather than only the
-  // buttons that were wrong, so a later addition cannot slip in unasserted.
+  // Delete run the identical handler (removeGroupKeepChildren), which takes
+  // the group off the canvas, un-parents its members and publishes a delete.
+  // Offering it while locked hands the user a second, differently-labelled
+  // Delete — the one thing the lock exists to refuse. So the locked menu
+  // offers Unlock and nothing else, and this case pins that by the menu's
+  // whole subtree, not by its buttons: see the two assertions at the end.
   it('offers unlock and nothing else when the group is locked', () => {
     renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
@@ -186,11 +185,17 @@ describe('GroupNode locked context menu', () => {
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
     expect(document.querySelectorAll('.color-button')).toHaveLength(0);
-    // Children, not buttons: a `div` or `a` carrying onClick is a working
-    // control that every role- and button-scoped assertion above sees as
-    // absent, so counting buttons would let a hand-rolled Hide back in under
-    // a different tag. The sole child is pinned as the unlock button above.
-    expect(document.querySelector('.graph-group-context-menu').children).toHaveLength(1);
+    // The whole subtree, not the buttons and not the direct children. A `div`
+    // or `a` carrying onClick is a working control that every role- and
+    // button-scoped assertion above sees as absent, so counting buttons would
+    // let a hand-rolled Hide back in under a different tag — and counting
+    // direct children would let it back in wrapped in one. Counting every
+    // descendant admits exactly one element, and the identity check names
+    // which: the assertions above are bound to `document.body`, so on their
+    // own they never establish that the element in the menu is that button.
+    const menu = document.querySelector('.graph-group-context-menu');
+    expect(menu.querySelectorAll('*')).toHaveLength(1);
+    expect(menu.firstElementChild).toBe(screen.getByRole('button', { name: /unlock/i }));
   });
 
   // The destructive handler stays reachable from the unlocked menu, so this

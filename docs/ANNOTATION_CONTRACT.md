@@ -233,9 +233,9 @@ and hands that job to the group's own menu, which now honours the flag.
 **Why Hide is withheld too, though the lock is not about visibility.** The
 lock is meant to protect the group box itself rather than whether it is on
 screen, so a genuinely reversible Hide would belong in the locked menu on the
-merits — and for a while it was rendered there on exactly
-that reasoning. But Hide is not a hide: `handleHideGroup` and
-`handleDeleteGroup` in `GroupNode.jsx` run the identical handler,
+merits — and for a while it was rendered there on exactly that reasoning. But
+Hide is not a hide: `handleHideGroup` and `handleDeleteGroup` in
+`GroupNode.jsx` run the identical handler,
 `removeGroupKeepChildren`, which takes the group off the canvas, un-parents
 its members and publishes `notifyChange('delete')`. There is no hidden-group
 state anywhere in the codebase to restore from. Offering it while locked is
