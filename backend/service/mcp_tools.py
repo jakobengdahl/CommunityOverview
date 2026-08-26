@@ -1193,7 +1193,9 @@ def register_mcp_tools(
             if session is not None:
                 visible_set = set(visible)
                 dimmed_node_ids = [
-                    n for n in session.state.get("dimmed_node_ids", []) if n in visible_set
+                    n
+                    for n in session.state.get("dimmed_node_ids", [])
+                    if n in visible_set
                 ]
                 dimmed_edge_ids = list(session.state.get("dimmed_edge_ids", []))
                 edge_intensity = session.state.get("edge_intensity", 1.0)
