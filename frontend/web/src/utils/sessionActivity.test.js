@@ -507,10 +507,15 @@ describe('describeActivity', () => {
 
   // Groups are the kind two rounds of per-field fixes never reached, because
   // they are not overlays: `useSharedSession` mirrors them through
-  // annotationsToGroups/groupsToAnnotations, which carry neither `z` nor
-  // `locked` nor rotation. So the browser's write-back of an agent-created
-  // group dropped all three, and renaming a locked group announced
-  // "Unlocked" — the literal string this whole change exists to eliminate.
+  // annotationsToGroups/groupsToAnnotations. That pair used to carry neither
+  // `z` nor `locked` nor rotation, so the browser's write-back of an
+  // agent-created group dropped all three and renaming a locked group
+  // announced "Unlocked" — the literal string this whole change exists to
+  // eliminate. PR #483 made it carry `locked` and `z`, and this module
+  // followed for free: it reports whatever the round trip preserves, so the
+  // assertions below now pin that the lock and the layer survive where they
+  // once pinned the clobber. `rotation` is still dropped, and `label` is
+  // still defaulted, so those two keep the asymmetry.
   describe('annotation_updated classification, groups', () => {
     // build_group_annotation's output shape (backend/core/session_annotations.py).
     function serverGroup({ x = 10, y = 20, w = 320, h = 200, ...rest } = {}) {
@@ -597,6 +602,29 @@ describe('describeActivity', () => {
         describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
           .key
       ).toBe(`history.desc.annotation_updated_${c.expected}`);
+    });
+
+    it('under-reports naming an unlabelled group literally "Group"', () => {
+      // The other half of the asymmetry, by a different route: the pair does
+      // not drop `label`, it substitutes `'Group'` for an empty one, which
+      // states a value the user never set just the same. Deliberate — without
+      // it every drag of an unlabelled group would report a rename — but it
+      // means `rotation` is not the only field in that position, which the
+      // browserWriteBack docstring has to say and this pins.
+      const at = (v) => serverGroup({ label: v });
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Group') }))
+          .key
+      ).toBe('history.desc.annotation_updated_generic');
+      // Any other name is a real rename, in both directions.
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(''), after: at('Team') }))
+          .key
+      ).toBe('history.desc.annotation_updated_text');
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at('Group'), after: at('') }))
+          .key
+      ).toBe('history.desc.annotation_updated_text');
     });
 
     it('still under-reports an agent unrotating a group, the one field still dropped', () => {

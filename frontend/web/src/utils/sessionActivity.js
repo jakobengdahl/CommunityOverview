@@ -96,13 +96,21 @@ function sameValue(a, b) {
  * exactly why they were the kind still producing the original false
  * "Unlocked" after two rounds of per-field fixes.
  *
- * Whatever that pair does not carry, the write-back states as the default,
- * and reading such a field becomes ASYMMETRIC: a change AWAY from the default
- * is visible, a change TO it is indistinguishable from the drop and so reads
- * as a plain update. Under-reporting is the safe direction, but it is not
- * "the field is ignored", and a follow-up scoped from that misreading would
- * be scoped wrong. Today only `rotation` is in that position — a group
- * rotated off 0 reports it, one rotated back to 0 does not.
+ * Wherever that pair states a value of its own rather than the stored one —
+ * by dropping a field, or by substituting a default for it — reading that
+ * field becomes ASYMMETRIC: a change AWAY from the value it states is
+ * visible, a change TO it is indistinguishable from the substitution and so
+ * reads as a plain update. Under-reporting is the safe direction, but it is
+ * not "the field is ignored", and a follow-up scoped from that misreading
+ * would be scoped wrong.
+ *
+ * Two fields are in that position today, by the two different routes:
+ * `rotation`, which the pair simply does not carry, so a group rotated off 0
+ * reports it and one rotated back to 0 does not; and `label`, which
+ * `annotationsToGroups` substitutes `'Group'` for when it is empty, so
+ * naming an unlabelled group literally "Group" reads as a plain update.
+ * Holding `label` to this rule is not a wart to be fixed — without it every
+ * drag of an unlabelled group would report a rename.
  *
  * `locked` and `z` were there too until the translators were fixed to carry
  * them, at which point this module started reporting a group's lock and layer
