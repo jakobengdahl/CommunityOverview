@@ -67,6 +67,29 @@
     0 0 16px rgba(100, 108, 255, 0.3);
 }
 
+/* Session-local focus (task-session-focus-dimming-controls): a dimmed node
+   stays on the canvas at reduced prominence. Selection, hover and a remote
+   collaborator's selection marker always win over dimming — the composition
+   order every reviewer of this state should be able to read straight off
+   the CSS rather than reconstruct from JS. */
+.graph-custom-node.dimmed {
+  opacity: 0.35;
+}
+
+.graph-custom-node.dimmed.selected,
+.graph-custom-node.dimmed:hover,
+.graph-custom-node.dimmed.remote-selected {
+  opacity: 1;
+}
+
+/* Accessibility contrast: a stronger contrast preference backs dimming off
+   to a level that stays clearly legible instead of the low-vision default. */
+@media (prefers-contrast: more) {
+  .graph-custom-node.dimmed {
+    opacity: 0.7;
+  }
+}
+
 /* Skill nodes — dashed border and gold glow when selected */
 .graph-custom-node.skill-node {
   border-style: dashed;

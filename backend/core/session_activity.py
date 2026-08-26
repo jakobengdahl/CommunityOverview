@@ -46,6 +46,11 @@ UNDOABLE_OPS = frozenset(
         "layout_applied",
         "nodes_hidden",
         "nodes_shown",
+        "nodes_dimmed",
+        "nodes_undimmed",
+        "edges_dimmed",
+        "edges_undimmed",
+        "edge_intensity_set",
     }
 )
 
@@ -162,6 +167,14 @@ def current_snapshot_for(session_state: Dict[str, Any], record: Dict[str, Any]) 
     if kind == "node_visibility":
         hidden = set(session_state.get("hidden_node_ids", []))
         return sorted(i for i in affected.get("ids", []) if i in hidden)
+    if kind == "node_dim":
+        dimmed = set(session_state.get("dimmed_node_ids", []))
+        return sorted(i for i in affected.get("ids", []) if i in dimmed)
+    if kind == "edge_dim":
+        dimmed = set(session_state.get("dimmed_edge_ids", []))
+        return sorted(i for i in affected.get("ids", []) if i in dimmed)
+    if kind == "edge_intensity":
+        return session_state.get("edge_intensity", 1.0)
     if kind == "layout":
         positions = session_state.get("positions", {})
         return {nid: positions.get(nid) for nid in affected.get("node_ids", [])}

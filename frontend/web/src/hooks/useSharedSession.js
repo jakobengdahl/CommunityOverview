@@ -16,11 +16,15 @@ export function serverStateToMirror(state, resolvedNodeIds) {
   const s = state || {};
   const { groups, parentIds } = annotationsToGroups(s.annotations);
   const overlays = annotationsToOverlays(s.annotations);
+  const intensity = Number(s.edge_intensity);
   return {
     node_refs: resolvedNodeIds || s.node_refs || [],
     positions: s.positions || {},
     hidden_node_ids: s.hidden_node_ids || [],
     hidden_edge_ids: s.hidden_edge_ids || [],
+    dimmed_node_ids: s.dimmed_node_ids || [],
+    dimmed_edge_ids: s.dimmed_edge_ids || [],
+    edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: [...groupsToAnnotations(groups, parentIds), ...overlaysToAnnotations(overlays)],
   };
 }
@@ -50,6 +54,9 @@ export function useSharedSession({
   addNodesToVisualization,
   setHiddenNodeIds,
   setHiddenEdgeIds,
+  setDimmedNodeIds,
+  setDimmedEdgeIds,
+  setEdgeIntensity,
   setPendingGroups,
   setPendingAnnotations,
   ensureSyncConnected,
@@ -80,6 +87,9 @@ export function useSharedSession({
       }
       if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
       if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
+      if (state.dimmed_node_ids?.length) setDimmedNodeIds(state.dimmed_node_ids);
+      if (state.dimmed_edge_ids?.length) setDimmedEdgeIds(state.dimmed_edge_ids);
+      if (typeof state.edge_intensity === 'number') setEdgeIntensity(state.edge_intensity);
       const { groups, parentIds } = annotationsToGroups(state.annotations);
       if (groups.length) setPendingGroups({ groups, parentIds });
       const overlays = annotationsToOverlays(state.annotations);
@@ -90,6 +100,9 @@ export function useSharedSession({
       addNodesToVisualization,
       setHiddenNodeIds,
       setHiddenEdgeIds,
+      setDimmedNodeIds,
+      setDimmedEdgeIds,
+      setEdgeIntensity,
       setPendingGroups,
       setPendingAnnotations,
     ]
