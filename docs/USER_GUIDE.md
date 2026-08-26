@@ -193,8 +193,9 @@ the underlying data model.
 
 A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
 the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
-simply no longer grouped. There is no undo from the menu, so you would have to draw the
-group again, but nothing in it is lost.
+simply no longer grouped. If you delete one by mistake, **Undo** in the session panel
+(see [Recent activity](#52-recent-activity-audit-log)) restores the box with its label, colour and
+members, as long as it is still your most recent undoable action.
 
 If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
 what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —

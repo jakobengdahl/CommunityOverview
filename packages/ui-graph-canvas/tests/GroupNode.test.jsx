@@ -238,18 +238,26 @@ describe('GroupNode locked context menu', () => {
     expect(notifyChange).toHaveBeenCalledWith('delete');
   });
 
-  // The unlocked menu is pinned as a whole for the same reason the locked one
-  // is: Hide Group was a second, differently-labelled Delete, and nothing
-  // should re-add it — or anything else — without this failing first.
-  it('offers colour and delete on an unlocked group, and no Hide Group', () => {
+  // Hide Group was a second, differently-labelled Delete. This guards against
+  // it coming back, which is what this PR exists to prevent — but note what it
+  // is and is not. Unlike the locked menu, this one is NOT pinned as a whole:
+  // it is a surface that may legitimately grow, so a subtree element count
+  // would fail on every honest addition. The guard is therefore the text —
+  // nothing in this menu may say "hide", whatever tag carries it — plus the
+  // button count, which catches a re-added `<button>` and a stray swatch. A
+  // differently-worded control added as a `div` or `a` would pass both; that
+  // is the accepted cost of letting this menu grow.
+  it('offers colour and delete on an unlocked group, and nothing that hides', () => {
     renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
     expect(document.querySelector('.context-menu-title').textContent).toBe('Group Color');
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
-    expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
-    // Six swatches and Delete Group, and nothing else that can be pressed.
     const menu = document.querySelector('.graph-group-context-menu');
+    // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
+    // working control that a role query reports as absent. Text sees it.
+    expect(menu.textContent).not.toMatch(/hide/i);
+    // Six swatches and Delete Group, and no eighth button.
     expect(menu.querySelectorAll('button')).toHaveLength(7);
   });
 
