@@ -990,6 +990,94 @@ class TestSessionImageIngestEndpoint:
         assert allowed.status_code == 200
 
 
+class TestImageIngestRateLimit:
+    """The ingest op is attributed to a single fixed marker id (see the class
+    above), so throttling on that attribution put every human upload on the
+    whole server into one bucket: one user exhausting it locked out everyone
+    else. The endpoint therefore throttles on the request *source* instead,
+    which is also the only key here that a caller cannot choose for itself —
+    ``client_id`` is a browser-held localStorage value, so keying on it would
+    let one caller rotate it and mint unlimited fresh budgets."""
+
+    @staticmethod
+    def _app_behind_proxy(temp_graph_file, temp_static_dirs, capacity: float):
+        from backend.api_host import create_app, AppConfig
+        from backend.core.session_manager import _TokenBucket
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            auth_enabled=False,
+            trusted_proxy_hops=1,
+        )
+        app = create_app(config)
+        app.state.session_manager._image_bucket = _TokenBucket(capacity, 0.0)
+        return TestClient(app)
+
+    @staticmethod
+    def _upload(client: TestClient, sid: str, source: str, client_id: str = "b1"):
+        return client.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": client_id,
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+            },
+            headers={"X-Forwarded-For": source},
+        )
+
+    def test_one_source_exhausting_its_budget_does_not_lock_out_another(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+        assert self._upload(client, sid, "1.1.1.1").status_code == 429
+        # The whole point: a second user's uploads are unaffected.
+        assert self._upload(client, sid, "2.2.2.2").status_code == 200
+
+    def test_rotating_client_id_does_not_mint_a_fresh_budget(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1", client_id="b1").status_code == 200
+        assert self._upload(client, sid, "1.1.1.1", client_id="b2").status_code == 429
+
+    def test_spoofed_forwarded_for_entry_does_not_mint_a_fresh_budget(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+        assert self._upload(client, sid, "9.9.9.9, 1.1.1.1").status_code == 429
+
+    def test_ops_traffic_cannot_drain_a_source_image_budget(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        """The image budget is keyed on a source address while the op bucket is
+        keyed on self-declared client ids. They must not share a keyspace, or a
+        caller could pick a ``client_id`` equal to a victim's address and spend
+        that victim's image budget through ``/ops``."""
+        from backend.core.session_manager import _TokenBucket
+
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client.app.state.session_manager._bucket = _TokenBucket(1.0, 0.0)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        ops_body = {"client_id": "1.1.1.1", "base_seq": 0, "ops": []}
+        assert client.post(f"/api/sessions/{sid}/ops", json=ops_body).status_code == 200
+        assert client.post(f"/api/sessions/{sid}/ops", json=ops_body).status_code == 429
+        # That exhausted op key must not have touched the image budget.
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+
+
 class TestImageIngestBodyCap:
     """This endpoint takes its body as raw ``Request`` rather than a typed
     Pydantic parameter specifically so the Content-Length pre-check can run
