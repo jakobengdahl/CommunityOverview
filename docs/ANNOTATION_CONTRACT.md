@@ -235,9 +235,8 @@ two actions rather than the baseline's one. This is a product decision, not an
 oversight: the lock is meant to protect the group box itself, not whether it
 is on screen, so a destructive Delete is refused while a reversible Hide is
 not. Read narrowly — it protects the box's own fields, not what the box holds
-(see the membership paragraph above).
-Hide is a group-only action; no other kind has it, so no other kind is
-affected.
+(see the membership paragraph below). Hide is a group-only action; no other
+kind has it, so no other kind is affected.
 
 A second hole in the same paragraph, and a real one: **a locked group's
 membership is not locked.** Dragging a graph node into or out of a locked
@@ -940,19 +939,27 @@ representation (`overlayToFlowNode`/`flowNodeToOverlay` in
 `packages/ui-graph-canvas/src/utils/annotations.js`, and the server-model
 translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
 the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
-`rotation` travels on the flow node's `data`. `group` is partly apart from
-this: it has no `rotation` at all, and its `z` is carried on the flow node's
-`data` rather than mapped to `zIndex`, because a group's paint order comes
-from the node array rather than from `zIndex` (see [Layer order](#layer-order)).
+`rotation` travels on the flow node's `data`.
+
+`group` is apart from this, and not only in degree: it never reaches
+`overlayToFlowNode`/`flowNodeToOverlay` at all. Its envelope is carried by
+`annotationsToGroups`/`groupsToAnnotations` on the server-model side and, on
+the canvas side, by the two group builders and `handleSaveView` in
+`GraphCanvas.jsx`. It has no `rotation`, and its `z` lands on the flow node's
+`data` rather than on `zIndex`, because a group's paint order comes from the
+node array rather than from `zIndex` (see [Layer order](#layer-order)).
 Its `locked` refuses broadly what every other kind's does, with three
-differences worth knowing: the rename guard is stricter (above), the menu
-keeps Hide (below), and an unlocked group resolves `draggable` to `undefined`
-rather than `true`, so it still defers to the canvas-wide `nodesDraggable`
-switch the way it did before it was lock-aware — ReactFlow tests
+differences worth knowing, all described under
+[Layer order](#layer-order) above: the rename guard is stricter, the menu
+keeps Hide, and an unlocked group resolves `draggable` to `undefined` rather
+than `true`, so it still defers to the canvas-wide `nodesDraggable` switch the
+way it did before it was lock-aware — ReactFlow tests
 `typeof node.draggable === 'undefined'`, so an explicit `undefined` and an
-absent key behave alike, and a literal `true` would override the switch. This is the canvas UI's own
-enforcement of `locked` — the server never rejects a write to a locked
-annotation — but which *tool* performs that write differs by type:
+absent key behave alike, and a literal `true` would override the switch.
+
+This is the canvas UI's own enforcement of `locked` — the server never rejects
+a write to a locked annotation — but which *tool* performs that write differs
+by type:
 
 - For the generic types (`text`/`label`/`line`/`frame`/`shape`/`icon`/
   `vote_dot`/`image`), `reorder_annotation`, `set_annotation_lock` and
