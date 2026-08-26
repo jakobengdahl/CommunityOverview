@@ -834,6 +834,10 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap(monkeypa
         event[0] == "delete" and event[1] == "federated::esam-main::n2"
         for event in node_events
     )
+    assert not any(
+        event[0] == "update" and event[1] == "federated::esam-main::n2"
+        for event in node_events
+    )
     assert set(edge_events) == {
         ("create", None, "federated::esam-main::e2"),
         ("delete", "federated::esam-main::e1", None),
@@ -841,19 +845,10 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
+async def test_sync_graph_does_not_re_emit_an_update_for_an_unchanged_node(
     monkeypatch,
 ):
-    """Documents current behaviour, which is wrong but out of scope to change here.
-
-    Node.from_dict stamps a fresh created_at/updated_at every time _build_cache
-    rebuilds the cache, and _emit_node_events compares nodes with to_dict(), so
-    the comparison never matches and every cached node is re-announced as an
-    update on every sync — a scheduled graph emits a full update storm per
-    interval even when the remote payload is byte-identical. Tracked separately
-    as smallfix-federation-unchanged-node-emits-update; this test is the one to
-    flip when that is fixed.
-    """
+    """A byte-identical remote payload must not create cache update noise."""
     remote = _ScriptedTransport((200, _ONE_NODE), (200, _ONE_NODE))
     _sealed(monkeypatch, remote)
 
@@ -868,7 +863,7 @@ async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
         node_events.clear()
         await manager.sync_graph("esam-main", client)
 
-    assert node_events == ["update"]
+    assert node_events == []
 
 
 @pytest.mark.asyncio
