@@ -207,8 +207,15 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
+    // `draggable` is recomputed here, not just cleared on `data`. It is set
+    // once when the group flow node is built, and nothing rebuilds a group for
+    // the rest of the session, so leaving it false would unlock the menu while
+    // the box stayed pinned until reload. ArrowNode's patchData recomputes it
+    // for the same reason.
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, locked: false } } : n))
+      nds.map((n) =>
+        n.id === id ? { ...n, data: { ...n.data, locked: false }, draggable: true } : n
+      )
     );
     setContextMenu(null);
     notifyChange('style');

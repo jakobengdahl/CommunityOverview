@@ -181,7 +181,12 @@ describe('GroupNode locked context menu', () => {
     fireEvent.contextMenu(screen.getByText('G'));
     fireEvent.click(screen.getByRole('button', { name: /unlock/i }));
     const updater = hoisted.setNodes.mock.calls.at(-1)[0];
-    expect(updater([{ id: 'group-1', data: lockedData }])[0].data.locked).toBe(false);
+    const updated = updater([{ id: 'group-1', data: lockedData, draggable: false }])[0];
+    expect(updated.data.locked).toBe(false);
+    // A group flow node's `draggable` is computed once, when the node is built,
+    // and nothing rebuilds a group afterwards. Clearing only `data.locked`
+    // would give back the menu but leave the box pinned until reload.
+    expect(updated.draggable).toBe(true);
     // Without this the unlock is purely local: no op is published, so the
     // group is locked again on reload and no collaborator ever sees it.
     expect(notifyChange).toHaveBeenCalledWith('style');
