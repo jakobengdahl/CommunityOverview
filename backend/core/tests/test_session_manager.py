@@ -1707,11 +1707,85 @@ class TestUpsertAnnotation:
 
 
 class TestUpsertImageAnnotation:
-    """The synchronous MCP image-annotation write path
+    """The synchronous image-annotation write path
     (``upsert_image_annotation``), including the image-specific session and
     document byte budgets it enforces instead of the generic op-batch cap
     (see ``TestOpBatchByteCap`` for that cap and the class docstring on
-    ``upsert_image_annotation`` for why images need their own)."""
+    ``upsert_image_annotation`` for why images need their own), and which
+    bucket its rate limit is charged to on each of its two caller shapes."""
+
+    async def test_image_ingest_throttles_on_the_rate_limit_key_not_the_client_id(
+        self,
+    ):
+        """A caller that attributes its ops to a fixed marker (the REST image
+        ingest endpoint does, so the pasting browser's SSE echo is not dropped)
+        passes ``rate_limit_key`` so it is throttled per real originator rather
+        than putting every such caller in the marker's one bucket."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        mgr._image_bucket = _TokenBucket(1.0, 0.0)
+        s = mgr.create_session()
+
+        mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+            rate_limit_key="1.2.3.4",
+        )
+        with pytest.raises(RateLimited):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation("img-2", data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+        # Same marker, different originator: its own budget, and the op bucket
+        # (still holding its single token) is not what is being spent here.
+        mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("img-3", data_bytes=100),
+            optimized_image_bytes=100,
+            rate_limit_key="5.6.7.8",
+        )
+
+    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_op_bucket(self):
+        """The MCP path passes no key and must keep drawing from the op bucket
+        under its own client id — dropping that fallback would leave it
+        unthrottled entirely."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+        with pytest.raises(RateLimited):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-2", data_bytes=100),
+                optimized_image_bytes=100,
+            )
+
+    async def test_image_bucket_exhaustion_does_not_block_the_fallback_path(self):
+        """The two buckets are independent: a spent source budget must not
+        throttle a caller that keys on the op bucket instead."""
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        mgr._image_bucket = _TokenBucket(0.0, 0.0)
+        s = mgr.create_session()
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+
+        assert res["annotation"]["id"] == "img-1"
 
     async def test_creates_and_broadcasts(self):
         mgr = _manager()

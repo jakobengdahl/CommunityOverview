@@ -431,6 +431,13 @@ class SessionManager:
         self._lookup_bucket = _TokenBucket(
             lookup_bucket_capacity, lookup_refill_per_sec
         )
+        # Separate keyspace, same sizing as the op bucket. The human image
+        # ingest endpoint keys this on the request source rather than on a
+        # client-declared id (see ``upsert_image_annotation``'s
+        # ``rate_limit_key``); mixing source-derived keys into ``_bucket``
+        # would let a client pick a ``client_id`` equal to a victim's source
+        # key and drain that victim's image budget through ``/ops``.
+        self._image_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def check_lookup_rate(self, client_key: str) -> None:
@@ -1133,6 +1140,7 @@ class SessionManager:
         annotation: Dict[str, Any],
         *,
         optimized_image_bytes: int,
+        rate_limit_key: Optional[str] = None,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         expected_revision: Optional[int] = None,
@@ -1156,6 +1164,21 @@ class SessionManager:
         ``image_ingest.optimize_image``) — passed in rather than re-derived
         from ``annotation`` so the budget check reflects the exact bytes that
         were validated, not a re-parse of the data URI.
+
+        ``rate_limit_key`` separates *who is throttled* from *who the op is
+        attributed to*. Callers that attribute their ops to a fixed marker
+        rather than to the originating caller must pass it, or every such op
+        server-wide would draw from that one marker's bucket and one caller
+        could lock out everyone else. The REST ingest endpoint passes the
+        request's source key for exactly that reason.
+
+        When it is omitted the throttle falls back to ``client_id`` in the
+        shared op bucket. That is the MCP path, and it is a known instance of
+        the same shared-marker problem, not an exemption from it: every MCP
+        tool passes one fixed agent marker, so all MCP callers share a bucket.
+        Fixing that needs a decision about what an MCP caller should be keyed
+        on (no request source exists at those call sites), so it is tracked
+        separately rather than settled here.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1163,7 +1186,10 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if not self._bucket.consume(client_id, 1):
+        if rate_limit_key is not None:
+            if not self._image_bucket.consume(rate_limit_key, 1):
+                raise RateLimited()
+        elif not self._bucket.consume(client_id, 1):
             raise RateLimited()
 
         if self._lock(session_id).locked():
