@@ -15,6 +15,7 @@ from backend.core import (
     NodeType,
     RelationshipType,
 )
+from backend.core import storage_search
 
 
 @pytest.fixture
@@ -507,6 +508,69 @@ class TestGraphStorageSearch:
         temp_storage.update_node("ec", {"aliases": ["EC"]})
         assert temp_storage.nodes["ec"].aliases == ["EC"]
         assert any(n.id == "ec" for n in temp_storage.search_nodes("EC"))
+
+    def test_any_term_caps_distinct_terms_after_ordered_deduplication(
+        self, temp_storage
+    ):
+        """Only the first capped distinct terms participate in any_term matching."""
+        cap = storage_search.MAX_ANY_TERM_TERMS
+        ordered_terms = [f"term{i:02d}x" for i in range(cap + 1)]
+        query = "  " + " \n ".join(
+            [ordered_terms[0], ordered_terms[1], ordered_terms[0], *ordered_terms[2:]]
+        )
+        nodes = [
+            Node(
+                id="within-cap",
+                type=NodeType.THEME,
+                name="Within cap",
+                description=f"matches {ordered_terms[cap - 1]}",
+            ),
+            Node(
+                id="past-cap",
+                type=NodeType.THEME,
+                name="Past cap",
+                description=f"matches {ordered_terms[cap]}",
+            ),
+        ]
+
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes(
+            query, match_mode=storage_search.MATCH_MODE_ANY_TERM
+        )
+
+        assert [node.id for node in results] == ["within-cap"]
+
+    def test_any_term_cap_does_not_change_substring_or_match_all(self, temp_storage):
+        """The term cap is only for non-wildcard any_term queries."""
+        cap = storage_search.MAX_ANY_TERM_TERMS
+        long_query = " ".join(f"term{i:02d}x" for i in range(cap + 1))
+        nodes = [
+            Node(id="one", type=NodeType.THEME, name="One"),
+            Node(id="two", type=NodeType.ACTOR, name="Two"),
+            Node(
+                id="phrase",
+                type=NodeType.THEME,
+                name="Phrase",
+                description=long_query,
+            ),
+        ]
+
+        temp_storage.add_nodes(nodes, [])
+
+        assert [
+            node.id
+            for node in temp_storage.search_nodes(
+                long_query, match_mode=storage_search.MATCH_MODE_SUBSTRING
+            )
+        ] == ["phrase"]
+        assert (
+            len(
+                temp_storage.search_nodes(
+                    "*", match_mode=storage_search.MATCH_MODE_ANY_TERM
+                )
+            )
+            == 3
+        )
 
 
 class TestSearchRanking:
