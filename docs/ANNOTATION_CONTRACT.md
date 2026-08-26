@@ -214,13 +214,26 @@ overlay is skipped and the user is told to unlock it first, which closes the
 one path that could destroy a locked *overlay* without unlocking it. It is
 kind-agnostic, so it needs no per-component change.
 
-`group` is the exception to all of it, and a locked group is still
-destroyable. It is lockable over MCP (`create_group_annotation` takes
-`locked`), but `annotationsToGroups` drops the flag on the way to the canvas
-and `GroupNode` never reads it, so a locked group box still shows its full
-colour/hide/delete menu. The keyboard rule does not cover the gap: `Delete`
-skips groups entirely — so their children stay correctly parented — and hands
-that job to the group's own menu, which is the one that ignores the flag.
+`group` now implements the same baseline. It was the one exception until its
+translators started carrying `locked`: the flag was persisted server-side
+(`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
+the way to the canvas, so `GroupNode` never saw it and a locked group box
+still showed its full colour/hide/delete menu with no way back out of the
+lock. A locked group now offers only unlock, and its resize handles and drag
+are withheld the same way a locked overlay's are. The keyboard rule still
+does not reach a group — `Delete` skips them entirely, so their children stay
+correctly parented — and hands that job to the group's own menu, which now
+honours the flag.
+
+What `group` still lacks is the layer row, not the lock: see
+[Layer order](#layer-order) above. Its `z` is carried through the same
+translators so a value set over MCP survives the canvas round trip, but
+nothing reads it — a group's paint order is array order
+(`reorderNodesForParentChild` puts groups first so they sit behind their
+members as backdrops), and groups are ReactFlow parents whose members carry
+`parentId`. Giving a group a GUI layer control therefore needs a decision
+about how group layering relates to that parent/child backdrop model, which
+has not been taken.
 
 ### Unrecognised annotation data
 
@@ -863,7 +876,7 @@ server accepts for them is stored and reported but never rendered. That is a
 tracked gap in the [acceptance matrix](#acceptance-matrix), not a decided
 non-goal. `group` never reaches this translation layer at all — its helpers
 (`annotationsToGroups`/`groupsToAnnotations`) carry no rotation field, so a
-group has no rotation to draw or preserve.
+group has no rotation to draw or preserve. They do carry `z` and `locked`.
 
 **A GUI rotation control now exists.** Right-clicking a `note`, `label`,
 `text`, `frame`, `shape`, `icon`, `vote_dot` or `image` opens a property
@@ -936,7 +949,7 @@ rule](#downstream-closure-rule).
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/unlock (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
 | `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
+| `group` | ⚠ toolbar create-group action, inline rename, recolor/hide/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour, rotation, layer (front/back), and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |

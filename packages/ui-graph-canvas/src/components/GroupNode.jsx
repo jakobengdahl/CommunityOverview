@@ -25,10 +25,14 @@ function GroupNode({ id, data, selected }) {
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
-  const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live claim makes
   // this group's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  // The persisted flag, distinct from the remote claim above. It only started
+  // reaching this component when the group translators began carrying it;
+  // before that a group locked over MCP rendered its full menu.
+  const locked = Boolean(data?.locked);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -76,6 +80,11 @@ function GroupNode({ id, data, selected }) {
       notifyRemoteLockedAttempt();
       return;
     }
+    // A rename is an edit, so the persisted lock refuses it as the menu does.
+    // Silently, unlike the remote claim above: that one is somebody else
+    // holding the object right now and worth surfacing, while this one is a
+    // standing state the menu already explains with its Unlock button.
+    if (locked) return;
     setIsEditing(true);
   };
 
@@ -88,6 +97,13 @@ function GroupNode({ id, data, selected }) {
     if (remoteLocked) {
       setEditedLabel(data.label || 'Group');
       notifyRemoteLockedAttempt();
+      return;
+    }
+    // Covers the lock arriving while the input is already open: the component
+    // re-renders with the new flag, so the commit sees it and discards the
+    // pending edit rather than writing it.
+    if (locked) {
+      setEditedLabel(data.label || 'Group');
       return;
     }
     if (editedLabel.trim() && editedLabel.trim() !== data.label) {
@@ -181,6 +197,23 @@ function GroupNode({ id, data, selected }) {
     removeGroupKeepChildren();
   };
 
+  // The only action a locked group's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // matching every overlay kind, the last of which got this branch in PR #455.
+  // Locking is MCP-only; this is the sole GUI path back out of it.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, locked: false } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
 
   return (
@@ -189,7 +222,7 @@ function GroupNode({ id, data, selected }) {
         minWidth={200}
         minHeight={150}
         onResizeEnd={() => notifyChange('geometry')}
-        isVisible={selected && !remoteLocked}
+        isVisible={selected && !remoteLocked && !locked}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
           width: 14,
@@ -250,23 +283,31 @@ function GroupNode({ id, data, selected }) {
             className="graph-group-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">Group Color</div>
-            <div className="context-menu-colors">
-              {colors.map((color) => (
-                <button
-                  key={color}
-                  className="color-button"
-                  style={{ backgroundColor: color }}
-                  onClick={() => handleChangeColor(color)}
-                />
-              ))}
-            </div>
-            <button className="context-menu-action" onClick={handleHideGroup}>
-              👁️ Hide Group
-            </button>
-            <button className="context-menu-delete" onClick={handleDeleteGroup}>
-              🗑️ Delete Group
-            </button>
+            {locked ? (
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
+            ) : (
+              <>
+                <div className="context-menu-title">Group Color</div>
+                <div className="context-menu-colors">
+                  {colors.map((color) => (
+                    <button
+                      key={color}
+                      className="color-button"
+                      style={{ backgroundColor: color }}
+                      onClick={() => handleChangeColor(color)}
+                    />
+                  ))}
+                </div>
+                <button className="context-menu-action" onClick={handleHideGroup}>
+                  👁️ Hide Group
+                </button>
+                <button className="context-menu-delete" onClick={handleDeleteGroup}>
+                  🗑️ Delete Group
+                </button>
+              </>
+            )}
           </div>,
           document.body
         )}

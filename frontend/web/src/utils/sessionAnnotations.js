@@ -77,6 +77,14 @@ export function annotationsToGroups(annotations) {
       position: a.position || { x: 0, y: 0 },
       style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
       color: a.color ?? a.style?.color,
+      // The same envelope fields every overlay kind's translator already
+      // carries. A group could always be locked over MCP, but the flag stopped
+      // here, so the canvas never saw it and the next save diffed it back to
+      // its default. `z` is carried for the same reason; group paint order is
+      // array order (reorderNodesForParentChild), so nothing reads it yet —
+      // preserving the value is not the same as offering a control for it.
+      z: a.z ?? 0,
+      locked: Boolean(a.locked),
     });
     for (const m of a.member_node_ids || []) parentIds[m] = a.id;
   }
@@ -114,6 +122,8 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           color: g.color,
           size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
           member_node_ids: membersByGroup[g.id] || [],
+          z: g.z ?? 0,
+          locked: Boolean(g.locked),
         })
       );
     } catch (error) {

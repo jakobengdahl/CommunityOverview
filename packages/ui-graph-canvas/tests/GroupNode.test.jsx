@@ -7,7 +7,10 @@ const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => ({
   // Expose onResizeEnd via a clickable stub so the test can fire a resize.
-  NodeResizer: ({ onResizeEnd }) => <button data-testid="resize" onClick={() => onResizeEnd?.()} />,
+  // `isVisible` is honoured because it is what withholds the handles from a
+  // locked group; the real NodeResizer renders nothing when it is false.
+  NodeResizer: ({ onResizeEnd, isVisible }) =>
+    isVisible ? <button data-testid="resize" onClick={() => onResizeEnd?.()} /> : null,
   useReactFlow: () => ({ setNodes: hoisted.setNodes }),
 }));
 
@@ -20,7 +23,9 @@ function renderGroup(
     notifyChange,
     notifyRemoteLockedAttempt,
     ...render(
-      <AnnotationContext.Provider value={{ notifyChange, notifyRemoteLockedAttempt, labels: {} }}>
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
         <GroupNode id="group-1" data={data} selected />
       </AnnotationContext.Provider>
     ),
@@ -146,5 +151,102 @@ describe('GroupNode remote selection claim exclusivity', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Team map' } });
     fireEvent.blur(screen.getByRole('textbox'));
     expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+});
+
+// The capability baseline (docs/ANNOTATION_CONTRACT.md) is that a locked
+// object "remains selectable but offers only unlock or copy". Every overlay
+// kind has rendered a `locked ? <unlock only> : <full menu>` branch since
+// PR #455 closed the last one (`line`). `group` did not — it read the remote
+// claim above but never the persisted flag, which the group translators were
+// dropping before it could reach this component. A group locked over MCP
+// therefore showed its full Group Color / Hide Group / Delete Group menu with
+// no way to unlock it from the GUI at all.
+describe('GroupNode locked context menu', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const lockedData = { label: 'G', color: '#646cff', locked: true };
+
+  it('offers only unlock when the group is locked', () => {
+    renderGroup(lockedData);
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(screen.getByRole('button', { name: /unlock/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
+    expect(document.querySelector('.context-menu-colors')).toBeNull();
+  });
+
+  it('unlocks the group and publishes the change', () => {
+    const { notifyChange } = renderGroup(lockedData);
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: /unlock/i }));
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    expect(updater([{ id: 'group-1', data: lockedData }])[0].data.locked).toBe(false);
+    // Without this the unlock is purely local: no op is published, so the
+    // group is locked again on reload and no collaborator ever sees it.
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('withholds the resize handles while the group is locked', () => {
+    renderGroup(lockedData);
+    // The NodeResizer stub renders only when isVisible is true.
+    expect(screen.queryByTestId('resize')).toBeNull();
+  });
+
+  it('keeps the full menu and the resizer when the group is not locked', () => {
+    renderGroup();
+    expect(screen.getByTestId('resize')).toBeInTheDocument();
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(screen.queryByRole('button', { name: /unlock/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
+    expect(document.querySelectorAll('.color-button')).toHaveLength(6);
+  });
+
+  it('refuses to open the rename input while the group is locked', () => {
+    const { notifyChange } = renderGroup(lockedData);
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('discards a pending rename when the lock arrives while the input is open', () => {
+    const notifyChange = vi.fn();
+    const notifyRemoteLockedAttempt = vi.fn();
+    const { rerender } = renderGroup(
+      { label: 'G', color: '#646cff' },
+      notifyChange,
+      notifyRemoteLockedAttempt
+    );
+    fireEvent.doubleClick(screen.getByText('G'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Team map' } });
+    rerender(
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
+        <GroupNode id="group-1" data={lockedData} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.blur(screen.getByRole('textbox'));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the attempt instead of unlocking while another client holds the claim', () => {
+    // The menu cannot be opened under a remote claim, so the unlock handler is
+    // reached only if the claim arrives while the menu is already open. It must
+    // still refuse rather than write.
+    const { notifyChange, notifyRemoteLockedAttempt, rerender } = renderGroup(lockedData);
+    fireEvent.contextMenu(screen.getByText('G'));
+    rerender(
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
+        <GroupNode id="group-1" data={{ ...lockedData, remoteSelection: REMOTE_CLAIM }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.click(screen.getByRole('button', { name: /unlock/i }));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
   });
 });

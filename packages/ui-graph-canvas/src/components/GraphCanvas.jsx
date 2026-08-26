@@ -1902,6 +1902,11 @@ function GraphCanvasInner({
           position: g.position,
           style: g.style,
           color: g.data.color,
+          // Re-emitted so a value that arrived from the server survives the
+          // canvas leg. Dropping either here is what made a locked group's
+          // flag revert on the next autosave, whatever the translators did.
+          z: g.data.z ?? 0,
+          locked: Boolean(g.data.locked),
         })),
       annotations: viewNodes
         .filter((n) => OVERLAY_TYPES.has(n.type))
@@ -2440,9 +2445,9 @@ function GraphCanvasInner({
           // Two are skipped: one held by another client's live selection
           // claim (leases are exclusive — task-annotation-shared-session-realtime)
           // and one that is locked, which stays selectable but offers only
-          // unlock or copy — the rule every *overlay* annotation's context menu
-          // applies. `group`'s menu ignores that flag, but the exclusion above
-          // means Delete never reaches a group to begin with.
+          // unlock or copy — the rule every annotation's context menu applies,
+          // `group`'s included as of this change. Delete never reaches a group
+          // anyway, because of the exclusion above.
           const deletableOverlays = selectedNodes.filter(
             (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
           );
@@ -2545,8 +2550,14 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
+          // Mirrors overlayToFlowNode's `draggable: !locked`: a locked group
+          // box stays selectable but cannot be dragged. Its members are
+          // separate nodes and keep their own draggability.
+          draggable: !g.locked,
         }));
       // Built from what survived, not the raw input. A group with a numeric id
       // — which JSON permits — is dropped by the filter but would land in a
@@ -2750,8 +2761,11 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
+          draggable: !g.locked,
         };
         const members = new Set(op.members || []);
         setNodes((nds) =>
