@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import AnnotationToolbox from '../src/components/AnnotationToolbox';
 
 // Read the stylesheet as text: jsdom applies no layout and vitest resolves a
@@ -290,5 +290,369 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByTestId('annotation-toolbox').className).toContain(
       'annotation-toolbox--compact'
     );
+  });
+
+  describe('drag-to-create', () => {
+    // jsdom has no PointerEvent constructor — build one from MouseEvent, the
+    // same pattern GraphCanvasFreehandDrawing.test.jsx and
+    // GraphCanvasTouch.test.jsx use for the identical limitation.
+    function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+      Object.defineProperty(event, 'pointerId', { value: pointerId });
+      return event;
+    }
+
+    // The pointer handlers are attached via plain addEventListener (see
+    // AnnotationToolbox's handlePointerDown), not React's synthetic event
+    // system, so a dispatch outside act() leaves the resulting state update
+    // unflushed when the very next line asserts on it.
+    function dispatch(target, event) {
+      act(() => {
+        target.dispatchEvent(event);
+      });
+    }
+
+    it('is HTML5-draggable by default (fine pointer) for every kind that creates an object', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^note$/i })).toHaveAttribute('draggable', 'true');
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toHaveAttribute(
+        'draggable',
+        'true'
+      );
+    });
+
+    it('never makes image or freehand draggable, on a fine pointer or a coarse one', () => {
+      for (const touch of [false, true]) {
+        const { unmount } = render(<AnnotationToolbox onCreate={vi.fn()} touch={touch} />);
+        fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+        expect(screen.getByRole('button', { name: /^image$/i })).toHaveAttribute(
+          'draggable',
+          'false'
+        );
+        expect(screen.getByRole('button', { name: /^freehand$/i })).toHaveAttribute(
+          'draggable',
+          'false'
+        );
+        unmount();
+      }
+    });
+
+    it('sets the annotation-kind dataTransfer payload on dragstart for a plain kind', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^note$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).toHaveBeenCalledWith(
+        'application/annotation-kind',
+        JSON.stringify({ kind: 'note' })
+      );
+    });
+
+    it('includes the shape option in the dataTransfer payload for a shape variant', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^hexagon$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).toHaveBeenCalledWith(
+        'application/annotation-kind',
+        JSON.stringify({ kind: 'shape', shape: 'hexagon' })
+      );
+    });
+
+    it('never fires a dataTransfer payload for image or freehand (no dragstart handler at all)', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^image$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      fireEvent.dragStart(screen.getByRole('button', { name: /^freehand$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).not.toHaveBeenCalled();
+    });
+
+    it('turns off native draggable on a coarse pointer, for every kind', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      expect(screen.getByRole('button', { name: /^note$/i })).toHaveAttribute('draggable', 'false');
+    });
+
+    it('creates via onDragCreate at the release point once a coarse-pointer drag clears the threshold', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+      // Under the threshold: no ghost, no creation yet.
+      dispatch(window, pointerEvent('pointermove', { clientX: 102, clientY: 100 }));
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+
+      // Clears the threshold: the ghost appears and follows the pointer.
+      dispatch(window, pointerEvent('pointermove', { clientX: 140, clientY: 220 }));
+      const ghost = document.querySelector('.annotation-toolbox-drag-ghost');
+      expect(ghost).not.toBeNull();
+      expect(ghost.style.left).toBe('140px');
+      expect(ghost.style.top).toBe('220px');
+
+      dispatch(window, pointerEvent('pointerup', { clientX: 150, clientY: 230 }));
+      expect(onDragCreate).toHaveBeenCalledWith('note', undefined, { x: 150, y: 230 });
+      expect(onCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
+
+    it('passes the shape option through onDragCreate for a shape variant', () => {
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const circle = screen.getByRole('button', { name: /^circle$/i });
+      dispatch(circle, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
+
+      expect(onDragCreate).toHaveBeenCalledWith('shape', { shape: 'circle' }, { x: 60, y: 60 });
+    });
+
+    it('treats a press-and-release under the threshold as a plain click, not a drag', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 11, clientY: 10 }));
+      expect(onDragCreate).not.toHaveBeenCalled();
+
+      // The tap's own click still creates normally — drag is additive.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('suppresses the click that follows a completed drag, without blocking the next real tap', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 50, clientY: 50 }));
+      expect(onDragCreate).toHaveBeenCalledTimes(1);
+
+      // The synthetic click a touch release can produce right after pointerup.
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // A later, unrelated tap on the same item still works.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('does not let a second pointer’s own gesture on a different item disturb the first pointer’s pending suppression', () => {
+      // Regression test: suppression is keyed per-item (suppressClickRef is a
+      // Set of item keys), not a single shared flag. A second pointer
+      // starting and completing its own gesture on a DIFFERENT item while a
+      // first pointer's completed drag is still in its own pending-suppress
+      // window (waiting for its synthetic click, or the fallback timeout)
+      // must neither erase the first item's suppression nor be swallowed by
+      // it — each item's suppression is independent.
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      const circle = screen.getByRole('button', { name: /^circle$/i });
+
+      // Pointer 1 completes a drag on `note` — opens note's suppression window.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+      expect(onDragCreate).toHaveBeenCalledTimes(1);
+
+      // Before note's own synthetic click arrives, pointer 2 presses and
+      // releases `circle` as a plain tap (under the drag threshold) — a
+      // genuine, unrelated click on a different button.
+      dispatch(circle, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 6, clientY: 5 }));
+      fireEvent.click(circle);
+      // circle's own click must NOT be swallowed by note's pending suppression.
+      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'circle' });
+
+      // note's own synthetic click now arrives — it must still be suppressed.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledTimes(1); // only circle's, not note's
+      expect(onDragCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps two pointers’ suppression windows on the same item independent, so consuming one never erases the other’s', () => {
+      // Regression test: suppression is a per-item FIFO queue of per-gesture
+      // tokens, not a per-item membership flag. Two different pointers can
+      // each complete a drag on the very same button close together (e.g. a
+      // fast two-finger touch); each drag's own pending synthetic click must
+      // be suppressed, and consuming the first must not erase the second's
+      // still-open window.
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+
+      // Pointer 1 completes a drag on `note`.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+
+      // Before pointer 1's synthetic click arrives, pointer 2 also completes
+      // a drag on the SAME button.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 2, clientX: 1, clientY: 1 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 2, clientX: 60, clientY: 60 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 60, clientY: 60 }));
+
+      expect(onDragCreate).toHaveBeenCalledTimes(2);
+
+      // Both gestures' synthetic clicks arrive — both must be suppressed.
+      fireEvent.click(note);
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // A genuine third tap, after both suppression windows are consumed,
+      // still works normally.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('leaves nothing behind once every stale fallback timer has actually run, so a later genuine tap still works', async () => {
+      // Regression test for a gap the token-queue design (see the
+      // `pendingSuppressionsRef` declaration) specifically closes: each
+      // completed drag schedules a REAL fallback timer that removes its own
+      // gesture's specific token (a no-op if a click already consumed it,
+      // which is the ordinary case — a synthetic click fires synchronously
+      // with its own pointerup, before any later macrotask). With a bare
+      // count instead of per-gesture tokens, a stale timer left over from an
+      // earlier, already-consumed gesture could blindly decrement whatever
+      // the CURRENT count was for that item — including a different,
+      // still-open gesture's on the very same button — once the event loop
+      // got a chance to run it, silently letting a later gesture's own
+      // synthetic click through as an unwanted extra creation. Real timers
+      // (not fake) are used deliberately: firing both gestures' fallback
+      // timers together via fake-timer flush cannot be avoided since they
+      // share the same nominal delay, so the only way to observe each
+      // timer's real no-op behaviour is to let the actual event loop run it
+      // after both suppressions are already consumed by their own clicks.
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+
+      // Pointer 1 completes a drag and its own click consumes the
+      // suppression immediately, matching real browsers (a completed
+      // gesture's synthetic click is synchronous with its own pointerup;
+      // its fallback timer is a later macrotask, still pending here).
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // Pointer 2 completes its own drag on the SAME button before pointer
+      // 1's stale timer has run, and its own click likewise consumes its
+      // suppression immediately.
+      dispatch(note, pointerEvent('pointerdown', { pointerId: 2, clientX: 1, clientY: 1 }));
+      dispatch(window, pointerEvent('pointermove', { pointerId: 2, clientX: 60, clientY: 60 }));
+      dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 60, clientY: 60 }));
+      expect(onDragCreate).toHaveBeenCalledTimes(2);
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // Only now let both gestures' now-superfluous fallback timers actually
+      // run in the real event loop. Each should find its own token already
+      // gone (removed by its own click above) and do nothing.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // A later, genuinely unrelated tap must still work normally — nothing
+      // from either stale timer is left behind to swallow it.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('cleans up in-flight pointer listeners on unmount mid-drag, without throwing or creating anything', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      const { unmount } = render(
+        <AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).not.toBeNull();
+
+      act(() => {
+        unmount();
+      });
+
+      // The component's cleanup effect must have torn down the window
+      // listeners this drag attached — a stale pointerup/pointermove
+      // dispatched after unmount must neither throw (a listener closing over
+      // a torn-down component's setState) nor create anything.
+      expect(() => {
+        dispatch(window, pointerEvent('pointermove', { clientX: 80, clientY: 80 }));
+        dispatch(window, pointerEvent('pointerup', { clientX: 80, clientY: 80 }));
+      }).not.toThrow();
+      expect(onDragCreate).not.toHaveBeenCalled();
+    });
+
+    it('never starts a pointer drag for image or freehand even on a coarse pointer', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const image = screen.getByRole('button', { name: /^image$/i });
+      dispatch(image, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 100, clientY: 100 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 100, clientY: 100 }));
+
+      expect(onDragCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+
+      // Click-only behaviour is unaffected.
+      fireEvent.click(image);
+      expect(onCreate).toHaveBeenCalledWith('image', undefined);
+    });
+
+    it('drops the in-progress drag with no creation on pointercancel', () => {
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 100, clientY: 100 }));
+      dispatch(window, pointerEvent('pointercancel', { clientX: 100, clientY: 100 }));
+
+      expect(onDragCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
   });
 });
