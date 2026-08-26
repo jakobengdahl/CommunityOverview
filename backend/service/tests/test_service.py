@@ -413,6 +413,14 @@ class TestGraphServiceStatistics:
         assert "Actor" in result["nodes_by_type"]
         assert result["nodes_by_type"]["Actor"] == 2
 
+    def test_get_graph_stats_has_edge_type_counts(self, populated_service: GraphService):
+        """Test that stats include edge counts by relationship type."""
+        result = populated_service.get_graph_stats()
+
+        assert "edges_by_type" in result
+        assert result["edges_by_type"]["BELONGS_TO"] == 2
+        assert result["edges_by_type"]["PART_OF"] == 1
+
     def test_list_node_types(self, empty_service: GraphService):
         """Test listing node types."""
         result = empty_service.list_node_types()

@@ -141,10 +141,15 @@ def get_visible_local_graph_stats(
         node.type.value if hasattr(node.type, "value") else str(node.type)
         for node in visible_nodes
     )
+    edges_by_type = Counter(
+        edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+        for edge in visible_edges
+    )
     return GraphStats(
         total_nodes=len(visible_nodes),
         total_edges=len(visible_edges),
         nodes_by_type=dict(nodes_by_type),
+        edges_by_type=dict(edges_by_type),
         last_updated=datetime.now(timezone.utc),
     )
 

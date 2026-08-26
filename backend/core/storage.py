@@ -1194,10 +1194,19 @@ class GraphStorage:
             )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
+        # Count edges per type, for the metamodel explorer's relationship counts.
+        edges_by_type = {}
+        for edge in self.edges.values():
+            type_name = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
+            edges_by_type[type_name] = edges_by_type.get(type_name, 0) + 1
+
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
+            edges_by_type=edges_by_type,
             last_updated=datetime.now(timezone.utc),
         )
 
