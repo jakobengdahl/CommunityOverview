@@ -2238,9 +2238,6 @@ function App() {
             annotationLayer: t('context_menu.annotation_layer'),
             annotationLayerFront: t('context_menu.annotation_layer_front'),
             annotationLayerBack: t('context_menu.annotation_layer_back'),
-            annotationVoteValue: t('context_menu.annotation_vote_value'),
-            annotationVoteValueDecrease: t('context_menu.annotation_vote_value_decrease'),
-            annotationVoteValueIncrease: t('context_menu.annotation_vote_value_increase'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
