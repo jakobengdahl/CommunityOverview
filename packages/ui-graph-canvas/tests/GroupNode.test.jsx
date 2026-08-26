@@ -168,8 +168,10 @@ describe('GroupNode locked context menu', () => {
 
   const lockedData = { label: 'G', color: '#646cff', locked: true };
 
-  // The lock protects the group's content, not its visibility, so a truly
-  // reversible Hide would belong in this menu. Hide is not that: it and Delete
+  // The lock protects the group box itself rather than whether it is on
+  // screen, so a truly reversible Hide would belong in this menu — the same
+  // reasoning the component and the contract give. Hide is not that: it and
+  // Delete
   // run the identical handler (removeGroupKeepChildren), which takes the group
   // off the canvas, un-parents its members and publishes a delete. Offering it
   // while locked hands the user a second, differently-labelled Delete — the
@@ -184,7 +186,11 @@ describe('GroupNode locked context menu', () => {
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
     expect(document.querySelectorAll('.color-button')).toHaveLength(0);
-    expect(document.querySelectorAll('.graph-group-context-menu button')).toHaveLength(1);
+    // Children, not buttons: a `div` or `a` carrying onClick is a working
+    // control that every role- and button-scoped assertion above sees as
+    // absent, so counting buttons would let a hand-rolled Hide back in under
+    // a different tag. The sole child is pinned as the unlock button above.
+    expect(document.querySelector('.graph-group-context-menu').children).toHaveLength(1);
   });
 
   // The destructive handler stays reachable from the unlocked menu, so this
