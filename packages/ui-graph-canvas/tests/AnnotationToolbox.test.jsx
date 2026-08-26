@@ -348,7 +348,10 @@ describe('AnnotationToolbox', () => {
       fireEvent.dragStart(screen.getByRole('button', { name: /^note$/i }), {
         dataTransfer: { setData, effectAllowed: '' },
       });
-      expect(setData).toHaveBeenCalledWith('application/annotation-kind', JSON.stringify({ kind: 'note' }));
+      expect(setData).toHaveBeenCalledWith(
+        'application/annotation-kind',
+        JSON.stringify({ kind: 'note' })
+      );
     });
 
     it('includes the shape option in the dataTransfer payload for a shape variant', () => {
