@@ -491,8 +491,15 @@ class FederationManager:
         for node_id in previous_ids & current_ids:
             old = previous_nodes[node_id]
             new = current_nodes[node_id]
-            if old.to_dict() != new.to_dict():
+            if self._node_event_fingerprint(old) != self._node_event_fingerprint(new):
                 self._on_node_event("update", old, new)
+
+    @staticmethod
+    def _node_event_fingerprint(node: Node) -> Dict[str, Any]:
+        data = node.to_dict()
+        data.pop("created_at", None)
+        data.pop("updated_at", None)
+        return data
 
     def _emit_edge_events(
         self, previous_edges: Dict[str, Edge], current_edges: Dict[str, Edge]
