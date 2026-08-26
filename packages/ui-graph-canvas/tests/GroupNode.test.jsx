@@ -243,10 +243,13 @@ describe('GroupNode locked context menu', () => {
   // and it is worth being exact about what each one forbids, because they are
   // not the same shape.
   //
-  // The text is the on-axis guard: nothing in this menu may say "hide",
-  // whatever tag carries it. That is the claim this PR is about, so a future
-  // "Unhide" or "Hidden members" failing here is correct — it should stop and
-  // make someone confirm the button is not creeping back.
+  // The text is the on-axis guard: nothing in this menu may say hide in any
+  // form, whatever tag carries it. The pattern covers "hidden" and "hiding"
+  // as well as "hide", because "Hidden members" is a hide-flavoured label
+  // that a bare /hide/ misses — `hidden` shares no substring with `hide`.
+  // That is the claim this PR is about, so a future "Unhide" or "Hidden
+  // members" failing here is correct: it should stop and make someone confirm
+  // the button is not creeping back under a softer name.
   //
   // The button count is a deliberate pin, not a growth allowance. An honest
   // new `<button>` — a Rename, say — fails it, and whoever adds one should
@@ -263,7 +266,7 @@ describe('GroupNode locked context menu', () => {
     const menu = document.querySelector('.graph-group-context-menu');
     // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
     // working control that a role query reports as absent. Text sees it.
-    expect(menu.textContent).not.toMatch(/hide/i);
+    expect(menu.textContent).not.toMatch(/hid(e|den|ing)/i);
     // Six swatches and Delete Group, and no eighth button.
     expect(menu.querySelectorAll('button')).toHaveLength(7);
   });
