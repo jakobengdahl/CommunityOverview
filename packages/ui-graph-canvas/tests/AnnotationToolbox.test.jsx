@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import AnnotationToolbox from '../src/components/AnnotationToolbox';
 
 // Read the stylesheet as text: jsdom applies no layout and vitest resolves a
@@ -290,5 +290,207 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByTestId('annotation-toolbox').className).toContain(
       'annotation-toolbox--compact'
     );
+  });
+
+  describe('drag-to-create', () => {
+    // jsdom has no PointerEvent constructor — build one from MouseEvent, the
+    // same pattern GraphCanvasFreehandDrawing.test.jsx and
+    // GraphCanvasTouch.test.jsx use for the identical limitation.
+    function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+      Object.defineProperty(event, 'pointerId', { value: pointerId });
+      return event;
+    }
+
+    // The pointer handlers are attached via plain addEventListener (see
+    // AnnotationToolbox's handlePointerDown), not React's synthetic event
+    // system, so a dispatch outside act() leaves the resulting state update
+    // unflushed when the very next line asserts on it.
+    function dispatch(target, event) {
+      act(() => {
+        target.dispatchEvent(event);
+      });
+    }
+
+    it('is HTML5-draggable by default (fine pointer) for every kind that creates an object', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^note$/i })).toHaveAttribute('draggable', 'true');
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toHaveAttribute(
+        'draggable',
+        'true'
+      );
+    });
+
+    it('never makes image or freehand draggable, on a fine pointer or a coarse one', () => {
+      for (const touch of [false, true]) {
+        const { unmount } = render(<AnnotationToolbox onCreate={vi.fn()} touch={touch} />);
+        fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+        expect(screen.getByRole('button', { name: /^image$/i })).toHaveAttribute(
+          'draggable',
+          'false'
+        );
+        expect(screen.getByRole('button', { name: /^freehand$/i })).toHaveAttribute(
+          'draggable',
+          'false'
+        );
+        unmount();
+      }
+    });
+
+    it('sets the annotation-kind dataTransfer payload on dragstart for a plain kind', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^note$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).toHaveBeenCalledWith('application/annotation-kind', JSON.stringify({ kind: 'note' }));
+    });
+
+    it('includes the shape option in the dataTransfer payload for a shape variant', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^hexagon$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).toHaveBeenCalledWith(
+        'application/annotation-kind',
+        JSON.stringify({ kind: 'shape', shape: 'hexagon' })
+      );
+    });
+
+    it('never fires a dataTransfer payload for image or freehand (no dragstart handler at all)', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^image$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      fireEvent.dragStart(screen.getByRole('button', { name: /^freehand$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).not.toHaveBeenCalled();
+    });
+
+    it('turns off native draggable on a coarse pointer, for every kind', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      expect(screen.getByRole('button', { name: /^note$/i })).toHaveAttribute('draggable', 'false');
+    });
+
+    it('creates via onDragCreate at the release point once a coarse-pointer drag clears the threshold', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 100, clientY: 100 }));
+      // Under the threshold: no ghost, no creation yet.
+      dispatch(window, pointerEvent('pointermove', { clientX: 102, clientY: 100 }));
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+
+      // Clears the threshold: the ghost appears and follows the pointer.
+      dispatch(window, pointerEvent('pointermove', { clientX: 140, clientY: 220 }));
+      const ghost = document.querySelector('.annotation-toolbox-drag-ghost');
+      expect(ghost).not.toBeNull();
+      expect(ghost.style.left).toBe('140px');
+      expect(ghost.style.top).toBe('220px');
+
+      dispatch(window, pointerEvent('pointerup', { clientX: 150, clientY: 230 }));
+      expect(onDragCreate).toHaveBeenCalledWith('note', undefined, { x: 150, y: 230 });
+      expect(onCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
+
+    it('passes the shape option through onDragCreate for a shape variant', () => {
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const circle = screen.getByRole('button', { name: /^circle$/i });
+      dispatch(circle, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
+
+      expect(onDragCreate).toHaveBeenCalledWith('shape', { shape: 'circle' }, { x: 60, y: 60 });
+    });
+
+    it('treats a press-and-release under the threshold as a plain click, not a drag', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 11, clientY: 10 }));
+      expect(onDragCreate).not.toHaveBeenCalled();
+
+      // The tap's own click still creates normally — drag is additive.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('suppresses the click that follows a completed drag, without blocking the next real tap', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 50, clientY: 50 }));
+      expect(onDragCreate).toHaveBeenCalledTimes(1);
+
+      // The synthetic click a touch release can produce right after pointerup.
+      fireEvent.click(note);
+      expect(onCreate).not.toHaveBeenCalled();
+
+      // A later, unrelated tap on the same item still works.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('never starts a pointer drag for image or freehand even on a coarse pointer', () => {
+      const onCreate = vi.fn();
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const image = screen.getByRole('button', { name: /^image$/i });
+      dispatch(image, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 100, clientY: 100 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 100, clientY: 100 }));
+
+      expect(onDragCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+
+      // Click-only behaviour is unaffected.
+      fireEvent.click(image);
+      expect(onCreate).toHaveBeenCalledWith('image', undefined);
+    });
+
+    it('drops the in-progress drag with no creation on pointercancel', () => {
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const note = screen.getByRole('button', { name: /^note$/i });
+      dispatch(note, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 100, clientY: 100 }));
+      dispatch(window, pointerEvent('pointercancel', { clientX: 100, clientY: 100 }));
+
+      expect(onDragCreate).not.toHaveBeenCalled();
+      expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
   });
 });
