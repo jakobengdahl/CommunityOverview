@@ -640,7 +640,7 @@ def register_mcp_tools(
         Get statistics for the graph
 
         Returns:
-            Dict with statistics (total_nodes, total_edges, nodes_by_type)
+            Dict with statistics (total_nodes, total_edges, nodes_by_type, edges_by_type)
         """
         return service.get_graph_stats()
 
