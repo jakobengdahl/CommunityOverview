@@ -306,10 +306,12 @@ export function isRemoteLocked(data) {
 // Whether an annotation should currently accept a plain ReactFlow drag,
 // combining its persisted lock, a live remote claim, and — for arrows only —
 // whether either endpoint is anchored to a target (anchored arrows move only
-// via their endpoint handles, never as a whole). Single source of truth for
-// GraphCanvas's remote-selection effect; `overlayToFlowNode` computes the
-// locked/anchor-only half of this itself at hydration time, when no remote
-// claim can yet exist.
+// via their endpoint handles, never as a whole). Drives GraphCanvas's
+// remote-selection effect, which takes the `false` verbatim but maps a `true`
+// for a group to `undefined`, so the group keeps deferring to the canvas-wide
+// `nodesDraggable` switch instead of overriding it. `overlayToFlowNode`
+// computes the locked/anchor-only half of this itself at hydration time, when
+// no remote claim can yet exist.
 export function isAnnotationDraggable(node) {
   const data = node?.data;
   if (Boolean(data?.locked) || isRemoteLocked(data)) return false;

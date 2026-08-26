@@ -2558,11 +2558,12 @@ function GraphCanvasInner({
           // A locked group box stays selectable but cannot be dragged; its
           // members are separate nodes and keep their own draggability.
           // `undefined` rather than `true` when unlocked, deliberately:
-          // ReactFlow reads an explicit boolean as an override and only falls
-          // back to the canvas-wide `nodesDraggable` switch when the key is
-          // absent. A plain `!g.locked` would therefore keep an unlocked group
-          // draggable while a freehand stroke is being drawn, which is exactly
-          // what that switch turns off.
+          // ReactFlow resolves `node.draggable || (nodesDraggable &&
+          // typeof node.draggable === 'undefined')`, so an explicit boolean
+          // overrides the canvas-wide switch while `undefined` (present or
+          // absent alike) defers to it. A plain `!g.locked` would therefore
+          // keep an unlocked group draggable while a freehand stroke is being
+          // drawn, which is exactly what that switch turns off.
           draggable: g.locked ? false : undefined,
         }));
       // Built from what survived, not the raw input. A group with a numeric id
@@ -2723,12 +2724,13 @@ function GraphCanvasInner({
         if (!marker && !n.data?.remoteSelection) return n;
         const nextData = { ...n.data, remoteSelection: marker };
         const draggable = isAnnotationDraggable({ ...n, data: nextData });
-        // A group that may be dragged carries no `draggable` key at all, so it
-        // keeps deferring to the canvas-wide `nodesDraggable` switch (see the
-        // group builders below). Writing an explicit `true` here would pin that
-        // decision for the rest of the session the first time a collaborator
-        // claimed the group and let go — leaving it draggable during a freehand
-        // stroke. Overlays keep the explicit boolean they are hydrated with.
+        // A group that may be dragged resolves `draggable` to `undefined`, so
+        // it keeps deferring to the canvas-wide `nodesDraggable` switch — the
+        // same value the two group builders write. Writing an explicit `true`
+        // here would pin that decision for the rest of the session the first
+        // time a collaborator claimed the group and let go, leaving it
+        // draggable during a freehand stroke. Overlays keep the explicit
+        // boolean they are hydrated with.
         return {
           ...n,
           data: nextData,

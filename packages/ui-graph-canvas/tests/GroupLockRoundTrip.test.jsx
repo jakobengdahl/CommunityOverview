@@ -42,8 +42,6 @@ vi.mock('reactflow', () => {
   };
 });
 
-// setNodes fires from several effects; apply every captured updater to the
-// given starting list and return the first result that contains a group.
 // setNodes fires from several effects and only one of them is the
 // remote-selection reconciler; find its result by the marker it clears rather
 // than by position, which is not stable.
@@ -58,6 +56,8 @@ function groupAfterClaimReconcile(from) {
   return null;
 }
 
+// Apply every captured updater to the given starting list and return the first
+// result that contains a group.
 function producedGroups(from = []) {
   for (const call of hoisted.setNodes.mock.calls) {
     const updater = call[0];

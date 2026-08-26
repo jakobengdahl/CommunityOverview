@@ -232,8 +232,10 @@ honours the flag.
 
 **The exception: a locked group's menu also keeps Hide Group**, so it offers
 two actions rather than the baseline's one. This is a product decision, not an
-oversight: the lock is meant to protect an annotation's content, not its
-visibility, so a destructive Delete is refused while a reversible Hide is not.
+oversight: the lock is meant to protect the group box itself, not whether it
+is on screen, so a destructive Delete is refused while a reversible Hide is
+not. Read narrowly — it protects the box's own fields, not what the box holds
+(see the membership paragraph above).
 Hide is a group-only action; no other kind has it, so no other kind is
 affected.
 
@@ -942,11 +944,13 @@ the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
 this: it has no `rotation` at all, and its `z` is carried on the flow node's
 `data` rather than mapped to `zIndex`, because a group's paint order comes
 from the node array rather than from `zIndex` (see [Layer order](#layer-order)).
-Its `locked` refuses the same edits every other kind's does, with two
-differences worth knowing: the menu keeps Hide (below), and an unlocked group
-carries no `draggable` key at all rather than `draggable: true`, so it still
-defers to the canvas-wide `nodesDraggable` switch the way it did before it was
-lock-aware. This is the canvas UI's own
+Its `locked` refuses broadly what every other kind's does, with three
+differences worth knowing: the rename guard is stricter (above), the menu
+keeps Hide (below), and an unlocked group resolves `draggable` to `undefined`
+rather than `true`, so it still defers to the canvas-wide `nodesDraggable`
+switch the way it did before it was lock-aware — ReactFlow tests
+`typeof node.draggable === 'undefined'`, so an explicit `undefined` and an
+absent key behave alike, and a literal `true` would override the switch. This is the canvas UI's own
 enforcement of `locked` — the server never rejects a write to a locked
 annotation — but which *tool* performs that write differs by type:
 
