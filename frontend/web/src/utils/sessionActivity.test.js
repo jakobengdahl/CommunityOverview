@@ -574,6 +574,46 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
     });
 
+    it.each([
+      { edit: 'locking', field: 'locked', from: false, to: true, expected: 'locked' },
+      { edit: 'raising', field: 'z', from: 0, to: 5, expected: 'raised' },
+      { edit: 'rotating', field: 'rotation', from: 0, to: 45, expected: 'rotated' },
+    ])('reports an agent $edit a group, since it moves AWAY from the dropped default', (c) => {
+      // The asymmetry the browserWriteBack docstring describes, pinned so the
+      // comment cannot drift back to the easier and wrong "these fields are
+      // ignored for groups". The write-back always states the default, so a
+      // change away from it is visible...
+      const at = (v) =>
+        c.field === 'rotation'
+          ? serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } })
+          : serverGroup({ [c.field]: v });
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
+          .key
+      ).toBe(`history.desc.annotation_updated_${c.expected}`);
+    });
+
+    it.each([
+      { edit: 'unlocking', field: 'locked', from: true, to: false },
+      { edit: 'lowering to zero', field: 'z', from: 5, to: 0 },
+      { edit: 'unrotating', field: 'rotation', from: 45, to: 0 },
+    ])('under-reports an agent $edit a group, which it cannot distinguish', (c) => {
+      // ...and a change TO the default is indistinguishable from the
+      // translators dropping the field, so it is not reported. Unlocking is
+      // the one that matters: this classifier can say "Locked" truly but can
+      // never say "Unlocked" truly for a group. Under-reporting is the safe
+      // direction; the real fix is in the group translators, logged
+      // separately.
+      const at = (v) =>
+        c.field === 'rotation'
+          ? serverGroup({ geometry: { x: 10, y: 20, w: 320, h: 200, rotation: v } })
+          : serverGroup({ [c.field]: v });
+      expect(
+        describeActivity(record({ op: 'annotation_updated', before: at(c.from), after: at(c.to) }))
+          .key
+      ).toBe('history.desc.annotation_updated_generic');
+    });
+
     it('does not report renaming a group as a layer or rotation change', () => {
       // `z` and rotation are dropped by the group translators the same way.
       const withZ = groupEdit(serverGroup({ label: 'Team', z: 3 }), (g) => ({
@@ -675,25 +715,39 @@ describe('describeActivity', () => {
   });
 
   describe('cost of classifying an image record', () => {
-    // Reconstructing the write-back means running the annotation through
+    // Reconstructing the write-back runs the annotation through
     // createAnnotation, which deep-clones an image's payload through JSON —
-    // and that payload is an embedded data URI of up to 2 MB. Done per record
-    // per render, from SessionActivityList's render body, on a drawer holding
-    // up to 500 records that re-renders on every node change, it stalled the
-    // main thread for seconds. The bound below is ~170x the measured cost and
-    // ~4x under the regression it guards, so it fails on a real reintroduction
-    // without being timing-flaky.
-    function imageRecord(i, overrides = {}) {
-      const url = `data:image/webp;base64,${'A'.repeat(2 * 1024 * 1024)}`;
+    // and that payload is an embedded data URI of up to 2 MB. Done twice per
+    // record from SessionActivityList's render body, on a drawer holding up
+    // to 500 records that re-renders on every node change, it cost 1838 ms of
+    // synchronous main-thread time for 100 records against 1 ms before.
+    //
+    // Guarded structurally rather than on the clock: a wall-clock bound tight
+    // enough to catch the regression is close enough to the honest cost to go
+    // flaky on a slow runner. `toJSON` is called if and only if something
+    // JSON-serialises the payload, which is exactly the regression.
+    function imagePayload(counter) {
+      const payload = { url: `data:image/webp;base64,${'A'.repeat(64 * 1024)}` };
+      Object.defineProperty(payload, 'toJSON', {
+        enumerable: false,
+        value() {
+          counter.serialised += 1;
+          return { url: payload.url };
+        },
+      });
+      return payload;
+    }
+
+    function imageRecord(counter, overrides = {}) {
       const before = {
-        id: `img-${i}`,
+        id: 'img-1',
         type: 'image',
         kind: 'image',
         geometry: { x: 0, y: 0, w: 200, h: 100, rotation: 0 },
         position: { x: 0, y: 0 },
         z: 0,
         locked: false,
-        image: { url },
+        image: imagePayload(counter),
         alt: '',
       };
       return record({
@@ -704,25 +758,60 @@ describe('describeActivity', () => {
           ...before,
           geometry: { ...before.geometry, x: 300 },
           position: { x: 300, y: 0 },
+          image: imagePayload(counter),
           ...overrides,
         },
       });
     }
 
-    it('does not scale with the image payload', () => {
-      const records = Array.from({ length: 100 }, (_, i) => imageRecord(i));
-      const started = performance.now();
-      const keys = records.map((r) => describeActivity(r).key);
-      const elapsed = performance.now() - started;
-      expect(new Set(keys)).toEqual(new Set(['history.desc.annotation_updated_moved']));
-      expect(elapsed).toBeLessThan(500);
+    it('never serialises the image payload', () => {
+      const counter = { serialised: 0 };
+      const r = imageRecord(counter);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+      expect(counter.serialised).toBe(0);
+    });
+
+    it('does not re-run the write-back when the same record is classified again', () => {
+      // SessionActivityList calls describeActivity from its render body, so
+      // without the memo every re-render pays the full reconstruction.
+      let typeReads = 0;
+      const before = {
+        id: 'memo-1',
+        geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+        position: { x: 0, y: 0 },
+        z: 0,
+        locked: false,
+        text: 'hi',
+      };
+      Object.defineProperty(before, 'type', {
+        enumerable: true,
+        get() {
+          typeReads += 1;
+          return 'note';
+        },
+      });
+      const r = record({
+        op: 'annotation_updated',
+        before,
+        after: { ...before, type: 'note', position: { x: 300, y: 0 } },
+      });
+
+      describeActivity(r);
+      const afterFirst = typeReads;
+      expect(afterFirst).toBeGreaterThan(0);
+      describeActivity(r);
+      describeActivity(r);
+      expect(typeReads).toBe(afterFirst);
     });
 
     it('still sees a genuine image swap', () => {
       // Holding the payload out of the round trip must not stop it being
       // compared — it is compared directly, which is what decides it.
-      const r = imageRecord(1, { image: { url: 'data:image/webp;base64,DIFFERENT' } });
-      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+      const counter = { serialised: 0 };
+      const swapped = imageRecord(counter, {
+        image: { url: 'data:image/webp;base64,DIFFERENT' },
+      });
+      expect(describeActivity(swapped).key).toBe('history.desc.annotation_updated_moved');
 
       const swapOnly = record({
         op: 'annotation_updated',

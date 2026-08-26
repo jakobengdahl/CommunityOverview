@@ -94,22 +94,32 @@ function sameValue(a, b) {
  * Groups take the other translator pair — they are not overlays, and
  * `useSharedSession` mirrors them through `annotationsToGroups` — which is
  * exactly why they were the kind still producing the original false
- * "Unlocked" after two rounds of per-field fixes.
- *
- * Groups take the other translator pair — they are not overlays, and
- * `useSharedSession` mirrors them through `annotationsToGroups` — which is
- * exactly why they were the kind still producing the original false
  * "Unlocked" after two rounds of per-field fixes. That pair carries neither
- * `locked` nor `z` nor rotation, so for a group all three read as unchanged
- * whatever they were: an agent genuinely unlocking or relayering one is
- * reported as a plain update. That is the conservative direction, and the
- * real fix is in the translators, which is logged separately.
+ * `locked` nor `z` nor rotation, so the write-back for a group always states
+ * the default: `locked: false`, `z: 0`, `rotation: 0`.
+ *
+ * That makes a group's reading of those three fields ASYMMETRIC, which is
+ * worth being precise about because `locked` is the field this whole
+ * classifier exists to get right. A change TO the dropped default is
+ * indistinguishable from the translators dropping it, so it is not reported;
+ * a change AWAY from it is. Concretely: locking a group reports "Locked",
+ * but unlocking one can never report "Unlocked" — it reads as a plain
+ * update. Likewise a group raised off `z: 0` reports the layer change, while
+ * one sent back down to `z: 0` does not. Under-reporting is the safe
+ * direction of the two, but it is not "these fields are ignored", and a
+ * follow-up scoped from that misreading would be scoped wrong. The real fix
+ * is to carry the three fields through the group translators, which is
+ * logged separately.
  *
  * Returns null when the annotation cannot be round-tripped, in which case the
  * caller falls back to comparing the snapshots directly. That fallback is a
- * raw diff, not a safe default — it is the pre-fix behaviour for that record —
- * but no producer can reach it: the browser's translators drop a kind they
- * cannot read rather than emitting an op for it, and an MCP patch is sparse.
+ * raw diff — the pre-fix behaviour for that record — rather than a safe
+ * default. It is reachable: a `before` snapshot written by an older build,
+ * carrying a kind this one cannot read, skips the translators (the activity
+ * log keeps 7 days, so that outlives a deploy). It stays correct rather than
+ * lucky because the only producer that can then write such a record is an
+ * MCP patch, which is sparse, so before/after differ only where the agent
+ * actually changed something.
  */
 function browserWriteBack(annotation) {
   if (!annotation || typeof annotation !== 'object') return null;
@@ -227,9 +237,8 @@ const classificationCache = new WeakMap();
  * write-back on each of those is pure waste, so it is done once per record
  * object; a refetch produces new objects and so a fresh result. This also
  * keeps the translators' own "cannot read this annotation" warning to once
- * per record rather than once per render, for a `before` snapshot written by
- * a build older than this one — the log keeps 7 days, so that outlives a
- * deploy.
+ * per record rather than once per render, for the older-build `before`
+ * snapshot described above.
  */
 function classifyAnnotationUpdate(record) {
   const cached = classificationCache.get(record);
