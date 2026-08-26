@@ -312,6 +312,13 @@ export function NodeContextMenu({
   selectNodesByType,
   onSelectRelated,
   onViewHistory,
+  dimmedNodeIds = [],
+  dimmedEdgeIds = [],
+  graphEdges = [],
+  onDimNodes,
+  onRestoreNodes,
+  onDimEdges,
+  onRestoreEdges,
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
@@ -319,6 +326,13 @@ export function NodeContextMenu({
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
+  const nodeId = menu.node.id;
+  const isNodeDimmed = dimmedNodeIds.includes(nodeId);
+  const incidentEdgeIds = graphEdges
+    .filter((e) => e.source === nodeId || e.target === nodeId)
+    .map((e) => e.id);
+  const incidentEdgesDimmed =
+    incidentEdgeIds.length > 0 && incidentEdgeIds.every((id) => dimmedEdgeIds.includes(id));
   return (
     <div
       ref={setContainerRef}
@@ -348,6 +362,30 @@ export function NodeContextMenu({
           }}
         >
           👁️ {cml.hide}
+        </button>
+      )}
+      {onDimNodes && onRestoreNodes && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            (isNodeDimmed ? onRestoreNodes : onDimNodes)([nodeId]);
+            onClose();
+          }}
+        >
+          🔅 {isNodeDimmed ? cml.restoreNode : cml.dimNode}
+        </button>
+      )}
+      {onDimEdges && onRestoreEdges && incidentEdgeIds.length > 0 && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            (incidentEdgesDimmed ? onRestoreEdges : onDimEdges)(incidentEdgeIds);
+            onClose();
+          }}
+        >
+          🔅 {incidentEdgesDimmed ? cml.restoreIncidentEdges : cml.dimIncidentEdges}
         </button>
       )}
       {onExpand && (
@@ -474,6 +512,13 @@ export function MultiNodeContextMenu({
   onDeleteMultiple,
   selectNodesByType,
   onOrganize,
+  dimmedNodeIds = [],
+  dimmedEdgeIds = [],
+  graphEdges = [],
+  onDimNodes,
+  onRestoreNodes,
+  onDimEdges,
+  onRestoreEdges,
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
@@ -481,6 +526,16 @@ export function MultiNodeContextMenu({
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
+  const nodeIds = menu.nodes.map((n) => n.id);
+  const nodeIdSet = new Set(nodeIds);
+  const allNodesDimmed = nodeIds.length > 0 && nodeIds.every((id) => dimmedNodeIds.includes(id));
+  const incidentEdgeIds = Array.from(
+    new Set(
+      graphEdges.filter((e) => nodeIdSet.has(e.source) || nodeIdSet.has(e.target)).map((e) => e.id)
+    )
+  );
+  const incidentEdgesDimmed =
+    incidentEdgeIds.length > 0 && incidentEdgeIds.every((id) => dimmedEdgeIds.includes(id));
   const organizeItems = onOrganize
     ? [
         { key: 'tidy', label: cml.autoTidy, onSelect: () => onOrganize('tidy') },
@@ -557,6 +612,30 @@ export function MultiNodeContextMenu({
           👁️ {cml.hideAll}
         </button>
       )}
+      {onDimNodes && onRestoreNodes && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            (allNodesDimmed ? onRestoreNodes : onDimNodes)(nodeIds);
+            onClose();
+          }}
+        >
+          🔅 {allNodesDimmed ? cml.restoreSelected : cml.dimSelected}
+        </button>
+      )}
+      {onDimEdges && onRestoreEdges && incidentEdgeIds.length > 0 && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            (incidentEdgesDimmed ? onRestoreEdges : onDimEdges)(incidentEdgeIds);
+            onClose();
+          }}
+        >
+          🔅 {incidentEdgesDimmed ? cml.restoreIncidentEdges : cml.dimIncidentEdges}
+        </button>
+      )}
       {(onDeleteMultiple || onDelete) && (
         <>
           <div className="context-menu-separator"></div>
@@ -590,6 +669,9 @@ export function EdgeContextMenu({
   onEditEdge,
   onHideEdge,
   onDeleteEdge,
+  dimmedEdgeIds = [],
+  onDimEdges,
+  onRestoreEdges,
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
@@ -597,6 +679,11 @@ export function EdgeContextMenu({
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
+  // menu.edgeIds carries the whole multi-selection when the right-clicked
+  // edge is part of one (see GraphCanvas's onEdgeContextMenu); otherwise
+  // just this edge.
+  const edgeIds = menu.edgeIds && menu.edgeIds.length > 0 ? menu.edgeIds : [menu.edge.id];
+  const allEdgesDimmed = edgeIds.every((id) => dimmedEdgeIds.includes(id));
 
   const validRelationshipTypes = (relationshipTypes || []).filter(
     (rt) => rt && typeof rt.type === 'string' && rt.type.length > 0
@@ -679,6 +766,18 @@ export function EdgeContextMenu({
           }}
         >
           👁️ {cml.hide}
+        </button>
+      )}
+      {onDimEdges && onRestoreEdges && (
+        <button
+          type="button"
+          data-menu-item="root"
+          onClick={() => {
+            (allEdgesDimmed ? onRestoreEdges : onDimEdges)(edgeIds);
+            onClose();
+          }}
+        >
+          🔅 {allEdgesDimmed ? cml.restoreEdge : cml.dimEdge}
         </button>
       )}
       {onDeleteEdge && (
