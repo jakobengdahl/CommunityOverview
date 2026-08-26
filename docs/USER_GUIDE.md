@@ -124,6 +124,12 @@ Right-clicking a node opens the context menu:
 
 - **Edit** — open the edit dialog
 - **Hide** — remove the node from the current view (does not delete it from the graph)
+- **Dim node / Restore node** — fade the node instead of hiding it: it stays visible, at
+  reduced prominence, so you keep its position as context. Restore brings it back to full
+  visibility.
+- **Dim incident edges / Restore incident edges** — fade every connection touching this
+  node (only offered when it has any), to de-emphasise its relationships without hiding
+  the node or the edges' other endpoints.
 - **Expand** — load all nodes directly connected to this node into the canvas
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
@@ -148,10 +154,14 @@ Right-clicking on the **canvas background** offers quick-create options:
 
 Right-clicking an **edge** opens: **Change type** (a submenu listing every relationship
 type defined in the schema; the edge's current type is shown checked and cannot be
-re-selected), **Edit**, **Hide**, and **Delete**.
+re-selected), **Edit**, **Hide**, **Dim connection / Restore connection**, and **Delete**.
+If the edge is part of a larger multi-edge selection, dim/restore applies to the whole
+selection rather than just the one you right-clicked.
 
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, an **Organize** submenu, Hide all, Delete all. "Select
+Select all nodes of the same type, an **Organize** submenu, Hide all, **Dim selected /
+Restore selected**, **Dim incident edges / Restore incident edges** (every connection
+touching any of the selected nodes, de-duplicated), Delete all. "Select
 all nodes of the same type" extends the selection to every node whose type matches any
 type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
 Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
@@ -573,7 +583,8 @@ your browser and takes effect the next time you open or switch session.
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,
-node moves, layout changes — with undo) and **Graph** (a read-only log of
+node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
+changes — with undo) and **Graph** (a read-only log of
 everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears
 with it; graph history is the permanent audit trail.
@@ -643,6 +654,7 @@ a **Details** button opens a full node-type statistics dialog.
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
 | **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
+| **Edge intensity** | A slider setting the baseline visibility for every connection in this session. Dimmed connections (see [2.4](#24-right-click-context-menu)) always render below this baseline — lowering it fades the whole graph's connections together, while dimming still singles out specific ones underneath that. |
 | **Assistant panel open** | Toggle the chat panel between expanded and collapsed. Your choice is remembered in the browser and used every time you return, overriding this deployment's configured startup default. Click **Reset to default** underneath to forget your choice and go back to that default. |
 
 #### Your presence
