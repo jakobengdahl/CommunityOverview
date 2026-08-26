@@ -1170,9 +1170,15 @@ class SessionManager:
         rather than to the originating caller must pass it, or every such op
         server-wide would draw from that one marker's bucket and one caller
         could lock out everyone else. The REST ingest endpoint passes the
-        request's source key for exactly that reason; when it is omitted the
-        throttle falls back to ``client_id`` in the shared op bucket, which is
-        what the MCP tools (already keyed by their own agent marker) rely on.
+        request's source key for exactly that reason.
+
+        When it is omitted the throttle falls back to ``client_id`` in the
+        shared op bucket. That is the MCP path, and it is a known instance of
+        the same shared-marker problem, not an exemption from it: every MCP
+        tool passes one fixed agent marker, so all MCP callers share a bucket.
+        Fixing that needs a decision about what an MCP caller should be keyed
+        on (no request source exists at those call sites), so it is tracked
+        separately rather than settled here.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()

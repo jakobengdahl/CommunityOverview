@@ -997,7 +997,11 @@ class TestImageIngestRateLimit:
     else. The endpoint therefore throttles on the request *source* instead,
     which is also the only key here that a caller cannot choose for itself —
     ``client_id`` is a browser-held localStorage value, so keying on it would
-    let one caller rotate it and mint unlimited fresh budgets."""
+    let one caller rotate it and mint unlimited fresh budgets.
+
+    These run behind a trusted proxy (``trusted_proxy_hops=1``) because that is
+    what makes the source key resolve per user; with the default 0 hops behind a
+    proxy every request would key on the proxy's own address instead."""
 
     @staticmethod
     def _app_behind_proxy(temp_graph_file, temp_static_dirs, capacity: float):
@@ -1040,14 +1044,20 @@ class TestImageIngestRateLimit:
         # The whole point: a second user's uploads are unaffected.
         assert self._upload(client, sid, "2.2.2.2").status_code == 200
 
-    def test_rotating_client_id_does_not_mint_a_fresh_budget(
+    def test_budget_tracks_the_source_and_ignores_the_caller_supplied_client_id(
         self, temp_graph_file, temp_static_dirs
     ):
+        """Both halves together pin which of the two the key actually is: a new
+        ``client_id`` on a spent source buys nothing, and the same ``client_id``
+        on a fresh source is unaffected. The handler does not forward the
+        browser's ``client_id`` into the throttle at all today, so this is the
+        guard against a rewiring that starts to."""
         client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1", client_id="b1").status_code == 200
         assert self._upload(client, sid, "1.1.1.1", client_id="b2").status_code == 429
+        assert self._upload(client, sid, "2.2.2.2", client_id="b1").status_code == 200
 
     def test_spoofed_forwarded_for_entry_does_not_mint_a_fresh_budget(
         self, temp_graph_file, temp_static_dirs

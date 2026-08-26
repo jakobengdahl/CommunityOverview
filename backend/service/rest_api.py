@@ -1231,7 +1231,10 @@ def _register_session_endpoints(
                 # `client_id` either: that is a browser-chosen localStorage
                 # value, so a caller could rotate it to mint an unlimited
                 # supply of fresh buckets. `_lookup_rate_key` is the same
-                # spoof-resistant source key the lookup throttle already uses.
+                # spoof-resistant source key the lookup throttle already uses,
+                # and so shares its precondition: behind a reverse proxy this
+                # separates users only if `trusted_proxy_hops` is configured
+                # for the deployment.
                 rate_limit_key=_lookup_rate_key(http_request),
                 expected_revision=request.expected_revision,
             )
