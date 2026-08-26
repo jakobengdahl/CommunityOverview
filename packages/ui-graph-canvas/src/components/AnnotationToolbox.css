@@ -79,6 +79,44 @@
   background: #3f3a34;
 }
 
+/* Only items with something draggable to create get the grab affordance;
+   image (file picker) and freehand (armed mode) keep the plain pointer
+   cursor from .annotation-toolbox-item above, so they never look draggable. */
+.annotation-toolbox-item--draggable {
+  cursor: grab;
+  /* Disables the browser's own touch scroll/pan gesture on this item so a
+     touch/stylus press starts the pointer-drag path below instead of the
+     platform treating it as a scroll. Harmless on a mouse. */
+  touch-action: none;
+}
+
+.annotation-toolbox-item--draggable:active {
+  cursor: grabbing;
+}
+
+/* The "in hand" ghost for the coarse-pointer (touch/stylus) drag path — a
+   mouse drag never renders this, since the browser's native drag image
+   already provides the same visual for free. Screen-space and centred on the
+   pointer, the same convention the drag-preview overlay elsewhere on the
+   canvas uses for its own pointer-following visuals. */
+.annotation-toolbox-drag-ghost {
+  position: fixed;
+  z-index: 2000;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid #fbbf24;
+  background: rgba(41, 37, 36, 0.95);
+  color: #e7e5e4;
+  font-size: 20px;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
 /* An armed one-shot drawing mode (currently only 'freehand'): the item stays
    visually pressed until the stroke completes or is cancelled, so it reads
    the same way a held tool does in a drawing app. */

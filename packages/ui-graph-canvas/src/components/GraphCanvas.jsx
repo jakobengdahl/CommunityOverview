@@ -1396,6 +1396,18 @@ function GraphCanvasInner({
     [viewportCenterPosition, createAnnotation]
   );
 
+  // The toolbox's coarse-pointer (touch/stylus) drag-to-create path — see
+  // AnnotationToolbox's component doc comment. `clientPosition` is the
+  // release point in screen space; `image`/`freehand` never reach here since
+  // AnnotationToolbox never starts a pointer-drag for either.
+  const handleAnnotationDragCreate = useCallback(
+    (kind, options, clientPosition) => {
+      const position = screenToFlowPosition(clientPosition);
+      createAnnotation(kind, position, options);
+    },
+    [screenToFlowPosition, createAnnotation]
+  );
+
   // Build and add the freehand annotation node once a stroke completes
   // (createFreehandStrokeCapture's onStrokeComplete). `points` are absolute
   // model-space coordinates; stored node-relative to the first point, the
@@ -2280,6 +2292,26 @@ function GraphCanvasInner({
         return;
       }
 
+      // The annotation toolbox's fine-pointer (mouse) drag path — matches
+      // FloatingToolbar's own dataTransfer convention, under its own MIME key
+      // so the two palettes' payloads never collide. image/freehand never
+      // reach here: AnnotationToolbox never makes either draggable.
+      const annotationPayload = event.dataTransfer.getData('application/annotation-kind');
+      if (annotationPayload) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(annotationPayload);
+        } catch {
+          parsed = null;
+        }
+        if (parsed?.kind) {
+          const dropPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+          const { kind, ...options } = parsed;
+          createAnnotation(kind, dropPosition, Object.keys(options).length ? options : undefined);
+        }
+        return;
+      }
+
       const nodeType = event.dataTransfer.getData('application/reactflow-nodetype');
       if (!nodeType) return;
 
@@ -2312,7 +2344,14 @@ function GraphCanvasInner({
         onDropCreateNode(nodeType, position);
       }
     },
-    [screenToFlowPosition, onDropCreateNode, setNodes, onCreateGroup, ingestImageFile]
+    [
+      screenToFlowPosition,
+      onDropCreateNode,
+      setNodes,
+      onCreateGroup,
+      ingestImageFile,
+      createAnnotation,
+    ]
   );
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
@@ -3033,6 +3072,7 @@ function GraphCanvasInner({
           {!activeFocusRootId && (
             <AnnotationToolbox
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+              onDragCreate={handleAnnotationDragCreate}
               labels={atl}
               compact={isCompact}
               // Distinct from `compact`, which is a viewport-WIDTH signal
