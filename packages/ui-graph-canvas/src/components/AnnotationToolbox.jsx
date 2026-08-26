@@ -96,7 +96,11 @@ function AnnotationToolbox({
   // Sole purpose: swallow the click that follows a completed pointer drag
   // (pointerup fires, then the browser's synthetic click fires next in the
   // same task) so a drag never also creates a second, click-positioned copy.
-  const suppressClickRef = useRef(false);
+  // Keyed by item (the same `${kind}-${labelKey}` string used as the React
+  // `key` below), not a single shared boolean: a click on button B must never
+  // be swallowed by a suppression window that button A's drag opened, and two
+  // pointers can each have a drag in flight on two different buttons at once.
+  const suppressClickRef = useRef(new Set());
   // Teardown for every currently-attached window pointermove/up/cancel
   // listener set (see handlePointerDown) — a Set rather than a single slot
   // because two pointers (e.g. two fingers on two different items) can each
@@ -135,18 +139,7 @@ function AnnotationToolbox({
   // the same choice GraphCanvas's own freehand-drawing pointer effect makes
   // (there, listening on the canvas wrapper is enough since the gesture never
   // needs to leave it; here it does, so `window` is the listened-on target).
-  const handlePointerDown = (event, kind, options, glyph) => {
-    // Deliberately NOT resetting suppressClickRef here. It is a single flag
-    // shared across every item/pointer on this toolbox (not per-gesture), so
-    // two pointers can be mid-drag at once (e.g. a two-finger touch on a
-    // touch-mode device): clearing it unconditionally on every pointerdown
-    // would let pointer B's fresh press erase pointer A's still-pending
-    // suppression window (set moments ago in `finishDrag`, below, and always
-    // self-clearing via its own `setTimeout`), letting A's completed drag's
-    // synthetic click through to create a second, click-positioned copy. The
-    // flag only ever needs clearing by the gesture that set it — `finishDrag`
-    // does that itself, either synchronously in `onClick` or via the
-    // `setTimeout` fallback — so no reset belongs here.
+  const handlePointerDown = (event, kind, options, glyph, itemKey) => {
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
@@ -173,20 +166,20 @@ function AnnotationToolbox({
       activeDragCleanupsRef.current.delete(cleanup);
       setDragGhost(null);
       if (create && drag.dragging) {
-        suppressClickRef.current = true;
+        suppressClickRef.current.add(itemKey);
         onDragCreate?.(drag.kind, drag.options, {
           x: finishEvent.clientX,
           y: finishEvent.clientY,
         });
         // A real drag usually releases away from this button, so the
         // browser's synthetic click (if it fires one for the touch release
-        // at all) never reaches this element's onClick to consume the flag —
-        // it would otherwise stay set and silently swallow the next
-        // unrelated tap on some other item. A click genuinely headed for
+        // at all) never reaches this element's onClick to consume the entry
+        // — it would otherwise stay set and silently swallow the next
+        // unrelated tap on this same item. A click genuinely headed for
         // this button fires synchronously before this callback runs, so
         // clearing on the next tick never masks it.
         setTimeout(() => {
-          suppressClickRef.current = false;
+          suppressClickRef.current.delete(itemKey);
         }, 0);
       }
     };
@@ -276,9 +269,10 @@ function AnnotationToolbox({
             // grab cursor.
             const isDraggableKind = draggable !== false;
             const options = shape ? { shape } : undefined;
+            const itemKey = `${kind}-${labelKey}`;
             return (
               <button
-                key={`${kind}-${labelKey}`}
+                key={itemKey}
                 type="button"
                 className={`annotation-toolbox-item${
                   activeKind === kind ? ' annotation-toolbox-item--active' : ''
@@ -287,9 +281,11 @@ function AnnotationToolbox({
                   // Swallow the click a completed pointer drag synthesizes
                   // right after its pointerup — onDragCreate already created
                   // the annotation, so this would otherwise create a second,
-                  // click-positioned one.
-                  if (suppressClickRef.current) {
-                    suppressClickRef.current = false;
+                  // click-positioned one. Keyed by itemKey so a completed
+                  // drag on THIS button can never swallow a click landing on
+                  // a different one.
+                  if (suppressClickRef.current.has(itemKey)) {
+                    suppressClickRef.current.delete(itemKey);
                     return;
                   }
                   // A tap on a touch device fires the emulated mouseenter but no
@@ -330,7 +326,7 @@ function AnnotationToolbox({
                 // HTML5 drag, which never fires there.
                 onPointerDown={
                   isDraggableKind && touch
-                    ? (e) => handlePointerDown(e, kind, options, glyph)
+                    ? (e) => handlePointerDown(e, kind, options, glyph, itemKey)
                     : undefined
                 }
               >

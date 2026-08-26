@@ -463,14 +463,14 @@ describe('AnnotationToolbox', () => {
       expect(onCreate).toHaveBeenCalledWith('note', undefined);
     });
 
-    it('does not let a second pointer starting a drag swallow a first pointer’s still-pending click suppression', () => {
-      // Regression test: suppressClickRef is one flag shared across every
-      // item/pointer, not per-gesture. A second pointer's pointerdown must
-      // not reset it while a first pointer's completed drag is still
-      // waiting for its own synthetic click (or the fallback timeout) to
-      // consume it — otherwise the first drag's click reaches onCreate and
-      // creates a second, click-positioned copy of what onDragCreate already
-      // created.
+    it('does not let a second pointer’s own gesture on a different item disturb the first pointer’s pending suppression', () => {
+      // Regression test: suppression is keyed per-item (suppressClickRef is a
+      // Set of item keys), not a single shared flag. A second pointer
+      // starting and completing its own gesture on a DIFFERENT item while a
+      // first pointer's completed drag is still in its own pending-suppress
+      // window (waiting for its synthetic click, or the fallback timeout)
+      // must neither erase the first item's suppression nor be swallowed by
+      // it — each item's suppression is independent.
       const onCreate = vi.fn();
       const onDragCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} onDragCreate={onDragCreate} touch />);
@@ -479,27 +479,25 @@ describe('AnnotationToolbox', () => {
       const note = screen.getByRole('button', { name: /^note$/i });
       const circle = screen.getByRole('button', { name: /^circle$/i });
 
-      // Pointer 1 completes a drag on `note` — sets the suppress flag.
+      // Pointer 1 completes a drag on `note` — opens note's suppression window.
       dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
       dispatch(window, pointerEvent('pointermove', { pointerId: 1, clientX: 50, clientY: 50 }));
       dispatch(window, pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
       expect(onDragCreate).toHaveBeenCalledTimes(1);
 
-      // Before that gesture's own synthetic click arrives, pointer 2 starts
-      // pressing a different item.
+      // Before note's own synthetic click arrives, pointer 2 presses and
+      // releases `circle` as a plain tap (under the drag threshold) — a
+      // genuine, unrelated click on a different button.
       dispatch(circle, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
-
-      // Pointer 1's synthetic click now arrives — it must still be suppressed.
-      fireEvent.click(note);
-      expect(onCreate).not.toHaveBeenCalled();
-
-      // Pointer 2 releases under the drag threshold (a plain tap) and its own
-      // click must behave normally — this is not itself the flag under test,
-      // just confirming pointer 2's own gesture is unaffected.
       dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 6, clientY: 5 }));
-      expect(onDragCreate).toHaveBeenCalledTimes(1);
       fireEvent.click(circle);
+      // circle's own click must NOT be swallowed by note's pending suppression.
       expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'circle' });
+
+      // note's own synthetic click now arrives — it must still be suppressed.
+      fireEvent.click(note);
+      expect(onCreate).toHaveBeenCalledTimes(1); // only circle's, not note's
+      expect(onDragCreate).toHaveBeenCalledTimes(1);
     });
 
     it('cleans up in-flight pointer listeners on unmount mid-drag, without throwing or creating anything', () => {
