@@ -1124,6 +1124,43 @@ class TestFreehandOverGenericTools:
         listed = tools_map["list_annotations"](session_id=session.id)
         assert listed["annotations"][0]["rotation"] == 45
 
+    def test_resize_stores_geometry_but_never_reshapes_the_stroke(
+        self, annotation_tools
+    ):
+        """A `freehand` stroke's shape is entirely in its `points`; unlike
+        `frame`/`shape`/`image` it carries no box the renderer scales to. A
+        w/h patch is therefore accepted and reported back, but changes
+        nothing a viewer sees — the same "stored, never drawn" shape as
+        freehand's rotation above, and documented alongside it in
+        docs/ANNOTATION_CONTRACT.md. Pinned so a later resize *implementation*
+        has to update the contract rather than silently changing what a
+        stored w/h means.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}]},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            w=200,
+            h=100,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["w"] == 200
+        assert result["annotation"]["h"] == 100
+        assert result["annotation"]["content"]["points"] == [
+            {"x": 0, "y": 0},
+            {"x": 10, "y": 0},
+        ]
+
     def test_reorder_lock_and_delete(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

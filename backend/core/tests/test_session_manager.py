@@ -12,6 +12,7 @@ import threading
 import pytest
 
 from backend.core import image_ingest
+from backend.core.session_annotations import build_annotation, build_annotation_patch
 from backend.core.session_hub import ClaimMap, InProcessEventBus
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
@@ -2071,6 +2072,92 @@ class TestUndoLastAction:
         # The delete-guard memory must not block the id from being re-created
         # by anyone else afterwards either.
         assert "note-1" not in s._deleted_annotation_ids
+
+    async def test_undo_of_a_freehand_move_restores_its_sampled_points(self):
+        """A freehand stroke's shape lives in its ``points`` (absolute
+        model-space), outside the geometry envelope every other type is moved
+        by, so a move rewrites every point (``translate_freehand_points``).
+        Undo therefore has to put the points back as well as the position:
+        an inverse op narrowed to the patched envelope fields would restore
+        the position and leave the stroke still drawn at the moved
+        coordinates. Only the full-prior inverse
+        (``session_store.apply_state_op``) gets this right, which is what
+        this pins — docs/ANNOTATION_CONTRACT.md's `freehand` Activity/undo
+        cell rests on it.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "actor-a",
+            build_annotation(
+                type="freehand",
+                x=0,
+                y=0,
+                content={
+                    "points": [
+                        {"x": 0, "y": 0, "pressure": 0.4},
+                        {"x": 10, "y": 10, "pressure": 0.8},
+                    ]
+                },
+                annotation_id="freehand-1",
+            ),
+        )
+        existing = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        mgr.update_annotation(
+            s.id, "actor-a", build_annotation_patch(existing, x=100, y=50)
+        )
+        moved = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert moved["points"] == [
+            {"x": 100, "y": 50, "pressure": 0.4},
+            {"x": 110, "y": 60, "pressure": 0.8},
+        ]
+
+        mgr.undo_last_action(s.id, "actor-a")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert restored["points"] == [
+            {"x": 0, "y": 0, "pressure": 0.4},
+            {"x": 10, "y": 10, "pressure": 0.8},
+        ]
+        assert restored["position"] == {"x": 0, "y": 0}
+        assert restored["geometry"]["x"] == 0 and restored["geometry"]["y"] == 0
+
+    async def test_undo_of_a_freehand_delete_restores_its_points_and_pressure(self):
+        """The delete inverse replays the whole removed annotation, so a
+        restored stroke has to come back drawable — points and their optional
+        per-point pressure included, not just the envelope.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "actor-a",
+            build_annotation(
+                type="freehand",
+                x=0,
+                y=0,
+                content={
+                    "points": [
+                        {"x": 0, "y": 0, "pressure": 0.4},
+                        {"x": 4, "y": 7, "pressure": 0.9},
+                    ],
+                    "strokeWidth": 3,
+                },
+                annotation_id="freehand-1",
+            ),
+        )
+        mgr.delete_annotation(s.id, "actor-a", "freehand-1")
+        assert s.state["annotations"] == []
+
+        mgr.undo_last_action(s.id, "actor-a")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert restored["points"] == [
+            {"x": 0, "y": 0, "pressure": 0.4},
+            {"x": 4, "y": 7, "pressure": 0.9},
+        ]
+        assert restored["strokeWidth"] == 3
 
     async def test_undo_node_moved_restores_prior_position(self):
         mgr = _manager()
