@@ -566,6 +566,14 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe(`history.desc.annotation_updated_${expected}`);
     });
 
+    it('does not report a group z that the translators drop as a layer change', () => {
+      // The group pair carries no `z`, so the write-back always yields 0.
+      const r = groupEdit(serverGroup({ label: 'Team', z: 4 }), (g) => ({ ...g, label: 'B' }));
+      expect(r.before.z).toBe(4);
+      expect(r.after.z).toBe(0);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+    });
+
     it('does not report renaming a group as a layer or rotation change', () => {
       // `z` and rotation are dropped by the group translators the same way.
       const withZ = groupEdit(serverGroup({ label: 'Team', z: 3 }), (g) => ({
@@ -663,6 +671,104 @@ describe('describeActivity', () => {
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_resized'
       );
+    });
+  });
+
+  describe('cost of classifying an image record', () => {
+    // Reconstructing the write-back means running the annotation through
+    // createAnnotation, which deep-clones an image's payload through JSON —
+    // and that payload is an embedded data URI of up to 2 MB. Done per record
+    // per render, from SessionActivityList's render body, on a drawer holding
+    // up to 500 records that re-renders on every node change, it stalled the
+    // main thread for seconds. The bound below is ~170x the measured cost and
+    // ~4x under the regression it guards, so it fails on a real reintroduction
+    // without being timing-flaky.
+    function imageRecord(i, overrides = {}) {
+      const url = `data:image/webp;base64,${'A'.repeat(2 * 1024 * 1024)}`;
+      const before = {
+        id: `img-${i}`,
+        type: 'image',
+        kind: 'image',
+        geometry: { x: 0, y: 0, w: 200, h: 100, rotation: 0 },
+        position: { x: 0, y: 0 },
+        z: 0,
+        locked: false,
+        image: { url },
+        alt: '',
+      };
+      return record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: before.id },
+        before,
+        after: {
+          ...before,
+          geometry: { ...before.geometry, x: 300 },
+          position: { x: 300, y: 0 },
+          ...overrides,
+        },
+      });
+    }
+
+    it('does not scale with the image payload', () => {
+      const records = Array.from({ length: 100 }, (_, i) => imageRecord(i));
+      const started = performance.now();
+      const keys = records.map((r) => describeActivity(r).key);
+      const elapsed = performance.now() - started;
+      expect(new Set(keys)).toEqual(new Set(['history.desc.annotation_updated_moved']));
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    it('still sees a genuine image swap', () => {
+      // Holding the payload out of the round trip must not stop it being
+      // compared — it is compared directly, which is what decides it.
+      const r = imageRecord(1, { image: { url: 'data:image/webp;base64,DIFFERENT' } });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+
+      const swapOnly = record({
+        op: 'annotation_updated',
+        before: { type: 'image', image: { url: 'data:image/webp;base64,AAAA' } },
+        after: { type: 'image', image: { url: 'data:image/webp;base64,BBBB' } },
+      });
+      // No branch classifies on `image`, but the swap must still register as a
+      // change rather than reading as "nothing happened".
+      expect(describeActivity(swapOnly).key).toBe('history.desc.annotation_updated_generic');
+    });
+  });
+
+  describe('shape spelling', () => {
+    it('does not report an agent respelling a shape it already is as a shape change', () => {
+      // The server stores content.shape verbatim, so an agent may write
+      // "Rectangle" over a `rectangle`. Normalising only the before-side
+      // caught the browser's rewrite but not this one.
+      for (const [before, after] of [
+        ['rectangle', 'Rectangle'],
+        ['process_arrow', 'Process Arrow'],
+        ['process_arrow', 'process-arrow'],
+      ]) {
+        const r = record({
+          op: 'annotation_updated',
+          before: { type: 'shape', shape: before },
+          after: { type: 'shape', shape: after },
+        });
+        expect(describeActivity(r).key, `${before} -> ${after}`).toBe(
+          'history.desc.annotation_updated_generic'
+        );
+      }
+    });
+
+    it('still reports a genuine shape change, including to an out-of-set name', () => {
+      const change = (before, after) =>
+        describeActivity(
+          record({
+            op: 'annotation_updated',
+            before: { type: 'shape', shape: before },
+            after: { type: 'shape', shape: after },
+          })
+        ).key;
+      expect(change('circle', 'triangle')).toBe('history.desc.annotation_updated_shape');
+      // normalizeShapeName keeps an unrecognised name verbatim, so this is a
+      // real change rather than a spelling of the same thing.
+      expect(change('rectangle', 'blob')).toBe('history.desc.annotation_updated_shape');
     });
   });
 

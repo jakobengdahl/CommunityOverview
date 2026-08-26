@@ -13,6 +13,7 @@
  * applied when it wrote the field, rather than a second copy that can drift.
  */
 
+import { normalizeShapeName } from '@community-graph/ui-graph-canvas';
 import {
   annotationsToGroups,
   annotationsToOverlays,
@@ -95,8 +96,20 @@ function sameValue(a, b) {
  * exactly why they were the kind still producing the original false
  * "Unlocked" after two rounds of per-field fixes.
  *
+ * Groups take the other translator pair — they are not overlays, and
+ * `useSharedSession` mirrors them through `annotationsToGroups` — which is
+ * exactly why they were the kind still producing the original false
+ * "Unlocked" after two rounds of per-field fixes. That pair carries neither
+ * `locked` nor `z` nor rotation, so for a group all three read as unchanged
+ * whatever they were: an agent genuinely unlocking or relayering one is
+ * reported as a plain update. That is the conservative direction, and the
+ * real fix is in the translators, which is logged separately.
+ *
  * Returns null when the annotation cannot be round-tripped, in which case the
- * caller falls back to comparing the snapshots directly.
+ * caller falls back to comparing the snapshots directly. That fallback is a
+ * raw diff, not a safe default — it is the pre-fix behaviour for that record —
+ * but no producer can reach it: the browser's translators drop a kind they
+ * cannot read rather than emitting an op for it, and an MCP patch is sparse.
  */
 function browserWriteBack(annotation) {
   if (!annotation || typeof annotation !== 'object') return null;
@@ -105,7 +118,15 @@ function browserWriteBack(annotation) {
       const { groups, parentIds } = annotationsToGroups([annotation]);
       return groupsToAnnotations(groups, parentIds)[0] || null;
     }
-    return overlaysToAnnotations(annotationsToOverlays([annotation]))[0] || null;
+    // `image` is held out of the round trip. An image annotation's payload is
+    // an embedded data URI of up to 2 MB (image_ingest's size cap), and
+    // `createAnnotation` deep-clones it through JSON on the way past — twice
+    // per write-back, which turned opening the drawer on a session full of
+    // images into a multi-second main-thread stall. Holding it out costs
+    // nothing: no branch here classifies on `image`, and the field is still
+    // compared directly, which is what decides it either way.
+    const withoutImage = { ...annotation, image: undefined };
+    return overlaysToAnnotations(annotationsToOverlays([withoutImage]))[0] || null;
   } catch {
     return null;
   }
@@ -126,6 +147,26 @@ function userChanged(before, after, normalised, haveNormalised) {
   if (sameValue(before, after)) return false;
   if (!haveNormalised) return true;
   return !sameValue(after, normalised);
+}
+
+/**
+ * Whether the user changed the shape subtype.
+ *
+ * `shape` needs its own equality in both directions, which the write-back
+ * alone does not give: that normalises `before`, so it catches the browser
+ * rewriting a stored spelling, but an agent may equally write a
+ * non-canonical spelling of the shape an annotation already has —
+ * `update_annotation(content={"shape": "Rectangle"})` on a `rectangle` is
+ * stored verbatim, since `_validate_generic_content` only type-checks it.
+ * Comparing both sides through the browser's own normaliser makes that the
+ * no-op it is, rather than "Changed the shape of" on a visually identical
+ * annotation.
+ */
+function shapeChanged(before, after) {
+  return !sameValue(
+    normalizeShapeName(before && before.shape),
+    normalizeShapeName(after && after.shape)
+  );
 }
 
 // Rewritten by the store on every write whatever the user touched
@@ -174,7 +215,31 @@ function changedFields(before, after, normalised) {
  * and bringing an annotation to the front while dragging it reads as the
  * move).
  */
+const classificationCache = new WeakMap();
+
+/**
+ * `classifyAnnotationUpdate`, computed once per record.
+ *
+ * The classification is a pure function of a record, and an activity record
+ * is an immutable snapshot — but `describeActivity` is called from
+ * SessionActivityList's render, the drawer holds up to 500 records, and it
+ * re-renders on every node change in a shared session. Reconstructing the
+ * write-back on each of those is pure waste, so it is done once per record
+ * object; a refetch produces new objects and so a fresh result. This also
+ * keeps the translators' own "cannot read this annotation" warning to once
+ * per record rather than once per render, for a `before` snapshot written by
+ * a build older than this one — the log keeps 7 days, so that outlives a
+ * deploy.
+ */
 function classifyAnnotationUpdate(record) {
+  const cached = classificationCache.get(record);
+  if (cached !== undefined) return cached;
+  const kind = computeAnnotationUpdateKind(record);
+  classificationCache.set(record, kind);
+  return kind;
+}
+
+function computeAnnotationUpdateKind(record) {
   const normalised = browserWriteBack(record.before);
   const changed = changedFields(record.before, record.after, normalised);
   if (!changed) return 'generic';
@@ -190,7 +255,7 @@ function classifyAnnotationUpdate(record) {
       Boolean(normalisedGeometry)
     );
 
-  if (changed.has('shape')) return 'shape';
+  if (changed.has('shape') && shapeChanged(record.before, record.after)) return 'shape';
   if (changed.has('locked')) return record.after && record.after.locked ? 'locked' : 'unlocked';
   if (changed.has('attachment')) {
     const attached = Boolean(record.after && record.after.attachment);
