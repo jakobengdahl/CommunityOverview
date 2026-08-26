@@ -612,8 +612,12 @@ def relationship_type_allows_node_types(
     if not source_rules and not target_rules:
         return {"allowed": True, "message": ""}
 
-    source_allowed = not source_rules or "*" in source_rules or source_type in source_rules
-    target_allowed = not target_rules or "*" in target_rules or target_type in target_rules
+    source_allowed = (
+        not source_rules or "*" in source_rules or source_type in source_rules
+    )
+    target_allowed = (
+        not target_rules or "*" in target_rules or target_type in target_rules
+    )
 
     if source_allowed and target_allowed:
         return {"allowed": True, "message": ""}
