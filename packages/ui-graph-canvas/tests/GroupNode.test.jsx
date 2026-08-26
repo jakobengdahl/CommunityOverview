@@ -179,33 +179,43 @@ describe('GroupNode locked context menu', () => {
   // text and shape rather than by its buttons: see the three assertions at
   // the end.
   it('offers unlock and nothing else when the group is locked', () => {
-    renderGroup(lockedData);
+    const { notifyChange } = renderGroup(lockedData);
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /unlock/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /hide group/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /delete group/i })).toBeNull();
     expect(document.querySelector('.context-menu-colors')).toBeNull();
     expect(document.querySelectorAll('.color-button')).toHaveLength(0);
-    // Three assertions rather than a button count, because a `div` or `a`
-    // carrying onClick is a working control that every role- and
-    // button-scoped assertion above sees as absent. Text first: whatever a
-    // re-added Hide is built from, it carries a visible label, and this
-    // admits exactly one. Then the structure — one direct child, and that
-    // child *is* the unlock button. Together those forbid both holes earlier
-    // rounds actually shipped: a sibling control, and one wrapped in a div
-    // that made the wrapper the single child. The identity check is what the
-    // queries above cannot give, since they are bound to `document.body` and
-    // so never say which element sits in this menu.
+    // Shape first. A `div` or `a` carrying onClick is a working control that
+    // every role- and button-scoped assertion above sees as absent, so the
+    // menu is pinned by its text, its one direct child, and that child's
+    // identity. Together those forbid both holes earlier rounds shipped: a
+    // sibling control, and one wrapped in a div that made the wrapper the
+    // single child. The identity check is what the queries above cannot
+    // give, since they are bound to `document.body` and so never say which
+    // element sits in this menu.
     //
-    // Deliberately not a subtree element count (`querySelectorAll('*')`).
-    // That catches nothing here these three miss, and false-fails the day
-    // someone puts an icon `<span>` inside the unlock button — a tripwire on
-    // the wrong axis. The cost of `textContent` is coupling to the emoji;
-    // the label comes from this file's own provider stub.
+    // Then behaviour, because shape alone cannot finish the job. `textContent`
+    // only sees controls that carry text, and none of the three reaches inside
+    // the unlock button — so a text-free span nested there, styled into a hit
+    // area by CSS, satisfies all three while running whatever it likes. A
+    // subtree element count would forbid that, but it also forbids a plain
+    // icon `<span>`, which is a refactor someone will legitimately make.
+    // Clicking every element in the menu except the unlock button settles it
+    // on the axis that actually matters: not what the menu is built from, but
+    // whether anything in it destroys the group. The unlock button is skipped
+    // so the menu stays open for the sweep; its own behaviour is pinned by
+    // the unlock case below.
     const menu = document.querySelector('.graph-group-context-menu');
+    const unlockButton = screen.getByRole('button', { name: /unlock/i });
     expect(menu.textContent).toBe('🔓 Unlock');
     expect(menu.children).toHaveLength(1);
-    expect(menu.firstElementChild).toBe(screen.getByRole('button', { name: /unlock/i }));
+    expect(menu.firstElementChild).toBe(unlockButton);
+
+    menu.querySelectorAll('*').forEach((el) => {
+      if (el !== unlockButton) fireEvent.click(el);
+    });
+    expect(notifyChange).not.toHaveBeenCalledWith('delete');
   });
 
   // The destructive handler stays reachable from the unlocked menu, so this
