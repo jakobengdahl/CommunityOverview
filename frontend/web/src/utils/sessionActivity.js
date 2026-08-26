@@ -11,6 +11,8 @@
  * uses for relativeTime.
  */
 
+import { normalizeShapeName } from '@community-graph/ui-graph-canvas';
+
 const ANNOTATION_TYPE_KEYS = new Set([
   'note',
   'text',
@@ -75,6 +77,34 @@ function sameValue(a, b) {
   return true;
 }
 
+/**
+ * Whether a field's two spellings mean the same value.
+ *
+ * `shape` needs more than `sameValue`: the server stores `content.shape`
+ * verbatim (`_validate_generic_content` only type-checks it, and
+ * `ANNOTATION_SHAPES` is deliberately not a rejection list), while the
+ * browser runs it through `normalizeShapeName` on load. So an agent-created
+ * shape with no `shape` at all, or one spelled "Process Arrow", comes back
+ * from the first browser touch as "rectangle" / "process_arrow" — a
+ * normalisation artefact that would otherwise announce "Changed the shape
+ * of" for a user who only dragged it. Compared through the browser's own
+ * normaliser rather than a second copy of the rule, so the two cannot drift.
+ */
+function fieldsEqual(key, before, after) {
+  if (key === 'shape') return sameValue(normalizeShapeName(before), normalizeShapeName(after));
+  return sameValue(before, after);
+}
+
+/**
+ * A change between two values that both carry information — as opposed to a
+ * field being filled in for the first time. Used where a producer supplies a
+ * non-zero default for a field the other producer leaves at nothing, which
+ * `isEmptyValue` alone cannot absorb because the default is not empty.
+ */
+function realChange(before, after) {
+  return !isEmptyValue(before) && !isEmptyValue(after) && !sameValue(before, after);
+}
+
 // Rewritten by the store on every write whatever the user touched
 // (session_store.py sets `updated_at` on each applied op), so a diff that
 // counted them would report every update as a change to them.
@@ -105,7 +135,7 @@ function changedFields(before, after) {
   const changed = new Set();
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (BOOKKEEPING_FIELDS.has(key)) continue;
-    if (!sameValue(before[key], after[key])) changed.add(key);
+    if (!fieldsEqual(key, before[key], after[key])) changed.add(key);
   }
   return changed;
 }
@@ -133,8 +163,18 @@ function classifyAnnotationUpdate(record) {
   }
   if (changed.has('geometry') || changed.has('position')) {
     if (!sameValue(before.rotation, after.rotation)) return 'rotated';
-    if (!sameValue(before.w, after.w) || !sameValue(before.h, after.h)) return 'resized';
-    return 'moved';
+    // `w`/`h` only, not `x`/`y`: an unsized annotation gains 160x96 the first
+    // time the browser writes it back, because `label`, `line` and `freehand`
+    // carry no size through the overlay translators and `normalizeGeometry`
+    // fills DEFAULT_SIZE, while the server defaults both to 0. That is a
+    // materialised default, not a resize — reporting it as one told a user
+    // who dragged an agent-created line that they had resized it. `x`/`y`
+    // need no such guard: both are required by `build_annotation`, so a
+    // coordinate of 0 is a real position and moving off it is a real move.
+    if (realChange(before.w, after.w) || realChange(before.h, after.h)) return 'resized';
+    if (!sameValue(before.x, after.x) || !sameValue(before.y, after.y)) return 'moved';
+    // Nothing in the geometry actually moved — fall through to whatever else
+    // this update touched rather than asserting a move that did not happen.
   }
   if (changed.has('z')) {
     // Strictly the direction the layer moved, not "is now frontmost": a

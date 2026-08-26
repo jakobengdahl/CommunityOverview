@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createAnnotation } from '@community-graph/ui-graph-canvas';
+import { annotationsToOverlays, overlaysToAnnotations } from './sessionAnnotations';
 import en from '../i18n/en.json';
 import sv from '../i18n/sv.json';
 import {
@@ -282,7 +283,171 @@ describe('describeActivity', () => {
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
+  });
 
+  // The suite above builds `before` with createAnnotation too, so both sides
+  // are already browser-normalised — which models a browser-created
+  // annotation edited by the browser, the case that was never broken. The
+  // producer divergence that caused the original defect lives in the other
+  // pairing: a SERVER-stored `before` (backend/core/session_annotations.py's
+  // build_annotation — no materialised defaults, `w`/`h` at 0, `content`
+  // merged verbatim) against a browser-normalised `after`. These drive the
+  // real overlay translators over server-shaped annotations, which is what
+  // the classifier actually sees the first time a user touches anything an
+  // agent created.
+  describe('annotation_updated classification, server-created annotations', () => {
+    // build_annotation's output shape, hand-written so the test states the
+    // contract rather than importing it across the language boundary:
+    // required x/y, w/h/rotation defaulted to 0, `content` merged verbatim.
+    function serverAnnotation(type, { x = 10, y = 20, ...content } = {}) {
+      return {
+        type,
+        kind: type,
+        id: `srv-${type}`,
+        geometry: { x, y, w: 0, h: 0, rotation: 0 },
+        position: { x, y },
+        style: {},
+        z: 0,
+        locked: false,
+        ...content,
+      };
+    }
+
+    // The round trip a user's drag actually takes: load through the overlay
+    // translators, move it, write it back, over the wire as JSON.
+    function browserMove(stored, dx = 250) {
+      const overlays = annotationsToOverlays([stored]);
+      const moved = overlays.map((o) => ({
+        ...o,
+        position: { x: (o.position?.x ?? 0) + dx, y: o.position?.y ?? 0 },
+      }));
+      const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(moved)[0]));
+      return record({
+        op: 'annotation_updated',
+        affected: { kind: 'annotation', id: stored.id, fields: Object.keys(incoming).sort() },
+        before: stored,
+        after: { ...stored, ...incoming, updated_at: '2026-08-26T09:00:01Z' },
+      });
+    }
+
+    const MOVABLE = [
+      { name: 'shape with no shape field at all', ann: serverAnnotation('shape') },
+      {
+        name: 'shape whose shape is a free-text spelling',
+        ann: serverAnnotation('shape', { shape: 'Process Arrow' }),
+      },
+      { name: 'line', ann: serverAnnotation('line', { to: { x: 100, y: 60 } }) },
+      { name: 'label', ann: serverAnnotation('label', { text: 'hi' }) },
+      { name: 'text', ann: serverAnnotation('text', { text: 'hi' }) },
+      { name: 'icon', ann: serverAnnotation('icon', { icon: 'star' }) },
+      { name: 'vote_dot', ann: serverAnnotation('vote_dot') },
+      { name: 'frame', ann: serverAnnotation('frame') },
+      { name: 'note', ann: serverAnnotation('note', { text: 'hi' }) },
+    ];
+
+    it.each(MOVABLE)('reads a drag of an agent-created $name as "moved"', ({ ann }) => {
+      expect(describeActivity(browserMove(ann)).key).toBe('history.desc.annotation_updated_moved');
+    });
+
+    it('does not read the browser normalising a free-text shape name as a shape change', () => {
+      // "Process Arrow" comes back as "process_arrow" purely from
+      // normalizeShapeName; the server stores content.shape verbatim.
+      const r = browserMove(serverAnnotation('shape', { shape: 'Process Arrow' }));
+      expect(r.before.shape).toBe('Process Arrow');
+      expect(r.after.shape).toBe('process_arrow');
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+    });
+
+    it('does not read the browser filling in a default size as a resize', () => {
+      // label/line/freehand carry no size through the overlay translators, so
+      // normalizeGeometry fills 160x96 over the server's 0.
+      const r = browserMove(serverAnnotation('label', { text: 'hi' }));
+      expect(r.before.geometry.w).toBe(0);
+      expect(r.after.geometry.w).toBeGreaterThan(0);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
+    });
+
+    it('still reports a genuine shape change on a server-created shape', () => {
+      const before = serverAnnotation('shape', { shape: 'rectangle' });
+      expect(
+        describeActivity(
+          record({ op: 'annotation_updated', before, after: { ...before, shape: 'ellipse' } })
+        ).key
+      ).toBe('history.desc.annotation_updated_shape');
+    });
+
+    it('still reports a genuine resize once the annotation has a real size', () => {
+      const before = serverAnnotation('shape', { shape: 'rectangle' });
+      before.geometry = { x: 10, y: 20, w: 160, h: 96, rotation: 0 };
+      const after = { ...before, geometry: { x: 10, y: 20, w: 400, h: 96, rotation: 0 } };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
+      );
+    });
+
+    it('does not claim a move when only the size was materialised', () => {
+      // A recolour of an agent-created label: geometry differs only by the
+      // default size the browser filled in, so the recolour is what happened.
+      const before = serverAnnotation('label', { text: 'hi' });
+      const after = {
+        ...before,
+        geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 },
+        style: { color: 'crimson' },
+      };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_style'
+      );
+    });
+  });
+
+  describe('sameValue equivalences', () => {
+    // classifyAnnotationUpdate's whole correctness rests on this table, and
+    // nothing else pins it: a later edit here changes what the activity log
+    // asserts, so it gets its own test rather than only being reached through
+    // geometry/style.
+    it('treats every unset spelling as one value', () => {
+      const unset = [undefined, null, false, '', 0, {}, []];
+      for (const a of unset) {
+        for (const b of unset) {
+          const r = record({
+            op: 'annotation_updated',
+            before: { type: 'note', z: 1, style: a },
+            after: { type: 'note', z: 1, style: b },
+          });
+          expect(describeActivity(r).key, `${JSON.stringify(a)} vs ${JSON.stringify(b)}`).toBe(
+            'history.desc.annotation_updated_generic'
+          );
+        }
+      }
+    });
+
+    it('still sees a change between an unset value and a real one', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'note', style: {} },
+        after: { type: 'note', style: { color: 'red' } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('compares nested objects and arrays by value, not identity', () => {
+      const same = record({
+        op: 'annotation_updated',
+        before: { type: 'freehand', points: [{ x: 1, y: 2 }], style: { color: 'red' } },
+        after: { type: 'freehand', points: [{ x: 1, y: 2 }], style: { color: 'red' } },
+      });
+      expect(describeActivity(same).key).toBe('history.desc.annotation_updated_generic');
+
+      const differs = record({
+        op: 'annotation_updated',
+        before: { type: 'freehand', points: [{ x: 1, y: 2 }], style: { color: 'red' } },
+        after: { type: 'freehand', points: [{ x: 1, y: 2 }], style: { color: 'blue' } },
+      });
+      expect(describeActivity(differs).key).toBe('history.desc.annotation_updated_style');
+    });
+  });
+
+  describe('annotation_updated classification, browser-shaped full payloads (continued)', () => {
     it('reports an agent-only sparse patch from the same before/after diff', () => {
       // The MCP path sends a sparse patch, but the store still snapshots the
       // whole annotation either side, so the diff serves both producers and
