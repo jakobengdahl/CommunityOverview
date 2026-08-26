@@ -66,6 +66,13 @@ const EMPTY_MIRROR = Object.freeze({
   positions: {},
   hidden_node_ids: [],
   hidden_edge_ids: [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden_*) but render at reduced prominence;
+  // edge_intensity is the session's global baseline opacity for every
+  // non-dimmed edge. Diffed/applied the same way as the hidden_* sets below.
+  dimmed_node_ids: [],
+  dimmed_edge_ids: [],
+  edge_intensity: 1.0,
   annotations: [],
 });
 
@@ -89,11 +96,15 @@ export function normalizeMirror(state) {
       positions[id] = roundPos(pos);
     }
   }
+  const intensity = Number(s.edge_intensity);
   return {
     node_refs: Array.from(new Set(s.node_refs || [])),
     positions,
     hidden_node_ids: Array.from(new Set(s.hidden_node_ids || [])),
     hidden_edge_ids: Array.from(new Set(s.hidden_edge_ids || [])),
+    dimmed_node_ids: Array.from(new Set(s.dimmed_node_ids || [])),
+    dimmed_edge_ids: Array.from(new Set(s.dimmed_edge_ids || [])),
+    edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: Array.isArray(s.annotations) ? s.annotations : [],
   };
 }
@@ -170,6 +181,20 @@ export function computeOps(prevState, nextState) {
   if (edgeHiddenAdded.length) ops.push({ op: 'edges_hidden', edge_ids: edgeHiddenAdded });
   if (edgeHiddenRemoved.length) ops.push({ op: 'edges_shown', edge_ids: edgeHiddenRemoved });
 
+  const nodeDimmedAdded = diffAdded(prev.dimmed_node_ids, next.dimmed_node_ids);
+  const nodeDimmedRemoved = diffAdded(next.dimmed_node_ids, prev.dimmed_node_ids);
+  if (nodeDimmedAdded.length) ops.push({ op: 'nodes_dimmed', node_ids: nodeDimmedAdded });
+  if (nodeDimmedRemoved.length) ops.push({ op: 'nodes_undimmed', node_ids: nodeDimmedRemoved });
+
+  const edgeDimmedAdded = diffAdded(prev.dimmed_edge_ids, next.dimmed_edge_ids);
+  const edgeDimmedRemoved = diffAdded(next.dimmed_edge_ids, prev.dimmed_edge_ids);
+  if (edgeDimmedAdded.length) ops.push({ op: 'edges_dimmed', edge_ids: edgeDimmedAdded });
+  if (edgeDimmedRemoved.length) ops.push({ op: 'edges_undimmed', edge_ids: edgeDimmedRemoved });
+
+  if (next.edge_intensity !== prev.edge_intensity) {
+    ops.push({ op: 'edge_intensity_set', value: next.edge_intensity });
+  }
+
   // Annotations, keyed by id.
   const prevAnn = new Map(prev.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
   const nextAnn = new Map(next.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
@@ -220,6 +245,7 @@ export function applyOpToMirror(mirrorState, op) {
       m.node_refs = m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
       m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
@@ -257,6 +283,25 @@ export function applyOpToMirror(mirrorState, op) {
       m.hidden_edge_ids = m.hidden_edge_ids.filter((id) => !drop.has(id));
       break;
     }
+    case 'nodes_dimmed':
+      m.dimmed_node_ids = Array.from(new Set([...m.dimmed_node_ids, ...(op.node_ids || [])]));
+      break;
+    case 'nodes_undimmed': {
+      const drop = new Set(op.node_ids || []);
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edges_dimmed':
+      m.dimmed_edge_ids = Array.from(new Set([...m.dimmed_edge_ids, ...(op.edge_ids || [])]));
+      break;
+    case 'edges_undimmed': {
+      const drop = new Set(op.edge_ids || []);
+      m.dimmed_edge_ids = m.dimmed_edge_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edge_intensity_set':
+      if (typeof op.value === 'number') m.edge_intensity = Math.max(0, Math.min(1, op.value));
+      break;
     case 'annotation_created':
     case 'annotation_updated': {
       const ann = op.annotation;

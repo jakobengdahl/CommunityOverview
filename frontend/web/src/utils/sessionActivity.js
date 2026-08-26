@@ -123,6 +123,24 @@ export function describeActivity(record, opts = {}) {
       const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
       return { key: 'history.desc.nodes_shown', params: { count } };
     }
+    case 'nodes_dimmed': {
+      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      return { key: 'history.desc.nodes_dimmed', params: { count } };
+    }
+    case 'nodes_undimmed': {
+      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      return { key: 'history.desc.nodes_undimmed', params: { count } };
+    }
+    case 'edges_dimmed': {
+      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      return { key: 'history.desc.edges_dimmed', params: { count } };
+    }
+    case 'edges_undimmed': {
+      const count = (record.affected && record.affected.ids && record.affected.ids.length) || 0;
+      return { key: 'history.desc.edges_undimmed', params: { count } };
+    }
+    case 'edge_intensity_set':
+      return { key: 'history.desc.edge_intensity_set', params: {} };
     default:
       return { key: 'history.desc.unknown', params: {} };
   }

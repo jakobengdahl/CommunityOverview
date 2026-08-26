@@ -240,21 +240,45 @@ body.graph-suppress-selection * {
   }
 }
 
-/* Selected edge styling */
+/* Selected edge styling. Composition rule (task-session-focus-dimming-
+   controls): stroke-opacity is set inline per edge from the session's
+   global edge-intensity baseline and any per-object dim override (see
+   GraphCanvas.jsx's reactFlowEdges / resolveEdgeOpacity) — selection and
+   hover always render at full opacity regardless of that, the same
+   `!important` override this rule already used for stroke/stroke-width. */
 .react-flow__edge.selected .react-flow__edge-path {
   stroke: #646cff !important;
   stroke-width: 3px !important;
+  stroke-opacity: 1 !important;
 }
 
 .react-flow__edge:hover .react-flow__edge-path {
   stroke: #818cf8 !important;
   stroke-width: 2.5px !important;
+  stroke-opacity: 1 !important;
+}
+
+/* Accessibility contrast: a stronger contrast preference backs off both the
+   global edge-intensity baseline and any per-object dim so every edge stays
+   clearly legible instead of the low-vision default. */
+@media (prefers-contrast: more) {
+  .react-flow__edge .react-flow__edge-path {
+    stroke-opacity: 1 !important;
+  }
 }
 
 /* Pulse/static animation state for edges carrying an "animated" attribute.
    React Flow's own `.animated` class flows the dash pattern; this adds a
    gentle opacity pulse on top so an active edge reads as pulsing rather than
-   merely dashed. Kept representable for the external pulse-trigger feature. */
+   merely dashed. Kept representable for the external pulse-trigger feature.
+
+   A CSS animation overrides a plain inline style for the property it drives
+   (here `stroke-opacity`) for as long as it runs — a fixed 1/0.35 keyframe
+   would silently cancel out the dim/edge-intensity opacity GraphCanvas.jsx
+   sets inline (see resolveEdgeOpacity) for every animated edge. The
+   `--edge-opacity` custom property carries that same value alongside the
+   inline `stroke-opacity`, so the keyframe scales relative to it instead of
+   overriding it outright — a dimmed, pulsing edge still pulses dim. */
 .react-flow__edge.rf-edge-pulse .react-flow__edge-path {
   animation: rf-edge-pulse 1.4s ease-in-out infinite;
 }
@@ -262,10 +286,10 @@ body.graph-suppress-selection * {
 @keyframes rf-edge-pulse {
   0%,
   100% {
-    stroke-opacity: 1;
+    stroke-opacity: var(--edge-opacity, 1);
   }
   50% {
-    stroke-opacity: 0.35;
+    stroke-opacity: calc(var(--edge-opacity, 1) * 0.35);
   }
 }
 

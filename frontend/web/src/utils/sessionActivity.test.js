@@ -190,6 +190,33 @@ describe('describeActivity', () => {
     ).toEqual({ key: 'history.desc.nodes_shown', params: { count: 1 } });
   });
 
+  it('describes nodes_dimmed / nodes_undimmed / edges_dimmed / edges_undimmed by affected count', () => {
+    expect(
+      describeActivity(
+        record({ op: 'nodes_dimmed', affected: { kind: 'node_dim', ids: ['a', 'b'] } })
+      )
+    ).toEqual({ key: 'history.desc.nodes_dimmed', params: { count: 2 } });
+
+    expect(
+      describeActivity(record({ op: 'nodes_undimmed', affected: { kind: 'node_dim', ids: ['a'] } }))
+    ).toEqual({ key: 'history.desc.nodes_undimmed', params: { count: 1 } });
+
+    expect(
+      describeActivity(record({ op: 'edges_dimmed', affected: { kind: 'edge_dim', ids: ['e1'] } }))
+    ).toEqual({ key: 'history.desc.edges_dimmed', params: { count: 1 } });
+
+    expect(
+      describeActivity(
+        record({ op: 'edges_undimmed', affected: { kind: 'edge_dim', ids: ['e1', 'e2'] } })
+      )
+    ).toEqual({ key: 'history.desc.edges_undimmed', params: { count: 2 } });
+  });
+
+  it('describes edge_intensity_set without needing an id or count', () => {
+    const r = record({ op: 'edge_intensity_set', affected: { kind: 'edge_intensity' } });
+    expect(describeActivity(r)).toEqual({ key: 'history.desc.edge_intensity_set', params: {} });
+  });
+
   it('falls back to a generic description for an unrecognised op instead of dumping raw JSON', () => {
     const r = record({ op: 'some_future_op' });
     expect(describeActivity(r)).toEqual({ key: 'history.desc.unknown', params: {} });

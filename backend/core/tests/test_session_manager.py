@@ -2087,6 +2087,33 @@ class TestUndoLastAction:
 
         assert s.state["positions"]["n1"] == {"x": 1.0, "y": 2.0}
 
+    async def test_undo_edges_dimmed_restores_them(self):
+        """task-session-focus-dimming-controls: dim/restore round-trips through
+        the same undo path as hide/show, without touching graph data."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edges_dimmed", "edge_ids": ["e1", "e2"]}]
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["dimmed_edge_ids"] == []
+
+    async def test_undo_edge_intensity_set_restores_prior_value(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edge_intensity_set", "value": 0.3}]
+        )
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edge_intensity_set", "value": 0.9}]
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["edge_intensity"] == 0.3
+
     async def test_no_undoable_action_for_actor_with_no_history(self):
         mgr = _manager()
         s = mgr.create_session()

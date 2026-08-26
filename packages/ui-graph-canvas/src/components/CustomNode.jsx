@@ -12,6 +12,9 @@ import './CustomNode.css';
  * - nodeType: Type of node (Actor, Initiative, etc.)
  * - color: Node color
  * - isHighlighted: Whether node is highlighted
+ * - isDimmed: Session-local focus (task-session-focus-dimming-controls) —
+ *   the node stays on the canvas but renders at reduced prominence; a
+ *   selection or hover still shows it at full opacity (see CustomNode.css)
  * - pulse: transient { style: 'glow'|'grow'|'marker', color, seq } when an
  *   external trigger fired a visual pulse on this node, else null
  * - description: Full description for tooltip
@@ -53,7 +56,7 @@ function CustomNode({ data, id, selected }) {
   return (
     <div
       ref={nodeRef}
-      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''} ${remote ? 'remote-selected' : ''}`}
+      className={`graph-custom-node ${data.isHighlighted ? 'highlighted' : ''} ${selected ? 'selected' : ''} ${data.markColor ? 'marked' : ''} ${isSkill ? 'skill-node' : ''} ${remote ? 'remote-selected' : ''} ${data.isDimmed ? 'dimmed' : ''}`}
       style={{
         borderColor: data.markColor || data.color,
         boxShadow: data.markColor
