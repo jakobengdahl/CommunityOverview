@@ -210,7 +210,6 @@ function GraphCanvasInner({
   onViewNodeHistory,
   onDelete,
   onHide,
-  onDeleteMultiple,
   onHideMultiple,
   onHideEdge,
   onDeleteEdge,
@@ -1124,6 +1123,57 @@ function GraphCanvasInner({
     setPaneContextMenu(null);
   }, []);
 
+  const hideSelectedGraphNodes = useCallback(() => {
+    const graphNodeIds = selectedNodes
+      .filter((n) => !ANNOTATION_TYPES.has(n.type))
+      .map((n) => n.id);
+    if (graphNodeIds.length === 0) return;
+    if (onHideMultiple) {
+      onHideMultiple(graphNodeIds);
+    } else if (onHide) {
+      graphNodeIds.forEach((id) => onHide(id));
+    }
+  }, [selectedNodes, onHideMultiple, onHide]);
+
+  const deleteSelectedNodes = useCallback(() => {
+    // Delete removes overlay annotations — every kind in OVERLAY_TYPES,
+    // which is all eleven v1 kinds except `group` — from the canvas;
+    // graph nodes are hidden, not deleted. Excluding `group` leaves it to
+    // its own context menu, so its children stay correctly parented.
+    // Two are skipped: one held by another client's live selection
+    // claim (leases are exclusive — task-annotation-shared-session-realtime)
+    // and one that is locked, which stays selectable but offers only
+    // unlock or copy — the rule every overlay annotation's context menu
+    // applies. `group` honours the flag too but keeps Hide as a decided
+    // exception; either way Delete never reaches a group, because of the
+    // exclusion above.
+    const deletableOverlays = selectedNodes.filter(
+      (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
+    );
+    const overlayIds = deletableOverlays.map((n) => n.id);
+    const skippedLocked = selectedNodes.some(
+      (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
+    );
+    const skippedOwnLocked = selectedNodes.some((n) => OVERLAY_TYPES.has(n.type) && n.data?.locked);
+    if (overlayIds.length > 0) {
+      const removeSet = new Set(overlayIds);
+      setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
+      onAnnotationChangeRef.current?.('delete');
+    }
+    // A remote claim wins the notice when the selection mixes both: it is
+    // the one the user cannot resolve alone.
+    if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
+    else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
+    hideSelectedGraphNodes();
+  }, [
+    selectedNodes,
+    setNodes,
+    showNotification,
+    cml.annotationRemoteLocked,
+    cml.annotationLockedSkipped,
+    hideSelectedGraphNodes,
+  ]);
+
   // Apply a batch of { id, position, parentId } moves to the canvas and persist
   // each one through the same callback a drag/organize uses, so an undo or redo
   // is indistinguishable from the move it reverses. `parentId` is restored too
@@ -1827,12 +1877,14 @@ function GraphCanvasInner({
       event.stopPropagation();
 
       if (selectedNodes.length > 0) {
+        const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
         setNodeContextMenu(null);
         setEdgeContextMenu(null);
         setMultiNodeContextMenu({
           x: event.clientX,
           y: event.clientY,
           nodes: selectedNodes,
+          actionNodes: graphActionNodes,
         });
       }
     },
@@ -1932,12 +1984,14 @@ function GraphCanvasInner({
       const hasMultipleSelected = selectedNodes.length > 1;
 
       if (hasMultipleSelected && isNodeSelected) {
+        const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
         setNodeContextMenu(null);
         setEdgeContextMenu(null);
         setMultiNodeContextMenu({
           x: event.clientX,
           y: event.clientY,
           nodes: selectedNodes,
+          actionNodes: graphActionNodes,
         });
       } else {
         setMultiNodeContextMenu(null);
@@ -2438,46 +2492,7 @@ function GraphCanvasInner({
 
         if (selectedNodes.length > 0) {
           e.preventDefault();
-          // Delete removes overlay annotations — every kind in OVERLAY_TYPES,
-          // which is all eleven v1 kinds except `group` — from the canvas;
-          // graph nodes are hidden, not deleted. Excluding `group` leaves it to
-          // its own context menu, so its children stay correctly parented.
-          // Two are skipped: one held by another client's live selection
-          // claim (leases are exclusive — task-annotation-shared-session-realtime)
-          // and one that is locked, which stays selectable but offers only
-          // unlock or copy — the rule every overlay annotation's context menu
-          // applies. `group` honours the flag too but keeps Hide as a decided
-          // exception; either way Delete never reaches a group, because of the
-          // exclusion above.
-          const deletableOverlays = selectedNodes.filter(
-            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
-          );
-          const overlayIds = deletableOverlays.map((n) => n.id);
-          const skippedLocked = selectedNodes.some(
-            (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
-          );
-          const skippedOwnLocked = selectedNodes.some(
-            (n) => OVERLAY_TYPES.has(n.type) && n.data?.locked
-          );
-          const graphNodeIds = selectedNodes
-            .filter((n) => !ANNOTATION_TYPES.has(n.type))
-            .map((n) => n.id);
-          if (overlayIds.length > 0) {
-            const removeSet = new Set(overlayIds);
-            setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
-            onAnnotationChangeRef.current?.('delete');
-          }
-          // A remote claim wins the notice when the selection mixes both: it is
-          // the one the user cannot resolve alone.
-          if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
-          else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
-          if (graphNodeIds.length > 0) {
-            if (onHideMultiple) {
-              onHideMultiple(graphNodeIds);
-            } else if (onHide) {
-              graphNodeIds.forEach((id) => onHide(id));
-            }
-          }
+          deleteSelectedNodes();
         }
       }
     };
@@ -2489,19 +2504,15 @@ function GraphCanvasInner({
   }, [
     selectedNodes,
     selectedEdges,
-    onHideMultiple,
-    onHide,
     onHideEdge,
     closeAllMenus,
     clearSelection,
     organizeSelection,
     showNotification,
     cml.organizeHint,
-    cml.annotationRemoteLocked,
-    cml.annotationLockedSkipped,
     handleUndo,
     handleRedo,
-    setNodes,
+    deleteSelectedNodes,
     freehandActive,
   ]);
 
@@ -3187,10 +3198,12 @@ function GraphCanvasInner({
           menu={multiNodeContextMenu}
           labels={cml}
           onShowOnly={onShowOnly}
-          onHide={onHide}
-          onHideMultiple={onHideMultiple}
-          onDelete={onDelete}
-          onDeleteMultiple={onDeleteMultiple}
+          onHideSelection={onHideMultiple || onHide ? hideSelectedGraphNodes : undefined}
+          onDeleteSelection={
+            selectedNodes.some((n) => OVERLAY_TYPES.has(n.type)) || onHideMultiple || onHide
+              ? deleteSelectedNodes
+              : undefined
+          }
           selectNodesByType={selectNodesByType}
           onOrganize={organizeSelection}
           dimmedNodeIds={dimmedNodeIds}
