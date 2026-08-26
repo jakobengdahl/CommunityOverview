@@ -142,9 +142,15 @@ function browserWriteBack(annotation) {
     // an embedded data URI of up to 2 MB (image_ingest's size cap), and
     // `createAnnotation` deep-clones it through JSON on the way past — twice
     // per write-back, which turned opening the drawer on a session full of
-    // images into a multi-second main-thread stall. Holding it out costs
-    // nothing: no branch here classifies on `image`, and the field is still
-    // compared directly, which is what decides it either way.
+    // images into a multi-second main-thread stall.
+    //
+    // Holding it out cannot change a classification, and the reason is worth
+    // stating exactly rather than hand-waving at "it is still compared": no
+    // branch below keys on `image`, and the change set is only ever asked
+    // whether it holds a *named* field — never its size — so whether `image`
+    // lands in it is not observable in the result at all. The translators
+    // also do not normalise the payload, only clone it, so there is nothing
+    // about it the write-back could have told us.
     const withoutImage = { ...annotation, image: undefined };
     return overlaysToAnnotations(annotationsToOverlays([withoutImage]))[0] || null;
   } catch {

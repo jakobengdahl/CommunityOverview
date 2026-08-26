@@ -804,22 +804,35 @@ describe('describeActivity', () => {
       expect(typeReads).toBe(afterFirst);
     });
 
-    it('still sees a genuine image swap', () => {
-      // Holding the payload out of the round trip must not stop it being
-      // compared — it is compared directly, which is what decides it.
+    it('classifies the same whether or not the payload also changed', () => {
+      // The invariant that makes holding `image` out of the write-back safe:
+      // the payload never perturbs how the rest of the annotation is read.
+      //
+      // Deliberately not asserted as "a swap still registers as a change" —
+      // that reads as a guard but cannot fail, because no branch keys on
+      // `image` and the change set is only asked whether it holds a named
+      // field, so whether `image` is in it is unobservable. Removing the
+      // image comparison outright leaves such an assertion passing. This one
+      // fails if the payload ever starts influencing the outcome.
       const counter = { serialised: 0 };
-      const swapped = imageRecord(counter, {
-        image: { url: 'data:image/webp;base64,DIFFERENT' },
-      });
-      expect(describeActivity(swapped).key).toBe('history.desc.annotation_updated_moved');
+      const samePayload = describeActivity(imageRecord(counter)).key;
+      const swappedPayload = describeActivity(
+        imageRecord(counter, { image: { url: 'data:image/webp;base64,DIFFERENT' } })
+      ).key;
+      expect(swappedPayload).toBe(samePayload);
+      expect(samePayload).toBe('history.desc.annotation_updated_moved');
+      expect(counter.serialised).toBe(0);
+    });
 
+    it('reports a payload-only change as a plain update', () => {
+      // Documented behaviour rather than a guard: there is no `image` kind to
+      // report, so a swap with nothing else changed has no more specific
+      // description available.
       const swapOnly = record({
         op: 'annotation_updated',
         before: { type: 'image', image: { url: 'data:image/webp;base64,AAAA' } },
         after: { type: 'image', image: { url: 'data:image/webp;base64,BBBB' } },
       });
-      // No branch classifies on `image`, but the swap must still register as a
-      // change rather than reading as "nothing happened".
       expect(describeActivity(swapOnly).key).toBe('history.desc.annotation_updated_generic');
     });
   });
