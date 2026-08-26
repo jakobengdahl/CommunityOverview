@@ -59,6 +59,27 @@ describe('LabelNode rotation control', () => {
   });
 });
 
+describe('LabelNode colour defaults', () => {
+  beforeEach(() => hoisted.setNodes.mockClear());
+
+  it('uses a neutral fallback colour when no label colour is stored', () => {
+    const { container } = render(
+      <LabelNode id="l1" data={{ text: 'Label text' }} selected={false} />
+    );
+    expect(container.querySelector('.graph-label-node').style.color).toBe('rgb(100, 116, 139)');
+  });
+
+  it('keeps the near-white colour available as a selectable swatch', () => {
+    render(<LabelNode id="l1" data={{ text: 'Label text' }} selected={false} />);
+    fireEvent.contextMenu(screen.getByText('Label text'));
+
+    const swatches = [...document.querySelectorAll('.color-button')].map(
+      (button) => button.style.backgroundColor
+    );
+    expect(swatches).toContain('rgb(230, 237, 243)');
+  });
+});
+
 // smallfix-annotation-context-menus-ignore-lock: the accepted capability
 // baseline is "a locked object remains selectable but offers only unlock or
 // copy".
