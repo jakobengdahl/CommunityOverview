@@ -247,8 +247,8 @@ largely its membership, so "a locked group is protected" is true of its box
 and false of its contents. Tracked separately; stated here so the paragraph
 above is not read as more than it claims.
 
-One caveat a reader of the paragraph above would otherwise be misled by, and
-which the decision's own wording assumes away: **Hide is not currently
+One caveat a reader of the Hide exception above would otherwise be misled by,
+and which the decision's own wording assumes away: **Hide is not currently
 reversible.** `handleHideGroup` and `handleDeleteGroup` in `GroupNode.jsx` run
 the identical handler, `removeGroupKeepChildren`, which takes the group off
 the canvas and publishes `notifyChange('delete')`; there is no hidden-group
@@ -942,8 +942,13 @@ the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
 `rotation` travels on the flow node's `data`.
 
 `group` is apart from this, and not only in degree: it never reaches
-`overlayToFlowNode`/`flowNodeToOverlay` at all — both are called only behind
-`OVERLAY_TYPES` filters, which exclude it. Its envelope is carried instead by
+`overlayToFlowNode`/`flowNodeToOverlay`. Two of the three call sites filter on
+`OVERLAY_TYPES`, which excludes `group`; the third — the `upsert-overlay`
+branch of the remote-op effect — does not, and is kept clear one layer up
+instead, by `App.jsx` routing an incoming `kind: 'group'` annotation to an
+`upsert-group` op. That routing is load-bearing: `overlayToFlowNode` does not
+itself refuse a group, it falls through to the line branch and would hand back
+a `group` node carrying arrow `data`. Its envelope is carried instead by
 `annotationsToGroups`/`groupsToAnnotations` in the browser's translators, by
 the two group builders and `handleSaveView` in `GraphCanvas.jsx` on the canvas
 side, and by `_annotation_document_to_legacy_metadata` in
