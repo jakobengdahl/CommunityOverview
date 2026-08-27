@@ -263,7 +263,7 @@ describe('FreehandAnnotationNode locked context menu', () => {
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
 
-  it('unlocks a locked stroke and notifies the annotation context', () => {
+  it('unlocks a locked stroke, notifies the annotation context, and makes it draggable again', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
@@ -272,8 +272,9 @@ describe('FreehandAnnotationNode locked context menu', () => {
     );
     fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
     fireEvent.click(screen.getByText(/Unlock/));
-    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true } });
+    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);
+    expect(updated.draggable).toBe(true);
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
