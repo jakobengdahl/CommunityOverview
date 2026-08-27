@@ -788,7 +788,7 @@ describe('GenericAnnotationNode locked context menu', () => {
     }
   );
 
-  it('unlocks a locked annotation and notifies the annotation context', () => {
+  it('unlocks a locked annotation, notifies the annotation context, and makes it draggable again', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
@@ -797,8 +797,9 @@ describe('GenericAnnotationNode locked context menu', () => {
     );
     fireEvent.contextMenu(document.querySelector('.kind-frame'));
     fireEvent.click(screen.getByText(/Unlock/));
-    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true } });
+    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);
+    expect(updated.draggable).toBe(true);
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 

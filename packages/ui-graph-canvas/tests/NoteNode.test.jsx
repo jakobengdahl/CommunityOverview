@@ -167,7 +167,7 @@ describe('NoteNode locked context menu', () => {
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
 
-  it('unlocks a locked note and notifies the annotation context', () => {
+  it('unlocks a locked note, notifies the annotation context, and makes it draggable again', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider
@@ -178,8 +178,9 @@ describe('NoteNode locked context menu', () => {
     );
     fireEvent.contextMenu(screen.getByText('Note'));
     fireEvent.click(screen.getByText(/Unlock/));
-    const [updated] = applyUpdate({ id: 'n1', data: { locked: true } });
+    const [updated] = applyUpdate({ id: 'n1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);
+    expect(updated.draggable).toBe(true);
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
