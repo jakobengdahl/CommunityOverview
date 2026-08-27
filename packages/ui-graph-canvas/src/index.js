@@ -38,6 +38,7 @@ export {
   createAnnotationDocument,
   migrateLegacyAnnotations,
   normalizeAnnotationDocument,
+  normalizeShapeName,
 } from './utils/annotationModel';
 
 // Canvas-facing annotation type set (ReactFlow node `type` values, e.g.
