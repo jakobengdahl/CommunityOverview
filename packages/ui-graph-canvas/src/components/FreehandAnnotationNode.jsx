@@ -1,9 +1,16 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { buildFreehandPath, hasPressureData, buildPressureSegments } from '../utils/freehandPath';
+import {
+  reduceFreehandPoints,
+  smoothAnchors,
+  pointsToPathData,
+  hasPressureData,
+  segmentsFromCurvePoints,
+} from '../utils/freehandPath';
 import { isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -25,14 +32,35 @@ import './FreehandAnnotationNode.css';
  * that helper's doc comment for why segments rather than one continuous
  * variable-width curve.
  */
-const DEFAULT_COLOR = '#e6edf3';
+// Black, because a stroke has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// freehand stroke drawn with it is invisible, so the tool reads as broken
+// rather than as mis-coloured. Kept in the swatch list too — a white stroke is
+// still wanted for a dark background — but it is no longer what you get by
+// drawing without choosing.
+export const DEFAULT_FREEHAND_COLOR = '#111827';
+const DEFAULT_COLOR = DEFAULT_FREEHAND_COLOR;
 const DEFAULT_STROKE_WIDTH = 2;
 const PAD = 8;
 
-const FREEHAND_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+const FREEHAND_COLORS = [
+  DEFAULT_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
 const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
 const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
 const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
+
+// Stable empty-array reference for the no-points fallback below, so a
+// missing/invalid `data.points` doesn't itself defeat this component's
+// useMemo (a fresh `[]` literal every render would count as "changed").
+const EMPTY_POINTS = [];
 
 function boundingBox(points) {
   let minX = Infinity;
@@ -50,7 +78,7 @@ function boundingBox(points) {
 }
 
 function FreehandAnnotationNode({ id, data, selected }) {
-  const rawPoints = Array.isArray(data?.points) ? data.points : [];
+  const rawPoints = Array.isArray(data?.points) ? data.points : EMPTY_POINTS;
   const color = data?.color || DEFAULT_COLOR;
   const strokeWidth = Number.isFinite(data?.strokeWidth) ? data.strokeWidth : DEFAULT_STROKE_WIDTH;
   const smoothing = data?.smoothing ?? 0;
@@ -58,6 +86,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const locked = Boolean(data?.locked);
   const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const { setNodes } = useReactFlow();
   // Another client's live selection claim (task-annotation-shared-session-
   // realtime): dragging is already refused centrally via `draggable`
@@ -148,16 +177,40 @@ function FreehandAnnotationNode({ id, data, selected }) {
   // position.
   const originX = PAD - minX;
   const originY = PAD - minY;
-  const localPoints = rawPoints.map((p) => ({
-    x: p.x + originX,
-    y: p.y + originY,
-    pressure: p.pressure,
-  }));
-  const pressureAware = hasPressureData(localPoints);
-  const { d } = buildFreehandPath(localPoints, smoothing);
-  const segments = pressureAware
-    ? buildPressureSegments(localPoints, smoothing, strokeWidth)
-    : null;
+  // Curve-fitting (Catmull-Rom resampling, task-annotation-freehand-true-
+  // smoothing) can now emit several times more points than it reduces at
+  // high smoothing, the opposite of the old RDP-decimation cost profile —
+  // so this stage is memoized on the actual sampled points rather than
+  // recomputed every render. `rawPoints` (`data.points`) is a stable
+  // reference across a drag (drag moves the node's flow position, not its
+  // points array — see this component's own doc comment), so a stroke's
+  // curve is only rebuilt when its points, smoothing, or origin truly
+  // change — deliberately NOT keyed on `strokeWidth`, which this stage never
+  // reads; splitting it out keeps a plain width change (no effect on the
+  // curve at all) from re-running reduce+curve-fit for nothing.
+  const { localPoints, curved } = useMemo(() => {
+    const lp = rawPoints.map((p) => ({
+      x: p.x + originX,
+      y: p.y + originY,
+      pressure: p.pressure,
+    }));
+    const reduced = reduceFreehandPoints(lp, smoothing);
+    return { localPoints: lp, curved: smoothAnchors(reduced, smoothing) };
+  }, [rawPoints, originX, originY, smoothing]);
+  const pressureAware = useMemo(() => hasPressureData(localPoints), [localPoints]);
+  // `curved` can hold up to ~7x the reduced point count at high smoothing,
+  // so building `d` (used unconditionally, even for pressure-aware strokes'
+  // hit-target path below) is memoized too — otherwise a re-render that
+  // touches neither points nor smoothing (selection, remote-selection badge,
+  // context menu open/close, locked/opacity) would still re-walk it.
+  const d = useMemo(() => pointsToPathData(curved), [curved]);
+  // Splitting into per-segment widths is a cheap single pass over the
+  // already curve-fit points (unlike the reduce+curve-fit stage above), so
+  // it's fine for this one to depend on `strokeWidth` directly.
+  const segments = useMemo(
+    () => (pressureAware ? segmentsFromCurvePoints(curved, strokeWidth) : null),
+    [pressureAware, curved, strokeWidth]
+  );
 
   return (
     <div
@@ -288,6 +341,11 @@ function FreehandAnnotationNode({ id, data, selected }) {
                     </button>
                   ))}
                 </div>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
                 <button type="button" className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
 import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './ArrowNode.css';
 
 /**
@@ -17,7 +18,28 @@ import './ArrowNode.css';
  * Arrows never anchor to other arrows. Stored in the session's annotation list
  * (kind: "arrow").
  */
-const ARROW_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+// Black, because a connector has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// line drawn without choosing a colour is invisible, so the tool reads as
+// broken rather than as mis-coloured. Same value and same fix shape as
+// FreehandAnnotationNode's DEFAULT_FREEHAND_COLOR — the other kind whose
+// whole interaction is "draw and see a line". Not exported: unlike freehand,
+// the canvas creates an arrow with `color: undefined` and leaves the fallback
+// below as the single source, so there is no second copy to keep in step.
+const DEFAULT_ARROW_COLOR = '#111827';
+
+// DEFAULT_ARROW_COLOR leads so the picker can always return a line to the
+// colour it was created with; '#e6edf3' stays available for a dark background.
+const ARROW_COLORS = [
+  DEFAULT_ARROW_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
 const PAD = 12;
 
 function ArrowNode({ id, data, selected }) {
@@ -29,6 +51,7 @@ function ArrowNode({ id, data, selected }) {
   // See NoteNode's equivalent comment: another client's live claim makes
   // this arrow's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -93,6 +116,24 @@ function ArrowNode({ id, data, selected }) {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
     notifyChange('delete');
+  };
+
+  // The only action a locked line's context menu offers (besides the
+  // capability baseline's "copy", which has no GUI action yet at all) —
+  // matching NoteNode/LabelNode/GenericAnnotationNode/FreehandAnnotationNode,
+  // which have had this branch all along. Until this existed a locked line
+  // was the one annotation kind whose menu still recoloured, toggled
+  // arrowheads and deleted, and the one with no way to unlock from the GUI
+  // at all.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    patchData({ locked: false });
+    setContextMenu(null);
+    notifyChange('style');
   };
 
   // Move one endpoint to a new flow-coordinate point, snapping onto a nearby
@@ -177,7 +218,8 @@ function ArrowNode({ id, data, selected }) {
 
   const dx = Number(data.dx ?? 160);
   const dy = Number(data.dy ?? 0);
-  const color = data.color || ARROW_COLORS[0];
+  const color = data.color || DEFAULT_ARROW_COLOR;
+  const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
 
@@ -257,7 +299,7 @@ function ArrowNode({ id, data, selected }) {
             markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
             markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
           />
-          {selected && !data.locked && !remoteLocked && (
+          {selected && !locked && !remoteLocked && (
             <>
               <circle
                 className="graph-arrow-handle nodrag"
@@ -293,28 +335,41 @@ function ArrowNode({ id, data, selected }) {
             className="graph-annotation-context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
-            <div className="context-menu-title">{labels.color}</div>
-            <div className="context-menu-colors">
-              {ARROW_COLORS.map((c) => (
-                <button
-                  key={c}
-                  className="color-button"
-                  style={{ backgroundColor: c }}
-                  onClick={() => changeColor(c)}
+            {locked ? (
+              <button type="button" className="context-menu-unlock" onClick={unlock}>
+                🔓 {labels.unlock}
+              </button>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.color}</div>
+                <div className="context-menu-colors">
+                  {ARROW_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className="color-button"
+                      style={{ backgroundColor: c }}
+                      onClick={() => changeColor(c)}
+                    />
+                  ))}
+                </div>
+                <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
+                  <span>{labels.arrowStartHead}</span>
+                  <span>{startArrow ? '✔' : ''}</span>
+                </button>
+                <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
+                  <span>{labels.arrowEndHead}</span>
+                  <span>{endArrow ? '✔' : ''}</span>
+                </button>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
                 />
-              ))}
-            </div>
-            <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
-              <span>{labels.arrowStartHead}</span>
-              <span>{startArrow ? '✔' : ''}</span>
-            </button>
-            <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
-              <span>{labels.arrowEndHead}</span>
-              <span>{endArrow ? '✔' : ''}</span>
-            </button>
-            <button className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+                <button className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
+                </button>
+              </>
+            )}
           </div>,
           document.body
         )}

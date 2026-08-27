@@ -209,6 +209,40 @@ class TestStateOps:
         self._apply(store, s, {"op": "edges_hidden", "edge_ids": ["e1"]})
         assert s.state["hidden_edge_ids"] == ["e1"]
 
+    def test_dim_restore_nodes_and_edges(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(store, s, {"op": "nodes_dimmed", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_undimmed", "node_ids": ["a"]})
+        assert s.state["dimmed_node_ids"] == ["b"]
+        self._apply(store, s, {"op": "edges_dimmed", "edge_ids": ["e1", "e2"]})
+        self._apply(store, s, {"op": "edges_undimmed", "edge_ids": ["e2"]})
+        assert s.state["dimmed_edge_ids"] == ["e1"]
+
+    def test_nodes_removed_also_cleans_dimmed_node_ids(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(store, s, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_dimmed", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_removed", "node_ids": ["a"]})
+        assert s.state["dimmed_node_ids"] == ["b"]
+
+    def test_edge_intensity_set_clamps_and_defaults_to_full(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        assert s.state["edge_intensity"] == 1.0
+        applied = self._apply(store, s, {"op": "edge_intensity_set", "value": 0.4})
+        assert applied["value"] == 0.4
+        assert s.state["edge_intensity"] == 0.4
+        # Out-of-range values clamp rather than raise, so a slightly stale
+        # client cannot fail the whole batch on a cosmetic overshoot.
+        self._apply(store, s, {"op": "edge_intensity_set", "value": 5})
+        assert s.state["edge_intensity"] == 1.0
+        self._apply(store, s, {"op": "edge_intensity_set", "value": -2})
+        assert s.state["edge_intensity"] == 0.0
+        with pytest.raises(OpError):
+            self._apply(store, s, {"op": "edge_intensity_set", "value": "bright"})
+
     def test_annotation_created_assigns_id(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()

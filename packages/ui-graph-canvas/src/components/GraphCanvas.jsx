@@ -18,9 +18,10 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode from './GenericAnnotationNode';
+import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
+import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
-import FreehandAnnotationNode from './FreehandAnnotationNode';
+import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
 import { AnnotationContext } from './AnnotationContext';
 import SimpleFloatingEdge from './SimpleFloatingEdge';
 import {
@@ -43,6 +44,7 @@ import {
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
   resolveEdgeVisuals,
+  resolveEdgeOpacity,
 } from '../utils/constants';
 import {
   OVERLAY_TYPES,
@@ -82,8 +84,12 @@ const FOCUS_MIN_RADIUS = 260;
 const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // Defaults for a freehand stroke drawn via the toolbox's drawing mode; all
 // four are editable afterwards through FreehandAnnotationNode's right-click
-// property editor (docs/ANNOTATION_CONTRACT.md's freehand row).
-const DEFAULT_FREEHAND_COLOR = '#e6edf3';
+// property editor (docs/ANNOTATION_CONTRACT.md's freehand row). The colour is
+// imported rather than restated: this file used to hold its own copy, and
+// because a GUI-drawn stroke is always written WITH an explicit colour, that
+// copy — not the node's fallback — was the value every drawn stroke actually
+// got. Two constants for one default is what let the invisible near-white
+// survive a fix aimed at the fallback.
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
@@ -188,6 +194,14 @@ function GraphCanvasInner({
   highlightedNodeIds = [],
   hiddenNodeIds = [],
   hiddenEdgeIds = [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden*) but render at reduced prominence.
+  // edgeIntensity is the session's global baseline opacity for every
+  // non-dimmed edge (1 = full prominence); a dimmed edge always renders
+  // below that baseline. Never a graph edit — visualization-session state.
+  dimmedNodeIds = [],
+  dimmedEdgeIds = [],
+  edgeIntensity = 1,
   nodeMarks = {},
   pulsedNodeIds = {},
   clearGroupsFlag = false,
@@ -196,10 +210,16 @@ function GraphCanvasInner({
   onViewNodeHistory,
   onDelete,
   onHide,
-  onDeleteMultiple,
   onHideMultiple,
   onHideEdge,
   onDeleteEdge,
+  // Bulk dim/restore primitives (arrays of node/edge ids). A single-object
+  // context-menu action passes a one-element array; a multi-selection or an
+  // incident-edges action passes the whole set in one call.
+  onDimNodes,
+  onRestoreNodes,
+  onDimEdges,
+  onRestoreEdges,
   onEditEdge,
   onSetEdgeType,
   onConnect: onConnectCallback,
@@ -305,6 +325,14 @@ function GraphCanvasInner({
     organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
+    dimNode: 'Dim node',
+    restoreNode: 'Restore node',
+    dimSelected: 'Dim selected',
+    restoreSelected: 'Restore selected',
+    dimIncidentEdges: 'Dim incident edges',
+    restoreIncidentEdges: 'Restore incident edges',
+    dimEdge: 'Dim connection',
+    restoreEdge: 'Restore connection',
     changeType: 'Change type',
     generalConnection: 'General connection',
     addNote: 'Add note',
@@ -316,6 +344,18 @@ function GraphCanvasInner({
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
     annotationTextSize: 'Text size',
+    annotationTextAlign: 'Alignment',
+    annotationAlignTop: 'Top',
+    annotationAlignMiddle: 'Middle',
+    annotationAlignBottom: 'Bottom',
+    annotationAlignLeft: 'Left',
+    annotationAlignCenter: 'Center',
+    annotationAlignRight: 'Right',
+    annotationFontFamily: 'Font',
+    annotationFontDefault: 'Default',
+    annotationFontFamilySerif: 'Serif',
+    annotationFontFamilyMonospace: 'Monospace',
+    annotationFontFamilyCursive: 'Cursive',
     arrowStartHead: 'Start arrowhead',
     arrowEndHead: 'End arrowhead',
     annotationShape: 'Shape',
@@ -328,12 +368,20 @@ function GraphCanvasInner({
     redoNotification: 'Move redone',
     imageIngestFailed: 'Could not add the image',
     annotationRemoteLocked: 'Someone else is editing this annotation',
+    annotationLockedSkipped: 'That annotation is locked — unlock it first',
+    annotationBroken: 'An annotation could not be drawn and was left out',
     freehandColor: 'Colour',
     freehandWidth: 'Stroke width',
     freehandSmoothing: 'Smoothing',
     freehandOpacity: 'Opacity',
     freehandDrawingHint: 'Draw a stroke on the canvas — press Escape to cancel',
     freehandConcurrentInputBlocked: 'Finish the current stroke before starting another',
+    annotationLayer: 'Layer',
+    annotationLayerFront: 'Bring to front',
+    annotationLayerBack: 'Send to back',
+    annotationVoteValue: 'Value',
+    annotationVoteValueDecrease: 'Decrease value',
+    annotationVoteValueIncrease: 'Increase value',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -566,10 +614,28 @@ function GraphCanvasInner({
     showNotification('info', cml.annotationRemoteLocked);
   }, [cml.annotationRemoteLocked, showNotification]);
 
+  // An annotation that could not be drawn is reported once per session rather
+  // than once per annotation: a graph carrying several of the same broken
+  // shape would otherwise fire a burst of identical notices, which reads as
+  // something being badly wrong rather than as one decoration being skipped.
+  // The console entry is not deduplicated — that one is for whoever has to
+  // find the defect.
+  const reportedBrokenRef = useRef(false);
+  const reportAnnotationRenderError = useCallback(
+    (nodeId, error) => {
+      console.error(`Annotation ${nodeId} could not be rendered:`, error);
+      if (reportedBrokenRef.current) return;
+      reportedBrokenRef.current = true;
+      showNotification('info', cml.annotationBroken);
+    },
+    [cml.annotationBroken, showNotification]
+  );
+
   const annotationContextValue = useMemo(
     () => ({
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
+      notifyRenderFailure: reportAnnotationRenderError,
       labels: {
         color: cml.annotationColor,
         delete: cml.deleteAnnotation,
@@ -577,6 +643,18 @@ function GraphCanvasInner({
         notePlaceholder: cml.notePlaceholder,
         labelPlaceholder: cml.labelPlaceholder,
         textSize: cml.annotationTextSize,
+        textAlign: cml.annotationTextAlign,
+        alignTop: cml.annotationAlignTop,
+        alignMiddle: cml.annotationAlignMiddle,
+        alignBottom: cml.annotationAlignBottom,
+        alignLeft: cml.annotationAlignLeft,
+        alignCenter: cml.annotationAlignCenter,
+        alignRight: cml.annotationAlignRight,
+        fontFamily: cml.annotationFontFamily,
+        fontDefault: cml.annotationFontDefault,
+        fontFamilySerif: cml.annotationFontFamilySerif,
+        fontFamilyMonospace: cml.annotationFontFamilyMonospace,
+        fontFamilyCursive: cml.annotationFontFamilyCursive,
         arrowStartHead: cml.arrowStartHead,
         arrowEndHead: cml.arrowEndHead,
         shape: cml.annotationShape,
@@ -589,6 +667,13 @@ function GraphCanvasInner({
         freehandWidth: cml.freehandWidth,
         freehandSmoothing: cml.freehandSmoothing,
         freehandOpacity: cml.freehandOpacity,
+        layer: cml.annotationLayer,
+        layerFront: cml.annotationLayerFront,
+        layerBack: cml.annotationLayerBack,
+        voteValue: cml.annotationVoteValue,
+        voteValueDecrease: cml.annotationVoteValueDecrease,
+        voteValueIncrease: cml.annotationVoteValueIncrease,
+        brokenAnnotation: cml.annotationBroken,
       },
     }),
     [
@@ -600,6 +685,18 @@ function GraphCanvasInner({
       cml.notePlaceholder,
       cml.labelPlaceholder,
       cml.annotationTextSize,
+      cml.annotationTextAlign,
+      cml.annotationAlignTop,
+      cml.annotationAlignMiddle,
+      cml.annotationAlignBottom,
+      cml.annotationAlignLeft,
+      cml.annotationAlignCenter,
+      cml.annotationAlignRight,
+      cml.annotationFontFamily,
+      cml.annotationFontDefault,
+      cml.annotationFontFamilySerif,
+      cml.annotationFontFamilyMonospace,
+      cml.annotationFontFamilyCursive,
       cml.arrowStartHead,
       cml.arrowEndHead,
       cml.annotationShape,
@@ -612,6 +709,14 @@ function GraphCanvasInner({
       cml.freehandWidth,
       cml.freehandSmoothing,
       cml.freehandOpacity,
+      cml.annotationLayer,
+      cml.annotationLayerFront,
+      cml.annotationLayerBack,
+      cml.annotationVoteValue,
+      cml.annotationVoteValueDecrease,
+      cml.annotationVoteValueIncrease,
+      cml.annotationBroken,
+      reportAnnotationRenderError,
     ]
   );
 
@@ -732,6 +837,7 @@ function GraphCanvasInner({
   const reactFlowEdges = useMemo(() => {
     return visibleEdges.map((edge) => {
       const visuals = resolveEdgeVisuals(edge.metadata);
+      const opacity = resolveEdgeOpacity(edgeIntensity, dimmedEdgeIds.includes(edge.id));
       return {
         id: edge.id,
         source: edge.source,
@@ -740,7 +846,11 @@ function GraphCanvasInner({
         type: 'floating',
         animated: visuals.animated,
         selectable: true,
-        style: visuals.style,
+        // `--edge-opacity` mirrors `strokeOpacity` as a CSS custom property:
+        // the rf-edge-pulse keyframe (GraphCanvas.css) reads it via calc() so
+        // an animated edge's pulse scales relative to this opacity instead of
+        // the animation silently overriding it back to a fixed 1/0.35.
+        style: { ...visuals.style, strokeOpacity: opacity, '--edge-opacity': opacity },
         markerStart: visuals.markerStart,
         markerEnd: visuals.markerEnd,
         className: visuals.className,
@@ -749,7 +859,7 @@ function GraphCanvasInner({
         labelBgStyle: { fill: '#1a1a1a', fillOpacity: 0.8 },
       };
     });
-  }, [visibleEdges]);
+  }, [visibleEdges, dimmedEdgeIds, edgeIntensity]);
 
   // Convert to React Flow node format with layout
   const reactFlowNodes = useMemo(() => {
@@ -767,6 +877,7 @@ function GraphCanvasInner({
           nodeType: node.type,
           color: (nodeColorResolver || getNodeColor)(node.type),
           isHighlighted: highlightedNodeIds.includes(node.id),
+          isDimmed: dimmedNodeIds.includes(node.id),
           markColor: mark?.color ?? null,
           markLabel: mark?.label ?? null,
           pulse: pulsedNodeIds[node.id] ?? null,
@@ -811,6 +922,7 @@ function GraphCanvasInner({
     onExpand,
     onEdit,
     highlightedNodeIds,
+    dimmedNodeIds,
     nodeMarks,
     pulsedNodeIds,
     remoteSelections,
@@ -1011,6 +1123,56 @@ function GraphCanvasInner({
     setPaneContextMenu(null);
   }, []);
 
+  const hideSelectedGraphNodes = useCallback(() => {
+    const graphNodeIds = selectedNodes
+      .filter((n) => !ANNOTATION_TYPES.has(n.type))
+      .map((n) => n.id);
+    if (graphNodeIds.length === 0) return;
+    if (onHideMultiple) {
+      onHideMultiple(graphNodeIds);
+    } else if (onHide) {
+      graphNodeIds.forEach((id) => onHide(id));
+    }
+  }, [selectedNodes, onHideMultiple, onHide]);
+
+  const deleteSelectedNodes = useCallback(() => {
+    // Delete removes overlay annotations — every kind in OVERLAY_TYPES,
+    // which is all eleven v1 kinds except `group` — from the canvas;
+    // graph nodes are hidden, not deleted. Excluding `group` leaves it to
+    // its own context menu, so its children stay correctly parented.
+    // Two are skipped: one held by another client's live selection
+    // claim (leases are exclusive — task-annotation-shared-session-realtime)
+    // and one that is locked, which stays selectable but offers only
+    // unlock or copy — the rule every overlay annotation's context menu
+    // applies, and `group`'s menu now applies it too. Delete never reaches
+    // a group anyway, because of the exclusion above.
+    const deletableOverlays = selectedNodes.filter(
+      (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data) && !n.data?.locked
+    );
+    const overlayIds = deletableOverlays.map((n) => n.id);
+    const skippedLocked = selectedNodes.some(
+      (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
+    );
+    const skippedOwnLocked = selectedNodes.some((n) => OVERLAY_TYPES.has(n.type) && n.data?.locked);
+    if (overlayIds.length > 0) {
+      const removeSet = new Set(overlayIds);
+      setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
+      onAnnotationChangeRef.current?.('delete');
+    }
+    // A remote claim wins the notice when the selection mixes both: it is
+    // the one the user cannot resolve alone.
+    if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
+    else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
+    hideSelectedGraphNodes();
+  }, [
+    selectedNodes,
+    setNodes,
+    showNotification,
+    cml.annotationRemoteLocked,
+    cml.annotationLockedSkipped,
+    hideSelectedGraphNodes,
+  ]);
+
   // Apply a batch of { id, position, parentId } moves to the canvas and persist
   // each one through the same callback a drag/organize uses, so an undo or redo
   // is indistinguishable from the move it reverses. `parentId` is restored too
@@ -1188,12 +1350,22 @@ function GraphCanvasInner({
           style: { width: 220, height: 160 },
         };
       } else if (kind === 'shape') {
+        // A subtype whose clip-path only draws a regular figure at one ratio
+        // is created at that ratio instead of the generic 160x96 box, so it
+        // comes out equal-sided rather than squashed. The resizer then keeps
+        // the ratio (GenericAnnotationNode's keepAspectRatio), so it stays
+        // that way.
+        const shape = options.shape || 'rectangle';
         newNode = {
           id,
           type: 'shape',
           position,
-          data: { shape: options.shape || 'rectangle', color: undefined },
-          style: { width: 160, height: 96 },
+          // `text: ''` (not omitted) matches the `text`-kind branch above —
+          // a freshly created shape has no caption yet
+          // (task-annotation-doubleclick-to-edit-text), but the field
+          // itself already exists rather than being absent until first edit.
+          data: { shape, text: '', color: undefined },
+          style: newShapeSize(shape),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size
@@ -1271,6 +1443,18 @@ function GraphCanvasInner({
       createAnnotation(kind, position, options);
     },
     [viewportCenterPosition, createAnnotation]
+  );
+
+  // The toolbox's coarse-pointer (touch/stylus) drag-to-create path — see
+  // AnnotationToolbox's component doc comment. `clientPosition` is the
+  // release point in screen space; `image`/`freehand` never reach here since
+  // AnnotationToolbox never starts a pointer-drag for either.
+  const handleAnnotationDragCreate = useCallback(
+    (kind, options, clientPosition) => {
+      const position = screenToFlowPosition(clientPosition);
+      createAnnotation(kind, position, options);
+    },
+    [screenToFlowPosition, createAnnotation]
   );
 
   // Build and add the freehand annotation node once a stroke completes
@@ -1692,12 +1876,14 @@ function GraphCanvasInner({
       event.stopPropagation();
 
       if (selectedNodes.length > 0) {
+        const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
         setNodeContextMenu(null);
         setEdgeContextMenu(null);
         setMultiNodeContextMenu({
           x: event.clientX,
           y: event.clientY,
           nodes: selectedNodes,
+          actionNodes: graphActionNodes,
         });
       }
     },
@@ -1767,8 +1953,16 @@ function GraphCanvasInner({
           position: g.position,
           style: g.style,
           color: g.data.color,
+          // Re-emitted so a value that arrived from the server survives the
+          // canvas leg. Dropping either here is what made a locked group's
+          // flag revert on the next autosave, whatever the translators did.
+          z: g.data.z ?? 0,
+          locked: Boolean(g.data.locked),
         })),
-      annotations: viewNodes.filter((n) => OVERLAY_TYPES.has(n.type)).map(flowNodeToOverlay),
+      annotations: viewNodes
+        .filter((n) => OVERLAY_TYPES.has(n.type))
+        .map(flowNodeToOverlay)
+        .filter(Boolean),
     });
   }, [nodes, edges, onSaveView, activeFocusRootId]);
 
@@ -1789,12 +1983,14 @@ function GraphCanvasInner({
       const hasMultipleSelected = selectedNodes.length > 1;
 
       if (hasMultipleSelected && isNodeSelected) {
+        const graphActionNodes = selectedNodes.filter((n) => !ANNOTATION_TYPES.has(n.type));
         setNodeContextMenu(null);
         setEdgeContextMenu(null);
         setMultiNodeContextMenu({
           x: event.clientX,
           y: event.clientY,
           nodes: selectedNodes,
+          actionNodes: graphActionNodes,
         });
       } else {
         setMultiNodeContextMenu(null);
@@ -1822,18 +2018,28 @@ function GraphCanvasInner({
     [onNodeDoubleClickCallback]
   );
 
-  // Edge context menu handler
-  const onEdgeContextMenu = useCallback((event, edge) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setNodeContextMenu(null);
-    setMultiNodeContextMenu(null);
-    setEdgeContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      edge: edge,
-    });
-  }, []);
+  // Edge context menu handler. When the right-clicked edge is part of a
+  // larger multi-edge selection, dim/restore (and the future bulk actions
+  // this same array shape supports) apply to the whole selection — mirroring
+  // onNodeContextMenu's single-vs-multi-selection branch above — rather than
+  // silently acting on just the one edge under the cursor.
+  const onEdgeContextMenu = useCallback(
+    (event, edge) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setNodeContextMenu(null);
+      setMultiNodeContextMenu(null);
+      const isMultiSelected =
+        selectedEdges.length > 1 && selectedEdges.some((e) => e.id === edge.id);
+      setEdgeContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        edge: edge,
+        edgeIds: isMultiSelected ? selectedEdges.map((e) => e.id) : [edge.id],
+      });
+    },
+    [selectedEdges]
+  );
 
   // Reuses the same context-menu handlers a desktop right-click calls,
   // instead of duplicating their menu-opening logic, for a touch long-press.
@@ -2144,6 +2350,26 @@ function GraphCanvasInner({
         return;
       }
 
+      // The annotation toolbox's fine-pointer (mouse) drag path — matches
+      // FloatingToolbar's own dataTransfer convention, under its own MIME key
+      // so the two palettes' payloads never collide. image/freehand never
+      // reach here: AnnotationToolbox never makes either draggable.
+      const annotationPayload = event.dataTransfer.getData('application/annotation-kind');
+      if (annotationPayload) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(annotationPayload);
+        } catch {
+          parsed = null;
+        }
+        if (parsed?.kind) {
+          const dropPosition = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+          const { kind, ...options } = parsed;
+          createAnnotation(kind, dropPosition, Object.keys(options).length ? options : undefined);
+        }
+        return;
+      }
+
       const nodeType = event.dataTransfer.getData('application/reactflow-nodetype');
       if (!nodeType) return;
 
@@ -2176,7 +2402,14 @@ function GraphCanvasInner({
         onDropCreateNode(nodeType, position);
       }
     },
-    [screenToFlowPosition, onDropCreateNode, setNodes, onCreateGroup, ingestImageFile]
+    [
+      screenToFlowPosition,
+      onDropCreateNode,
+      setNodes,
+      onCreateGroup,
+      ingestImageFile,
+      createAnnotation,
+    ]
   );
 
   // Delete/Backspace hides selected nodes/edges, Escape clears selection
@@ -2258,34 +2491,7 @@ function GraphCanvasInner({
 
         if (selectedNodes.length > 0) {
           e.preventDefault();
-          // Delete removes overlay annotations (note/label/arrow) from the
-          // canvas; graph nodes are hidden, not deleted. Groups are left to
-          // their own context menu so their children stay correctly parented.
-          // One held by another client's live selection claim is skipped —
-          // leases are exclusive (task-annotation-shared-session-realtime).
-          const deletableOverlays = selectedNodes.filter(
-            (n) => OVERLAY_TYPES.has(n.type) && !isRemoteLocked(n.data)
-          );
-          const overlayIds = deletableOverlays.map((n) => n.id);
-          const skippedLocked = selectedNodes.some(
-            (n) => OVERLAY_TYPES.has(n.type) && isRemoteLocked(n.data)
-          );
-          const graphNodeIds = selectedNodes
-            .filter((n) => !ANNOTATION_TYPES.has(n.type))
-            .map((n) => n.id);
-          if (overlayIds.length > 0) {
-            const removeSet = new Set(overlayIds);
-            setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
-            onAnnotationChangeRef.current?.('delete');
-          }
-          if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
-          if (graphNodeIds.length > 0) {
-            if (onHideMultiple) {
-              onHideMultiple(graphNodeIds);
-            } else if (onHide) {
-              graphNodeIds.forEach((id) => onHide(id));
-            }
-          }
+          deleteSelectedNodes();
         }
       }
     };
@@ -2297,18 +2503,15 @@ function GraphCanvasInner({
   }, [
     selectedNodes,
     selectedEdges,
-    onHideMultiple,
-    onHide,
     onHideEdge,
     closeAllMenus,
     clearSelection,
     organizeSelection,
     showNotification,
     cml.organizeHint,
-    cml.annotationRemoteLocked,
     handleUndo,
     handleRedo,
-    setNodes,
+    deleteSelectedNodes,
     freehandActive,
   ]);
 
@@ -2340,18 +2543,45 @@ function GraphCanvasInner({
     const parentIds = Array.isArray(groupsToRestore) ? {} : groupsToRestore?.parentIds || {};
 
     if (groups && groups.length > 0) {
-      const groupNodes = groups.map((g) => ({
-        id: g.id,
-        type: 'group',
-        position: g.position,
-        data: {
-          label: g.label || 'Group',
-          description: g.description || '',
-          color: g.color || '#646cff',
-        },
-        style: g.style || { width: 300, height: 200 },
-      }));
-      const groupIdSet = new Set(groups.map((g) => g.id));
+      // The sibling of the overlay restore's own filter below. A stored group
+      // that is not a usable object throws on `g.id` here — inside an effect,
+      // so outside every AnnotationErrorBoundary, taking the whole canvas with
+      // it. A group is an annotation kind and answers to the same rule as the
+      // rest: skip it, keep the others.
+      const groupNodes = groups
+        .filter((g) => g && typeof g === 'object' && typeof g.id === 'string' && g.id)
+        .map((g) => ({
+          id: g.id,
+          type: 'group',
+          // Defaulted like every sibling path (overlayToFlowNode, the remote
+          // upsert-group branch below, sessionAnnotations.js). A node with no
+          // position throws inside ReactFlow's store, which no boundary reaches.
+          position: g.position || { x: 0, y: 0 },
+          data: {
+            label: g.label || 'Group',
+            description: g.description || '',
+            color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
+          },
+          style: g.style || { width: 300, height: 200 },
+          // A locked group box stays selectable but cannot be dragged; its
+          // members are separate nodes and keep their own draggability.
+          // `undefined` rather than `true` when unlocked, deliberately:
+          // ReactFlow resolves `node.draggable || (nodesDraggable &&
+          // typeof node.draggable === 'undefined')`, so an explicit boolean
+          // overrides the canvas-wide switch while `undefined` (present or
+          // absent alike) defers to it. A plain `!g.locked` would therefore
+          // keep an unlocked group draggable while a freehand stroke is being
+          // drawn, which is exactly what that switch turns off.
+          draggable: g.locked ? false : undefined,
+        }));
+      // Built from what survived, not the raw input. A group with a numeric id
+      // — which JSON permits — is dropped by the filter but would land in a
+      // raw-derived set, and a matching `parentIds` value is truthy, so a node
+      // would be parented onto a group that is not on the canvas. That throws
+      // inside ReactFlow's store, where no boundary reaches.
+      const groupIdSet = new Set(groupNodes.map((g) => g.id));
       setNodes((nds) => {
         const nonGroups = nds
           .filter((n) => n.type !== 'group' && !n.id.startsWith('group-'))
@@ -2371,9 +2601,14 @@ function GraphCanvasInner({
   // Restore free-floating annotations (note/label/arrow) from a loaded session.
   useEffect(() => {
     if (!annotationsToRestore || annotationsToRestore.length === 0) return;
+    // A stored annotation the translator cannot make a node out of is dropped
+    // rather than allowed to become a null in the node list, which ReactFlow
+    // would throw on. Annotation shapes may change without migrating what is
+    // stored, so this is an expected condition, not a defensive flourish.
     const overlayNodes = annotationsToRestore
       .filter((a) => OVERLAY_TYPES.has(a?.kind))
-      .map(overlayToFlowNode);
+      .map(overlayToFlowNode)
+      .filter(Boolean);
     if (overlayNodes.length === 0) {
       onAnnotationsRestored?.();
       return;
@@ -2498,7 +2733,19 @@ function GraphCanvasInner({
         const marker = remoteSelections?.[n.id] ?? null;
         if (!marker && !n.data?.remoteSelection) return n;
         const nextData = { ...n.data, remoteSelection: marker };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        const draggable = isAnnotationDraggable({ ...n, data: nextData });
+        // A group that may be dragged resolves `draggable` to `undefined`, so
+        // it keeps deferring to the canvas-wide `nodesDraggable` switch — the
+        // same value the two group builders write. Writing an explicit `true`
+        // here would pin that decision for the rest of the session the first
+        // time a collaborator claimed the group and let go, leaving it
+        // draggable during a freehand stroke. Overlays keep the explicit
+        // boolean they are hydrated with.
+        return {
+          ...n,
+          data: nextData,
+          draggable: n.type === 'group' && draggable ? undefined : draggable,
+        };
       })
     );
   }, [remoteSelections, setNodes]);
@@ -2526,9 +2773,13 @@ function GraphCanvasInner({
     for (const op of remoteAnnotationOps) {
       if (op.action === 'upsert-overlay' && op.overlay) {
         const flowNode = overlayToFlowNode(op.overlay);
-        setNodes((nds) =>
-          reorderNodesForParentChild([...nds.filter((n) => n.id !== flowNode.id), flowNode])
-        );
+        // A malformed op from a peer or an agent must not take this client's
+        // canvas down with it.
+        if (flowNode) {
+          setNodes((nds) =>
+            reorderNodesForParentChild([...nds.filter((n) => n.id !== flowNode.id), flowNode])
+          );
+        }
       } else if (op.action === 'upsert-group' && op.group) {
         const g = op.group;
         const groupNode = {
@@ -2539,8 +2790,11 @@ function GraphCanvasInner({
             label: g.label || 'Group',
             description: g.description || '',
             color: g.color || '#646cff',
+            z: g.z ?? 0,
+            locked: Boolean(g.locked),
           },
           style: g.style || { width: 300, height: 200 },
+          draggable: g.locked ? false : undefined,
         };
         const members = new Set(op.members || []);
         setNodes((nds) =>
@@ -2599,23 +2853,42 @@ function GraphCanvasInner({
     return () => clearTimeout(timer);
   }, [focusNodeId, nodes, setCenter, onFocusComplete]);
 
-  const nodeTypes = useMemo(
-    () => ({
+  // Every annotation type is wrapped; `custom` (a graph node) deliberately is
+  // not. A graph node failing to render is a defect that should be loud, and
+  // its data is the user's real work rather than a decoration whose stored
+  // shape this project reserves the right to change.
+  const nodeTypes = useMemo(() => {
+    // The boundary takes the reporter and its label from AnnotationContext,
+    // which every annotation already consumes. That keeps this map's
+    // dependency list empty: ReactFlow remounts every node when `nodeTypes`
+    // changes identity, so a map that rebuilt on a label or callback change
+    // would blow away the canvas's DOM for a language switch.
+    // The computed key names the component without assigning to it after the
+    // fact — React treats a component as immutable, and devtools read `name`
+    // when there is no displayName.
+    const guard = (Component, kind) =>
+      ({
+        [`Guarded(${kind})`]: (props) => (
+          <AnnotationErrorBoundary nodeId={props.id}>
+            <Component {...props} />
+          </AnnotationErrorBoundary>
+        ),
+      })[`Guarded(${kind})`];
+    return {
       custom: CustomNode,
-      group: GroupNode,
-      note: NoteNode,
-      label: LabelNode,
-      arrow: ArrowNode,
-      text: GenericAnnotationNode,
-      frame: GenericAnnotationNode,
-      shape: GenericAnnotationNode,
-      icon: GenericAnnotationNode,
-      vote_dot: GenericAnnotationNode,
-      image: GenericAnnotationNode,
-      freehand: FreehandAnnotationNode,
-    }),
-    []
-  );
+      group: guard(GroupNode, 'group'),
+      note: guard(NoteNode, 'note'),
+      label: guard(LabelNode, 'label'),
+      arrow: guard(ArrowNode, 'arrow'),
+      text: guard(GenericAnnotationNode, 'text'),
+      frame: guard(GenericAnnotationNode, 'frame'),
+      shape: guard(GenericAnnotationNode, 'shape'),
+      icon: guard(GenericAnnotationNode, 'icon'),
+      vote_dot: guard(GenericAnnotationNode, 'vote_dot'),
+      image: guard(GenericAnnotationNode, 'image'),
+      freehand: guard(FreehandAnnotationNode, 'freehand'),
+    };
+  }, []);
 
   const marksLegend = useMemo(() => {
     const seen = new Map();
@@ -2842,8 +3115,16 @@ function GraphCanvasInner({
           {!activeFocusRootId && (
             <AnnotationToolbox
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+              onDragCreate={handleAnnotationDragCreate}
               labels={atl}
               compact={isCompact}
+              // Distinct from `compact`, which is a viewport-WIDTH signal
+              // (COMPACT_MEDIA_QUERY) and so captions the wrong people in both
+              // directions. This is the pointer signal, and it covers what the
+              // stylesheet's own `@media (hover: none)` cannot: a hybrid device
+              // that reports hover while being driven by finger, and an
+              // explicit touchMode="on" override.
+              touch={isTouchMode}
               activeKind={freehandActive ? 'freehand' : null}
             />
           )}
@@ -2902,6 +3183,13 @@ function GraphCanvasInner({
           selectNodesByType={selectNodesByType}
           onSelectRelated={selectRelatedNodes}
           onViewHistory={onViewNodeHistory}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          graphEdges={inputEdges}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setNodeContextMenu(null)}
         />
 
@@ -2909,12 +3197,21 @@ function GraphCanvasInner({
           menu={multiNodeContextMenu}
           labels={cml}
           onShowOnly={onShowOnly}
-          onHide={onHide}
-          onHideMultiple={onHideMultiple}
-          onDelete={onDelete}
-          onDeleteMultiple={onDeleteMultiple}
+          onHideSelection={onHideMultiple || onHide ? hideSelectedGraphNodes : undefined}
+          onDeleteSelection={
+            selectedNodes.some((n) => OVERLAY_TYPES.has(n.type)) || onHideMultiple || onHide
+              ? deleteSelectedNodes
+              : undefined
+          }
           selectNodesByType={selectNodesByType}
           onOrganize={organizeSelection}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          graphEdges={inputEdges}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setMultiNodeContextMenu(null)}
         />
 
@@ -2926,6 +3223,9 @@ function GraphCanvasInner({
           onEditEdge={onEditEdge}
           onHideEdge={onHideEdge}
           onDeleteEdge={onDeleteEdge}
+          dimmedEdgeIds={dimmedEdgeIds}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
           onClose={() => setEdgeContextMenu(null)}
         />
 

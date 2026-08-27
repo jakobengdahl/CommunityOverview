@@ -12,6 +12,7 @@ import threading
 import pytest
 
 from backend.core import image_ingest
+from backend.core.session_annotations import build_annotation, build_annotation_patch
 from backend.core.session_hub import ClaimMap, InProcessEventBus
 from backend.core.session_store import (
     FileSessionPersistenceBackend,
@@ -341,9 +342,10 @@ class TestClaimEnforcement:
     """Server-side rejection of a browser (``apply_ops``) write to an
     annotation another client holds a live selection claim on
     (task-annotation-shared-session-realtime's server-side-claim-enforcement
-    slice). Scoped to the ``apply_ops`` batch path only; the last test in this
-    class documents that the synchronous MCP write path is deliberately left
-    unaffected pending the still-open agent-bypass decision.
+    slice). Covers both browser write paths — the ``apply_ops`` batch and
+    ``undo_last_action`` — while the last test in this class documents that
+    the synchronous MCP write path is deliberately left unaffected pending
+    the still-open agent-bypass decision.
     """
 
     async def _seeded(self, mgr, ann_id="note-1"):
@@ -387,6 +389,115 @@ class TestClaimEnforcement:
         assert exc_info.value.held_by == "c1"
         # rejected, so the state never actually changed
         assert s.state["annotations"][0].get("text") != "hijacked"
+
+    async def test_undo_of_own_action_is_rejected_while_another_client_holds_it(self):
+        """Actor-scoping is not a substitute for the claim check.
+
+        Undo reverts the caller's *own* past action, but the annotation it
+        touches can have been claimed by someone else in the meantime — which
+        is exactly the window this closes.
+        """
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        with pytest.raises(ClaimConflict) as exc_info:
+            mgr.undo_last_action(s.id, "c1")
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c2"
+        # Refused before anything was touched: the edit stands and the record
+        # is still undoable once the claim clears.
+        assert s.state["annotations"][0]["text"] == "mine"
+        assert any(not r.get("undone") for r in s.activity_log)
+
+    async def test_undo_is_allowed_while_the_caller_holds_the_claim(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        # Seeded WITH text, so undoing an edit to it demonstrably restores the
+        # old value. `annotation_updated` merges rather than replaces, so
+        # undoing an edit that *added* a field would leave the field in place —
+        # a separate fidelity question, deliberately not what this asserts.
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "note-1", "type": "note", "text": "original"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+        assert s.state["annotations"][0]["text"] == "original"
+
+    async def test_undo_is_allowed_when_nobody_holds_the_claim(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+
+    async def test_undo_of_a_delete_proceeds_since_the_annotation_is_gone(self):
+        """The inverse op is an ``annotation_created`` for an id no longer in
+        state, so ``_claimed_annotation_target`` reports no target and a stale
+        claim on the deleted id cannot block the restore."""
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "annotation_deleted", "annotation_id": "note-1"}]
+        )
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_deleted"
+
+    async def test_claim_conflict_message_matches_the_ui_classifier(self):
+        """The browser tells the retryable claim 409 apart from the permanent
+        "state changed since" 409 by matching this substring — see
+        ``classifyUndoError`` in frontend/web/src/utils/sessionActivity.js.
+        Nothing else carries the distinction over the wire (both are a bare
+        409 with a prose ``detail``), so reword the message and the UI silently
+        starts telling users a retryable refusal is permanent."""
+        assert "is claimed by another client" in str(ClaimConflict("note-1", "c2"))
 
     async def test_non_holder_delete_is_rejected(self):
         mgr = _manager()
@@ -1596,11 +1707,85 @@ class TestUpsertAnnotation:
 
 
 class TestUpsertImageAnnotation:
-    """The synchronous MCP image-annotation write path
+    """The synchronous image-annotation write path
     (``upsert_image_annotation``), including the image-specific session and
     document byte budgets it enforces instead of the generic op-batch cap
     (see ``TestOpBatchByteCap`` for that cap and the class docstring on
-    ``upsert_image_annotation`` for why images need their own)."""
+    ``upsert_image_annotation`` for why images need their own), and which
+    bucket its rate limit is charged to on each of its two caller shapes."""
+
+    async def test_image_ingest_throttles_on_the_rate_limit_key_not_the_client_id(
+        self,
+    ):
+        """A caller that attributes its ops to a fixed marker (the REST image
+        ingest endpoint does, so the pasting browser's SSE echo is not dropped)
+        passes ``rate_limit_key`` so it is throttled per real originator rather
+        than putting every such caller in the marker's one bucket."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        mgr._image_bucket = _TokenBucket(1.0, 0.0)
+        s = mgr.create_session()
+
+        mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+            rate_limit_key="1.2.3.4",
+        )
+        with pytest.raises(RateLimited):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation("img-2", data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+        # Same marker, different originator: its own budget, and the op bucket
+        # (still holding its single token) is not what is being spent here.
+        mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("img-3", data_bytes=100),
+            optimized_image_bytes=100,
+            rate_limit_key="5.6.7.8",
+        )
+
+    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_op_bucket(self):
+        """The MCP path passes no key and must keep drawing from the op bucket
+        under its own client id — dropping that fallback would leave it
+        unthrottled entirely."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+        with pytest.raises(RateLimited):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-2", data_bytes=100),
+                optimized_image_bytes=100,
+            )
+
+    async def test_image_bucket_exhaustion_does_not_block_the_fallback_path(self):
+        """The two buckets are independent: a spent source budget must not
+        throttle a caller that keys on the op bucket instead."""
+        mgr = _manager(bucket_capacity=2, bucket_refill_per_sec=0)
+        mgr._image_bucket = _TokenBucket(0.0, 0.0)
+        s = mgr.create_session()
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+
+        assert res["annotation"]["id"] == "img-1"
 
     async def test_creates_and_broadcasts(self):
         mgr = _manager()
@@ -1962,6 +2147,92 @@ class TestUndoLastAction:
         # by anyone else afterwards either.
         assert "note-1" not in s._deleted_annotation_ids
 
+    async def test_undo_of_a_freehand_move_restores_its_sampled_points(self):
+        """A freehand stroke's shape lives in its ``points`` (absolute
+        model-space), outside the geometry envelope every other type is moved
+        by, so a move rewrites every point (``translate_freehand_points``).
+        Undo therefore has to put the points back as well as the position:
+        an inverse op narrowed to the patched envelope fields would restore
+        the position and leave the stroke still drawn at the moved
+        coordinates. Only the full-prior inverse
+        (``session_store.apply_state_op``) gets this right, which is what
+        this pins — docs/ANNOTATION_CONTRACT.md's `freehand` Activity/undo
+        cell rests on it.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "actor-a",
+            build_annotation(
+                type="freehand",
+                x=0,
+                y=0,
+                content={
+                    "points": [
+                        {"x": 0, "y": 0, "pressure": 0.4},
+                        {"x": 10, "y": 10, "pressure": 0.8},
+                    ]
+                },
+                annotation_id="freehand-1",
+            ),
+        )
+        existing = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        mgr.update_annotation(
+            s.id, "actor-a", build_annotation_patch(existing, x=100, y=50)
+        )
+        moved = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert moved["points"] == [
+            {"x": 100, "y": 50, "pressure": 0.4},
+            {"x": 110, "y": 60, "pressure": 0.8},
+        ]
+
+        mgr.undo_last_action(s.id, "actor-a")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert restored["points"] == [
+            {"x": 0, "y": 0, "pressure": 0.4},
+            {"x": 10, "y": 10, "pressure": 0.8},
+        ]
+        assert restored["position"] == {"x": 0, "y": 0}
+        assert restored["geometry"]["x"] == 0 and restored["geometry"]["y"] == 0
+
+    async def test_undo_of_a_freehand_delete_restores_its_points_and_pressure(self):
+        """The delete inverse replays the whole removed annotation, so a
+        restored stroke has to come back drawable — points and their optional
+        per-point pressure included, not just the envelope.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "actor-a",
+            build_annotation(
+                type="freehand",
+                x=0,
+                y=0,
+                content={
+                    "points": [
+                        {"x": 0, "y": 0, "pressure": 0.4},
+                        {"x": 4, "y": 7, "pressure": 0.9},
+                    ],
+                    "strokeWidth": 3,
+                },
+                annotation_id="freehand-1",
+            ),
+        )
+        mgr.delete_annotation(s.id, "actor-a", "freehand-1")
+        assert s.state["annotations"] == []
+
+        mgr.undo_last_action(s.id, "actor-a")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "freehand-1")
+        assert restored["points"] == [
+            {"x": 0, "y": 0, "pressure": 0.4},
+            {"x": 4, "y": 7, "pressure": 0.9},
+        ]
+        assert restored["strokeWidth"] == 3
+
     async def test_undo_node_moved_restores_prior_position(self):
         mgr = _manager()
         s = mgr.create_session()
@@ -1976,6 +2247,33 @@ class TestUndoLastAction:
         mgr.undo_last_action(s.id, "mcp-agent")
 
         assert s.state["positions"]["n1"] == {"x": 1.0, "y": 2.0}
+
+    async def test_undo_edges_dimmed_restores_them(self):
+        """task-session-focus-dimming-controls: dim/restore round-trips through
+        the same undo path as hide/show, without touching graph data."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edges_dimmed", "edge_ids": ["e1", "e2"]}]
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["dimmed_edge_ids"] == []
+
+    async def test_undo_edge_intensity_set_restores_prior_value(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edge_intensity_set", "value": 0.3}]
+        )
+        await mgr.apply_ops(
+            s.id, "mcp-agent", None, [{"op": "edge_intensity_set", "value": 0.9}]
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        assert s.state["edge_intensity"] == 0.3
 
     async def test_no_undoable_action_for_actor_with_no_history(self):
         mgr = _manager()

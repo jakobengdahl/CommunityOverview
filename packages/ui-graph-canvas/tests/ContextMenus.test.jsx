@@ -26,6 +26,14 @@ const labels = {
   organizeTree: 'Arrange as tree',
   hideAll: 'Hide all',
   deleteAll: 'Delete all',
+  dimNode: 'Dim node',
+  restoreNode: 'Restore node',
+  dimSelected: 'Dim selected',
+  restoreSelected: 'Restore selected',
+  dimIncidentEdges: 'Dim incident edges',
+  restoreIncidentEdges: 'Restore incident edges',
+  dimEdge: 'Dim connection',
+  restoreEdge: 'Restore connection',
   changeType: 'Change type',
   generalConnection: 'General connection',
   addNote: 'Add note',
@@ -273,6 +281,114 @@ describe('NodeContextMenu', () => {
     expect(document.activeElement).toBe(trigger);
     document.body.removeChild(trigger);
   });
+
+  describe('dim/restore (task-session-focus-dimming-controls)', () => {
+    it('omits the dim buttons when the handlers are absent', () => {
+      render(<NodeContextMenu menu={{ x: 0, y: 0, node }} labels={labels} onClose={vi.fn()} />);
+      expect(screen.queryByRole('button', { name: /dim node/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /dim incident edges/i })).toBeNull();
+    });
+
+    it('offers to dim the node, then to restore it once dimmed', () => {
+      const onDimNodes = vi.fn();
+      const onRestoreNodes = vi.fn();
+      const onClose = vi.fn();
+      const { rerender } = render(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          dimmedNodeIds={[]}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onClose={onClose}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim node/i }));
+      expect(onDimNodes).toHaveBeenCalledWith(['n1']);
+      expect(onClose).toHaveBeenCalled();
+
+      rerender(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          dimmedNodeIds={['n1']}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onClose={onClose}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /restore node/i }));
+      expect(onRestoreNodes).toHaveBeenCalledWith(['n1']);
+    });
+
+    it('offers to dim every edge incident to the node, only when it has any', () => {
+      const onDimEdges = vi.fn();
+      const onClose = vi.fn();
+      const { rerender } = render(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          graphEdges={[]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={vi.fn()}
+          onClose={onClose}
+        />
+      );
+      expect(screen.queryByRole('button', { name: /dim incident edges/i })).toBeNull();
+
+      rerender(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          graphEdges={[
+            { id: 'e1', source: 'n1', target: 'other' },
+            { id: 'e2', source: 'other', target: 'n1' },
+            { id: 'e3', source: 'other', target: 'other2' },
+          ]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={vi.fn()}
+          onClose={onClose}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim incident edges/i }));
+      expect(onDimEdges).toHaveBeenCalledWith(['e1', 'e2']);
+    });
+
+    it('reads incident edges as already-dimmed only when every one of them is', () => {
+      const onRestoreEdges = vi.fn();
+      const graphEdges = [
+        { id: 'e1', source: 'n1', target: 'other' },
+        { id: 'e2', source: 'other', target: 'n1' },
+      ];
+      render(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          graphEdges={graphEdges}
+          dimmedEdgeIds={['e1']}
+          onDimEdges={vi.fn()}
+          onRestoreEdges={onRestoreEdges}
+          onClose={vi.fn()}
+        />
+      );
+      // Only e1 dimmed, not e2 — still offers "dim", not "restore".
+      expect(screen.getByRole('button', { name: /dim incident edges/i })).toBeTruthy();
+
+      render(
+        <NodeContextMenu
+          menu={{ x: 0, y: 0, node }}
+          labels={labels}
+          graphEdges={graphEdges}
+          dimmedEdgeIds={['e1', 'e2']}
+          onDimEdges={vi.fn()}
+          onRestoreEdges={onRestoreEdges}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /restore incident edges/i }));
+      expect(onRestoreEdges).toHaveBeenCalledWith(['e1', 'e2']);
+    });
+  });
 });
 
 describe('MultiNodeContextMenu', () => {
@@ -387,6 +503,90 @@ describe('MultiNodeContextMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete all/i }));
     expect(onDeleteMultiple).toHaveBeenCalledWith(['a', 'b']);
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('uses filtered action nodes for callbacks while the header counts the full selection', () => {
+    const onShowOnly = vi.fn();
+    const onHideMultiple = vi.fn();
+    const onDeleteMultiple = vi.fn();
+    const onDimNodes = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes, actionNodes: [nodes[0]] }}
+        labels={labels}
+        onShowOnly={onShowOnly}
+        onHideMultiple={onHideMultiple}
+        onDeleteMultiple={onDeleteMultiple}
+        onDimNodes={onDimNodes}
+        onRestoreNodes={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('2 nodes selected')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /show only/i }));
+    expect(onShowOnly).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /hide all/i }));
+    expect(onHideMultiple).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /dim selected/i }));
+    expect(onDimNodes).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /delete all/i }));
+    expect(onDeleteMultiple).toHaveBeenCalledWith(['a']);
+  });
+
+  describe('dim/restore (task-session-focus-dimming-controls)', () => {
+    it('dims the whole selection, then offers to restore it once every node is dimmed', () => {
+      const onDimNodes = vi.fn();
+      const onRestoreNodes = vi.fn();
+      const { rerender } = render(
+        <MultiNodeContextMenu
+          menu={{ x: 0, y: 0, nodes }}
+          labels={labels}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim selected/i }));
+      expect(onDimNodes).toHaveBeenCalledWith(['a', 'b']);
+
+      rerender(
+        <MultiNodeContextMenu
+          menu={{ x: 0, y: 0, nodes }}
+          labels={labels}
+          dimmedNodeIds={['a', 'b']}
+          onDimNodes={onDimNodes}
+          onRestoreNodes={onRestoreNodes}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /restore selected/i }));
+      expect(onRestoreNodes).toHaveBeenCalledWith(['a', 'b']);
+    });
+
+    it('dims the de-duplicated union of edges incident to any selected node', () => {
+      const onDimEdges = vi.fn();
+      render(
+        <MultiNodeContextMenu
+          menu={{ x: 0, y: 0, nodes }}
+          labels={labels}
+          graphEdges={[
+            { id: 'e1', source: 'a', target: 'other' },
+            { id: 'e2', source: 'other', target: 'b' },
+            { id: 'e3', source: 'a', target: 'b' }, // incident to both — must not duplicate
+            { id: 'e4', source: 'other', target: 'other2' },
+          ]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim incident edges/i }));
+      expect(onDimEdges).toHaveBeenCalledWith(['e1', 'e2', 'e3']);
+    });
   });
 });
 
@@ -754,6 +954,71 @@ describe('EdgeContextMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     const panel = document.querySelector('.context-submenu-panel');
     expect(panel.className).not.toContain('flip');
+  });
+
+  describe('dim/restore (task-session-focus-dimming-controls)', () => {
+    it('dims the single edge, then offers to restore it once dimmed', () => {
+      const onDimEdges = vi.fn();
+      const onRestoreEdges = vi.fn();
+      const { rerender } = render(
+        <EdgeContextMenu
+          menu={{ x: 0, y: 0, edge, edgeIds: ['e1'] }}
+          labels={labels}
+          relationshipTypes={[]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim connection/i }));
+      expect(onDimEdges).toHaveBeenCalledWith(['e1']);
+
+      rerender(
+        <EdgeContextMenu
+          menu={{ x: 0, y: 0, edge, edgeIds: ['e1'] }}
+          labels={labels}
+          relationshipTypes={[]}
+          dimmedEdgeIds={['e1']}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={onRestoreEdges}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /restore connection/i }));
+      expect(onRestoreEdges).toHaveBeenCalledWith(['e1']);
+    });
+
+    it('acts on the whole multi-edge selection when the clicked edge is part of one', () => {
+      const onDimEdges = vi.fn();
+      render(
+        <EdgeContextMenu
+          menu={{ x: 0, y: 0, edge, edgeIds: ['e1', 'e2', 'e3'] }}
+          labels={labels}
+          relationshipTypes={[]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim connection/i }));
+      expect(onDimEdges).toHaveBeenCalledWith(['e1', 'e2', 'e3']);
+    });
+
+    it('falls back to just the clicked edge when no menu.edgeIds is given', () => {
+      const onDimEdges = vi.fn();
+      render(
+        <EdgeContextMenu
+          menu={{ x: 0, y: 0, edge }}
+          labels={labels}
+          relationshipTypes={[]}
+          onDimEdges={onDimEdges}
+          onRestoreEdges={vi.fn()}
+          onClose={vi.fn()}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /dim connection/i }));
+      expect(onDimEdges).toHaveBeenCalledWith(['e1']);
+    });
   });
 });
 

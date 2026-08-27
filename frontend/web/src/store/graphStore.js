@@ -267,6 +267,14 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden*) but render at reduced prominence.
+  // edgeIntensity is the session's global baseline opacity for every
+  // non-dimmed edge (1 = full prominence). All three are session-document
+  // state, synced like hidden*Ids — never a per-browser localStorage default.
+  dimmedNodeIds: [],
+  dimmedEdgeIds: [],
+  edgeIntensity: 1.0,
   nodeMarks: {},
   // Transient per-node pulse state driven by external trigger URLs (design:
   // external pulse-trigger). Maps nodeId -> { style, color, seq }; each entry is
@@ -471,6 +479,9 @@ const useGraphStore = create((set, get) => ({
       highlightedNodeIds: [],
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
+      dimmedNodeIds: [],
+      dimmedEdgeIds: [],
+      edgeIntensity: 1.0,
       nodeMarks: {},
       pulsedNodeIds: {},
       pendingGroups: null,
@@ -548,6 +559,35 @@ const useGraphStore = create((set, get) => ({
   },
 
   setHiddenEdgeIds: (ids) => set({ hiddenEdgeIds: ids }),
+
+  // Dim/restore a set of nodes or edges at once — the bulk primitive every
+  // context-menu dim/restore action (single or multi-selection) reduces to.
+  // Session-local focus only: never touches graph data.
+  dimNodes: (nodeIds) => {
+    const { dimmedNodeIds } = get();
+    set({ dimmedNodeIds: Array.from(new Set([...dimmedNodeIds, ...nodeIds])) });
+  },
+  restoreNodes: (nodeIds) => {
+    const drop = new Set(nodeIds);
+    set((state) => ({ dimmedNodeIds: state.dimmedNodeIds.filter((id) => !drop.has(id)) }));
+  },
+  setDimmedNodeIds: (ids) => set({ dimmedNodeIds: ids }),
+
+  dimEdges: (edgeIds) => {
+    const { dimmedEdgeIds } = get();
+    set({ dimmedEdgeIds: Array.from(new Set([...dimmedEdgeIds, ...edgeIds])) });
+  },
+  restoreEdges: (edgeIds) => {
+    const drop = new Set(edgeIds);
+    set((state) => ({ dimmedEdgeIds: state.dimmedEdgeIds.filter((id) => !drop.has(id)) }));
+  },
+  setDimmedEdgeIds: (ids) => set({ dimmedEdgeIds: ids }),
+
+  setEdgeIntensity: (value) => {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized)) return;
+    set({ edgeIntensity: Math.max(0, Math.min(1, normalized)) });
+  },
 
   setSelectedNodeId: (nodeId) => set({ selectedNodeId: nodeId }),
 

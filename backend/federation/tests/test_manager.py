@@ -834,6 +834,10 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap(monkeypa
         event[0] == "delete" and event[1] == "federated::esam-main::n2"
         for event in node_events
     )
+    assert not any(
+        event[0] == "update" and event[1] == "federated::esam-main::n2"
+        for event in node_events
+    )
     assert set(edge_events) == {
         ("create", None, "federated::esam-main::e2"),
         ("delete", "federated::esam-main::e1", None),
@@ -841,19 +845,10 @@ async def test_sync_graph_emits_node_and_edge_events_for_the_cache_swap(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
+async def test_sync_graph_does_not_re_emit_an_update_for_an_unchanged_node(
     monkeypatch,
 ):
-    """Documents current behaviour, which is wrong but out of scope to change here.
-
-    Node.from_dict stamps a fresh created_at/updated_at every time _build_cache
-    rebuilds the cache, and _emit_node_events compares nodes with to_dict(), so
-    the comparison never matches and every cached node is re-announced as an
-    update on every sync — a scheduled graph emits a full update storm per
-    interval even when the remote payload is byte-identical. Tracked separately
-    as smallfix-federation-unchanged-node-emits-update; this test is the one to
-    flip when that is fixed.
-    """
+    """A byte-identical remote payload must not create cache update noise."""
     remote = _ScriptedTransport((200, _ONE_NODE), (200, _ONE_NODE))
     _sealed(monkeypatch, remote)
 
@@ -868,24 +863,50 @@ async def test_sync_graph_currently_re_emits_an_update_for_an_unchanged_node(
         node_events.clear()
         await manager.sync_graph("esam-main", client)
 
-    assert node_events == ["update"]
+    assert node_events == []
 
 
 @pytest.mark.asyncio
-async def test_sync_graph_currently_treats_a_payload_without_nodes_as_an_empty_graph(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("bad_payload", "error_fragment"),
+    [
+        ({}, "nodes"),
+        ({"nodes": None, "edges": []}, "nodes"),
+        ({"nodes": {}, "edges": []}, "nodes"),
+        ({"nodes": [], "edges": {}}, "edges"),
+    ],
+)
+async def test_sync_graph_degrades_and_keeps_cache_when_payload_is_malformed(
+    monkeypatch, bad_payload, error_fragment
 ):
-    """Documents current behaviour rather than endorsing it.
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, bad_payload))
+    _sealed(monkeypatch, remote)
 
-    A 200 carrying neither key empties the cache and reports success, so a
-    remote that starts serving `{}` — malformed, truncated, or an error
-    envelope — silently drops every federated node and announces it as
-    deletions. That is the same outcome the non-2xx path deliberately guards
-    against, reached through a response the guard never sees. Tracked
-    separately as smallfix-federation-empty-payload-wipes-cache; this test is
-    the one to flip when that is decided.
-    """
-    remote = _ScriptedTransport((200, _ONE_NODE), (200, {}))
+    node_events = []
+    manager = FederationManager(
+        _single_graph_config(),
+        on_node_event=lambda op, before, after: node_events.append(op),
+    )
+
+    async with httpx.AsyncClient(transport=remote.transport) as client:
+        await manager.sync_graph("esam-main", client)
+        node_events.clear()
+        result = await manager.sync_graph("esam-main", client)
+
+    assert result["success"] is False
+    assert result["graph_id"] == "esam-main"
+    assert error_fragment in result["error"]
+
+    graph_status = manager.get_status()["graphs"][0]
+    assert graph_status["status"] == "degraded"
+    assert graph_status["last_error"]
+    assert graph_status["cached_nodes"] == 1
+    assert node_events == []
+
+
+@pytest.mark.asyncio
+async def test_sync_graph_accepts_an_explicit_empty_node_list(monkeypatch):
+    remote = _ScriptedTransport((200, _ONE_NODE), (200, {"nodes": [], "edges": []}))
     _sealed(monkeypatch, remote)
 
     node_events = []

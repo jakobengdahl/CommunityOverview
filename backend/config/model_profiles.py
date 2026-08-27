@@ -71,7 +71,11 @@ class ModelProfile(BaseModel):
     @classmethod
     def _options_must_not_embed_secrets(cls, v: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in v.items():
-            if isinstance(value, str) and value and _SECRET_LOOKING_OPTION_KEY_RE.search(key):
+            if (
+                isinstance(value, str)
+                and value
+                and _SECRET_LOOKING_OPTION_KEY_RE.search(key)
+            ):
                 raise ValueError(
                     f"options.{key} looks like an inline secret value — use "
                     "credential_ref to point at an environment variable instead "
@@ -162,7 +166,9 @@ def get_default_profile(profiles: List[ModelProfile]) -> Optional[ModelProfile]:
     return None
 
 
-def find_profile(profiles: List[ModelProfile], profile_id: str) -> Optional[ModelProfile]:
+def find_profile(
+    profiles: List[ModelProfile], profile_id: str
+) -> Optional[ModelProfile]:
     """Look up a profile by id regardless of its enabled state."""
     for p in profiles:
         if p.id == profile_id:
@@ -269,9 +275,13 @@ def create_provider_from_profile(
 
     provider_id = profile.provider.lower()
     if provider_id in ("claude", "anthropic"):
-        return ClaudeProvider(api_key=api_key, model=profile.model, base_url=profile.endpoint)
+        return ClaudeProvider(
+            api_key=api_key, model=profile.model, base_url=profile.endpoint
+        )
     if provider_id == "openai":
-        return OpenAIProvider(api_key=api_key, model=profile.model, base_url=profile.endpoint)
+        return OpenAIProvider(
+            api_key=api_key, model=profile.model, base_url=profile.endpoint
+        )
     raise ValueError(
         f"Model profile '{profile.id}' uses unsupported provider '{profile.provider}'. "
         "Supported providers: 'claude', 'openai' (OpenAI-compatible endpoints, e.g. "

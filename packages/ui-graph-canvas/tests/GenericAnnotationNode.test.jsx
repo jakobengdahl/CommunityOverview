@@ -1,16 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import GenericAnnotationNode from '../src/components/GenericAnnotationNode';
+import GenericAnnotationNode, {
+  regularShapeAspect,
+  newShapeSize,
+  SHAPE_BASE_WIDTH,
+} from '../src/components/GenericAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ resizerProps: [], setNodes: vi.fn(), nodes: [] }));
 
 vi.mock('reactflow', () => ({
   NodeResizer: (props) => {
     hoisted.resizerProps.push(props);
     return <div data-testid="resizer" />;
   },
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
 
 // Applies the latest setNodes(updater) call to a single-node array and
@@ -35,6 +39,7 @@ describe('GenericAnnotationNode', () => {
   beforeEach(() => {
     hoisted.resizerProps.length = 0;
     hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
   });
 
   it('renders text content', () => {
@@ -569,6 +574,177 @@ describe('GenericAnnotationNode property editor', () => {
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
 
+  // task-annotation-render-direct-manipulation remaining_scope: "No
+  // color/recolor editor for any generic kind". The picker is offered only
+  // for the kinds that actually paint `color` — `image` carries the field in
+  // the model but nothing renders it.
+  describe('colour editor', () => {
+    it.each([
+      ['text', (c) => c.querySelector('.kind-text'), { text: 'x' }],
+      ['frame', (c) => c.querySelector('.kind-frame'), {}],
+      ['icon', (c) => c.querySelector('.kind-icon'), { icon: 'circle' }],
+      ['vote_dot', (c) => c.querySelector('.kind-vote_dot'), { value: 1 }],
+    ])('offers colour swatches for a %s annotation', (kind, find, data) => {
+      const { container } = render(<GenericAnnotationNode id="a1" type={kind} data={data} />);
+      fireEvent.contextMenu(find(container));
+      expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
+    });
+
+    it('offers colour swatches for a shape annotation', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
+    });
+
+    it('offers no colour swatches for an image annotation, which paints no colour', () => {
+      const { container } = render(
+        <GenericAnnotationNode id="im1" type="image" data={{ image: { url: 'x.png' } }} />
+      );
+      fireEvent.contextMenu(container.querySelector('.kind-image'));
+      expect(screen.queryByLabelText('#ef4444')).toBeNull();
+      expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    });
+
+    it("changes a shape's colour from the picker", () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      fireEvent.click(screen.getByLabelText('#22c55e'));
+      expect(applyLatestUpdate({ id: 's1', data: { shape: 'circle' } }).data.color).toBe('#22c55e');
+    });
+
+    it('marks the current colour as the active swatch', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ color: '#3b82f6' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.getByLabelText('#3b82f6').className).toContain('active');
+      expect(screen.getByLabelText('#ef4444').className).not.toContain('active');
+    });
+
+    it('refuses a recolour while another client holds the claim', () => {
+      const notifyRemoteLockedAttempt = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+        >
+          <GenericAnnotationNode
+            id="s1"
+            type="shape"
+            data={{ shape: 'circle', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          />
+        </AnnotationContext.Provider>
+      );
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
+    });
+  });
+
+  // task-annotation-render-direct-manipulation remaining_scope: "No way to
+  // change a `vote_dot`'s value after creation" — it was MCP-only.
+  describe('vote_dot value stepper', () => {
+    it('raises and lowers the value', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 2 }} />);
+      fireEvent.contextMenu(screen.getByText('2'));
+      fireEvent.click(screen.getByLabelText('Increase value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(3);
+      fireEvent.click(screen.getByLabelText('Decrease value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(1);
+    });
+
+    it('never counts below zero', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 0 }} />);
+      fireEvent.contextMenu(screen.getByText('0'));
+      fireEvent.click(screen.getByLabelText('Decrease value'));
+      expect(applyLatestUpdate({ id: 'v1', data: { value: 0 } }).data.value).toBe(0);
+    });
+
+    it('treats a vote dot created without a value as zero', () => {
+      const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      fireEvent.click(screen.getByLabelText('Increase value'));
+      expect(applyLatestUpdate({ id: 'v1', data: {} }).data.value).toBe(1);
+    });
+
+    it('offers no value stepper on a kind that has no value', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.queryByLabelText('Increase value')).toBeNull();
+    });
+  });
+
+  // See docs/ANNOTATION_CONTRACT.md's "Layer order" for why the control is
+  // bring-to-front/send-to-back rather than a one-step forward/back. The
+  // arithmetic itself is covered by annotationLayers.test.js; these pin the
+  // wiring into the menu.
+  describe('layer controls', () => {
+    it('writes an integer layer onto the annotation as zIndex', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 0 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
+      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.click(screen.getByLabelText('Bring to front'));
+      const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+      expect(updated[0].zIndex).toBe(2);
+      expect(Number.isInteger(updated[0].zIndex)).toBe(true);
+      expect(updated[1].zIndex).toBe(1);
+    });
+
+    it('refuses a layer change while another client holds the claim', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 0 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      const notifyRemoteLockedAttempt = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{
+            notifyChange: vi.fn(),
+            notifyRemoteLockedAttempt,
+            labels: { layer: 'Layer', layerFront: 'Bring to front' },
+          }}
+        >
+          <GenericAnnotationNode
+            id="v1"
+            type="vote_dot"
+            data={{ value: 1, remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          />
+        </AnnotationContext.Provider>
+      );
+      // A remote claim refuses the context menu outright, so the row is never
+      // reachable — the attempt is surfaced rather than silently ignored.
+      fireEvent.contextMenu(screen.getByText('1'));
+      expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
+    });
+
+    it('leaves the canvas untouched when the annotation is already at the front', () => {
+      hoisted.nodes = [
+        { id: 'v1', type: 'vote_dot', zIndex: 5 },
+        { id: 'other', type: 'note', zIndex: 1 },
+      ];
+      const notifyChange = vi.fn();
+      render(
+        <AnnotationContext.Provider
+          value={{ notifyChange, labels: { layer: 'Layer', layerFront: 'Bring to front' } }}
+        >
+          <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
+        </AnnotationContext.Provider>
+      );
+      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.click(screen.getByLabelText('Bring to front'));
+      expect(hoisted.setNodes).not.toHaveBeenCalled();
+      expect(notifyChange).not.toHaveBeenCalled();
+    });
+
+    it('offers no layer controls on a locked annotation', () => {
+      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />);
+      fireEvent.contextMenu(screen.getByText('1'));
+      expect(screen.queryByLabelText('Bring to front')).toBeNull();
+      expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    });
+  });
+
   it('closes the context menu on Escape', async () => {
     render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
     fireEvent.contextMenu(screen.getByText('1'));
@@ -638,5 +814,541 @@ describe('GenericAnnotationNode locked context menu', () => {
   it('keeps resize handles hidden for a locked, selected frame', () => {
     render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
+  });
+});
+
+// task-annotation-doubleclick-to-edit-text: only note/label/group had
+// double-click-to-edit; `text` (whose whole purpose is text) and every
+// `shape` variant had no content-editing UI at all. This follows
+// NoteNode/LabelNode's exact pattern: double-click to enter, blur/Escape to
+// commit, live per-keystroke sync (the host's scheduler debounces 'text'
+// changes to 300ms — see AnnotationContext's notifyChange doc comment).
+describe('GenericAnnotationNode inline text editing', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+  });
+
+  it('enters edit mode on double-click, showing a textarea seeded with the current text', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toHaveValue('Hello');
+  });
+
+  it('syncs every keystroke live and commits the trimmed value on blur', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'typing' } });
+    expect(applyLatestUpdate({ id: 't1', data: { text: 'Hello' } }).data.text).toBe('typing');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+
+    fireEvent.change(textarea, { target: { value: '  world  ' } });
+    fireEvent.blur(textarea);
+    expect(applyLatestUpdate({ id: 't1', data: { text: 'Hello' } }).data.text).toBe('world');
+  });
+
+  it('cancels the edit on Escape, reverting to the stored text without writing it', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'discard me' } });
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+  });
+
+  it('refuses to enter edit mode while another client holds the selection claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+      >
+        <GenericAnnotationNode
+          id="t1"
+          type="text"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('enters edit mode on double-click for a shape annotation', () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'triangle' }} />);
+    fireEvent.doubleClick(screen.getByTestId('shape-halo'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it("writes a shape's caption and notifies the text-kind change", () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByTestId('shape-halo'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Step 1' } });
+    expect(applyLatestUpdate({ id: 's1', data: { shape: 'rectangle' } }).data.text).toBe('Step 1');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+
+  it('shows a previously stored caption without entering edit mode', () => {
+    render(<GenericAnnotationNode type="shape" data={{ shape: 'hexagon', text: 'caption' }} />);
+    expect(screen.getByText('caption')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('renders no caption layer at all for an empty, unedited shape', () => {
+    const { container } = render(<GenericAnnotationNode type="shape" data={{ shape: 'circle' }} />);
+    expect(container.querySelector('.graph-generic-annotation-shape-text')).toBeNull();
+  });
+
+  it.each(['icon', 'vote_dot', 'image', 'frame'])(
+    'does not open a text editor on double-click for %s (no free-text field to edit)',
+    (kind) => {
+      const { container } = render(
+        <GenericAnnotationNode id="n1" type={kind} data={{ icon: 'flag', value: 1, image: {} }} />
+      );
+      const root = container.querySelector(`.kind-${kind}`);
+      fireEvent.doubleClick(root);
+      expect(screen.queryByRole('textbox')).toBeNull();
+    }
+  );
+
+  // The whole point of this task's shape-specific problem: a clip-path clips
+  // the shape's own outline, so a caption centred in the bounding box would
+  // spill past the visible figure at the corners for every non-rectangular
+  // variant. Each SHAPE_TEXT_INSET entry is the axis-aligned rectangle its
+  // clip-path is proven to contain (see that constant's derivation comment
+  // in GenericAnnotationNode.jsx) — pin that the rendered overlay actually
+  // carries it, not merely that some inset exists.
+  it.each([
+    ['rectangle', { top: '0%', right: '0%', bottom: '0%', left: '0%' }],
+    ['triangle', { top: '50%', right: '25%', bottom: '0%', left: '25%' }],
+    ['rhombus', { top: '25%', right: '25%', bottom: '25%', left: '25%' }],
+    ['hexagon', { top: '0%', right: '25%', bottom: '0%', left: '25%' }],
+    ['process_arrow', { top: '0%', right: '30%', bottom: '0%', left: '0%' }],
+  ])('insets a %s caption to the rectangle its clip-path is proven to contain', (shape, inset) => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape, text: 'x' }} />
+    );
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(overlay.style.top).toBe(inset.top);
+    expect(overlay.style.right).toBe(inset.right);
+    expect(overlay.style.bottom).toBe(inset.bottom);
+    expect(overlay.style.left).toBe(inset.left);
+  });
+
+  it("insets a circle caption to its inscribed square's margin", () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'circle', text: 'x' }} />
+    );
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    const margin = ((1 - 1 / Math.sqrt(2)) / 2) * 100;
+    expect(parseFloat(overlay.style.top)).toBeCloseTo(margin, 6);
+    expect(parseFloat(overlay.style.left)).toBeCloseTo(margin, 6);
+  });
+
+  it('falls back to the rectangle inset for an unrecognised shape name', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'star', text: 'x' }} />
+    );
+    const overlay = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(overlay.style.top).toBe('0%');
+    expect(overlay.style.left).toBe('0%');
+  });
+});
+
+// Parse a `polygon(x% y%, ...)` clip-path into side lengths at a given box
+// size, so the assertions below are about the figure a user sees rather than
+// about the percentages that happen to produce it. This is the whole point of
+// the aspect ratios: the same clip-path draws a regular hexagon or a squashed
+// one depending only on the box it resolves against, and no class-name or
+// style-string assertion can tell those apart.
+function sideLengths(clipPath, w, h) {
+  const pts = clipPath
+    .replace(/^polygon\(/, '')
+    .replace(/\)$/, '')
+    .split(',')
+    .map((pair) => {
+      const [x, y] = pair
+        .trim()
+        .split(/\s+/)
+        .map((v) => parseFloat(v) / 100);
+      return [x * w, y * h];
+    });
+  return pts.map((pt, i) => {
+    const next = pts[(i + 1) % pts.length];
+    return Math.hypot(next[0] - pt[0], next[1] - pt[1]);
+  });
+}
+
+function clipPathFor(shape) {
+  const { container } = render(<GenericAnnotationNode type="shape" data={{ shape }} />);
+  return container.querySelector(`.shape-${shape}`).style.clipPath;
+}
+
+describe('regular shape geometry', () => {
+  // Drive the size from the shipped helper rather than restating it, so a
+  // change to the created box is a change these assertions see. Restating it
+  // is what let a full revert of the creation branch pass.
+  const sidesAt = (shape) => {
+    const { width, height } = newShapeSize(shape);
+    return sideLengths(clipPathFor(shape), width, height);
+  };
+  const spread = (sides) => (Math.max(...sides) - Math.min(...sides)) / Math.max(...sides);
+
+  it.each(['triangle', 'hexagon'])(
+    'draws %s with equal-length sides at the size it is created with',
+    (shape) => {
+      // Tolerance is 0.5%, not 1%: rounding the height to a whole pixel costs
+      // 0.24%, so 1% left a band of about +/-1.5% of wrong ratio passing.
+      expect(spread(sidesAt(shape))).toBeLessThan(0.005);
+    }
+  );
+
+  it('draws a rhombus as a square on its corner, which is the property a ratio can fix', () => {
+    // A rhombus clip-path has four equal sides at EVERY ratio, so the
+    // equal-sides assertion above would pass for any value here and says
+    // nothing. What 1:1 buys is equal diagonals — a square standing on its
+    // corner rather than a wide flat lozenge.
+    const { width, height } = newShapeSize('rhombus');
+    expect(spread(sidesAt('rhombus'))).toBeLessThan(0.005); // true regardless; documents why
+    expect(width).toBe(height);
+  });
+
+  it('would draw them squashed in the generic box the other subtypes use', () => {
+    // The witness for the whole change: the same clip-paths in the box a
+    // shape used to be created in. Read from the helper, so reverting the
+    // creation size to 160x96 makes the equal-sides tests fail and this one
+    // explain why.
+    const generic = newShapeSize('rectangle');
+    expect(
+      spread(sideLengths(clipPathFor('hexagon'), generic.width, generic.height))
+    ).toBeGreaterThan(0.1);
+  });
+
+  it('sizes each subtype from its own ratio, and leaves the rest in the generic box', () => {
+    // The helper only. That GraphCanvas actually calls it is a separate fact
+    // and needs its own assertion — a helper test cannot see the call site
+    // reverting to a hardcoded box, which is exactly the mutant that
+    // reproduces the reported bug. Covered in
+    // GraphCanvasAnnotationToolbox.test.jsx, at the toolbox.
+    expect(newShapeSize('triangle')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('hexagon')).toEqual({ width: SHAPE_BASE_WIDTH, height: 139 });
+    expect(newShapeSize('rhombus')).toEqual({ width: SHAPE_BASE_WIDTH, height: 160 });
+    expect(newShapeSize('rectangle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('circle')).toEqual({ width: 160, height: 96 });
+    expect(newShapeSize('process_arrow')).toEqual({ width: 160, height: 96 });
+  });
+
+  it('resizes the box when the subtype switch needs a different ratio', () => {
+    // The second way to get a squashed shape, and the one keepAspectRatio
+    // makes permanent: right-click a 160x96 rectangle and choose Triangle.
+    // Without moving the box the triangle is drawn in a rectangle's ratio,
+    // and the ratio lock then preserves exactly that.
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('triangle'));
+
+    const updated = applyLatestUpdate({
+      id: 's1',
+      data: { shape: 'rectangle' },
+      style: { width: 160, height: 96 },
+    });
+    expect(updated.data.shape).toBe('triangle');
+    // Height re-proportioned, width kept: 160 is what the node already had.
+    expect(updated.style).toEqual({ width: 160, height: 139 });
+    expect(notifyChange).toHaveBeenCalledWith('geometry');
+  });
+
+  it('keeps a deliberately resized width when the subtype changes', () => {
+    // Re-proportioning must not throw away a resize. A 480-wide triangle
+    // becoming a hexagon stays 480 wide and only gets the height its ratio
+    // needs — the two share a ratio, so nothing was squashed to begin with.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="s2" type="shape" data={{ shape: 'triangle' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('hexagon'));
+
+    const updated = applyLatestUpdate({
+      id: 's2',
+      data: { shape: 'triangle' },
+      style: { width: 480, height: 417 },
+    });
+    expect(updated.style).toEqual({
+      width: 480,
+      height: Math.round(480 / regularShapeAspect('hexagon')),
+    });
+  });
+
+  it('leaves the box untouched when switching to a subtype that fills its box', () => {
+    // A rectangle fills whatever box it is given, so there is nothing to
+    // correct — and resetting it would discard the user's resize.
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: {} }}>
+        <GenericAnnotationNode id="s3" type="shape" data={{ shape: 'hexagon' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    fireEvent.click(screen.getByLabelText('rectangle'));
+
+    const updated = applyLatestUpdate({
+      id: 's3',
+      data: { shape: 'hexagon' },
+      style: { width: 480, height: 417 },
+    });
+    expect(updated.style).toEqual({ width: 480, height: 417 });
+    expect(updated.data.shape).toBe('rectangle');
+  });
+
+  it('locks the resize ratio only for the subtypes that need one', () => {
+    // A boolean, not the ratio: reactflow's NodeResizer takes no target ratio
+    // and preserves whatever the node measures at drag start. Asserting the
+    // number here would assert a value the library discards.
+    for (const shape of ['triangle', 'rhombus', 'hexagon']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBe(true);
+    }
+    for (const shape of ['rectangle', 'circle', 'process_arrow']) {
+      render(<GenericAnnotationNode type="shape" data={{ shape }} selected />);
+      expect(hoisted.resizerProps.at(-1).keepAspectRatio).toBe(false);
+    }
+  });
+
+  it('has no ratio for the subtypes meant to fill their box', () => {
+    expect(regularShapeAspect('rectangle')).toBeNull();
+    expect(regularShapeAspect('circle')).toBeNull();
+    expect(regularShapeAspect('process_arrow')).toBeNull();
+    expect(regularShapeAspect('not-a-shape')).toBeNull();
+  });
+});
+
+// task-annotation-text-alignment-and-font: nine-position alignment, font
+// size and a curated font-family picker for the two EDITABLE_TEXT_KINDS
+// (`text`, `shape`). An existing annotation with none of these fields stored
+// must keep rendering exactly as it did before this task, so the default
+// cases below are pinned as carefully as the overridden ones.
+describe('text/shape typography', () => {
+  beforeEach(() => {
+    hoisted.resizerProps.length = 0;
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('defaults `text` to its previous 16px size and top-left layout', () => {
+    const { container } = render(<GenericAnnotationNode type="text" data={{ text: 'Hi' }} />);
+    const node = container.querySelector('.kind-text');
+    expect(node.style.fontSize).toBe('16px');
+    expect(node.style.justifyContent).toBe('flex-start');
+    expect(node.style.alignItems).toBe('flex-start');
+    // No font-family override: inherits the ambient app font, unchanged.
+    expect(node.style.fontFamily).toBe('');
+  });
+
+  it('defaults a `shape` caption to its previous 14px, centred layout', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="shape" data={{ shape: 'rectangle', text: 'Caption' }} />
+    );
+    const wrapper = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(wrapper.style.justifyContent).toBe('center');
+    expect(wrapper.style.alignItems).toBe('center');
+    const content = container.querySelector('.graph-generic-annotation-shape-text-content');
+    expect(content.style.fontSize).toBe('14px');
+  });
+
+  it('renders an overridden fontSize/font/textAlign on `text`', () => {
+    const { container } = render(
+      <GenericAnnotationNode
+        type="text"
+        data={{ text: 'Hi', fontSize: 28, font: 'serif', textAlign: 'bottom-right' }}
+      />
+    );
+    const node = container.querySelector('.kind-text');
+    expect(node.style.fontSize).toBe('28px');
+    expect(node.style.fontFamily).toBe('serif');
+    expect(node.style.justifyContent).toBe('flex-end');
+    expect(node.style.alignItems).toBe('flex-end');
+  });
+
+  // A stored fontSize of 0 is an explicit, if degenerate, value and must be
+  // honored rather than treated as "unset" and replaced by the kind default
+  // (an earlier `data?.fontSize || default` did exactly that, since `||`
+  // treats 0 as falsy the same way it does undefined/null).
+  it('honors an explicit fontSize of 0 instead of falling back to the default', () => {
+    const { container } = render(
+      <GenericAnnotationNode type="text" data={{ text: 'Hi', fontSize: 0 }} />
+    );
+    expect(container.querySelector('.kind-text').style.fontSize).toBe('0px');
+  });
+
+  it('renders an overridden fontSize/font/textAlign on a `shape` caption', () => {
+    const { container } = render(
+      <GenericAnnotationNode
+        type="shape"
+        data={{
+          shape: 'rectangle',
+          text: 'Caption',
+          fontSize: 20,
+          font: 'monospace',
+          textAlign: 'top-left',
+        }}
+      />
+    );
+    const wrapper = container.querySelector('.graph-generic-annotation-shape-text');
+    expect(wrapper.style.justifyContent).toBe('flex-start');
+    expect(wrapper.style.alignItems).toBe('flex-start');
+    const content = container.querySelector('.graph-generic-annotation-shape-text-content');
+    expect(content.style.fontSize).toBe('20px');
+    expect(content.style.fontFamily).toBe('monospace');
+  });
+
+  it.each(['text', 'shape'])(
+    'shows the alignment grid, font-size picker and font picker for %s',
+    (kind) => {
+      const { container } = render(
+        <GenericAnnotationNode type={kind} data={kind === 'shape' ? { shape: 'rectangle' } : {}} />
+      );
+      const target =
+        kind === 'shape' ? screen.getByTestId('shape-halo') : container.querySelector('.kind-text');
+      fireEvent.contextMenu(target);
+      expect(document.querySelectorAll('.align-picker-button')).toHaveLength(9);
+      expect(document.querySelector('.context-menu-sizes')).toBeTruthy();
+      // Button text is the translated family label (labels.fontFamily*), not
+      // the bare stored keyword — packages/ui-graph-canvas's i18n rule.
+      expect(screen.getByText('Default')).toBeInTheDocument();
+      expect(screen.getByText('Serif')).toBeInTheDocument();
+      expect(screen.getByText('Monospace')).toBeInTheDocument();
+      expect(screen.getByText('Cursive')).toBeInTheDocument();
+    }
+  );
+
+  it.each(['frame', 'icon', 'vote_dot', 'image'])('shows no typography controls for %s', (kind) => {
+    const data = kind === 'icon' ? { icon: 'flag' } : kind === 'vote_dot' ? { value: 1 } : {};
+    const { container } = render(<GenericAnnotationNode type={kind} data={data} />);
+    const target =
+      kind === 'icon'
+        ? screen.getByTitle('flag')
+        : kind === 'vote_dot'
+          ? screen.getByText('1')
+          : container.querySelector(`.kind-${kind}`);
+    fireEvent.contextMenu(target);
+    expect(document.querySelector('.context-menu-align')).toBeNull();
+    expect(document.querySelector('.context-menu-fonts')).toBeNull();
+  });
+
+  it('sets textAlign on click and notifies the annotation context', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange,
+          notifyRemoteLockedAttempt: () => {},
+          labels: {
+            textAlign: 'Alignment',
+            alignTop: 'Top',
+            alignMiddle: 'Middle',
+            alignBottom: 'Bottom',
+            alignLeft: 'Left',
+            alignCenter: 'Center',
+            alignRight: 'Right',
+            textSize: 'Text size',
+            fontFamily: 'Font',
+            fontDefault: 'Default',
+          },
+        }}
+      >
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    fireEvent.click(screen.getByLabelText('Bottom Right'));
+    expect(applyLatestUpdate({ id: 't1', data: {} }).data.textAlign).toBe('bottom-right');
+    expect(notifyChange).toHaveBeenCalledWith('style');
+  });
+
+  it('sets fontSize on click', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi' }} />);
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    // Every GENERIC_TEXT_FONT_SIZES button renders the same "A" glyph at a
+    // different size — pick the first (smallest, 12) rather than an
+    // ambiguous text match.
+    fireEvent.click(screen.getAllByText('A')[0]);
+    expect(applyLatestUpdate({ id: 't1', data: {} }).data.fontSize).toBe(12);
+  });
+
+  it('sets and clears a font-family override on click', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi', font: 'serif' }} />);
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    // Clicked by its translated label ("Monospace"), matching what the DOM
+    // actually shows; the stored value it writes is still the bare keyword.
+    fireEvent.click(screen.getByText('Monospace'));
+    expect(applyLatestUpdate({ id: 't1', data: { font: 'serif' } }).data.font).toBe('monospace');
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    fireEvent.click(screen.getByText('Default'));
+    expect(applyLatestUpdate({ id: 't1', data: { font: 'serif' } }).data.font).toBeNull();
+  });
+
+  it('refuses a typography change on a remote-locked annotation', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: () => {},
+          notifyRemoteLockedAttempt,
+          labels: {
+            textAlign: 'Alignment',
+            alignTop: 'Top',
+            alignMiddle: 'Middle',
+            alignBottom: 'Bottom',
+            alignLeft: 'Left',
+            alignCenter: 'Center',
+            alignRight: 'Right',
+            textSize: 'Text size',
+            fontFamily: 'Font',
+            fontDefault: 'Default',
+          },
+        }}
+      >
+        <GenericAnnotationNode
+          id="t1"
+          type="text"
+          data={{ text: 'Hi', remoteSelection: { color: '#fff', displayName: 'Ada' } }}
+        />
+      </AnnotationContext.Provider>
+    );
+    // A remote claim refuses even opening the menu (openContextMenu itself
+    // notifies and returns) — matching every other mutation on a remote-locked
+    // annotation, so there is nothing to click here at all.
+    fireEvent.contextMenu(screen.getByText('Hi'));
+    expect(document.querySelector('.context-menu-align')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('process arrow', () => {
+  it('is a full-height block with a point, not a thin arrow', () => {
+    const clip = clipPathFor('process_arrow');
+    // The body spans the full height: the leading edge runs 0% to 100%,
+    // where the old arrow glyph ran 25% to 75% and left the rest empty.
+    expect(clip).toBe('polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%)');
+    const sides = sideLengths(clip, 200, 100);
+    // Five sides: back edge, top, two point edges, bottom. An arrow glyph has
+    // seven. The count alone distinguishes the two shapes.
+    expect(sides).toHaveLength(5);
   });
 });

@@ -401,6 +401,17 @@ class TestGraphStats:
         assert stats.total_edges == 150
         assert stats.nodes_by_type["Actor"] == 50
 
+    def test_edges_by_type_defaults_to_empty_dict(self):
+        """edges_by_type is additive — omitting it must not break existing callers."""
+        stats = GraphStats(
+            total_nodes=1,
+            total_edges=0,
+            nodes_by_type={"Actor": 1},
+            last_updated=datetime.now(timezone.utc),
+        )
+
+        assert stats.edges_by_type == {}
+
 
 class TestAddNodesResult:
     """Tests for AddNodesResult model"""

@@ -66,6 +66,13 @@ const EMPTY_MIRROR = Object.freeze({
   positions: {},
   hidden_node_ids: [],
   hidden_edge_ids: [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden_*) but render at reduced prominence;
+  // edge_intensity is the session's global baseline opacity for every
+  // non-dimmed edge. Diffed/applied the same way as the hidden_* sets below.
+  dimmed_node_ids: [],
+  dimmed_edge_ids: [],
+  edge_intensity: 1.0,
   annotations: [],
 });
 
@@ -89,11 +96,15 @@ export function normalizeMirror(state) {
       positions[id] = roundPos(pos);
     }
   }
+  const intensity = Number(s.edge_intensity);
   return {
     node_refs: Array.from(new Set(s.node_refs || [])),
     positions,
     hidden_node_ids: Array.from(new Set(s.hidden_node_ids || [])),
     hidden_edge_ids: Array.from(new Set(s.hidden_edge_ids || [])),
+    dimmed_node_ids: Array.from(new Set(s.dimmed_node_ids || [])),
+    dimmed_edge_ids: Array.from(new Set(s.dimmed_edge_ids || [])),
+    edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: Array.isArray(s.annotations) ? s.annotations : [],
   };
 }
@@ -170,6 +181,20 @@ export function computeOps(prevState, nextState) {
   if (edgeHiddenAdded.length) ops.push({ op: 'edges_hidden', edge_ids: edgeHiddenAdded });
   if (edgeHiddenRemoved.length) ops.push({ op: 'edges_shown', edge_ids: edgeHiddenRemoved });
 
+  const nodeDimmedAdded = diffAdded(prev.dimmed_node_ids, next.dimmed_node_ids);
+  const nodeDimmedRemoved = diffAdded(next.dimmed_node_ids, prev.dimmed_node_ids);
+  if (nodeDimmedAdded.length) ops.push({ op: 'nodes_dimmed', node_ids: nodeDimmedAdded });
+  if (nodeDimmedRemoved.length) ops.push({ op: 'nodes_undimmed', node_ids: nodeDimmedRemoved });
+
+  const edgeDimmedAdded = diffAdded(prev.dimmed_edge_ids, next.dimmed_edge_ids);
+  const edgeDimmedRemoved = diffAdded(next.dimmed_edge_ids, prev.dimmed_edge_ids);
+  if (edgeDimmedAdded.length) ops.push({ op: 'edges_dimmed', edge_ids: edgeDimmedAdded });
+  if (edgeDimmedRemoved.length) ops.push({ op: 'edges_undimmed', edge_ids: edgeDimmedRemoved });
+
+  if (next.edge_intensity !== prev.edge_intensity) {
+    ops.push({ op: 'edge_intensity_set', value: next.edge_intensity });
+  }
+
   // Annotations, keyed by id.
   const prevAnn = new Map(prev.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
   const nextAnn = new Map(next.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
@@ -220,6 +245,7 @@ export function applyOpToMirror(mirrorState, op) {
       m.node_refs = m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
       m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
@@ -257,6 +283,25 @@ export function applyOpToMirror(mirrorState, op) {
       m.hidden_edge_ids = m.hidden_edge_ids.filter((id) => !drop.has(id));
       break;
     }
+    case 'nodes_dimmed':
+      m.dimmed_node_ids = Array.from(new Set([...m.dimmed_node_ids, ...(op.node_ids || [])]));
+      break;
+    case 'nodes_undimmed': {
+      const drop = new Set(op.node_ids || []);
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edges_dimmed':
+      m.dimmed_edge_ids = Array.from(new Set([...m.dimmed_edge_ids, ...(op.edge_ids || [])]));
+      break;
+    case 'edges_undimmed': {
+      const drop = new Set(op.edge_ids || []);
+      m.dimmed_edge_ids = m.dimmed_edge_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edge_intensity_set':
+      if (typeof op.value === 'number') m.edge_intensity = Math.max(0, Math.min(1, op.value));
+      break;
     case 'annotation_created':
     case 'annotation_updated': {
       const ann = op.annotation;
@@ -359,6 +404,12 @@ export class SessionSyncClient {
     this._closed = false;
     this._flushing = false;
     this._forceSingle = false;
+
+    // Annotation ids folded into the baseline directly via foldLocalOp,
+    // awaiting the one echo delivery that would otherwise fold the same
+    // (by-then possibly stale) creation-time content over it a second time —
+    // see foldLocalOp and _handleEvent's 'op' case.
+    this._locallyFoldedAnnotationIds = new Set();
 
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
@@ -586,6 +637,35 @@ export class SessionSyncClient {
   /** Set the synced baseline without emitting ops (after a load or remote apply). */
   setBaseline(state) {
     this._baseline = normalizeMirror(state);
+    // A wholesale reset (initial load, or resyncFromServer after a
+    // reconnect) makes any pending "skip the next echo-fold" markers moot —
+    // the fresh baseline already reflects server truth for every annotation,
+    // this one included.
+    this._locallyFoldedAnnotationIds.clear();
+  }
+
+  /**
+   * Fold one op into the baseline directly, the same way the SSE `onmessage`
+   * handler folds a remote op before dispatching it (see `_handleEvent`'s
+   * 'op' case) — for a caller that applied an op to the canvas *without* it
+   * having come over that stream (image ingest: the REST response is applied
+   * immediately, ahead of this browser's own confirming echo — see App.jsx's
+   * handleImageIngest, which only calls this when its own delivery won the
+   * render race against that echo). Skipping this would leave the baseline
+   * stale until the echo arrives, so the next `syncState()` diff (e.g. the
+   * user repositioning the just-created annotation before the echo lands)
+   * would see it as absent from the baseline and re-emit a redundant
+   * `annotation_created` for something the server already has.
+   *
+   * Marks the op's annotation id so `_handleEvent`'s own fold (below) skips
+   * re-folding it when the echo arrives afterwards — the echo carries this
+   * same creation-time content, and re-folding it over a baseline this call
+   * already advanced would revert any edit made in the meantime.
+   */
+  foldLocalOp(op) {
+    const id = op?.annotation?.id;
+    if (id) this._locallyFoldedAnnotationIds.add(id);
+    this._baseline = applyOpToMirror(this._baseline, op);
   }
 
   /**
@@ -906,8 +986,15 @@ export class SessionSyncClient {
         }
         if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
         // Fold the remote change into the baseline before the host applies it,
-        // so the resulting local store change does not diff back out as an echo.
-        this._baseline = applyOpToMirror(this._baseline, op);
+        // so the resulting local store change does not diff back out as an
+        // echo — UNLESS foldLocalOp already folded this exact annotation
+        // directly (image ingest's own delivery won the race against this
+        // echo — see foldLocalOp): re-folding this now-possibly-stale
+        // creation-time content would revert any edit made since.
+        const foldedId = op?.annotation?.id;
+        if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
+          this._baseline = applyOpToMirror(this._baseline, op);
+        }
         if (this.handlers.onRemoteOps)
           this.handlers.onRemoteOps([op], { clientId: data.client_id });
         break;

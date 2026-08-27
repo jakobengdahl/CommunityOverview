@@ -48,6 +48,14 @@ def _annotation_document_to_legacy_metadata(
                 if isinstance(annotation.get("size"), dict)
                 else {}
             )
+            # `z` and `locked` are part of the group envelope, so they are
+            # carried here for the same reason the browser's own
+            # annotationsToGroups carries them: this is the server-side twin of
+            # that translator, and a saved view whose metadata has an
+            # annotation_document but no legacy `groups` list is loaded through
+            # this path. Dropping them here would hand back an unlocked group
+            # at the base layer no matter what was stored.
+            z_value = annotation.get("z")
             group: Dict[str, Any] = {
                 "id": annotation.get("id"),
                 "label": annotation.get("label", "Group"),
@@ -56,6 +64,10 @@ def _annotation_document_to_legacy_metadata(
                     "x": geometry.get("x", position.get("x", 0)),
                     "y": geometry.get("y", position.get("y", 0)),
                 },
+                "z": z_value
+                if isinstance(z_value, (int, float)) and not isinstance(z_value, bool)
+                else 0,
+                "locked": bool(annotation.get("locked")),
             }
             width = size.get("w", geometry.get("w", geometry.get("width")))
             height = size.get("h", geometry.get("h", geometry.get("height")))
@@ -191,7 +203,7 @@ def get_saved_view(
     results = storage.search_nodes(
         query=name,
         node_types=[NodeType.SAVED_VIEW, NodeType.VISUALIZATION_VIEW],
-        limit=max(100, storage.get_stats().total_nodes)
+        limit=max(100, storage.get_node_count())
         if decision.graph_access.enabled
         else 1,
     )

@@ -198,6 +198,91 @@ class TestCreateAnnotation:
         assert updated["annotation"]["w"] == 160
         assert updated["annotation"]["content"]["shape"] == "process_arrow"
 
+    def test_shape_caption_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
+        """A shape's optional `content.text` caption
+        (task-annotation-doubleclick-to-edit-text) is free-form payload like
+        every other content field outside shape/icon/attachment/line
+        (`_validate_generic_content`'s docstring) — this pins that it
+        actually survives create/list/update over the MCP surface, not just
+        the frontend translators.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            content={"shape": "triangle", "text": "Step 1"},
+            annotation_id="shape-caption-1",
+        )
+        assert created["annotation"]["content"]["text"] == "Step 1"
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["shape"])
+        assert listed["annotations"][0]["content"]["text"] == "Step 1"
+
+        updated = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id="shape-caption-1",
+            content={"text": "Step 2"},
+        )
+        assert updated["annotation"]["content"]["text"] == "Step 2"
+        # The shape name is untouched by a caption-only update.
+        assert updated["annotation"]["content"]["shape"] == "triangle"
+
+    def test_text_typography_round_trips_through_create_list_and_update(
+        self, annotation_tools
+    ):
+        """fontSize/font/textAlign (task-annotation-text-alignment-and-font)
+        live under `style`, a generic, un-typed passthrough
+        (`build_annotation`/`build_annotation_patch` in
+        session_annotations.py) — this pins that all three actually survive
+        create/list/update over the MCP surface, mirroring the shape-caption
+        pin above for `content`.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="text",
+            x=0,
+            y=0,
+            content={"text": "Heading"},
+            style={
+                "color": "#fff",
+                "fontSize": 24,
+                "font": "serif",
+                "textAlign": "middle-center",
+            },
+            annotation_id="text-typography-1",
+        )
+        assert created["annotation"]["style"] == {
+            "color": "#fff",
+            "fontSize": 24,
+            "font": "serif",
+            "textAlign": "middle-center",
+        }
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["text"])
+        assert listed["annotations"][0]["style"]["textAlign"] == "middle-center"
+
+        updated = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id="text-typography-1",
+            style={
+                "color": "#fff",
+                "fontSize": 24,
+                "font": "monospace",
+                "textAlign": "top-left",
+            },
+        )
+        assert updated["annotation"]["style"]["font"] == "monospace"
+        assert updated["annotation"]["style"]["textAlign"] == "top-left"
+
     def test_invalid_type_is_rejected(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -1038,6 +1123,48 @@ class TestFreehandOverGenericTools:
         assert created["annotation"]["rotation"] == 45
         listed = tools_map["list_annotations"](session_id=session.id)
         assert listed["annotations"][0]["rotation"] == 45
+
+    def test_resize_stores_geometry_but_never_reshapes_the_stroke(
+        self, annotation_tools
+    ):
+        """A `freehand` stroke's shape is entirely in its `points`; unlike
+        `frame`/`shape`/`image` it carries no box the renderer scales to. A
+        w/h patch is therefore accepted and echoed back by the server while
+        changing nothing a viewer sees — documented under Canvas rendering in
+        docs/ANNOTATION_CONTRACT.md.
+
+        This pins the *server* half only. What a stored w/h means end to end
+        is not yet stable: the canvas translator drops it on the way out to
+        the overlay, so the next autosave that ships the annotation writes the
+        model default back over it
+        (`smallfix-browser-clobbers-unsized-annotation-geometry`). Fixing that,
+        or implementing a real resize on top of it, has to amend the contract
+        rather than quietly reinterpret the w/h existing strokes carry.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="freehand",
+            x=0,
+            y=0,
+            content={"points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}]},
+        )
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=created["annotation"]["id"],
+            w=200,
+            h=100,
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["w"] == 200
+        assert result["annotation"]["h"] == 100
+        assert result["annotation"]["content"]["points"] == [
+            {"x": 0, "y": 0},
+            {"x": 10, "y": 0},
+        ]
 
     def test_reorder_lock_and_delete(self, annotation_tools):
         tools_map, manager = annotation_tools

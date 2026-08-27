@@ -12,6 +12,10 @@ import io
 
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.requests import Request
+
+from backend.service import rest_api as rest_api_module
+from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
 
 class TestSessionCrud:
@@ -380,6 +384,48 @@ class TestSessionActivityAndUndo:
 
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"] == []
+
+    def test_undo_is_409_while_another_client_holds_the_claim(
+        self, test_app: TestClient
+    ):
+        """Undo is a browser write, so it answers to the same claim rule
+        POST /ops does. Actor-scoping does not cover this: the action being
+        undone is the caller's own, but the annotation it touches was claimed
+        by someone else in between."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="hello")
+        test_app.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c2",
+                "ops": [{"op": "selection_claimed", "element_ids": ["note-1"]}],
+            },
+        )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 409
+        assert "claimed by another client" in resp.json()["detail"]
+
+        # Refused without touching anything: the note is still there and the
+        # action is still undoable once the claim clears.
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert state["annotations"][0]["text"] == "hello"
+
+    def test_undo_succeeds_once_the_claim_is_released(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        self._create_note(test_app, sid, text="hello")
+        for op in ("selection_claimed", "selection_released"):
+            test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={
+                    "client_id": "c2",
+                    "ops": [{"op": op, "element_ids": ["note-1"]}],
+                },
+            )
+
+        resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
+        assert resp.status_code == 200
+        assert resp.json()["undone_op"] == "annotation_created"
 
     def test_undo_delete_restores_the_annotation(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
@@ -942,3 +988,202 @@ class TestSessionImageIngestEndpoint:
             },
         )
         assert allowed.status_code == 200
+
+
+class TestImageIngestRateLimit:
+    """The ingest op is attributed to a single fixed marker id (see the class
+    above), so throttling on that attribution put every human upload on the
+    whole server into one bucket: one user exhausting it locked out everyone
+    else. The endpoint therefore throttles on the request *source* instead,
+    which is also the only key here that a caller cannot choose for itself —
+    ``client_id`` is a browser-held localStorage value, so keying on it would
+    let one caller rotate it and mint unlimited fresh budgets.
+
+    These run behind a trusted proxy (``trusted_proxy_hops=1``) because that is
+    what makes the source key resolve per user; with the default 0 hops behind a
+    proxy every request would key on the proxy's own address instead."""
+
+    @staticmethod
+    def _app_behind_proxy(temp_graph_file, temp_static_dirs, capacity: float):
+        from backend.api_host import create_app, AppConfig
+        from backend.core.session_manager import _TokenBucket
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            auth_enabled=False,
+            trusted_proxy_hops=1,
+        )
+        app = create_app(config)
+        app.state.session_manager._image_bucket = _TokenBucket(capacity, 0.0)
+        return TestClient(app)
+
+    @staticmethod
+    def _upload(client: TestClient, sid: str, source: str, client_id: str = "b1"):
+        return client.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": client_id,
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+            },
+            headers={"X-Forwarded-For": source},
+        )
+
+    def test_one_source_exhausting_its_budget_does_not_lock_out_another(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+        assert self._upload(client, sid, "1.1.1.1").status_code == 429
+        # The whole point: a second user's uploads are unaffected.
+        assert self._upload(client, sid, "2.2.2.2").status_code == 200
+
+    def test_budget_tracks_the_source_and_ignores_the_caller_supplied_client_id(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        """Both halves together pin which of the two the key actually is: a new
+        ``client_id`` on a spent source buys nothing, and the same ``client_id``
+        on a fresh source is unaffected. The handler does not forward the
+        browser's ``client_id`` into the throttle at all today, so this is the
+        guard against a rewiring that starts to."""
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1", client_id="b1").status_code == 200
+        assert self._upload(client, sid, "1.1.1.1", client_id="b2").status_code == 429
+        assert self._upload(client, sid, "2.2.2.2", client_id="b1").status_code == 200
+
+    def test_spoofed_forwarded_for_entry_does_not_mint_a_fresh_budget(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+        assert self._upload(client, sid, "9.9.9.9, 1.1.1.1").status_code == 429
+
+    def test_ops_traffic_cannot_drain_a_source_image_budget(
+        self, temp_graph_file, temp_static_dirs
+    ):
+        """The image budget is keyed on a source address while the op bucket is
+        keyed on self-declared client ids. They must not share a keyspace, or a
+        caller could pick a ``client_id`` equal to a victim's address and spend
+        that victim's image budget through ``/ops``."""
+        from backend.core.session_manager import _TokenBucket
+
+        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client.app.state.session_manager._bucket = _TokenBucket(1.0, 0.0)
+        sid = client.post("/api/sessions", json={}).json()["id"]
+
+        ops_body = {"client_id": "1.1.1.1", "base_seq": 0, "ops": []}
+        assert client.post(f"/api/sessions/{sid}/ops", json=ops_body).status_code == 200
+        assert client.post(f"/api/sessions/{sid}/ops", json=ops_body).status_code == 429
+        # That exhausted op key must not have touched the image budget.
+        assert self._upload(client, sid, "1.1.1.1").status_code == 200
+
+
+class TestImageIngestBodyCap:
+    """This endpoint takes its body as raw ``Request`` rather than a typed
+    Pydantic parameter specifically so the Content-Length pre-check can run
+    before FastAPI/Starlette ever buffers or parses the request (see
+    ingest_session_image's docstring). The missing-field/malformed-JSON 422
+    cases below mirror TestOpBatchBodyCap's equivalent pair for the sibling
+    .../ops endpoint; the header-precheck and backstop tests are specific to
+    this endpoint's own cap."""
+
+    def test_oversized_content_length_header_is_rejected_before_body_is_read(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """A Content-Length far above the cap must be rejected from the header
+        alone, before ``Request.body()`` is ever awaited. Proved by making that
+        call blow up if it is ever reached, rather than by actually uploading
+        tens of megabytes: if the pre-check were removed (or moved after the
+        read, as a typed Pydantic body parameter would force), this request
+        would trip the patched body() and fail with an AssertionError instead
+        of a clean 413."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        def _body_must_not_be_read(self):
+            raise AssertionError(
+                "body() must not be read once Content-Length exceeds the cap"
+            )
+
+        monkeypatch.setattr(Request, "body", _body_must_not_be_read)
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=b"{}",
+            headers={
+                "content-type": "application/json",
+                "content-length": str(2 * _MAX_IMAGE_INGEST_BODY_BYTES),
+            },
+        )
+        assert resp.status_code == 413
+
+    def test_oversized_body_without_a_usable_content_length_is_rejected_by_the_backstop(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """The header check only catches a client that declares its size
+        honestly. A chunked request (no ``Content-Length`` at all) must still
+        be rejected once the actually-buffered body exceeds the cap — proved
+        here by shrinking the cap to a few bytes rather than uploading tens
+        of megabytes, since the module reads the cap as a global at call
+        time (see ``ingest_session_image``)."""
+        monkeypatch.setattr(rest_api_module, "_MAX_IMAGE_INGEST_BODY_BYTES", 100)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        def _chunks():
+            yield b"x" * 200
+
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=_chunks(),
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 413
+
+    def test_legitimately_sized_request_still_works(self, test_app: TestClient):
+        """A normal-sized image upload is nowhere near the cap and must still
+        succeed — the pre-check only guards against the pathological case."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "c1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(),
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_missing_required_field_returns_422_with_structured_detail(
+        self, test_app: TestClient
+    ):
+        """The body is now parsed manually (for the pre-parse byte cap); a
+        missing required field must still 422 with a FastAPI-shaped error
+        list — mirrors TestOpBatchBodyCap's equivalent test for .../ops."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={"x": 0, "y": 0, "image_data": _png_data_url()},
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert isinstance(detail, list)
+        assert any(err.get("loc") == ["client_id"] for err in detail)
+
+    def test_malformed_json_body_returns_422(self, test_app: TestClient):
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        resp = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 422

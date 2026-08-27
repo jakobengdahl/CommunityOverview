@@ -334,6 +334,7 @@ class GraphStats(BaseModel):
     total_nodes: int
     total_edges: int
     nodes_by_type: Dict[str, int]
+    edges_by_type: Dict[str, int] = Field(default_factory=dict)
     last_updated: datetime
 
 

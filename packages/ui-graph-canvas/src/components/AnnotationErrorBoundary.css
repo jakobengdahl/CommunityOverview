@@ -1,0 +1,18 @@
+/* Deliberately plain and small: a placeholder for an annotation that could not
+   be drawn should be visible enough to select and delete, and quiet enough not
+   to look like an error the user caused. */
+.graph-annotation-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px dashed #94a3b8;
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: default;
+}

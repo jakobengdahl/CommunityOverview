@@ -196,6 +196,87 @@
   background: #94a3b8;
 }
 
+/* Nine-position alignment picker (task-annotation-text-alignment-and-font) —
+   same 3-column grid as .context-menu-shapes above, but every button doubles
+   as its own live preview: a small dot positioned inside it with the exact
+   justify-content/align-items pair that value applies to the annotation's own
+   text, rather than an icon standing in for the concept. */
+.graph-annotation-context-menu .context-menu-align {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .align-picker-button {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 3px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .align-picker-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .align-picker-button.active {
+  border-color: #60a5fa;
+}
+
+.graph-annotation-context-menu .align-picker-dot {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-annotation-context-menu .align-picker-dot-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e6edf3;
+}
+
+/* Font-family picker (task-annotation-text-alignment-and-font) — a 2-column
+   grid rather than .context-menu-sizes' single flex row, since the curated
+   family names ("Default", "serif", "monospace", "cursive") are longer than
+   a number and would crowd four abreast in the menu's ~150px width. Each
+   button renders its own label IN that family (except "Default", which has
+   no family of its own to preview in — see GENERIC_FONT_FAMILIES's doc
+   comment) as a lightweight live preview. */
+.graph-annotation-context-menu .context-menu-fonts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .font-button {
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .font-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .font-button.active {
+  border-color: #60a5fa;
+  color: #60a5fa;
+}
+
 /* The icon picker's vocabulary is much larger than the shape picker's six
    variants (annotationIcons.js's full set), so it uses more, smaller columns
    and scrolls instead of growing the menu past a usable height. */
@@ -261,4 +342,43 @@
 .graph-annotation-context-menu .rotate-button.rotate-reset {
   flex: 1.4;
   font-size: 12px;
+}
+
+/* Shared by every annotation context menu (note, label, arrow, freehand and
+   the generic kinds) — the layer row AnnotationLayerControls renders and the
+   vote-dot value stepper, both styled on the rotate row's pattern above so
+   the menu reads as one control set rather than several. */
+.graph-annotation-context-menu .context-menu-layer,
+.graph-annotation-context-menu .context-menu-vote-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .layer-button,
+.graph-annotation-context-menu .vote-value-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .layer-button:hover,
+.graph-annotation-context-menu .vote-value-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .vote-value-current {
+  flex: 1.4;
+  text-align: center;
+  color: #e6edf3;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }

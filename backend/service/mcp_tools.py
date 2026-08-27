@@ -640,7 +640,7 @@ def register_mcp_tools(
         Get statistics for the graph
 
         Returns:
-            Dict with statistics (total_nodes, total_edges, nodes_by_type)
+            Dict with statistics (total_nodes, total_edges, nodes_by_type, edges_by_type)
         """
         return service.get_graph_stats()
 
@@ -1136,9 +1136,13 @@ def register_mcp_tools(
         """
         Get the current visualization state of a session.
 
-        Returns the node IDs currently displayed and selected in the canvas.
-        Use this to understand what the user is looking at before deciding
-        which nodes to add or which view to load.
+        Returns the node IDs currently displayed and selected in the canvas,
+        plus which nodes/edges are session-locally dimmed (visible but
+        de-emphasised — see ``dimmed_node_ids``/``dimmed_edge_ids``) and the
+        session's global edge-intensity baseline. Use this to understand what
+        the user is looking at, and how prominently, before deciding which
+        nodes to add, which view to load, or whether a dim/restore action is
+        still needed.
 
         The state is server-owned, so it reads back for any session that exists
         — including one created over MCP that no browser has opened yet, where
@@ -1148,12 +1152,19 @@ def register_mcp_tools(
         taken on an edge, but this field is narrowed to the session's nodes, so
         it is safe to pass into any argument that expects node ids.
 
+        Dimming is session-local visualization state, not a graph edit: it
+        never changes the underlying nodes or edges, only how this session
+        currently renders them.
+
         Args:
             session_id: The session ID shown in the browser header, or the one
                 returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with visible_node_ids, selected_node_ids, and node_count
+            Dict with visible_node_ids, selected_node_ids, node_count,
+            dimmed_node_ids, dimmed_edge_ids and edge_intensity (0.0-1.0, the
+            baseline opacity every non-dimmed edge renders at; 1.0 is full
+            prominence).
         """
         if session_registry is None and session_manager is None:
             return {"error": "Visualization sessions are not available"}
@@ -1174,11 +1185,28 @@ def register_mcp_tools(
                 )
             }
         visible, selected = _session_view_state(session_id)
+        dimmed_node_ids: list = []
+        dimmed_edge_ids: list = []
+        edge_intensity = 1.0
+        if session_manager is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                visible_set = set(visible)
+                dimmed_node_ids = [
+                    n
+                    for n in session.state.get("dimmed_node_ids", [])
+                    if n in visible_set
+                ]
+                dimmed_edge_ids = list(session.state.get("dimmed_edge_ids", []))
+                edge_intensity = session.state.get("edge_intensity", 1.0)
         return {
             "session_id": session_id,
             "visible_node_ids": visible,
             "selected_node_ids": selected,
             "node_count": len(visible),
+            "dimmed_node_ids": dimmed_node_ids,
+            "dimmed_edge_ids": dimmed_edge_ids,
+            "edge_intensity": edge_intensity,
         }
 
     # ==================== Visualization Layout (geometry) ====================
@@ -1231,12 +1259,16 @@ def register_mcp_tools(
           be passed straight back to ``apply_visualization_layout``. The visible
           set is not repeated here: it is this response's nodes with
           ``hidden`` false.
+        - ``dimmed`` is session-local focus state (independent of ``hidden``):
+          the node is still on the canvas but rendered at reduced prominence.
+          See ``get_visualization_session_state`` for the session's global
+          ``edge_intensity`` baseline and the dimmed edge ids.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
 
         Returns:
-            Dict with revision, node_count, nodes (id/x/y/hidden/type/status),
+            Dict with revision, node_count, nodes (id/x/y/hidden/dimmed/type/status),
             selected_node_ids, assumed_node_size
         """
         if session_manager is None:
@@ -1258,6 +1290,7 @@ def register_mcp_tools(
             }
         positions = session.state.get("positions", {})
         hidden = set(session.state.get("hidden_node_ids", []))
+        dimmed = set(session.state.get("dimmed_node_ids", []))
         node_refs = session.state.get("node_refs", [])
         # Read scope, and this tool's own name as the target: same rule the
         # write path follows, so a target-aware hook is never asked about the
@@ -1282,6 +1315,7 @@ def register_mcp_tools(
                     "x": pos["x"] if pos else None,
                     "y": pos["y"] if pos else None,
                     "hidden": node_id in hidden,
+                    "dimmed": node_id in dimmed,
                     "type": meaning.get("type"),
                     "status": meaning.get("status"),
                 }
@@ -2485,10 +2519,21 @@ def register_mcp_tools(
         differs per type — see docs/ANNOTATION_CONTRACT.md), for example:
           - text/label: {"text": "..."}
           - line: {"to": {"x": .., "y": ..}, "endArrow": true}
-          - shape: {"shape": "rectangle"}
+          - shape: {"shape": "rectangle", "text": "optional caption"}
           - icon: {"icon": "flag"}
           - vote_dot: {"value": 3}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
+
+        `text` and `shape` also read typography out of `style` (not
+        `content`): `style.fontSize` (px), `style.font` (one of the curated
+        family names GENERIC_FONT_FAMILIES in
+        packages/ui-graph-canvas/src/utils/annotations.js lists — currently
+        "serif", "monospace", "cursive"; omit for the app's own default font),
+        and `style.textAlign` (one of the nine box positions "top-left"
+        through "bottom-right", e.g. {"style": {"fontSize": 20, "font":
+        "serif", "textAlign": "middle-center"}}). All three are optional and
+        each falls back independently to what the canvas already rendered
+        before this existed, so omitting them changes nothing.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -2502,7 +2547,8 @@ def register_mcp_tools(
             h: Optional height in model-space px.
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
-            style: Optional style dict (fill/stroke/color/opacity/font, ...).
+            style: Optional style dict (fill/stroke/color/opacity; for
+                text/shape also fontSize/font/textAlign — see above).
             z: Optional layer order (higher draws on top). Defaults to 0.
             locked: Whether the annotation starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the
@@ -2890,6 +2936,13 @@ def register_mcp_tools(
                 ),
             }
         except OpError as exc:
+            # A same-id collision with a different type slipped past the
+            # pre-check above (a concurrent write landed in the window between
+            # that read and this write — the pre-check is a fast-path UX
+            # nicety, not the enforcement point); SessionStore.apply_state_op
+            # is the actual authority and raises OpError here instead of
+            # silently retyping the annotation. Same race, same handling, as
+            # the REST endpoint's ingest_session_image.
             return {"success": False, "error": str(exc)}
         return {
             "success": True,
@@ -2935,7 +2988,10 @@ def register_mcp_tools(
                 `image` is rejected here: an image annotation's picture is
                 replaced by calling `create_image_annotation` again with the
                 same annotation_id, so the new bytes go through ingest.
-            style: New style dict, if changing it (replaces the whole dict).
+            style: New style dict, if changing it (replaces the whole dict —
+                for text/shape this includes fontSize/font/textAlign, so
+                changing only one of them still means resending every style
+                field you want kept, per create_annotation's docstring).
             expected_revision: If given, the write is rejected unless it
                 equals the session's current `revision` (optimistic
                 concurrency). Read it from `list_annotations` first. Omit
@@ -3625,8 +3681,16 @@ def register_mcp_tools(
                 group with. Omit to leave current membership alone on an
                 upsert, or create an empty group. Use `update_group_members`
                 afterward for ongoing add/remove.
-            z: Optional layer order (higher draws on top). Defaults to 0.
-            locked: Whether the group starts locked against edits.
+            z: Optional layer order. Defaults to 0. Stored and reported
+                back, but not drawn for a group: the canvas paints groups as
+                backdrops behind their members in node-array order, so a
+                group's `z` does not change what covers what. Set it if you
+                want the value preserved; do not expect it to reorder
+                anything.
+            locked: Whether the group starts locked against edits. The canvas
+                honours it: a locked group refuses recolour, rename, resize,
+                drag and delete, and offers only unlock. A group's menu has
+                no hide action at all, locked or not.
             annotation_id: Stable id to create or replace. Omit to let the
                 server assign one.
             expected_revision: If given, the write is rejected unless it

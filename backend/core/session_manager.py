@@ -10,8 +10,9 @@ used by the REST/SSE endpoints and by MCP pushes:
   monotonic ``seq`` to each state op, persists once per batch, and broadcasts
   every applied op to all subscribers including the originator. It also rejects
   (``ClaimConflict``) a batch op that would mutate an annotation another client
-  currently holds a live selection claim on — the one browser write path this
-  goes through; see ``ClaimConflict`` for what stays out of scope.
+  currently holds a live selection claim on — one of three gated browser write
+  paths, alongside ``undo_last_action`` and the image-ingest endpoint;
+  see ``ClaimConflict`` for the full picture and for what stays out of scope.
 * selection claims (``selection_claimed`` / ``selection_released``) are handled
   inline but stay ephemeral — broadcast, never persisted, never sequenced.
 * ``connect`` / ``disconnect`` manage presence and release a departing client's
@@ -174,16 +175,24 @@ class RevisionConflict(Exception):
 
 
 class ClaimConflict(Exception):
-    """A browser batch (``apply_ops``) tried to mutate an annotation another
-    client currently holds a live selection claim on.
+    """A browser write tried to mutate an annotation another client currently
+    holds a live selection claim on.
 
-    Raised only for the ``apply_ops`` batch path — the REST ``/ops`` endpoint,
-    the sole browser write path (D3/D9). The synchronous MCP write path
+    Raised from the two ``SessionManager`` paths that check live claims: the
+    ``apply_ops`` batch (the REST ``/ops`` endpoint) and ``undo_last_action``
+    (``/undo``), which replays a stored inverse op and is reachable from the
+    browser only — no MCP tool calls it. A third browser write path is gated
+    too without raising this class: the image-ingest endpoint
+    (``POST /sessions/{id}/annotations/image``) replaces an annotation directly
+    rather than through ``apply_ops``, so it checks the same claim snapshot
+    itself and only borrows this class to format its 409 detail. The
+    synchronous MCP write path
     (``upsert_annotation``/``update_annotation``/``delete_annotation``/
     ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
     client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
-    unaffected by this check; see ``session_hub.ClaimMap``'s docstring for the
-    open decision on whether it should be.
+    unaffected by this check; see the ``ClaimMap`` bullet in ``session_hub``'s
+    module docstring for the open decision on whether it should be (the class
+    docstring is a one-liner and does not carry it).
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
@@ -252,8 +261,9 @@ class _TokenBucket:
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
-    Used to check a batch op against the live claim snapshot before applying
-    it (``apply_ops``). Only ``annotation_updated``/``annotation_deleted``
+    Used to check an op against the live claim snapshot before applying it —
+    a batch op in ``apply_ops``, or the stored inverse op ``undo_last_action``
+    is about to replay. Only ``annotation_updated``/``annotation_deleted``
     always target an existing annotation; ``annotation_created`` targets one
     only when its id already exists in the session (the upsert-as-replace
     case) — a genuinely new id has no prior claim to protect. Every other
@@ -421,6 +431,13 @@ class SessionManager:
         self._lookup_bucket = _TokenBucket(
             lookup_bucket_capacity, lookup_refill_per_sec
         )
+        # Separate keyspace, same sizing as the op bucket. The human image
+        # ingest endpoint keys this on the request source rather than on a
+        # client-declared id (see ``upsert_image_annotation``'s
+        # ``rate_limit_key``); mixing source-derived keys into ``_bucket``
+        # would let a client pick a ``client_id`` equal to a victim's source
+        # key and drain that victim's image budget through ``/ops``.
+        self._image_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def check_lookup_rate(self, client_key: str) -> None:
@@ -1123,6 +1140,7 @@ class SessionManager:
         annotation: Dict[str, Any],
         *,
         optimized_image_bytes: int,
+        rate_limit_key: Optional[str] = None,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         expected_revision: Optional[int] = None,
@@ -1146,6 +1164,21 @@ class SessionManager:
         ``image_ingest.optimize_image``) — passed in rather than re-derived
         from ``annotation`` so the budget check reflects the exact bytes that
         were validated, not a re-parse of the data URI.
+
+        ``rate_limit_key`` separates *who is throttled* from *who the op is
+        attributed to*. Callers that attribute their ops to a fixed marker
+        rather than to the originating caller must pass it, or every such op
+        server-wide would draw from that one marker's bucket and one caller
+        could lock out everyone else. The REST ingest endpoint passes the
+        request's source key for exactly that reason.
+
+        When it is omitted the throttle falls back to ``client_id`` in the
+        shared op bucket. That is the MCP path, and it is a known instance of
+        the same shared-marker problem, not an exemption from it: every MCP
+        tool passes one fixed agent marker, so all MCP callers share a bucket.
+        Fixing that needs a decision about what an MCP caller should be keyed
+        on (no request source exists at those call sites), so it is tracked
+        separately rather than settled here.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1153,7 +1186,10 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if not self._bucket.consume(client_id, 1):
+        if rate_limit_key is not None:
+            if not self._image_bucket.consume(rate_limit_key, 1):
+                raise RateLimited()
+        elif not self._bucket.consume(client_id, 1):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1434,6 +1470,21 @@ class SessionManager:
             raise UndoConflict(record["id"], conflict_reason)
 
         inverse_op = dict(record["inverse_op"])
+        # Undo is a browser write like any other, so it answers to the same
+        # claim rule apply_ops does (D3). Actor-scoping is not a substitute:
+        # undo reverts *your own* past action, but the annotation it touches
+        # may have been claimed by someone else since you made it. Placed
+        # ahead of every mutation below so a refusal leaves the session as it
+        # found it; the two do not actually overlap today (the
+        # _deleted_annotation_ids branch runs only for an annotation_created
+        # inverse, whose id undo_conflict_reason has already rejected if it
+        # still exists), but the ordering should not rely on that.
+        conflict_id = _claimed_annotation_target(inverse_op, session)
+        if conflict_id is not None:
+            holder = self.claims.snapshot(session_id).get(conflict_id)
+            if holder is not None and holder != client_id:
+                raise ClaimConflict(conflict_id, holder)
+
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
             if isinstance(ann_id, str):

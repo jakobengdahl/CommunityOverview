@@ -280,6 +280,72 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // task-annotation-doubleclick-to-edit-text: a shape's optional caption text
+  // must survive the canvas-node round trip like every other field, or the
+  // browser's own next autosave would diff a typed caption back out.
+  it("round-trips a shape's caption text", () => {
+    const overlay = {
+      id: 'shape-3',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'rectangle',
+      text: 'Step 1',
+      color: '#60A5FA',
+      size: { w: 160, h: 96 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.text).toBe('Step 1');
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // task-annotation-text-alignment-and-font: alignment/font size/font family
+  // are new fields on both `text` and `shape` — pin that neither leg of the
+  // canvas-node round trip silently drops any of them (the "unsized-geometry
+  // clobber" class of bug this task's own node warns about).
+  it("round-trips a text annotation's alignment, font size and font family", () => {
+    const overlay = {
+      id: 'text-3',
+      kind: 'text',
+      position: { x: 0, y: 0 },
+      text: 'Heading',
+      color: '#fff',
+      fontSize: 24,
+      textAlign: 'middle-center',
+      font: 'serif',
+      attachment: undefined,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toMatchObject({ fontSize: 24, textAlign: 'middle-center', font: 'serif' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it("round-trips a shape's caption alignment, font size and font family", () => {
+    const overlay = {
+      id: 'shape-4',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'hexagon',
+      text: 'Step 2',
+      color: '#60A5FA',
+      fontSize: 18,
+      textAlign: 'top-left',
+      font: 'monospace',
+      size: { w: 160, h: 96 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toMatchObject({ fontSize: 18, textAlign: 'top-left', font: 'monospace' });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
   it('round-trips a non-zero rotation on a generic overlay', () => {
     const overlay = {
       id: 'shape-2',

@@ -79,6 +79,37 @@ describe('group description round-trip (R12)', () => {
   });
 });
 
+// task-annotation-doubleclick-to-edit-text: a shape's optional caption text
+// must survive the host-level overlay <-> server-document round trip too,
+// not only the canvas-node round trip overlaySerialization.test.js covers —
+// this is the layer legacyMetadataToAnnotationDocument/
+// annotationDocumentToLegacyMetadata actually use for session save/restore.
+describe('shape caption round-trip', () => {
+  it('carries a caption through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata', () => {
+    const overlay = {
+      id: 'shape-1',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'hexagon',
+      text: 'Step 1',
+    };
+    const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+    const stored = document.annotations.find((a) => a.id === overlay.id);
+    expect(stored.text).toBe('Step 1');
+
+    const metadata = annotationDocumentToLegacyMetadata(document);
+    const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+    expect(roundTripped.text).toBe('Step 1');
+  });
+
+  it('defaults to an empty caption when the shape overlay has none', () => {
+    const document = legacyMetadataToAnnotationDocument({
+      annotations: [{ id: 'shape-2', kind: 'shape', position: { x: 0, y: 0 }, shape: 'circle' }],
+    });
+    expect(document.annotations[0].text).toBe('');
+  });
+});
+
 // task-annotation-render-direct-manipulation: label/text/icon/vote_dot
 // attachments now round-trip between the server annotation document and the
 // canvas overlay shape, not only through the JS annotation model.
@@ -158,4 +189,63 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
       expect(roundTripped.size).not.toEqual({ w: 160, h: 96 });
     }
   );
+});
+
+// A group has always been lockable over MCP (create_group_annotation takes
+// `locked`), but both group translators dropped the flag, so it never reached
+// the canvas and the browser's next autosave diffed it back to its default —
+// the exact failure docs/ANNOTATION_CONTRACT.md warns about for envelope
+// fields. `z` is carried for the same reason; nothing reads it for groups yet
+// (their paint order is array order), so this preserves the value without
+// offering a control for it.
+describe('group envelope round-trip (locked, z)', () => {
+  it('carries locked and z from the server annotation onto the canvas group', () => {
+    const { groups } = annotationsToGroups([
+      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 3 },
+    ]);
+    expect(groups[0].locked).toBe(true);
+    expect(groups[0].z).toBe(3);
+  });
+
+  it('defaults an unlocked group at the base layer when the server omits both', () => {
+    const { groups } = annotationsToGroups([
+      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 } },
+    ]);
+    expect(groups[0].locked).toBe(false);
+    expect(groups[0].z).toBe(0);
+  });
+
+  it('carries locked and z back from the canvas group to the annotation', () => {
+    const [ann] = groupsToAnnotations(
+      [{ id: 'g1', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 2 }],
+      {}
+    );
+    expect(ann.locked).toBe(true);
+    expect(ann.z).toBe(2);
+  });
+
+  // The autosave path: a locked group loaded from the server is re-serialised
+  // on every save. Before this round-trip existed the save wrote locked=false
+  // back, silently unlocking a group nobody had touched.
+  it('survives the save/restore round trip instead of reverting to unlocked', () => {
+    const { groups, parentIds } = annotationsToGroups([
+      { id: 'g1', kind: 'group', label: 'Team', position: { x: 1, y: 2 }, locked: true, z: 5 },
+    ]);
+    const [ann] = groupsToAnnotations(groups, parentIds);
+    expect(ann.locked).toBe(true);
+    expect(ann.z).toBe(5);
+  });
+
+  it('keeps the flag through the legacy saved-view metadata leg', () => {
+    const metadata = annotationDocumentToLegacyMetadata([
+      { id: 'g1', type: 'group', label: 'Team', position: { x: 0, y: 0 }, locked: true, z: 4 },
+    ]);
+    expect(metadata.groups[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+    const document = legacyMetadataToAnnotationDocument({
+      groups: metadata.groups,
+      parentIds: {},
+      annotations: [],
+    });
+    expect(document.annotations[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+  });
 });

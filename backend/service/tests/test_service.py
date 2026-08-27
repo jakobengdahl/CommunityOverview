@@ -413,6 +413,16 @@ class TestGraphServiceStatistics:
         assert "Actor" in result["nodes_by_type"]
         assert result["nodes_by_type"]["Actor"] == 2
 
+    def test_get_graph_stats_has_edge_type_counts(
+        self, populated_service: GraphService
+    ):
+        """Test that stats include edge counts by relationship type."""
+        result = populated_service.get_graph_stats()
+
+        assert "edges_by_type" in result
+        assert result["edges_by_type"]["BELONGS_TO"] == 2
+        assert result["edges_by_type"]["PART_OF"] == 1
+
     def test_list_node_types(self, empty_service: GraphService):
         """Test listing node types."""
         result = empty_service.list_node_types()
@@ -514,6 +524,87 @@ class TestGraphServiceSavedViews:
         assert result["annotation_document"]["annotations"][0]["type"] == "group"
         assert result["annotations"][0]["kind"] == "note"
 
+    def test_get_saved_view_keeps_a_group_locked_when_derived_from_the_document(
+        self, service_with_view: GraphService
+    ):
+        """A locked group must not come back unlocked through the v1-only path.
+
+        This helper is the server-side twin of the browser's annotationsToGroups.
+        It used to build the legacy group dict without `z` or `locked`, so a view
+        whose metadata carries an annotation_document but no legacy `groups` list
+        handed the canvas an unlocked group at the base layer however it was
+        stored - the flag survived every other leg of the round trip and died
+        here.
+        """
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_schema_version"] = 1
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [
+                {
+                    "id": "group-1",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Locked area",
+                    "geometry": {"x": 0, "y": 0, "w": 300, "h": 200},
+                    "z": 3,
+                    "locked": True,
+                }
+            ],
+        }
+        view.metadata.pop("groups", None)
+        view.metadata.pop("annotations", None)
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert result["success"] is True
+        assert result["groups"][0]["locked"] is True
+        assert result["groups"][0]["z"] == 3
+
+    def test_get_saved_view_defaults_a_non_numeric_group_z_instead_of_passing_it_on(
+        self, service_with_view: GraphService
+    ):
+        """A stored `z` that is not a number must not reach the canvas as-is.
+
+        The browser's own translator only ever sees a `z` that `createAnnotation`
+        has already coerced through `finiteNumber`, so it can afford a bare
+        `?? 0`. This path reads stored metadata directly and has no such
+        guarantee - including `True`, which is an `int` in Python and would
+        otherwise arrive as a layer of 1.
+        """
+        storage = service_with_view._storage
+        view = storage.get_node("view-1")
+        view.metadata["annotation_schema_version"] = 1
+        view.metadata["annotation_document"] = {
+            "schema_version": 1,
+            "annotations": [
+                {
+                    "id": "group-1",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Odd z",
+                    "z": True,
+                },
+                {
+                    "id": "group-2",
+                    "type": "group",
+                    "kind": "group",
+                    "label": "Stringy z",
+                    "z": "3",
+                },
+            ],
+        }
+        view.metadata.pop("groups", None)
+        view.metadata.pop("annotations", None)
+        storage.update_node("view-1", {"metadata": view.metadata})
+
+        result = service_with_view.get_saved_view("Test View")
+
+        assert result["success"] is True
+        assert [g["z"] for g in result["groups"]] == [0, 0]
+
     def test_get_saved_view_derives_legacy_fields_from_v1_only_document(
         self, service_with_view: GraphService
     ):
@@ -558,6 +649,8 @@ class TestGraphServiceSavedViews:
                 "position": {"x": 10, "y": 20},
                 "style": {"width": 320, "height": 180},
                 "color": "#f5a623",
+                "z": 0,
+                "locked": False,
             }
         ]
         assert result["parentIds"] == {"actor-1": "group-1"}

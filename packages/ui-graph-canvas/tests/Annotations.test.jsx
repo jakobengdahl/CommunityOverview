@@ -264,15 +264,38 @@ describe('ArrowNode', () => {
     expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
   });
 
-  it('keeps a locked arrow non-draggable after a style change (colour)', () => {
+  // A locked line's menu now offers only Unlock, so recolouring one is no
+  // longer reachable through the menu.
+  it('offers a locked arrow no style controls at all, only unlock', () => {
     const { notifyChange } = renderWithContext(
       <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected={false} />
     );
     fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
-    const colorButtons = document.querySelectorAll('.color-button');
-    fireEvent.click(colorButtons[1]);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(document.querySelector('.context-menu-delete')).toBeNull();
+    expect(document.querySelector('.context-menu-unlock')).toBeTruthy();
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  // The lock can land between opening the menu and clicking a swatch — a
+  // remote `annotation_updated` arriving mid-interaction. `patchData` reads
+  // `n.data` from live state rather than the render-time `data` prop
+  // precisely so the write respects the lock that arrived in between, the
+  // same stale-lock race "ignores an in-flight endpoint move once the arrow
+  // becomes locked" documents for moveEndpoint. This case is the only guard
+  // on the `!nextData.locked` term in patchData's draggable expression, and
+  // on patchData reading `n.data` from live state rather than the
+  // render-time prop: with either removed, this case fails and nothing else
+  // in the suite does.
+  it('keeps the arrow non-draggable when a lock lands between menu-open and click', () => {
+    renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: false }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    fireEvent.click(document.querySelectorAll('.color-button')[1]);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    // State has since been locked by the incoming remote op.
     const result = updater([
       { id: 'arrow-1', data: { dx: 160, dy: 0, locked: true }, draggable: false },
     ]);

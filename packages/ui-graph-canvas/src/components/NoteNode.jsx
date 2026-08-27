@@ -8,6 +8,7 @@ import {
   isRemoteLocked,
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './NoteNode.css';
 
 /**
@@ -20,7 +21,12 @@ import './NoteNode.css';
 const NOTE_COLORS = ['#FEF08A', '#FDBA74', '#86EFAC', '#93C5FD', '#F9A8D4', '#E9D5FF'];
 const NOTE_FONT_SIZES = [12, 14, 18, 24];
 
-function NoteNode({ id, data, selected }) {
+// `data` is defaulted rather than assumed: a stored annotation missing its
+// payload entirely should render as an empty note, not take the canvas down.
+// AnnotationErrorBoundary would catch it, but a note with no text is a thing
+// this component can draw perfectly well — falling back to the placeholder
+// there would lose an annotation the user could otherwise still edit.
+function NoteNode({ id, data = {}, selected }) {
   const [isEditing, setIsEditing] = useState(false);
   const [text, setText] = useState(data.text || '');
   const [contextMenu, setContextMenu] = useState(null);
@@ -37,6 +43,7 @@ function NoteNode({ id, data, selected }) {
   // to run while it is held, surfacing the attempt instead of silently
   // dropping it or letting two clients race.
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
 
   useEffect(() => {
@@ -349,6 +356,11 @@ function NoteNode({ id, data, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

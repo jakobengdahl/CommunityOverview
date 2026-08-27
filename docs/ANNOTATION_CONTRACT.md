@@ -57,7 +57,8 @@ Each annotation has:
 - `kind`: compatibility alias equal to `type`, except legacy inputs may use `arrow`
 - `geometry`: model-space x/y/width/height plus optional rotation
 - `position`: compatibility x/y projection
-- `style`: visual style fields such as fill, stroke, color, opacity and font
+- `style`: visual style fields such as fill, stroke, color, opacity, font
+  size/family and text alignment
 - `z`: layer order
 - `locked`: object lock flag
 - `created_by`, `updated_by`, `created_at`, `updated_at`: optional attribution
@@ -143,14 +144,24 @@ that geometry survives the session save round trip (see
 being silently reset to a mismatched box on the next reload. A right-click
 property editor now exists for every rotatable kind (`note`, `label`, `text`,
 `frame`, `shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps
-plus reset), for `shape` a subtype picker, and for `icon` a picker grid over
-the full icon vocabulary. `freehand` gets its own right-click property editor
-too (color, stroke width, smoothing, opacity) — it is not in the rotatable
-set (see [Canvas rendering](#canvas-rendering) on why rotation is not drawn
-for it), so it has no rotation control. What the rotatable kinds' editor
-still does not cover: recoloring any generic kind other than `freehand`,
-changing a `vote_dot`'s value after creation, and cropping/replacing an
-`image`'s pixel content.
+plus reset), a colour picker for the kinds that paint one (`text`, `frame`,
+`shape`, `icon`, `vote_dot` — `image` carries a `color` in the model but
+renders none, so it is offered no swatches), for `shape` a subtype picker, for
+`icon` a picker grid over the full icon vocabulary, and for `vote_dot` a value
+stepper that never counts below zero; for `text` and `shape` (whose caption
+is now editable — see below), the right-click editor also carries a
+nine-position text-alignment grid, a font-size picker and a curated
+font-family picker (task-annotation-text-alignment-and-font — see [Typography
+controls](#typography-controls-text-shape)). `freehand` gets its own
+right-click property editor too (color, stroke width, smoothing, opacity) —
+it is not in the rotatable set (see [Canvas rendering](#canvas-rendering) on
+why rotation is not drawn for it), so it has no rotation control. The
+dedicated `note`/`label`/`line`/`freehand` editors and the generic one alike
+also carry the shared bring-to-front/send-to-back layer row described under
+[Layer order](#layer-order); `group`'s own context menu does not. What the
+editors still do not cover: `note`/`label` still have only a text-size
+picker, not the alignment/font-family control `text`/`shape` now have, and
+cropping/replacing an `image`'s pixel content is still unsupported.
 `label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
 another annotation from the GUI, by dragging the annotation within snapping
 distance of the target
@@ -159,6 +170,193 @@ is still no dedicated "nearby object menu" (the wireframe above) that
 pre-wires a new attachable annotation to a target at creation time. Closing
 what remains is tracked per type in the [acceptance matrix](#acceptance-matrix);
 it is not satisfied by documenting the wireframes above.
+
+### Layer order
+
+An annotation's `z` orders it against the other annotations on the canvas.
+The `note`, `label`, `line`, `freehand` and generic-kind context menus each
+carry the same layer row (`AnnotationLayerControls`), offering **bring to
+front** and **send to back**. `group` has its own context menu and does *not*
+carry the row — a group box can be ordered against by other annotations but
+cannot be reordered itself.
+
+The value written is always an **integer**, even when annotations already on
+the canvas carry fractional `z` values (an agent may set any float over MCP —
+`z` is `Optional[float]` server-side). The canvas writes a node's layer
+straight into the element's inline style, and CSS `z-index` accepts only
+`auto | <integer>`: a browser rejects `z-index: 0.5` outright and the element
+silently keeps whatever it had. A fractional layer would publish an operation
+and move nothing on screen — worse than refusing, because every other client
+would still apply it. Note that a jsdom-based test cannot catch this: jsdom's
+CSSOM accepts the fractional value that a real browser discards.
+
+Front/back rather than a one-step forward/back is a deliberate trade. A true
+one-step swap needs distinct integer levels to step between, and every
+annotation is created at `z = 0`, so the common case is a pile of ties.
+Breaking those ties one step at a time means renumbering the annotations
+around the one that moved — and an `annotation_updated` op carries the
+*whole* annotation, which for an embedded image is its entire data URI. A
+renumber touching a few images would exceed the session op batch's byte cap
+and be rejected atomically. Front/back always writes exactly one annotation,
+so it cannot reach that cap. One-step forward/back, and the level compaction
+it would need, are not implemented.
+
+An annotation tied with the current front is not treated as already in front —
+the tie is what the click exists to break — so it moves. A click that would
+change nothing (already alone at the front, or at the back) is a no-op and
+publishes no operation, and so is a click on an annotation another client
+currently holds the claim on (the attempt is surfaced, as for every other
+annotation mutation). A `locked` annotation is not offered the row at all,
+per the capability baseline's "remains selectable but offers only unlock or
+copy" — which every *overlay* annotation's menu now implements, `line`
+included. The canvas `Delete`/`Backspace` handler enforces it too: a locked
+overlay is skipped and the user is told to unlock it first, which closes the
+one path that could destroy a locked *overlay* without unlocking it. It is
+kind-agnostic, so it needs no per-component change.
+
+`group` now honours the flag, and follows the baseline exactly: **a locked
+group's menu offers Unlock and nothing else.** It honoured it nowhere until
+its translators started carrying `locked`: the flag was persisted server-side
+(`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
+the way to the canvas, so `GroupNode` never saw it and a locked group box
+still showed its full colour/hide/delete menu with no way back out of the
+lock. A locked group's resize handles and drag are now withheld the same way a
+locked overlay's are, its label cannot be renamed by double-clicking the
+header, and its colour swatches and Delete Group are out of reach. Nothing
+else is left to withhold: those are the whole of the unlocked menu, so the
+locked branch carries Unlock alone rather than by exception. The rename guard
+goes one step further than the overlay kinds, whose
+double-click text editors still refuse only a live remote claim and not the
+persisted flag — the group's behaviour is the one this baseline describes, and
+the overlays' is a tracked gap. The keyboard rule still does not reach a group
+— `Delete` skips them entirely, so their children stay correctly parented —
+and hands that job to the group's own menu, which now honours the flag.
+
+**There is no longer a Hide Group action, on a locked group or any other.**
+It is worth recording why, because the button existed for a long time and its
+name will outlive it in people's memory. `handleHideGroup` and
+`handleDeleteGroup` called the identical handler, `removeGroupKeepChildren`,
+which takes the group off the canvas, un-parents its members and publishes
+`notifyChange('delete')`; there was no hidden-group state anywhere in the
+codebase to restore from, and none of the round-trip legs carried one. So the
+menu offered two buttons that read as different severities and ran the same
+destruction, and a locked group — which withheld everything else — was one
+click from being dissolved by the safe-sounding one.
+
+The fix was to delete the button rather than to make it real. Deleting a group
+already keeps its members, so `Delete Group` is the action `Hide Group`
+purported to be, correctly named; removing the duplicate cost no capability.
+`handleDeleteGroup` is now the sole path into `removeGroupKeepChildren`.
+Whether a group should ever be hideable *separately* from being deleted — with
+its identity, label, colour and membership preserved for restoration — is an
+open product question, not a bug, and is tracked as one.
+
+A real hole remains, and it is not about the menu: **a locked group's
+membership is not locked.** Dragging a graph node into or out of a locked
+group re-parents it (`computeGroupPlacement` in `GraphCanvas.jsx` never
+consults the flag) and publishes `group_membership_changed`, so the locked
+annotation's own `member_node_ids` changes from the GUI. What a group *is* is
+largely its membership, so "a locked group is protected" is true of its box
+and false of its contents. Tracked separately; stated here so this section's
+account of what the flag reaches is not read as more than it claims.
+
+What `group` still lacks is the layer row, not the lock: see
+[Layer order](#layer-order) above. Its `z` is carried through the same
+translators so a value set over MCP survives the canvas round trip, but
+nothing reads it — a group's paint order is array order
+(`reorderNodesForParentChild` puts groups first so they sit behind their
+members as backdrops), and groups are ReactFlow parents whose members carry
+`parentId`. Giving a group a GUI layer control therefore needs a decision
+about how group layering relates to that parent/child backdrop model, which
+has not been taken.
+
+### Unrecognised annotation data
+
+Annotations have no users yet, so the shapes below may change without migrating
+what is already stored: a redesign is free to ignore or discard an existing
+annotation rather than carry a compatibility path for it. What replaces that
+guarantee is narrower and firmer — **unrecognised annotation data must never
+crash the canvas.**
+
+Annotations render inside the same ReactFlow tree as the graph, so an exception
+thrown while drawing one unmounts everything. An annotation is a decoration and
+the graph is the user's work, so that trade is never worth taking. Three
+mechanisms at three depths, deliberately all of them — each catches what the
+one below it cannot reach:
+
+- **An annotation that cannot be normalised is skipped, not fatal.**
+  `createAnnotation` throws for a kind this version does not know, and
+  `normalizeAnnotationDocument` used to let that escape — so one stored
+  annotation of a retired kind made the whole document unreadable, which in the
+  app means the session fails to open. That is the worst outcome available: the
+  user loses the session rather than one decoration. Skipped entries are
+  reported to the console, since a silent drop looks like deletion. A payload
+  whose annotation slot is not a list at all is still fatal — that is a
+  malformed session, not an annotation this version cannot read.
+- **The overlay translators refuse what they cannot represent.**
+  `overlayToFlowNode` and `flowNodeToOverlay` return `null` for input that is
+  not an object or has no string id, and all three call sites — session
+  restore, saved-view export, and remote ops from a peer or agent — drop those
+  rather than letting a `null` into the node list, where it would crash one
+  step later and harder to trace.
+- **Every annotation node type is wrapped in `AnnotationErrorBoundary`.** A kind
+  that throws anyway renders as a small neutral placeholder the user can select
+  and delete. The user-facing notice fires once per session — several copies of
+  the same broken shape would otherwise read as something being badly wrong —
+  while each failure is logged to the console separately, for whoever has to
+  find the defect.
+
+Groups are annotations too, and get the same treatment in both places: a
+malformed entry in a restored session's group list is filtered before it can
+throw on `g.id` inside an effect — where no boundary reaches — and a primitive
+entry is refused rather than silently becoming a group annotation with a
+generated id and no members.
+
+An unknown kind therefore never reaches the canvas at all: it is dropped while
+normalising, and the restore path filters by the known overlay kinds besides.
+The translators tolerate one because they are also used on already-built nodes,
+not because a stored unknown kind survives to be rendered.
+
+`custom` — a graph node — is deliberately **not** wrapped. Its data is the
+user's real work, carries no licence to change shape, and a render failure
+there should be loud rather than hidden behind a placeholder.
+
+This is covered by `packages/ui-graph-canvas/tests/AnnotationBadData.test.jsx`,
+which feeds the canvas deliberately malformed annotations. That test is what
+makes every later annotation redesign safe to do without a migration.
+
+All of this is client-side. The server never rejects a write to a locked
+annotation, whatever the type or tool — see [MCP access](#mcp-access) for the
+per-type breakdown of which tool does the writing. `locked` is a shared UI
+convention, not a permission, and reads as a stronger guarantee than it is
+precisely because the menus and the keyboard now enforce it so uniformly.
+Contrast a selection claim, which the server does enforce for browser writes.
+
+Only other *annotations* are consulted: the ordering is computed against
+them, and no graph node is ever read to decide the result. That is not the
+same as staying within the graph's own band, and should not be read as such.
+Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
+created annotation, while send-to-back writes one below the backmost
+annotation. Whenever that backmost annotation is itself at or below 0 — the
+default, since every annotation is created at 0 — the result is negative and
+does place the annotation behind the graph's nodes and edges. That is
+intended and useful, and it is how a `frame` gets behind the nodes it frames;
+it is not, however, a guarantee. Once every annotation has been pushed above
+0, send-to-back lands at 0 or higher — level with the graph (where paint
+order falls back to document order) or in front of it, but no longer behind
+it.
+
+A layer is only ever written when it is an integer strictly past every other
+annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
+the layer that is stored is the layer the browser actually paints. Against a
+neighbour already at that bound the click is a no-op: clamping the step back
+down to the bound would land level with the neighbour it is meant to pass,
+recreating the tie the control exists to break while publishing an operation
+that changes nothing on screen.
+
+Semantic default layers — a per-kind default `z` at creation time, so a frame
+starts behind the annotations it frames — are **not** implemented; every
+annotation is created at `z = 0` and ordered manually from there.
 
 ## Operation layer
 
@@ -243,7 +441,16 @@ refusing — but every write path that goes through `apply_ops` now reads a
 snapshot of it first and refuses instead of silently applying, matching the
 client-side exclusivity above with a server backstop a client that ignores
 `data.remoteSelection` can no longer bypass. `undo_last_action` (`/undo`) is
-not covered by this check either.
+covered too: it replays a stored inverse op, so the same check runs against
+that op before anything is touched. Actor-scoping is not a substitute — undo
+reverts the caller's *own* past action, but the annotation it lands on may
+have been claimed by someone else since. A refused undo changes nothing and
+leaves the record undoable once the claim clears — and because the Activity
+drawer's undo button carries no claim awareness of its own, this is the one
+place a claim refusal reaches an ordinary user, so the UI renders it as the
+retryable "someone else has that selected" message rather than the permanent
+"can no longer be undone" one (`classifyUndoError`,
+`frontend/web/src/utils/sessionActivity.js`).
 
 **Remaining gap:** this is scoped to browser-originated writes only. The
 synchronous MCP write path (`upsert_annotation`/`update_annotation`/
@@ -548,8 +755,42 @@ resize, inline text editing, anchoring). The rest of the v1 model — `text`,
 selection and drag-to-move for every kind, plus model-space resize (via the
 same `NodeResizer` handles as `note`) for the kinds that carry an explicit
 box size: `frame`, `shape` and `image`. `text`, `icon` and `vote_dot` render
-at a fixed intrinsic size and are not resizable. A locked annotation of any
+at a fixed intrinsic size and are not resizable. `freehand` is not resizable
+either, and for a further reason: its shape is not in a box at all but in its
+sampled `points`, so there is nothing for a resize to scale. The canvas
+offers it no handles. The MCP tools do accept a `w`/`h` patch: the server
+stores it and `list_annotations` echoes it back, and nothing ever draws from
+it. Nor does it survive contact with a browser. `freehand` is one of the
+three types whose canvas translator carries no size across —
+`freehandAnnotationToOverlay` in `sessionAnnotations.js`, alongside the
+`label` and `line` branches beside it, and unlike
+`genericAnnotationToOverlay`, which does carry it for all six generic kinds
+— so hydrating a stroke resets its box to the model's 160×96 default. The
+next autosave that ships that annotation writes the default back over
+whatever an agent set. When that happens depends on the client: a browser
+already connected when the patch lands folds the server's real geometry into
+its baseline while its overlay drops it, so the next autosave for any reason
+at all carries the reset even though nobody touched the stroke; a browser
+that loaded afterwards needs an actual edit to it first. Saving a view loses
+it unconditionally — the document is rebuilt from the canvas overlays, which
+never carried the box (`handleConfirmSaveView` →
+`legacyMetadataToAnnotationDocument`), so every affected annotation in the
+view is stored at the default. `rotation` is not affected for any of the
+three: the same translators do carry that across in both directions. This is
+the "unsized-geometry clobber" class of bug already closed for `icon`/
+`vote_dot`/`text` (`smallfix-annotation-unsized-generic-geometry-clobber`),
+still open for these three and tracked as
+`smallfix-browser-clobbers-unsized-annotation-geometry`. Like the never-drawn `rotation`
+below, it is a tracked gap rather than a decided non-goal: scaling the
+sampled points on a `w`/`h` patch remains open, and would need that
+translator fixed first, or an agent's resize would be undone by the next
+client to touch the stroke. A locked annotation of any
 generic kind hides its resize handles the same way a locked `note` does.
+`text` and `shape` now have their own inline text editing too
+(task-annotation-doubleclick-to-edit-text) — see below — so inline text
+editing is no longer exclusive to `note`/`label`. `line` was never part of
+that: its own dedicated UX above is endpoint attach/drag and anchoring, not
+inline text.
 
 Per-type property editors and GUI creation for these types are required v1
 scope (see [Human authoring surfaces](#human-authoring-surfaces)), not a
@@ -565,6 +806,84 @@ the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 `GenericAnnotationNode.jsx`).
+
+**Double-click inline text editing (`text`, `shape`).** Double-clicking a
+`text` annotation — or any `shape` variant, including `process_arrow` — opens
+inline editing, following NoteNode/LabelNode's established pattern exactly:
+double-click to enter, blur or Escape to commit, live per-keystroke sync at
+the shared 300ms text debounce (see [Operation timing and
+leases](#operation-timing-and-leases)). `shape` gains a new optional `text`
+content field for this — a caption on the shape, stored and read the same
+free-form way as every other non-structurally-validated content field (see
+[Attachment and detach behavior](#attachment-and-detach-behavior)'s
+Validation note) — while `text`'s own `content.text` was already there. A
+`shape`'s clip-path clips its own outline, so a caption centred in the
+bounding box would spill past the visible figure at the corners for every
+non-rectangular variant; `GenericAnnotationNode.jsx`'s `SHAPE_TEXT_INSET`
+insets the text layer to the axis-aligned rectangle each variant's clip-path
+is proven to contain (a derived, not eyeballed, region — see that constant's
+comment) rather than growing the shape to fit. Growing was rejected
+deliberately: it would fight `triangle`/`hexagon`/`rhombus`'s fixed aspect
+ratios (`REGULAR_SHAPE_ASPECT`; there is no single side to grow that keeps
+the figure regular) and would move the annotation's stored geometry as a side
+effect of typing rather than of a deliberate resize gesture — inset-only
+means `shape`'s width/height semantics, and everything resize/aspect-lock
+does with them, are untouched by this. `frame` is deliberately excluded: the
+contract describes it above as a "visual-only framing box", and the reported
+gap named only `note`/`label`/`text`/the six `shape` variants. `icon`,
+`vote_dot` and `image` are excluded too — none carries a free-text field in
+the v1 content model (a vote's `value` is a number with its own stepper).
+
+### Typography controls (`text`, `shape`)
+
+`text` and `shape` (task-annotation-text-alignment-and-font) are the only two
+kinds with editable free text (see above), so they are the only two kinds
+this task adds typography to: a nine-position text-alignment grid
+(`top-left` through `bottom-right`, matching `content.attachment.anchor`'s
+box-position vocabulary in spirit though it is a separate field), a font-size
+picker, and a curated font-family picker. All three live under `style`
+(`style.textAlign`, `style.fontSize`, `style.font`), not `content` — the same
+place `text`'s pre-existing `fontSize` already lived — and each is optional,
+falling back independently to whatever the annotation already rendered as
+before this task: `text` defaults to `top-left` (its plain block-flow layout
+with no alignment rule at all), `shape`'s caption defaults to `middle-center`
+(the centred layout `GenericAnnotationNode.css` used to hardcode), and both
+default their font size to what was previously hardcoded in CSS (16px for
+`text`, 14px for a `shape` caption) and their font family to the app's own
+ambient font (no override). An existing annotation with none of these fields
+stored therefore renders exactly as it did before this task.
+
+**Font scope.** The font-family picker is a short curated list of CSS
+*generic* font families (`GENERIC_FONT_FAMILIES` in
+`packages/ui-graph-canvas/src/utils/annotations.js`: `serif`, `monospace`,
+`cursive`, plus the unstyled default) rather than free-form font-name entry
+or an uploaded font file. A generic family name is resolved by the viewer's
+own browser/OS, so it renders predictably on every client with nothing to
+ship or embed — the trade-off is a fixed, small set of looks rather than a
+specific named typeface.
+
+**`text` has no box, so its vertical alignment is inert today.** `text` is
+not one of the kinds that carries an explicit box size
+(`RESIZABLE_KINDS`/`SIZED_GENERIC_KINDS` in `GenericAnnotationNode.jsx`/
+`annotations.js` — unchanged by this task) — it always renders exactly as
+large as its own content, the same as before. The alignment control's
+horizontal axis is still visible for `text` whenever the caption spans
+multiple lines (typed line breaks): shorter lines sit left/center/right of
+the widest one. The vertical axis (`top`/`middle`/`bottom`) has no visible
+effect for `text` — with the box always equal to the content, there is no
+extra room to place it in — until `text` itself becomes resizable, which
+this task deliberately leaves out of scope (the same call `61d5cc7b` already
+made for `icon`/`vote_dot`: making an unsized kind resizable is a separate,
+bigger UX change). `shape`'s caption has a real box (the shape's own
+`w`/`h`), so all nine positions are visibly distinct there today.
+
+**MCP.** `create_annotation`/`update_annotation` read these three fields from
+their existing `style` argument — see their docstrings
+(`backend/service/mcp_tools.py`) — so no new MCP tool or parameter was added;
+an agent setting `style.fontSize` on a `text`/`shape` annotation already goes
+through the generic, un-typed `style` passthrough
+(`backend/core/session_annotations.py`) that `text`'s `fontSize` already used
+before this task.
 
 An `icon` annotation draws the glyph its configured `content.icon` name
 resolves to in the canvas package's icon set
@@ -621,7 +940,7 @@ server accepts for them is stored and reported but never rendered. That is a
 tracked gap in the [acceptance matrix](#acceptance-matrix), not a decided
 non-goal. `group` never reaches this translation layer at all — its helpers
 (`annotationsToGroups`/`groupsToAnnotations`) carry no rotation field, so a
-group has no rotation to draw or preserve.
+group has no rotation to draw or preserve. They do carry `z` and `locked`.
 
 **A GUI rotation control now exists.** Right-clicking a `note`, `label`,
 `text`, `frame`, `shape`, `icon`, `vote_dot` or `image` opens a property
@@ -651,9 +970,36 @@ representation (`overlayToFlowNode`/`flowNodeToOverlay` in
 `packages/ui-graph-canvas/src/utils/annotations.js`, and the server-model
 translators in `frontend/web/src/utils/sessionAnnotations.js`): `z` maps to
 the ReactFlow node's `zIndex`, `locked` maps to `draggable: false`, and
-`rotation` travels on the flow node's `data`. This is the canvas UI's own
-enforcement of `locked` — the server never rejects a write to a locked
-annotation — but which *tool* performs that write differs by type:
+`rotation` travels on the flow node's `data`.
+
+`group` is apart from this, and not only in degree: it never reaches
+`overlayToFlowNode`/`flowNodeToOverlay`. Two of the three call sites filter on
+`OVERLAY_TYPES`, which excludes `group`; the third — the `upsert-overlay`
+branch of the remote-op effect — does not, and is kept clear one layer up
+instead, by `App.jsx` routing an incoming `kind: 'group'` annotation to an
+`upsert-group` op. That routing is load-bearing: `overlayToFlowNode` does not
+itself refuse a group, it falls through to the line branch and would hand back
+a `group` node carrying arrow `data`. Its envelope is carried instead by
+`annotationsToGroups`/`groupsToAnnotations` in the browser's translators, by
+the two group builders and `handleSaveView` in `GraphCanvas.jsx` on the canvas
+side, and by `_annotation_document_to_legacy_metadata` in
+`backend/service/views.py` on the server. It has no `rotation`, and its `z`
+lands on the flow node's `data` rather than on `zIndex`, because a group's
+paint order comes from the node array rather than from `zIndex` (see
+[Layer order](#layer-order)).
+
+Its `locked` refuses broadly what every other kind's does, with two
+differences worth knowing. One is described under [Layer order](#layer-order)
+above: the rename guard is stricter. The other is here — an unlocked group
+resolves `draggable` to `undefined` rather than `true`, so it still defers to
+the canvas-wide `nodesDraggable` switch the way it did before it was
+lock-aware. ReactFlow tests `typeof node.draggable === 'undefined'`, so an
+explicit `undefined` and an absent key behave alike, and a literal `true`
+would override the switch.
+
+This is the canvas UI's own enforcement of `locked` — the server never rejects
+a write to a locked annotation — but which *tool* performs that write differs
+by type:
 
 - For the generic types (`text`/`label`/`line`/`frame`/`shape`/`icon`/
   `vote_dot`/`image`), `reorder_annotation`, `set_annotation_lock` and
@@ -670,8 +1016,12 @@ annotation — but which *tool* performs that write differs by type:
   notes — just through their own dedicated tool, not the generic three.
 - For `group`, none of the three apply — group annotations are not exposed
   through the generic tool set at all (`create_group_annotation`/
-  `update_group_members`/`delete_group_annotation` are its own dedicated set,
-  and none of them models `z`/`locked`/`rotation`).
+  `update_group_members`/`delete_group_annotation` are its own dedicated set).
+  `create_group_annotation` is the equivalent write: it takes `z` and `locked`
+  and `build_group_annotation` persists both, so a group can be created or
+  upserted locked and at a given layer, and like the note tools it does not
+  check the group's current `locked` value. Only `rotation` is genuinely
+  unmodelled for a group — `build_group_annotation` hardcodes it to 0.
 
 A translator that dropped any of `z`/`locked`/`rotation` would make the
 browser's own next autosave diff the annotation back to its `z: 0` /
@@ -689,18 +1039,18 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ⚠ toolbox create (fixed default), rotate (right-click), attach by dragging near a node/annotation; no color/font editor and no way to inspect or clear an attachment other than dragging | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `label` | ✅ toolbox create, inline edit, drag/resize, rotate (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `line` | ⚠ toolbox create, endpoint attach/drag; a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ✅ | ✅ | ✅ | ⬜ |
-| `frame` | ⚠ toolbox create (fixed default size), rotate (right-click); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `group` | ✅ toolbar create-group action | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
-| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; right-click editor changes an existing shape's subtype and rotation | ✅ generic tool set (`content.shape`) | ✅ | ✅ | ✅ | ⬜ |
-| `icon` | ⚠ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)); no color editor | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `vote_dot` | ⚠ toolbox create (fixed default value of 1), move, rotate (right-click) and attach by dragging near a node/annotation; no way to change the value or color after creation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
+| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape)), attach by dragging near a node/annotation; no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles despite this row's stale "resize" claim (`smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay also carries only `color` and `fontSize` out of `style`, so any other style key an agent sets — `opacity` among them — is dropped on the same leg (`smallfix-label-overlay-drops-nonvisual-style-keys`). `text`, colour, font size, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ⬜ |
+| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/unlock (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay carries only `color` out of `style`, so any other style key an agent sets is dropped on the same leg as the box — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only). `rotation`, `z`, `locked`, arrowheads, colour and the GUI's own anchors all survive | ✅ | ✅ | ⬜ |
+| `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour, rotation, layer (front/back), and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
+| `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/lock/copy/delete via the generic annotation context menu once created | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
-| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity; a `rotation` on the document model is still never drawn (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ✅ document model round-trips it | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move/undo | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
+| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer row (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule
 

@@ -5,13 +5,19 @@ import { GraphCanvas } from '../src/index';
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), selectionOnChange: null }));
 
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown }) => (
+  const MockReactFlow = ({
+    children,
+    onPaneContextMenu,
+    onPaneMouseDown,
+    onSelectionContextMenu,
+  }) => (
     <div data-testid="react-flow" className="react-flow">
       <div
         data-testid="pane"
         onMouseDown={(event) => onPaneMouseDown?.(event)}
         onContextMenu={(event) => onPaneContextMenu?.(event)}
       />
+      <div data-testid="selection" onContextMenu={(event) => onSelectionContextMenu?.(event)} />
       {children}
     </div>
   );
@@ -209,5 +215,202 @@ describe('GraphCanvas annotation creation', () => {
       }
     });
     expect(removed).toBe(true);
+  });
+
+  it('leaves a locked annotation alone on Delete and says why', () => {
+    // The contract's baseline is that a locked object stays selectable but
+    // offers only unlock or copy. Every *overlay* annotation's context menu
+    // enforces that; the keyboard path did not, so selecting a locked overlay
+    // and pressing Delete removed it — the one way left to destroy a locked
+    // overlay without unlocking it first. (`group` is outside this path
+    // because Delete never touches a group at all; its own menu honours the
+    // flag separately.)
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [{ id: 'note-1', type: 'note', data: { locked: true } }],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+    // setNodes fires for unrelated canvas bookkeeping, so assert on outcome:
+    // no updater drops note-1.
+    const dropped = hoisted.setNodes.mock.calls.some((call) => {
+      if (typeof call[0] !== 'function') return false;
+      try {
+        return call[0]([{ id: 'note-1', type: 'note' }]).every((n) => n.id !== 'note-1');
+      } catch {
+        return false;
+      }
+    });
+    expect(dropped).toBe(false);
+    expect(screen.getByText('That annotation is locked — unlock it first')).toBeTruthy();
+  });
+
+  it('deletes the unlocked half of a mixed selection and keeps the locked half', () => {
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-free', type: 'note', data: {} },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(onAnnotationChange).toHaveBeenCalled();
+    const survivors = hoisted.setNodes.mock.calls
+      .filter((call) => typeof call[0] === 'function')
+      .map((call) => {
+        try {
+          return call[0]([{ id: 'note-locked' }, { id: 'note-free' }]).map((n) => n.id);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    expect(survivors).toContainEqual(['note-locked']);
+    expect(screen.getByText('That annotation is locked — unlock it first')).toBeTruthy();
+  });
+
+  it('reports the remote claim, not the lock, when a selection holds both', () => {
+    // Both are skipped either way; only the message differs. A remote claim
+    // wins because it is the one the user cannot resolve alone — unlocking is
+    // theirs to do, waiting for someone else to deselect is not.
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.keyDown(document, { key: 'Delete' });
+
+    expect(screen.getByText('Someone else is editing this annotation')).toBeTruthy();
+    expect(screen.queryByText('That annotation is locked — unlock it first')).toBeNull();
+    // Nothing was deleted either — the whole selection was skipped, so no
+    // delete is published. This is also the only coverage the remote-claim
+    // skip has ever had; it predates this change and had none of its own.
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+  });
+
+  it('hides only selected graph nodes from a mixed-selection context menu', () => {
+    const onHideMultiple = vi.fn();
+    const onDeleteMultiple = vi.fn();
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onHideMultiple={onHideMultiple}
+        onDeleteMultiple={onDeleteMultiple}
+      />
+    );
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.contextMenu(screen.getByTestId('selection'), { clientX: 20, clientY: 30 });
+    fireEvent.click(screen.getByRole('button', { name: /hide all/i }));
+
+    expect(onHideMultiple).toHaveBeenCalledWith(['graph-1']);
+    expect(onDeleteMultiple).not.toHaveBeenCalled();
+  });
+
+  it('uses graph-node ids for non-destructive mixed-selection context menu actions', () => {
+    const onShowOnly = vi.fn();
+    const onDimNodes = vi.fn();
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onShowOnly={onShowOnly}
+        onDimNodes={onDimNodes}
+        onRestoreNodes={vi.fn()}
+      />
+    );
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.contextMenu(screen.getByTestId('selection'), { clientX: 20, clientY: 30 });
+    expect(screen.getByText('3 nodes selected')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /show only/i }));
+    expect(onShowOnly).toHaveBeenCalledWith(['graph-1']);
+
+    fireEvent.contextMenu(screen.getByTestId('selection'), { clientX: 20, clientY: 30 });
+    fireEvent.click(screen.getByRole('button', { name: /dim selected/i }));
+    expect(onDimNodes).toHaveBeenCalledWith(['graph-1']);
+  });
+
+  it('deletes unlocked overlays and hides graph nodes from a mixed-selection context menu', () => {
+    const onHideMultiple = vi.fn();
+    const onDeleteMultiple = vi.fn();
+    const onAnnotationChange = vi.fn();
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        onHideMultiple={onHideMultiple}
+        onDeleteMultiple={onDeleteMultiple}
+        onAnnotationChange={onAnnotationChange}
+      />
+    );
+    act(() => {
+      hoisted.selectionOnChange({
+        nodes: [
+          { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
+          { id: 'note-free', type: 'note', data: {} },
+          { id: 'note-locked', type: 'note', data: { locked: true } },
+          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+        ],
+        edges: [],
+      });
+    });
+    fireEvent.contextMenu(screen.getByTestId('selection'), { clientX: 20, clientY: 30 });
+    fireEvent.click(screen.getByRole('button', { name: /delete all/i }));
+
+    expect(onHideMultiple).toHaveBeenCalledWith(['graph-1']);
+    expect(onDeleteMultiple).not.toHaveBeenCalled();
+    expect(onAnnotationChange).toHaveBeenCalledWith('delete');
+    const survivors = hoisted.setNodes.mock.calls
+      .filter((call) => typeof call[0] === 'function')
+      .map((call) => {
+        try {
+          return call[0]([
+            { id: 'graph-1' },
+            { id: 'note-free' },
+            { id: 'note-locked' },
+            { id: 'note-claimed' },
+          ]).map((n) => n.id);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    expect(survivors).toContainEqual(['graph-1', 'note-locked', 'note-claimed']);
+    expect(screen.getByText('Someone else is editing this annotation')).toBeTruthy();
+    expect(screen.queryByText('That annotation is locked — unlock it first')).toBeNull();
   });
 });

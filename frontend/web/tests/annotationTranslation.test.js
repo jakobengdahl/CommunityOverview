@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { annotationsToOverlays, overlaysToAnnotations } from '../src/utils/sessionAnnotations';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  annotationsToOverlays,
+  overlaysToAnnotations,
+  annotationsToGroups,
+  annotationDocumentToLegacyMetadata,
+  legacyMetadataToAnnotationDocument,
+} from '../src/utils/sessionAnnotations';
 
 // The canvas emits overlay descriptors (note/label/arrow) via onSaveView; App
 // stores them in the server annotation model and restores them on load. These
@@ -275,6 +281,65 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
+  // task-annotation-text-alignment-and-font: alignment and font family are
+  // new fields, carried under `style` alongside `fontSize` — same
+  // "unsized-geometry clobber" risk as any other new content field, so this
+  // pins that both directions carry all three, not just fontSize.
+  it("round-trips a text annotation's alignment and font family", () => {
+    const overlays = [
+      {
+        id: 'text-2b',
+        kind: 'text',
+        position: { x: 1, y: 2 },
+        text: 'Region',
+        color: '#fff',
+        fontSize: 20,
+        textAlign: 'middle-center',
+        font: 'serif',
+        size: { w: 220, h: 60 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style).toEqual({
+      color: '#fff',
+      fontSize: 20,
+      textAlign: 'middle-center',
+      font: 'serif',
+    });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it("round-trips a shape's caption alignment, font size and font family", () => {
+    const overlays = [
+      {
+        id: 'shape-2b',
+        kind: 'shape',
+        position: { x: 0, y: 0 },
+        shape: 'hexagon',
+        text: 'Step 2',
+        color: '#60A5FA',
+        fontSize: 18,
+        textAlign: 'top-left',
+        font: 'monospace',
+        size: { w: 160, h: 96 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style).toEqual({
+      color: '#60A5FA',
+      fontSize: 18,
+      textAlign: 'top-left',
+      font: 'monospace',
+    });
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
   it('round-trips a frame annotation (size lives in geometry, not a payload field)', () => {
     const overlays = [
       {
@@ -300,6 +365,9 @@ describe('generic annotation overlay translation', () => {
         kind: 'shape',
         position: { x: 5, y: 5 },
         shape: 'circle',
+        // task-annotation-doubleclick-to-edit-text: shape now carries an
+        // optional caption field, defaulting to '' like text/label's own.
+        text: '',
         color: '#60A5FA',
         size: { w: 120, h: 120 },
         z: 4,
@@ -396,5 +464,155 @@ describe('generic annotation overlay translation', () => {
       'text',
       'vote_dot',
     ]);
+  });
+});
+
+describe('a stored annotation this version cannot read', () => {
+  // The failure this prevents is much worse than the one it looks like. The
+  // normaliser rejects an unknown kind by throwing, and that throw used to
+  // escape the whole document — so a single stored annotation of a kind that
+  // no longer exists made the session fail to load. The user lost the entire
+  // session, not one decoration, and in the deep-link path it surfaced as a
+  // session that silently never opened.
+  //
+  // Annotation kinds may change without migrating what is stored, so meeting
+  // an unknown one is expected input, not a corrupt document.
+  let warn;
+  afterEach(() => warn?.mockRestore());
+
+  const mixed = [
+    { id: 'good-1', kind: 'note', position: { x: 0, y: 0 }, text: 'survives' },
+    { id: 'gone-1', kind: 'wormhole', position: { x: 10, y: 10 } },
+    { id: 'good-2', kind: 'label', position: { x: 5, y: 5 }, text: 'also survives' },
+    null,
+    { id: 'gone-2', position: { x: 0, y: 0 } },
+    'not an annotation at all',
+  ];
+
+  it('does not take the rest of the document down with it', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const overlays = annotationsToOverlays(mixed);
+    expect(overlays.map((o) => o.id)).toEqual(['good-1', 'good-2']);
+    expect(overlays.find((o) => o.id === 'good-1').text).toBe('survives');
+  });
+
+  it('reports what it dropped instead of losing it silently', () => {
+    // A silent drop looks to the user like their annotation was deleted, and
+    // leaves nobody a way to find out which stored shape stopped working.
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    annotationsToOverlays(mixed);
+    expect(warn).toHaveBeenCalled();
+    expect(warn.mock.calls.length).toBe(4);
+  });
+
+  // Each entry point into the normaliser has to pass the reporter, and each is
+  // asserted separately. Wiring it at one call site and forgetting another is
+  // invisible otherwise: the session still loads, so nothing fails — the drop
+  // just becomes silent, which is the outcome this reporting exists to prevent.
+  it.each([
+    ['annotationsToOverlays (bare list)', () => annotationsToOverlays(mixed)],
+    [
+      'annotationsToOverlays (versioned document)',
+      () => annotationsToOverlays({ schema_version: 1, annotations: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (groups + overlays)',
+      // The branch that composes a document out of the older group/overlay
+      // shapes. Only groups are malformed here: the overlay serialiser is a
+      // write path and is deliberately still strict.
+      () =>
+        legacyMetadataToAnnotationDocument({
+          groups: [{ id: 'g-ok', label: 'fine', position: { x: 0, y: 0 } }, null],
+          parentIds: {},
+        }),
+    ],
+    ['annotationsToGroups', () => annotationsToGroups(mixed)],
+    [
+      'annotationDocumentToLegacyMetadata',
+      () => annotationDocumentToLegacyMetadata({ schema_version: 1, annotations: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (document)',
+      () => legacyMetadataToAnnotationDocument({ annotation_document: mixed }),
+    ],
+    [
+      'legacyMetadataToAnnotationDocument (versioned list)',
+      () =>
+        legacyMetadataToAnnotationDocument({ annotation_schema_version: 1, annotations: mixed }),
+    ],
+  ])('%s survives it and reports the drop', (_name, run) => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(run).not.toThrow();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('refuses a primitive group entry instead of fabricating a phantom group', () => {
+    // A string or a number does NOT throw on `g.id` — it yields undefined — so
+    // without an explicit refusal it becomes a group annotation with a
+    // generated id, an empty label and no members: an unexplained box on the
+    // canvas, and nothing anywhere reporting it.
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const groups = annotationsToGroups([]).groups;
+    expect(groups).toEqual([]);
+    const doc = legacyMetadataToAnnotationDocument({
+      groups: [{ id: 'g-ok', label: 'fine', position: { x: 0, y: 0 } }, 'a string', 7, true],
+      parentIds: {},
+    });
+    expect(doc.annotations.map((a) => a.id)).toEqual(['g-ok']);
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  it('the legacy overlay path keeps the annotations it can read', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(
+      legacyMetadataToAnnotationDocument({ annotation_document: mixed }).annotations.map(
+        (a) => a.id
+      )
+    ).toEqual(['good-1', 'good-2']);
+  });
+
+  it('still refuses a payload whose annotation slot is not a list', () => {
+    // Deliberately still fatal: that is a malformed session, not an
+    // annotation this version cannot read.
+    expect(() => annotationsToOverlays({ annotations: 'nope' })).toThrow(/not an array/);
+  });
+});
+
+describe('malformed overlay data on the write path', () => {
+  let warn;
+  afterEach(() => warn?.mockRestore());
+
+  it('skips a freehand overlay with malformed points and keeps the rest', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const annotations = overlaysToAnnotations([
+      {
+        id: 'bad-freehand',
+        kind: 'freehand',
+        position: { x: 10, y: 20 },
+        points: [null],
+      },
+      {
+        id: 'good-note',
+        kind: 'note',
+        position: { x: 1, y: 2 },
+        text: 'survives',
+      },
+    ]);
+
+    expect(annotations.map((a) => a.id)).toEqual(['good-note']);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips null and malformed overlay entries without blocking valid overlays', () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const annotations = overlaysToAnnotations([
+      null,
+      'not an overlay',
+      { id: 'bad-kind', kind: 'wormhole', position: { x: 0, y: 0 } },
+      { id: 'good-label', kind: 'label', position: { x: 5, y: 6 }, text: 'ok' },
+    ]);
+
+    expect(annotations.map((a) => a.id)).toEqual(['good-label']);
+    expect(warn).toHaveBeenCalledTimes(3);
   });
 });

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { DEFAULT_LABEL_FONT_SIZE, rotationStyle, isRemoteLocked } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import './LabelNode.css';
 
 /**
@@ -12,6 +13,7 @@ import './LabelNode.css';
  * the session's annotation list (kind: "label").
  */
 const LABEL_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+const DEFAULT_LABEL_COLOR = '#64748b';
 const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {
@@ -25,6 +27,7 @@ function LabelNode({ id, data, selected }) {
   // See NoteNode's equivalent comment: another client's live claim makes
   // this label's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
 
   useEffect(() => {
@@ -157,7 +160,7 @@ function LabelNode({ id, data, selected }) {
     notifyChange('style');
   };
 
-  const color = data.color || LABEL_COLORS[0];
+  const color = data.color || DEFAULT_LABEL_COLOR;
   const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
 
   return (
@@ -282,6 +285,11 @@ function LabelNode({ id, data, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

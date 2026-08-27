@@ -6,17 +6,36 @@ import { createAnnotation, normalizeAnnotationDocument } from '@community-graph/
 // Group boxes persist inside the generic server-side annotation list as
 // `kind: "group"` (design 3.1). These two helpers translate between that
 // server shape and the {groups, parentIds} shape the canvas round-trips.
+// An annotation this version cannot read is dropped, not fatal. It used to
+// take the whole call down, which in the app means the session never opens —
+// the user losing everything because one stored decoration had a kind that no
+// longer exists. Reported to the console so the discard is findable, since a
+// silent drop looks to the user like their annotation was deleted.
+function skippedAnnotation(annotation, error) {
+  console.warn('Skipping an annotation this version cannot read:', annotation, error?.message);
+}
+
+function skippedOverlay(overlay, error) {
+  console.warn('Skipping an annotation overlay that cannot be saved:', overlay, error?.message);
+}
+
 function documentAnnotations(annotations) {
   if (annotations == null) return [];
   if (annotations?.schema_version === 1 && Array.isArray(annotations.annotations)) {
-    return normalizeAnnotationDocument(annotations).annotations;
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
   }
-  if (Array.isArray(annotations)) return normalizeAnnotationDocument(annotations).annotations;
+  if (Array.isArray(annotations)) {
+    return normalizeAnnotationDocument(annotations, { onSkipped: skippedAnnotation }).annotations;
+  }
+  // Still fatal, deliberately: a payload whose annotation slot is not a list at
+  // all is a malformed session, not an annotation this version cannot read.
   throw new Error('Malformed session payload: state.annotations is not an array');
 }
 
 export function annotationDocumentToLegacyMetadata(documentInput) {
-  const document = normalizeAnnotationDocument(documentInput || []);
+  const document = normalizeAnnotationDocument(documentInput || [], {
+    onSkipped: skippedAnnotation,
+  });
   return {
     annotation_schema_version: document.schema_version,
     annotations: annotationsToOverlays(document),
@@ -25,18 +44,24 @@ export function annotationDocumentToLegacyMetadata(documentInput) {
 }
 
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
+  const skip = { onSkipped: skippedAnnotation };
   if (metadata.annotation_document)
-    return normalizeAnnotationDocument(metadata.annotation_document);
+    return normalizeAnnotationDocument(metadata.annotation_document, skip);
   if (metadata.annotations != null && !Array.isArray(metadata.annotations)) {
     throw new Error('Malformed session payload: state.annotations is not an array');
   }
   if (metadata.annotation_schema_version === 1 && Array.isArray(metadata.annotations)) {
-    return normalizeAnnotationDocument(metadata.annotations);
+    return normalizeAnnotationDocument(metadata.annotations, skip);
   }
-  return normalizeAnnotationDocument([
-    ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
-    ...overlaysToAnnotations(metadata.annotations || []),
-  ]);
+  // Groups and overlays now both apply the same "skip the unreadable entry,
+  // keep the rest" rule before handing the composed document to the normalizer.
+  return normalizeAnnotationDocument(
+    [
+      ...groupsToAnnotations(metadata.groups || [], metadata.parentIds || {}),
+      ...overlaysToAnnotations(metadata.annotations || []),
+    ],
+    skip
+  );
 }
 
 export function annotationsToGroups(annotations) {
@@ -52,6 +77,14 @@ export function annotationsToGroups(annotations) {
       position: a.position || { x: 0, y: 0 },
       style: a.size ? { width: a.size.w, height: a.size.h } : undefined,
       color: a.color ?? a.style?.color,
+      // The same envelope fields every overlay kind's translator already
+      // carries. A group could always be locked over MCP, but the flag stopped
+      // here, so the canvas never saw it and the next save diffed it back to
+      // its default. `z` is carried for the same reason; group paint order is
+      // array order (reorderNodesForParentChild), so nothing reads it yet —
+      // preserving the value is not the same as offering a control for it.
+      z: a.z ?? 0,
+      locked: Boolean(a.locked),
     });
     for (const m of a.member_node_ids || []) parentIds[m] = a.id;
   }
@@ -63,18 +96,41 @@ export function groupsToAnnotations(viewGroups, parentIds) {
   for (const [nodeId, groupId] of Object.entries(parentIds || {})) {
     (membersByGroup[groupId] = membersByGroup[groupId] || []).push(nodeId);
   }
-  return (viewGroups || []).map((g) =>
-    createAnnotation({
-      id: g.id,
-      type: 'group',
-      position: g.position || { x: 0, y: 0 },
-      label: g.label || '',
-      description: g.description || '',
-      color: g.color,
-      size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
-      member_node_ids: membersByGroup[g.id] || [],
-    })
-  );
+  // A group is an annotation kind, so it answers to the same rule as the rest:
+  // skip what cannot be read, report it, keep the others. Two distinct ways to
+  // be unreadable are handled below, because they fail differently — a
+  // primitive slips through silently, while a bad payload throws.
+  const annotations = [];
+  for (const g of viewGroups || []) {
+    // A primitive entry must be refused explicitly. It does NOT throw on
+    // `g.id` — a string or a number just yields undefined — so without this it
+    // silently becomes a group annotation with a generated id, an empty label
+    // and no members: a phantom box on the canvas, which is worse than the
+    // skip, because nothing anywhere reports it.
+    if (!g || typeof g !== 'object') {
+      skippedAnnotation(g, new Error('group entry is not an object'));
+      continue;
+    }
+    try {
+      annotations.push(
+        createAnnotation({
+          id: g.id,
+          type: 'group',
+          position: g.position || { x: 0, y: 0 },
+          label: g.label || '',
+          description: g.description || '',
+          color: g.color,
+          size: g.style ? { w: g.style.width, h: g.style.height } : undefined,
+          member_node_ids: membersByGroup[g.id] || [],
+          z: g.z ?? 0,
+          locked: Boolean(g.locked),
+        })
+      );
+    } catch (error) {
+      skippedAnnotation(g, error);
+    }
+  }
+  return annotations;
 }
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond
@@ -87,6 +143,12 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // translator that dropped them would make the browser's next autosave diff
 // the annotation back to rotation 0 / createAnnotation's 160x96 default,
 // silently undoing what an agent or a collaborator had just set.
+// `text` and `shape` additionally carry `style.fontSize`/`style.font`/
+// `style.textAlign` (task-annotation-text-alignment-and-font) — the same
+// reasoning applies: leaving any one of them out of either direction below
+// would make the next autosave diff it back to its default, silently
+// discarding a typography choice an agent or collaborator had just set (the
+// "unsized-geometry clobber" class of bug this task's own node warns about).
 const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
 
 function genericAnnotationToOverlay(a) {
@@ -103,9 +165,25 @@ function genericAnnotationToOverlay(a) {
   if (a.type === 'text') {
     overlay.text = a.text || '';
     overlay.fontSize = a.style?.fontSize;
+    // `font`/`textAlign` (task-annotation-text-alignment-and-font) live
+    // under `style` alongside `fontSize`, not `content` — the same
+    // convention `fontSize` already established for this kind, and the
+    // `style` argument's own documented home for typography
+    // (backend/service/mcp_tools.py's create_annotation/update_annotation
+    // docstrings).
+    overlay.font = a.style?.font;
+    overlay.textAlign = a.style?.textAlign;
     overlay.attachment = a.attachment;
   } else if (a.type === 'shape') {
     overlay.shape = a.shape || 'rectangle';
+    // Optional caption (task-annotation-doubleclick-to-edit-text) — same
+    // empty-string default as every other kind's `text` field.
+    overlay.text = a.text || '';
+    // Caption typography (task-annotation-text-alignment-and-font) — new on
+    // `shape`, same `style`-nested convention as `text`'s own fontSize above.
+    overlay.fontSize = a.style?.fontSize;
+    overlay.font = a.style?.font;
+    overlay.textAlign = a.style?.textAlign;
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
@@ -128,12 +206,21 @@ function genericOverlayToAnnotation(o) {
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
   };
-  input.style = o.kind === 'text' ? { color: o.color, fontSize: o.fontSize } : { color: o.color };
+  // `text` and `shape` (task-annotation-text-alignment-and-font) both carry
+  // fontSize/font/textAlign under `style`, mirroring `text`'s pre-existing
+  // fontSize convention rather than the plain `{color}` every other generic
+  // kind gets.
+  input.style =
+    o.kind === 'text' || o.kind === 'shape'
+      ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
+      : { color: o.color };
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;
-  } else if (o.kind === 'shape') input.shape = o.shape || 'rectangle';
-  else if (o.kind === 'icon') {
+  } else if (o.kind === 'shape') {
+    input.shape = o.shape || 'rectangle';
+    input.text = o.text || '';
+  } else if (o.kind === 'icon') {
     input.icon = o.icon || 'circle';
     input.attachment = o.attachment;
   } else if (o.kind === 'vote_dot') {
@@ -264,59 +351,79 @@ export function annotationsToOverlays(annotations) {
 }
 
 export function overlaysToAnnotations(overlays) {
-  return (overlays || []).map((o) => {
-    if (o.kind === 'note') {
-      return createAnnotation({
+  const annotations = [];
+  for (const o of overlays || []) {
+    try {
+      if (!o || typeof o !== 'object') {
+        throw new Error('overlay entry is not an object');
+      }
+      if (o.kind === 'note') {
+        annotations.push(
+          createAnnotation({
+            id: o.id,
+            type: 'note',
+            position: o.position || { x: 0, y: 0 },
+            text: o.text || '',
+            color: o.color,
+            fontSize: o.fontSize,
+            size: o.size,
+            z: o.z ?? 0,
+            locked: Boolean(o.locked),
+            rotation: o.rotation ?? 0,
+          })
+        );
+        continue;
+      }
+      if (o.kind === 'label') {
+        annotations.push(
+          createAnnotation({
+            id: o.id,
+            type: 'label',
+            position: o.position || { x: 0, y: 0 },
+            text: o.text || '',
+            style: { color: o.color, fontSize: o.fontSize },
+            attachment: o.attachment,
+            z: o.z ?? 0,
+            locked: Boolean(o.locked),
+            rotation: o.rotation ?? 0,
+          })
+        );
+        continue;
+      }
+      if (o.kind === 'freehand') {
+        annotations.push(freehandOverlayToAnnotation(o));
+        continue;
+      }
+      if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
+        annotations.push(genericOverlayToAnnotation(o));
+        continue;
+      }
+      if (o.kind !== 'arrow') {
+        throw new Error(`Unsupported overlay kind: ${o.kind || '<missing>'}`);
+      }
+      // arrow: store both endpoints as absolute points (design 3.1)
+      const from = o.position || { x: 0, y: 0 };
+      const dx = o.dx ?? 160;
+      const dy = o.dy ?? 0;
+      const ann = {
         id: o.id,
-        type: 'note',
-        position: o.position || { x: 0, y: 0 },
-        text: o.text || '',
-        color: o.color,
-        fontSize: o.fontSize,
-        size: o.size,
+        type: 'line',
+        position: { x: from.x, y: from.y },
+        from: { x: from.x, y: from.y },
+        to: { x: from.x + dx, y: from.y + dy },
+        style: { color: o.color },
+        startArrow: o.startArrow ?? false,
+        endArrow: o.endArrow ?? true,
         z: o.z ?? 0,
         locked: Boolean(o.locked),
         rotation: o.rotation ?? 0,
-      });
+      };
+      if (o.startAnchor) ann.startAnchor = o.startAnchor;
+      if (o.endAnchor) ann.endAnchor = o.endAnchor;
+      annotations.push(createAnnotation(ann));
+    } catch (error) {
+      skippedOverlay(o, error);
     }
-    if (o.kind === 'label') {
-      return createAnnotation({
-        id: o.id,
-        type: 'label',
-        position: o.position || { x: 0, y: 0 },
-        text: o.text || '',
-        style: { color: o.color, fontSize: o.fontSize },
-        attachment: o.attachment,
-        z: o.z ?? 0,
-        locked: Boolean(o.locked),
-        rotation: o.rotation ?? 0,
-      });
-    }
-    if (o.kind === 'freehand') {
-      return freehandOverlayToAnnotation(o);
-    }
-    if (GENERIC_OVERLAY_TYPES.has(o.kind)) {
-      return genericOverlayToAnnotation(o);
-    }
-    // arrow: store both endpoints as absolute points (design 3.1)
-    const from = o.position || { x: 0, y: 0 };
-    const dx = o.dx ?? 160;
-    const dy = o.dy ?? 0;
-    const ann = {
-      id: o.id,
-      type: 'line',
-      position: { x: from.x, y: from.y },
-      from: { x: from.x, y: from.y },
-      to: { x: from.x + dx, y: from.y + dy },
-      style: { color: o.color },
-      startArrow: o.startArrow ?? false,
-      endArrow: o.endArrow ?? true,
-      z: o.z ?? 0,
-      locked: Boolean(o.locked),
-      rotation: o.rotation ?? 0,
-    };
-    if (o.startAnchor) ann.startAnchor = o.startAnchor;
-    if (o.endAnchor) ann.endAnchor = o.endAnchor;
-    return createAnnotation(ann);
-  });
+  }
+  return annotations;
 }

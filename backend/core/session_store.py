@@ -80,6 +80,11 @@ STATE_OPS = {
     "edges_updated",
     "edges_hidden",
     "edges_shown",
+    "nodes_dimmed",
+    "nodes_undimmed",
+    "edges_dimmed",
+    "edges_undimmed",
+    "edge_intensity_set",
     "annotation_created",
     "annotation_updated",
     "annotation_deleted",
@@ -103,6 +108,16 @@ def _empty_state() -> Dict[str, Any]:
         "positions": {},
         "hidden_node_ids": [],
         "hidden_edge_ids": [],
+        # Session-local focus (task-session-focus-dimming-controls): dimmed
+        # ids stay on the canvas (unlike hidden_*) but render at reduced
+        # prominence. edge_intensity is the global baseline opacity every
+        # non-dimmed edge composes with; per-object dimming always reduces
+        # further from that baseline (see current_snapshot_for's "edge_dim"/
+        # "node_dim"/"edge_intensity" kinds for the undo-conflict view of
+        # this same state). Graph data itself is never touched by any of this.
+        "dimmed_node_ids": [],
+        "dimmed_edge_ids": [],
+        "edge_intensity": 1.0,
         "annotation_schema_version": 1,
         "annotations": [],
     }
@@ -327,6 +342,18 @@ def _validate_position(value: Any) -> Dict[str, float]:
     ):
         raise OpError("position must be an object with numeric x and y")
     return {"x": float(value["x"]), "y": float(value["y"])}
+
+
+def _validate_intensity(value: Any) -> float:
+    """Clamp ``edge_intensity_set``'s value into [0.0, 1.0].
+
+    Clamping rather than rejecting an out-of-range number keeps a slightly
+    stale client (a UI that permits e.g. 1.05 mid-drag) convergent with the
+    server instead of dropping the whole batch on a cosmetic overshoot.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise OpError("edge_intensity_set requires a numeric 'value'")
+    return max(0.0, min(1.0, float(value)))
 
 
 def _validate_annotation(value: Any, *, require_id: bool) -> Dict[str, Any]:
@@ -607,6 +634,7 @@ class SessionStore:
                 k: v for k, v in state["positions"].items() if k not in drop
             }
             state["hidden_node_ids"] = _remove_all(state["hidden_node_ids"], removals)
+            state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], removals)
             for ann in state["annotations"]:
                 members = ann.get("member_node_ids")
                 if isinstance(members, list):
@@ -703,6 +731,70 @@ class SessionStore:
             state["hidden_edge_ids"] = _remove_all(
                 state["hidden_edge_ids"], _require_id_list(op, "edge_ids")
             )
+        elif op_type == "nodes_dimmed":
+            requested = _require_id_list(op, "node_ids")
+            newly_dimmed = sorted(
+                {i for i in requested if i not in state["dimmed_node_ids"]}
+            )
+            state["dimmed_node_ids"] = _union(state["dimmed_node_ids"], requested)
+            if newly_dimmed:
+                activity_kwargs = {
+                    "affected": {"kind": "node_dim", "ids": newly_dimmed},
+                    "before": [],
+                    "after": newly_dimmed,
+                    "inverse_op": {"op": "nodes_undimmed", "node_ids": newly_dimmed},
+                }
+        elif op_type == "nodes_undimmed":
+            requested = _require_id_list(op, "node_ids")
+            newly_restored = sorted(
+                {i for i in requested if i in state["dimmed_node_ids"]}
+            )
+            state["dimmed_node_ids"] = _remove_all(state["dimmed_node_ids"], requested)
+            if newly_restored:
+                activity_kwargs = {
+                    "affected": {"kind": "node_dim", "ids": newly_restored},
+                    "before": newly_restored,
+                    "after": [],
+                    "inverse_op": {"op": "nodes_dimmed", "node_ids": newly_restored},
+                }
+        elif op_type == "edges_dimmed":
+            requested = _require_id_list(op, "edge_ids")
+            newly_dimmed = sorted(
+                {i for i in requested if i not in state["dimmed_edge_ids"]}
+            )
+            state["dimmed_edge_ids"] = _union(state["dimmed_edge_ids"], requested)
+            if newly_dimmed:
+                activity_kwargs = {
+                    "affected": {"kind": "edge_dim", "ids": newly_dimmed},
+                    "before": [],
+                    "after": newly_dimmed,
+                    "inverse_op": {"op": "edges_undimmed", "edge_ids": newly_dimmed},
+                }
+        elif op_type == "edges_undimmed":
+            requested = _require_id_list(op, "edge_ids")
+            newly_restored = sorted(
+                {i for i in requested if i in state["dimmed_edge_ids"]}
+            )
+            state["dimmed_edge_ids"] = _remove_all(state["dimmed_edge_ids"], requested)
+            if newly_restored:
+                activity_kwargs = {
+                    "affected": {"kind": "edge_dim", "ids": newly_restored},
+                    "before": newly_restored,
+                    "after": [],
+                    "inverse_op": {"op": "edges_dimmed", "edge_ids": newly_restored},
+                }
+        elif op_type == "edge_intensity_set":
+            value = _validate_intensity(op.get("value"))
+            before_value = state.get("edge_intensity", 1.0)
+            state["edge_intensity"] = value
+            applied["value"] = value
+            if value != before_value:
+                activity_kwargs = {
+                    "affected": {"kind": "edge_intensity"},
+                    "before": before_value,
+                    "after": value,
+                    "inverse_op": {"op": "edge_intensity_set", "value": before_value},
+                }
         elif op_type == "annotation_created":
             annotation = dict(
                 _validate_annotation(op.get("annotation"), require_id=False)

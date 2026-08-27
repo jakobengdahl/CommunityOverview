@@ -1,5 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import './AnnotationToolbox.css';
+
+// How far the pointer has to travel from the item before a press turns into a
+// drag rather than staying a click/tap. Keeps a plain tap (no measurable
+// movement) from ever reaching the drag path.
+const DRAG_THRESHOLD_PX = 6;
 
 // The v1 annotation kinds this toolbox can create today. Each 'shape' entry
 // carries the `shape` option it creates; every variant the model accepts now
@@ -8,7 +14,7 @@ import './AnnotationToolbox.css';
 // the per-type-editor gaps this still doesn't close - creating a shape from
 // here is not the same as being able to change an existing one's subtype.
 const TOOLBOX_ITEMS = [
-  { kind: 'note', glyph: '📝', labelKey: 'note' },
+  { kind: 'note', glyph: '🗒️', labelKey: 'note' },
   { kind: 'text', glyph: 'T', labelKey: 'text' },
   { kind: 'label', glyph: '🏷️', labelKey: 'label' },
   { kind: 'frame', glyph: '▢', labelKey: 'frame' },
@@ -20,14 +26,20 @@ const TOOLBOX_ITEMS = [
   { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
   { kind: 'icon', glyph: '🔘', labelKey: 'icon' },
   { kind: 'vote_dot', glyph: '⚫', labelKey: 'voteDot' },
-  { kind: 'image', glyph: '🖼️', labelKey: 'image' },
+  // Opens a file picker rather than creating an object directly — there is
+  // nothing to pick up and carry, so this item stays click-only (see
+  // `isDraggableKind` below).
+  { kind: 'image', glyph: '🖼️', labelKey: 'image', draggable: false },
   // Unlike every other item, clicking this one does not create an annotation
   // immediately — GraphCanvas's onCreate special-cases 'freehand' to arm a
   // one-stroke drawing mode instead (docs/ANNOTATION_CONTRACT.md's "Physical
   // device acceptance" gap: this is the GUI creation entry point stylus input
   // needed). `activeKind` reflects that armed state back onto this button.
-  { kind: 'freehand', glyph: '✏️', labelKey: 'freehand' },
+  // Arming a mode isn't an object to carry either, so it stays click-only too.
+  { kind: 'freehand', glyph: '✏️', labelKey: 'freehand', draggable: false },
 ];
+
+const TOOLTIP_ID = 'annotation-toolbox-tooltip';
 
 /**
  * AnnotationToolbox - the bottom-mounted GUI creation surface for the v1
@@ -50,9 +62,169 @@ const TOOLBOX_ITEMS = [
  * `activeKind` (currently only meaningful for 'freehand') marks that item as
  * pressed while its armed drawing mode is active, so a user mid-stroke can
  * see which tool is live.
+ *
+ * Every item that creates an object (all but `image` and `freehand`, see
+ * `draggable: false` on those two in TOOLBOX_ITEMS) is also drag-to-create:
+ * picking it up and moving away from the button is the creation gesture, and
+ * releasing places the object where the pointer lands, rather than a click
+ * always landing it at the viewport centre via `onCreate`. Two input paths
+ * cover this, chosen by `touch` (the host's coarse-pointer signal, matching
+ * FloatingToolbar's own `isDraggable`/`isCoarsePointer` split):
+ *   - fine pointer (mouse): native HTML5 `dataTransfer` drag, the same
+ *     mechanism FloatingToolbar already uses for graph-node creation. The
+ *     browser's own drag image is the "in hand" visual; GraphCanvas's onDrop
+ *     reads the payload and creates the annotation at the drop position.
+ *   - coarse pointer (touch/stylus): HTML5 drag never fires there, so a
+ *     Pointer Events-based drag stands in — a small ghost glyph (portalled,
+ *     `pointer-events: none`) follows the pointer from the moment it clears
+ *     `DRAG_THRESHOLD_PX`, and `onDragCreate` fires on release with the
+ *     client position for the host to convert and create from.
+ * A plain click/tap that never crosses the threshold still calls `onCreate`
+ * exactly as before — drag is additive, not a replacement for the existing
+ * keyboard/click path (Enter/Space activation never goes through pointer
+ * events at all, so it is unaffected either way).
  */
-function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind = null }) {
+function AnnotationToolbox({
+  onCreate,
+  onDragCreate,
+  labels = {},
+  compact = false,
+  touch = false,
+  activeKind = null,
+}) {
   const [expanded, setExpanded] = useState(false);
+  // Sole purpose: swallow the click that follows a completed pointer drag
+  // (pointerup fires, then the browser's synthetic click fires next in the
+  // same task) so a drag never also creates a second, click-positioned copy.
+  // Per item (the same `${kind}-${labelKey}` string used as the React `key`
+  // below), a FIFO queue of per-gesture tokens — not a shared boolean, not a
+  // Set membership flag, and not a bare count. Each completed drag mints its
+  // own token (a fresh, unique object) and queues it; `onClick` consumes the
+  // oldest queued token for that item (order doesn't matter semantically,
+  // since any pending token means "some drag on this item is still owed a
+  // suppressed click" — first-in-first-out is just a deterministic pick).
+  // The token, not a count, is why this survives the fallback timeout below:
+  // a count can't tell whether the specific unit it decrements belongs to
+  // the gesture that scheduled it or to an unrelated later one that reused
+  // the same slot, so an early-consumed gesture's stale timeout can end up
+  // decrementing a DIFFERENT gesture's pending suppression. A token can only
+  // ever remove itself — if `onClick` already consumed it, the timeout's
+  // removal of that same token is a harmless no-op on a queue that no longer
+  // contains it, and it never touches whatever token(s) a later gesture on
+  // the same item queued in the meantime.
+  const pendingSuppressionsRef = useRef(new Map());
+  // Teardown for every currently-attached window pointermove/up/cancel
+  // listener set (see handlePointerDown) — a Set rather than a single slot
+  // because two pointers (e.g. two fingers on two different items) can each
+  // have a drag in flight at once. Guards an unmount mid-drag — the toolbox
+  // collapsing, or the whole component going away — leaving listeners
+  // attached to `window` that reference a torn-down closure.
+  const activeDragCleanupsRef = useRef(new Set());
+  useEffect(
+    () => () => {
+      activeDragCleanupsRef.current.forEach((cleanup) => cleanup());
+      activeDragCleanupsRef.current.clear();
+    },
+    []
+  );
+  // The floating glyph shown while a coarse-pointer drag is in progress; null
+  // when no drag is active. State (not a ref) because it must re-render the
+  // portal — the ghost is a handful of DOM nodes, not the whole canvas.
+  const [dragGhost, setDragGhost] = useState(null);
+  // Hover description, positioned above the hovered cell. A portal for the
+  // same reason FloatingToolbar uses one: the items row clips and the toolbox
+  // sits in a stacking context, so a tooltip rendered inline would be cut off
+  // by its own container. Hover-only by construction — the visible caption the
+  // items no longer show is restored wherever hover is unavailable, so a touch
+  // user is never left with an unlabelled grid.
+  const [hovered, setHovered] = useState(null);
+
+  const showTip = (event, key) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setHovered({ key, left: rect.left + rect.width / 2, top: rect.top - 8 });
+  };
+
+  // Coarse-pointer drag path (see the component doc comment above). Listens
+  // on `window` rather than using Pointer Capture: the drag routinely leaves
+  // both the button and the toolbox entirely (onto the canvas underneath),
+  // and a window listener follows it there with no capture API involved —
+  // the same choice GraphCanvas's own freehand-drawing pointer effect makes
+  // (there, listening on the canvas wrapper is enough since the gesture never
+  // needs to leave it; here it does, so `window` is the listened-on target).
+  const handlePointerDown = (event, kind, options, glyph, itemKey) => {
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const drag = { kind, options, dragging: false };
+
+    const handleMove = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      if (!drag.dragging) {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+        drag.dragging = true;
+        // A tap's hover/description handling is irrelevant once it is a drag.
+        setHovered(null);
+      }
+      setDragGhost({ glyph, left: moveEvent.clientX, top: moveEvent.clientY });
+    };
+
+    const finishDrag = (finishEvent, { create }) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleCancel);
+      activeDragCleanupsRef.current.delete(cleanup);
+      setDragGhost(null);
+      if (create && drag.dragging) {
+        // A fresh, unique token for THIS gesture. Object identity (not a
+        // count) is what lets the fallback timeout below remove only its
+        // own entry, never a different gesture's — see the ref's
+        // declaration for why a count can't guarantee that.
+        const token = {};
+        const queue = pendingSuppressionsRef.current.get(itemKey) ?? [];
+        queue.push(token);
+        pendingSuppressionsRef.current.set(itemKey, queue);
+        onDragCreate?.(drag.kind, drag.options, {
+          x: finishEvent.clientX,
+          y: finishEvent.clientY,
+        });
+        // A real drag usually releases away from this button, so the
+        // browser's synthetic click (if it fires one for the touch release
+        // at all) never reaches this element's onClick to consume this
+        // gesture's token — it would otherwise stay queued and silently
+        // swallow a later, unrelated tap on this same item. A click
+        // genuinely headed for this button fires synchronously before this
+        // callback runs, so clearing on the next tick never masks it. If
+        // `onClick` already consumed this exact token, removing it here
+        // again is a harmless no-op.
+        setTimeout(() => {
+          const q = pendingSuppressionsRef.current.get(itemKey);
+          if (!q) return;
+          const at = q.indexOf(token);
+          if (at !== -1) q.splice(at, 1);
+          if (q.length === 0) pendingSuppressionsRef.current.delete(itemKey);
+        }, 0);
+      }
+    };
+
+    // Cancel (platform-initiated, e.g. a system gesture interrupting the
+    // touch) drops the in-progress drag without creating anything — same as
+    // a native HTML5 drag released outside any drop target.
+    const handleUp = (upEvent) => finishDrag(upEvent, { create: true });
+    const handleCancel = (cancelEvent) => finishDrag(cancelEvent, { create: false });
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleCancel);
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleCancel);
+    };
+    activeDragCleanupsRef.current.add(cleanup);
+  };
 
   const lbl = {
     toggleExpand: 'Add annotation',
@@ -71,6 +243,23 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
     voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
+    // What each item will add, shown on hover. Separate from the item's name
+    // because the name has to stay short enough to be an accessible label and
+    // a touch-mode caption, while this is allowed to say what happens.
+    noteHint: 'Add a sticky note',
+    textHint: 'Add a block of text',
+    labelHint: 'Add a label or callout',
+    frameHint: 'Add a frame to group things visually',
+    shapeRectangleHint: 'Add a rectangle',
+    shapeCircleHint: 'Add a circle',
+    shapeTriangleHint: 'Add a triangle',
+    shapeRhombusHint: 'Add a rhombus',
+    shapeHexagonHint: 'Add a hexagon',
+    shapeProcessArrowHint: 'Add a process step',
+    iconHint: 'Add an icon',
+    voteDotHint: 'Add a voting dot',
+    imageHint: 'Add an image from a file',
+    freehandHint: 'Draw a freehand stroke',
     ...labels,
   };
 
@@ -78,7 +267,7 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
         compact ? ' annotation-toolbox--compact' : ''
-      }`}
+      }${touch ? ' annotation-toolbox--touch' : ''}`}
       data-testid="annotation-toolbox"
       role="toolbar"
       aria-label={lbl.toggleExpand}
@@ -98,26 +287,125 @@ function AnnotationToolbox({ onCreate, labels = {}, compact = false, activeKind 
 
       {expanded && (
         <div className="annotation-toolbox-items">
-          {TOOLBOX_ITEMS.map(({ kind, glyph, labelKey, shape }) => (
-            <button
-              key={`${kind}-${labelKey}`}
-              type="button"
-              className={`annotation-toolbox-item${
-                activeKind === kind ? ' annotation-toolbox-item--active' : ''
-              }`}
-              onClick={() => onCreate?.(kind, shape ? { shape } : undefined)}
-              aria-label={lbl[labelKey]}
-              aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
-              title={lbl[labelKey]}
-            >
-              <span className="annotation-toolbox-item-glyph" aria-hidden="true">
-                {glyph}
-              </span>
-              <span className="annotation-toolbox-item-label">{lbl[labelKey]}</span>
-            </button>
-          ))}
+          {TOOLBOX_ITEMS.map(({ kind, glyph, labelKey, shape, draggable }) => {
+            // image/freehand have no draggable object to create (a file
+            // picker, an armed mode) — both stay click-only: no draggable
+            // attribute, no dragstart handler, no pointer-drag handlers, no
+            // grab cursor.
+            const isDraggableKind = draggable !== false;
+            const options = shape ? { shape } : undefined;
+            const itemKey = `${kind}-${labelKey}`;
+            return (
+              <button
+                key={itemKey}
+                type="button"
+                className={`annotation-toolbox-item${
+                  activeKind === kind ? ' annotation-toolbox-item--active' : ''
+                }${isDraggableKind ? ' annotation-toolbox-item--draggable' : ''}`}
+                onClick={() => {
+                  // Swallow the click a completed pointer drag synthesizes
+                  // right after its pointerup — onDragCreate already created
+                  // the annotation, so this would otherwise create a second,
+                  // click-positioned one. Keyed by itemKey so a completed
+                  // drag on THIS button can never swallow a click landing on
+                  // a different one. Consumes the oldest queued token (any
+                  // pending token means some drag on this item is still owed
+                  // a suppressed click) rather than a count, so that if two
+                  // pointers each completed a drag on this same button close
+                  // together, consuming one here never erases the other's —
+                  // see the ref's declaration for why a count can't promise
+                  // that once its fallback timeout is in the picture.
+                  const queue = pendingSuppressionsRef.current.get(itemKey);
+                  if (queue && queue.length > 0) {
+                    queue.shift();
+                    if (queue.length === 0) pendingSuppressionsRef.current.delete(itemKey);
+                    return;
+                  }
+                  // A tap on a touch device fires the emulated mouseenter but no
+                  // mouseleave until the user touches something else, so without
+                  // this the tooltip stays on screen after the item is used.
+                  setHovered(null);
+                  onCreate?.(kind, options);
+                }}
+                aria-label={lbl[labelKey]}
+                aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
+                // The description is the accessible *description*, referenced
+                // rather than duplicated. A `title` would give the same text a
+                // second, native tooltip on top of the styled one — the visual
+                // clutter this redesign exists to reduce. FloatingToolbar sets
+                // no title for the same reason.
+                aria-describedby={hovered?.key === labelKey ? TOOLTIP_ID : undefined}
+                onMouseEnter={(e) => showTip(e, labelKey)}
+                onMouseLeave={() => setHovered(null)}
+                onFocus={(e) => showTip(e, labelKey)}
+                onBlur={() => setHovered(null)}
+                // Fine pointer (mouse): native HTML5 drag, off entirely on a
+                // coarse pointer — it never fires there, and leaving it on
+                // would fight the pointer-drag path below over the same
+                // gesture. Mirrors FloatingToolbar's isDraggable/isCoarsePointer split.
+                draggable={isDraggableKind && !touch}
+                onDragStart={
+                  isDraggableKind
+                    ? (e) => {
+                        e.dataTransfer.setData(
+                          'application/annotation-kind',
+                          JSON.stringify(options ? { kind, ...options } : { kind })
+                        );
+                        e.dataTransfer.effectAllowed = 'move';
+                      }
+                    : undefined
+                }
+                // Coarse pointer (touch/stylus): Pointer Events stand in for
+                // HTML5 drag, which never fires there.
+                onPointerDown={
+                  isDraggableKind && touch
+                    ? (e) => handlePointerDown(e, kind, options, glyph, itemKey)
+                    : undefined
+                }
+              >
+                <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+                  {glyph}
+                </span>
+                {/* Always rendered; CSS reveals it only where hover is
+                    unavailable, so the tooltip's job is covered on touch
+                    without the label reintroducing the uneven rows. */}
+                <span className="annotation-toolbox-item-label">{lbl[labelKey]}</span>
+              </button>
+            );
+          })}
         </div>
       )}
+
+      {expanded &&
+        hovered &&
+        createPortal(
+          <div
+            id={TOOLTIP_ID}
+            className="annotation-toolbox-tooltip"
+            role="tooltip"
+            style={{ left: hovered.left, top: hovered.top }}
+          >
+            {lbl[`${hovered.key}Hint`] || lbl[hovered.key]}
+          </div>,
+          document.body
+        )}
+
+      {/* The coarse-pointer drag's "in hand" visual — a mouse drag gets this
+          for free from the browser's own drag image, so this only ever
+          renders on the touch/stylus path. pointer-events: none so it can
+          never itself become a drop target or intercept the gesture it is
+          only supposed to illustrate. */}
+      {dragGhost &&
+        createPortal(
+          <div
+            className="annotation-toolbox-drag-ghost"
+            style={{ left: dragGhost.left, top: dragGhost.top }}
+            aria-hidden="true"
+          >
+            {dragGhost.glyph}
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

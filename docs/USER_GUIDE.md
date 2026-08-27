@@ -124,6 +124,12 @@ Right-clicking a node opens the context menu:
 
 - **Edit** — open the edit dialog
 - **Hide** — remove the node from the current view (does not delete it from the graph)
+- **Dim node / Restore node** — fade the node instead of hiding it: it stays visible, at
+  reduced prominence, so you keep its position as context. Restore brings it back to full
+  visibility.
+- **Dim incident edges / Restore incident edges** — fade every connection touching this
+  node (only offered when it has any), to de-emphasise its relationships without hiding
+  the node or the edges' other endpoints.
 - **Expand** — load all nodes directly connected to this node into the canvas
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
@@ -148,10 +154,14 @@ Right-clicking on the **canvas background** offers quick-create options:
 
 Right-clicking an **edge** opens: **Change type** (a submenu listing every relationship
 type defined in the schema; the edge's current type is shown checked and cannot be
-re-selected), **Edit**, **Hide**, and **Delete**.
+re-selected), **Edit**, **Hide**, **Dim connection / Restore connection**, and **Delete**.
+If the edge is part of a larger multi-edge selection, dim/restore applies to the whole
+selection rather than just the one you right-clicked.
 
 Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, an **Organize** submenu, Hide all, Delete all. "Select
+Select all nodes of the same type, an **Organize** submenu, Hide all, **Dim selected /
+Restore selected**, **Dim incident edges / Restore incident edges** (every connection
+touching any of the selected nodes, de-duplicated), Delete all. "Select
 all nodes of the same type" extends the selection to every node whose type matches any
 type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
 Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
@@ -181,6 +191,25 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
+A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
+the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
+simply no longer grouped. The deletion is recorded in the session panel
+(see [Recent activity](#52-recent-activity-audit-log)) and can be undone from there while it
+is still your most recent undoable action.
+
+If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
+what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
+it is the same action you were already getting, named for what it does.
+
+A group box can also be locked, the same way an annotation can. A locked group stays where
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
+it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
+menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
+not lock yourself may already be locked when you open a shared board.
+
+Locking protects the group box, not what is inside it. Dragging a node into or out of a
+locked group still works, so the group's membership can change even while the box cannot.
+
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
 
@@ -204,9 +233,10 @@ A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
 **Note**, **Text**, **Label**, **Frame**, a **Shape** — rectangle, circle, triangle,
 rhombus, hexagon or process arrow, each drawn as its own filled shape — **Icon**, **Vote
-dot**, **Image**, or **Freehand**. It is hidden while a focus view is active, since
-annotations are set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus
-view works).
+dot**, **Image**, or **Freehand**. Each is a single icon — hover one to see what it will
+add. On a touch screen, where there is no hover, the names are shown next to the icons
+instead. It is hidden while a focus view is active, since annotations are set aside
+during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
 
 **Freehand** works differently from the rest of the toolbox: clicking it arms a
 drawing mode (the button stays highlighted and a banner reminds you Escape cancels)
@@ -226,14 +256,46 @@ is uploaded to the server, which validates it, optimises it, and embeds the resu
 keeps rendering even if the original file or URL later disappears. It appears on the
 canvas a moment after you paste or drop it, once the server has finished processing.
 
+Like Note and Label, a **Text** annotation and any **Shape** — including a process
+arrow — can be double-clicked to type into it: click away, press Escape, or just click
+elsewhere on the canvas to finish. A Shape's caption stays inside its outline no matter
+the variant — a triangle or hexagon's text sits within the part of the figure it's
+guaranteed to fit rather than spilling past a corner.
+
+A Text annotation's or Shape's caption's right-click menu also has a nine-position
+alignment grid (each button doubles as a small live preview of that position), a text-size
+picker, and a font picker: **Default** plus a short curated list — **Serif**,
+**Monospace**, **Cursive** — chosen so text renders the same way for everyone rather than
+depending on a font file the viewer might not have. For a Shape, note that the alignment
+grid's top/middle/bottom choices only matter once the shape is tall enough to show the
+difference; for a Text annotation, which always sizes itself to its own content, only
+left/center/right currently make a visible difference, and only once the text spans more
+than one line.
+
 Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
-the note and label menus offer; a Shape's menu also has a subtype picker to swap its
-variant (circle, triangle, and so on) after it's been placed. An **Icon** annotation
-starts with a generic default glyph — right-click it to open a picker grid covering the
-full icon vocabulary and choose the one you actually want. Icon and voting-dot annotations
-also support the same attach behaviour as labels once placed: drag one near a node or
-another annotation to attach it. Neither has a colour editor yet, and a voting dot's value
-is fixed at creation — change it via an MCP agent.
+the note and label menus offer, plus a colour picker for everything that paints a colour
+(an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype
+picker to swap its variant (circle, triangle, and so on) after it's been placed. An
+**Icon** annotation starts with a generic default glyph — right-click it to open a picker
+grid covering the full icon vocabulary and choose the one you actually want. A **voting
+dot**'s menu has a value stepper, so you can raise or lower the count after it's been
+placed. Icon and voting-dot annotations also support the same attach behaviour as labels
+once placed: drag one near a node or another annotation to attach it.
+
+Notes, labels, arrows, freehand strokes, text, frames, shapes, icons, voting dots and
+images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+front** puts the annotation on top of the other annotations and **Send to back** puts it
+underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
+label. The buttons do nothing once an annotation is already alone at the front or the
+back, and a locked annotation has no Layer row at all — right-click it and choose
+**Unlock** first. Pressing **Delete** will not remove a locked annotation either;
+it stays put and tells you to unlock it first.
+
+Send to back normally goes all the way back, behind your graph's own nodes and edges —
+which is what you want for a frame that should sit behind the nodes it frames. Bring it
+forward again with **Bring to front**. One gap worth knowing: a group box can be layered
+*against* by other annotations, but cannot be layered itself — its own menu has no Layer
+row.
 
 ### 2.6 Saved views
 
@@ -540,7 +602,8 @@ your browser and takes effect the next time you open or switch session.
 Open **Recent activity** from the bottom of the session menu to see the activity
 panel. It slides in from the right edge of the screen and has two tabs:
 **Session** (this session's annotation and canvas activity — sticky notes, shapes,
-node moves, layout changes — with undo) and **Graph** (a read-only log of
+node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
+changes — with undo) and **Graph** (a read-only log of
 everything that has changed in the graph itself, newest first). They are
 deliberately separate: session activity lives with the session and disappears
 with it; graph history is the permanent audit trail.
@@ -553,8 +616,10 @@ with it; graph history is the permanent audit trail.
 
 Every annotation or canvas change you or a collaborator makes in the current
 session appears here as a plain-language entry — "Created a sticky note",
-"Moved \"Acme Corp\"", "Rotated a shape" — with who did it (your own actions are
-marked *(You)*) and when.
+"Moved \"Acme Corp\"", "Rotated a shape", "Raised the layer of a shape" — with
+who did it (your own actions are marked *(You)*) and when. The entry names what
+actually changed: moving an annotation reads as a move and changing its layer as
+a layer change, distinct from locking or unlocking it.
 
 - **Undo** appears only on *your own* most recent undoable action — you can
   never undo someone else's change. The same action is also available as
@@ -562,6 +627,10 @@ marked *(You)*) and when.
 - If the item you are trying to undo has changed since (someone else edited it,
   or you did something else to it first), undo fails with a clear conflict
   message instead of silently overwriting that later change.
+- If someone else currently has that item selected, undo waits rather than
+  reaching through them: you are told to try again in a moment, and it works
+  once they click away. This one is temporary — unlike the conflict above, the
+  action stays undoable.
 - Session activity is kept for 7 days or the last 500 actions per session,
   whichever comes first — it is not a permanent record.
 
@@ -600,12 +669,26 @@ The top of the dialog shows the total number of nodes and edges currently in the
 followed by a colour-coded breakdown by node type. If there are more than five types,
 a **Details** button opens a full node-type statistics dialog.
 
+#### Metamodel explorer
+
+**Explore metamodel** opens an interactive, read-only view of the graph's active
+schema — the node types and relationship types this deployment is configured with,
+rendered as a network you can pan and zoom. Click a node type to see its
+description, fields and current node count; relationship types are drawn as
+directed, labelled connections between the node types they are configured to
+apply to. Relationship types with no configured source/target rule are listed
+separately rather than drawn to every node type, since no rule was actually
+configured. A **Table** tab presents the same information as two accessible
+data tables, for screen readers or a quick text scan. This view never lets you
+change the schema — editing the metamodel is not part of the open-source core.
+
 #### View settings
 
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
 | **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
+| **Edge intensity** | A slider setting the baseline visibility for every connection in this session. Dimmed connections (see [2.4](#24-right-click-context-menu)) always render below this baseline — lowering it fades the whole graph's connections together, while dimming still singles out specific ones underneath that. |
 | **Assistant panel open** | Toggle the chat panel between expanded and collapsed. Your choice is remembered in the browser and used every time you return, overriding this deployment's configured startup default. Click **Reset to default** underneath to forget your choice and go back to that default. |
 
 #### Your presence
@@ -897,3 +980,4 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
 | `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
+| `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |

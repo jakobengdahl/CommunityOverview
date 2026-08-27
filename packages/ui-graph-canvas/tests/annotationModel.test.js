@@ -300,6 +300,42 @@ describe('annotationModel contract v1', () => {
     expect(createAnnotation({ type: 'shape', shape: 'star' }).shape).toBe('star');
   });
 
+  // task-annotation-doubleclick-to-edit-text: a shape can now carry an
+  // inline-edited caption, the same optional `text` field `text`/`label`
+  // already carry — an omitted one defaults to '', not undefined, so a
+  // shape created before this change keeps rendering identically.
+  it("keeps a shape's optional caption text", () => {
+    expect(createAnnotation({ type: 'shape', shape: 'circle', text: 'Step 1' }).text).toBe(
+      'Step 1'
+    );
+    expect(createAnnotation({ type: 'shape', shape: 'circle' }).text).toBe('');
+  });
+
+  // task-annotation-text-alignment-and-font: fontSize/font/textAlign live
+  // under `style`, which createAnnotation already clones and carries through
+  // generically (withTypePayload has no special case for either type) — this
+  // pins that the generic passthrough actually covers the new fields, not
+  // just `color`/`fontSize` (text) or nothing at all (shape, before this task).
+  it('carries text/shape typography through the generic style passthrough', () => {
+    const text = createAnnotation({
+      type: 'text',
+      style: { color: '#fff', fontSize: 24, font: 'serif', textAlign: 'middle-center' },
+    });
+    expect(text.style).toEqual({
+      color: '#fff',
+      fontSize: 24,
+      font: 'serif',
+      textAlign: 'middle-center',
+    });
+
+    const shape = createAnnotation({
+      type: 'shape',
+      shape: 'hexagon',
+      style: { fontSize: 18, font: 'monospace', textAlign: 'top-left' },
+    });
+    expect(shape.style).toEqual({ fontSize: 18, font: 'monospace', textAlign: 'top-left' });
+  });
+
   // Rotation is accepted for text, labels, notes, images, icons, dots and
   // shapes; it must survive normalization and the transform op the same way
   // x/y/w/h do, or a rotated annotation snaps back on the next round-trip.
