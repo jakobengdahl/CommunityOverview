@@ -1562,7 +1562,7 @@ def create_rest_router(
             )
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /collect/%s endpoint", short_name)
             raise HTTPException(status_code=500, detail="Internal server error")
 

@@ -207,7 +207,7 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
             )
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /chat endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -240,7 +240,7 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
             )
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /chat/simple endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -274,7 +274,7 @@ def create_ui_router(
                 federation_depth=request.federation_depth,
             )
             return result
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /propose-nodes endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -355,7 +355,7 @@ def create_ui_router(
 
             return response
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /upload endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -382,7 +382,7 @@ def create_ui_router(
 
             return result
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error in /upload/extract endpoint")
             raise HTTPException(status_code=500, detail="Internal server error")
 
