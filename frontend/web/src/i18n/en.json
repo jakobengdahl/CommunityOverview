@@ -89,6 +89,7 @@
     "confirm_delete": "Yes, delete the nodes.",
     "delete_cancelled": "Deletion cancelled.",
     "selected_nodes": "{count} nodes selected",
+    "minimize": "Minimize",
     "clear_selection": "Clear selection",
     "placeholder_with_selection": "Ask a question about the selected nodes...",
     "model_profile": "Model profile",

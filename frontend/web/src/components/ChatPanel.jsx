@@ -713,7 +713,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
               </span>
             )}
           </div>
-          <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
+          <button
+            className="chat-collapse-button"
+            onClick={toggleChatPanel}
+            title={t('chat.minimize')}
+            aria-label={t('chat.minimize')}
+          >
             <ChevronRight size={18} />
           </button>
         </div>
@@ -927,6 +932,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
               className="selection-clear-button"
               onClick={clearSelectedGraphNodes}
               title={t('chat.clear_selection')}
+              aria-label={t('chat.clear_selection')}
             >
               <XCircleFill size={14} />
             </button>
@@ -944,6 +950,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
               className="remove-file-button"
               onClick={handleRemoveFile}
               title={t('chat.remove_file')}
+              aria-label={t('chat.remove_file')}
             >
               &times;
             </button>

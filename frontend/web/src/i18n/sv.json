@@ -89,6 +89,7 @@
     "confirm_delete": "Ja, ta bort noderna.",
     "delete_cancelled": "Borttagning avbruten.",
     "selected_nodes": "{count} noder markerade",
+    "minimize": "Minimera",
     "clear_selection": "Rensa markering",
     "placeholder_with_selection": "Ställ en fråga om de markerade noderna...",
     "model_profile": "Modellprofil",
