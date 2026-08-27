@@ -214,49 +214,51 @@ overlay is skipped and the user is told to unlock it first, which closes the
 one path that could destroy a locked *overlay* without unlocking it. It is
 kind-agnostic, so it needs no per-component change.
 
-`group` now honours the flag, with one deliberate exception to the baseline.
-It honoured it nowhere until its translators started carrying `locked`: the
-flag was persisted server-side (`create_group_annotation` takes it) but
-dropped in `annotationsToGroups` on the way to the canvas, so `GroupNode`
-never saw it and a locked group box still showed its full colour/hide/delete
-menu with no way back out of the lock. A locked group's resize handles and
-drag are now withheld the same way a locked overlay's are, its label cannot be
-renamed by double-clicking the header, and its colour swatches and Delete
-Group are out of reach. The rename guard goes one step further than the
-overlay kinds, whose double-click text editors still refuse only a live remote
-claim and not the persisted flag — the group's behaviour is the one this
-baseline describes, and the overlays' is a tracked gap. The keyboard rule still
-does not reach a group — `Delete` skips them entirely, so their children stay
-correctly parented — and hands that job to the group's own menu, which now
-honours the flag.
+`group` now honours the flag, and follows the baseline exactly: **a locked
+group's menu offers Unlock and nothing else.** It honoured it nowhere until
+its translators started carrying `locked`: the flag was persisted server-side
+(`create_group_annotation` takes it) but dropped in `annotationsToGroups` on
+the way to the canvas, so `GroupNode` never saw it and a locked group box
+still showed its full colour/hide/delete menu with no way back out of the
+lock. A locked group's resize handles and drag are now withheld the same way a
+locked overlay's are, its label cannot be renamed by double-clicking the
+header, and its colour swatches and Delete Group are out of reach. Nothing
+else is left to withhold: those are the whole of the unlocked menu, so the
+locked branch carries Unlock alone rather than by exception. The rename guard
+goes one step further than the overlay kinds, whose
+double-click text editors still refuse only a live remote claim and not the
+persisted flag — the group's behaviour is the one this baseline describes, and
+the overlays' is a tracked gap. The keyboard rule still does not reach a group
+— `Delete` skips them entirely, so their children stay correctly parented —
+and hands that job to the group's own menu, which now honours the flag.
 
-**The exception: a locked group's menu also keeps Hide Group**, so it offers
-two actions rather than the baseline's one. This is a product decision, not an
-oversight: the lock is meant to protect the group box itself, not whether it
-is on screen, so a destructive Delete is refused while a reversible Hide is
-not. Read narrowly — it protects the box's own fields, not what the box holds
-(see the membership paragraph below). Hide is a group-only action; no other
-kind has it, so no other kind is affected.
+**There is no longer a Hide Group action, on a locked group or any other.**
+It is worth recording why, because the button existed for a long time and its
+name will outlive it in people's memory. `handleHideGroup` and
+`handleDeleteGroup` called the identical handler, `removeGroupKeepChildren`,
+which takes the group off the canvas, un-parents its members and publishes
+`notifyChange('delete')`; there was no hidden-group state anywhere in the
+codebase to restore from, and none of the round-trip legs carried one. So the
+menu offered two buttons that read as different severities and ran the same
+destruction, and a locked group — which withheld everything else — was one
+click from being dissolved by the safe-sounding one.
 
-A second hole in the same paragraph, and a real one: **a locked group's
+The fix was to delete the button rather than to make it real. Deleting a group
+already keeps its members, so `Delete Group` is the action `Hide Group`
+purported to be, correctly named; removing the duplicate cost no capability.
+`handleDeleteGroup` is now the sole path into `removeGroupKeepChildren`.
+Whether a group should ever be hideable *separately* from being deleted — with
+its identity, label, colour and membership preserved for restoration — is an
+open product question, not a bug, and is tracked as one.
+
+A real hole remains, and it is not about the menu: **a locked group's
 membership is not locked.** Dragging a graph node into or out of a locked
 group re-parents it (`computeGroupPlacement` in `GraphCanvas.jsx` never
 consults the flag) and publishes `group_membership_changed`, so the locked
 annotation's own `member_node_ids` changes from the GUI. What a group *is* is
 largely its membership, so "a locked group is protected" is true of its box
-and false of its contents. Tracked separately; stated here so the paragraph
-above is not read as more than it claims.
-
-One caveat a reader of the Hide exception above would otherwise be misled by,
-and which the decision's own wording assumes away: **Hide is not currently
-reversible.** `handleHideGroup` and `handleDeleteGroup` in `GroupNode.jsx` run
-the identical handler, `removeGroupKeepChildren`, which takes the group off
-the canvas and publishes `notifyChange('delete')`; there is no hidden-group
-state anywhere in the codebase to restore from. So today Hide removes a locked
-group exactly as Delete would, and the only thing standing between a locked
-group and destruction is which button the user picks. Closing that gap — by
-making Hide genuinely reversible — is tracked separately; until it lands, this
-exception is wider in practice than it reads.
+and false of its contents. Tracked separately; stated here so this section's
+account of what the flag reaches is not read as more than it claims.
 
 What `group` still lacks is the layer row, not the lock: see
 [Layer order](#layer-order) above. Its `z` is carried through the same
@@ -986,14 +988,14 @@ lands on the flow node's `data` rather than on `zIndex`, because a group's
 paint order comes from the node array rather than from `zIndex` (see
 [Layer order](#layer-order)).
 
-Its `locked` refuses broadly what every other kind's does, with three
-differences worth knowing. Two are described under
-[Layer order](#layer-order) above: the rename guard is stricter, and the menu
-keeps Hide. The third is here — an unlocked group resolves `draggable` to
-`undefined` rather than `true`, so it still defers to the canvas-wide
-`nodesDraggable` switch the way it did before it was lock-aware. ReactFlow
-tests `typeof node.draggable === 'undefined'`, so an explicit `undefined` and
-an absent key behave alike, and a literal `true` would override the switch.
+Its `locked` refuses broadly what every other kind's does, with two
+differences worth knowing. One is described under [Layer order](#layer-order)
+above: the rename guard is stricter. The other is here — an unlocked group
+resolves `draggable` to `undefined` rather than `true`, so it still defers to
+the canvas-wide `nodesDraggable` switch the way it did before it was
+lock-aware. ReactFlow tests `typeof node.draggable === 'undefined'`, so an
+explicit `undefined` and an absent key behave alike, and a literal `true`
+would override the switch.
 
 This is the canvas UI's own enforcement of `locked` — the server never rejects
 a write to a locked annotation — but which *tool* performs that write differs
@@ -1042,7 +1044,7 @@ rule](#downstream-closure-rule).
 | `label` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer (right-click), attach by dragging near a node/annotation — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles despite this row's stale "resize" claim (`smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay also carries only `color` and `fontSize` out of `style`, so any other style key an agent sets — `opacity` among them — is dropped on the same leg (`smallfix-label-overlay-drops-nonvisual-style-keys`). `text`, colour, font size, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/unlock (right-click); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay carries only `color` out of `style`, so any other style key an agent sets is dropped on the same leg as the box — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only). `rotation`, `z`, `locked`, arrowheads, colour and the GUI's own anchors all survive | ✅ | ✅ | ⬜ |
 | `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer (right-click) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `group` | ⚠ toolbar create-group action, inline rename, recolor/hide/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
+| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour, rotation, layer (front/back), and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation; right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour and layer | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor/layer and a value stepper (right-click), and attach by dragging near a node/annotation | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |

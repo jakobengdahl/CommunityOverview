@@ -191,19 +191,24 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group box can be locked, the same way an annotation can. A locked group stays where it
-is: you cannot drag it, resize it, rename it by double-clicking, or recolour it, and
-**Delete Group** is not offered. Its right-click menu keeps just two actions — **Unlock**
-and **Hide Group** — because locking is meant to protect the group box itself rather than
-whether it is on screen. It does not lock the group's membership: dragging a node into or
-out of a locked group still works, so what the group holds can change even while the box
-cannot. Choose **Unlock** to get the full menu back. Locking is done by an assistant or an
-agent on your behalf, so a group you did not lock yourself may already be locked when you
-open a shared board.
+A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
+the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
+simply no longer grouped. The deletion is recorded in the session panel
+(see [Recent activity](#52-recent-activity-audit-log)) and can be undone from there while it
+is still your most recent undoable action.
 
-One thing to know before you use **Hide Group** on a locked group: hiding a group currently
-removes the box and releases the nodes inside it, and there is no "unhide" — you would have
-to draw the group again. Treat it as you would Delete until that changes.
+If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
+what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
+it is the same action you were already getting, named for what it does.
+
+A group box can also be locked, the same way an annotation can. A locked group stays where
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
+it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
+menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
+not lock yourself may already be locked when you open a shared board.
+
+Locking protects the group box, not what is inside it. Dragging a node into or out of a
+locked group still works, so the group's membership can change even while the box cannot.
 
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
@@ -611,8 +616,10 @@ with it; graph history is the permanent audit trail.
 
 Every annotation or canvas change you or a collaborator makes in the current
 session appears here as a plain-language entry — "Created a sticky note",
-"Moved \"Acme Corp\"", "Rotated a shape" — with who did it (your own actions are
-marked *(You)*) and when.
+"Moved \"Acme Corp\"", "Rotated a shape", "Raised the layer of a shape" — with
+who did it (your own actions are marked *(You)*) and when. The entry names what
+actually changed: moving an annotation reads as a move and changing its layer as
+a layer change, distinct from locking or unlocking it.
 
 - **Undo** appears only on *your own* most recent undoable action — you can
   never undo someone else's change. The same action is also available as

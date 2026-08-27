@@ -505,6 +505,38 @@ describe('MultiNodeContextMenu', () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
+  it('uses filtered action nodes for callbacks while the header counts the full selection', () => {
+    const onShowOnly = vi.fn();
+    const onHideMultiple = vi.fn();
+    const onDeleteMultiple = vi.fn();
+    const onDimNodes = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes, actionNodes: [nodes[0]] }}
+        labels={labels}
+        onShowOnly={onShowOnly}
+        onHideMultiple={onHideMultiple}
+        onDeleteMultiple={onDeleteMultiple}
+        onDimNodes={onDimNodes}
+        onRestoreNodes={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('2 nodes selected')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /show only/i }));
+    expect(onShowOnly).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /hide all/i }));
+    expect(onHideMultiple).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /dim selected/i }));
+    expect(onDimNodes).toHaveBeenCalledWith(['a']);
+
+    fireEvent.click(screen.getByRole('button', { name: /delete all/i }));
+    expect(onDeleteMultiple).toHaveBeenCalledWith(['a']);
+  });
+
   describe('dim/restore (task-session-focus-dimming-controls)', () => {
     it('dims the whole selection, then offers to restore it once every node is dimmed', () => {
       const onDimNodes = vi.fn();
