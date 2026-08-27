@@ -246,7 +246,8 @@ describe('GroupNode locked context menu', () => {
   // The text is the on-axis guard: nothing in this menu may say hide in any
   // form, whatever tag carries it. The pattern covers "hidden" and "hiding"
   // as well as "hide", because "Hidden members" is a hide-flavoured label
-  // that a bare /hide/ misses — `hidden` shares no substring with `hide`.
+  // that a bare /hide/ misses — `hidden` does not contain `hide`. The shared
+  // `hid` is what the alternation factors out.
   // That is the claim this PR is about, so a future "Unhide" or "Hidden
   // members" failing here is correct: it should stop and make someone confirm
   // the button is not creeping back under a softer name.
