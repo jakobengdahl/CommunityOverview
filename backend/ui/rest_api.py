@@ -9,6 +9,7 @@ All graph mutations go through ChatService -> GraphService.
 This module does NOT create graph objects directly.
 """
 
+import logging
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from .chat_service import ChatService
 from .document_service import DocumentService
 
+logger = logging.getLogger(__name__)
 
 # ==================== Request/Response Models ====================
 
@@ -205,8 +207,9 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
             )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /chat endpoint")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/chat/simple", response_model=ChatResponse)
     async def chat_simple(request: SimpleChatRequest) -> ChatResponse:
@@ -237,8 +240,9 @@ def create_ui_router(
                 toolUsed=result.get("toolUsed"),
                 toolResult=result.get("toolResult"),
             )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /chat/simple endpoint")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/propose-nodes")
     async def propose_nodes_from_text(request: ProposeNodesRequest) -> Dict[str, Any]:
@@ -270,8 +274,9 @@ def create_ui_router(
                 federation_depth=request.federation_depth,
             )
             return result
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /propose-nodes endpoint")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # ==================== Upload Endpoints ====================
 
@@ -350,8 +355,9 @@ def create_ui_router(
 
             return response
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /upload endpoint")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.post("/upload/extract")
     async def extract_only(file: UploadFile = File(...)) -> Dict[str, Any]:
@@ -376,8 +382,9 @@ def create_ui_router(
 
             return result
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /upload/extract endpoint")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # ==================== Capabilities Endpoint ====================
 

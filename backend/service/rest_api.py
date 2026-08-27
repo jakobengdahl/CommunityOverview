@@ -1562,8 +1562,9 @@ def create_rest_router(
             )
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /collect/%s endpoint", short_name)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # Register config-driven dedicated interfaces last, after every fixed route
     # (including /collect/{short_name}), so a fixed route always wins if an
