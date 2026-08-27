@@ -180,6 +180,99 @@ describe('useSyncConnection.ensureSyncConnected', () => {
 
     expect(appOnRemoteOps).not.toHaveBeenCalled();
   });
+
+  it('ignores stale ready, presence, and selection callbacks after switching sessions', () => {
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    const appOnReady = vi.fn();
+    result.current.syncHandlersRef.current = {
+      onReady: appOnReady,
+      onPresence: result.current.setRoster,
+      onSelections: result.current.setRemoteSelections,
+    };
+
+    let staleClient;
+    let currentClient;
+    act(() => {
+      staleClient = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      currentClient = result.current.ensureSyncConnected('3333-4444');
+    });
+    act(() => {
+      staleClient.handlers.onReady('stale-ready');
+      staleClient.handlers.onPresence([{ client_id: 'stale-client' }]);
+      staleClient.handlers.onSelections({ staleEdge: { clientId: 'stale-client' } });
+    });
+
+    expect(result.current.opStreamReady).toBe(false);
+    expect(result.current.roster).toEqual([]);
+    expect(result.current.remoteSelections).toEqual({});
+    expect(appOnReady).not.toHaveBeenCalled();
+
+    act(() => {
+      currentClient.handlers.onReady('current-ready');
+      currentClient.handlers.onPresence([{ client_id: 'current-client' }]);
+      currentClient.handlers.onSelections({ currentEdge: { clientId: 'current-client' } });
+    });
+
+    expect(result.current.opStreamReady).toBe(true);
+    expect(result.current.roster).toEqual([{ client_id: 'current-client' }]);
+    expect(result.current.remoteSelections).toEqual({
+      currentEdge: { clientId: 'current-client' },
+    });
+    expect(appOnReady).toHaveBeenCalledWith('current-ready');
+  });
+
+  it('ignores stale app-level session callbacks after switching sessions', () => {
+    const { result } = renderHook(() => useSyncConnection('1111-2222'));
+    const handlers = {
+      onResync: vi.fn(),
+      onSessionRenamed: vi.fn(),
+      onSessionDeleted: vi.fn(),
+      onCommand: vi.fn(),
+      onDropped: vi.fn(),
+    };
+    result.current.syncHandlersRef.current = handlers;
+
+    let staleClient;
+    let currentClient;
+    act(() => {
+      staleClient = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      currentClient = result.current.ensureSyncConnected('3333-4444');
+    });
+    act(() => {
+      staleClient.handlers.onResync('stale-resync');
+      staleClient.handlers.onSessionRenamed('Stale name');
+      staleClient.handlers.onSessionDeleted('stale-user');
+      staleClient.handlers.onCommand({ type: 'node_pulse', node_id: 'stale-node' });
+      staleClient.handlers.onDropped([{ op: 'stale' }], 400);
+    });
+
+    expect(handlers.onResync).not.toHaveBeenCalled();
+    expect(handlers.onSessionRenamed).not.toHaveBeenCalled();
+    expect(handlers.onSessionDeleted).not.toHaveBeenCalled();
+    expect(handlers.onCommand).not.toHaveBeenCalled();
+    expect(handlers.onDropped).not.toHaveBeenCalled();
+
+    act(() => {
+      currentClient.handlers.onResync('current-resync');
+      currentClient.handlers.onSessionRenamed('Current name');
+      currentClient.handlers.onSessionDeleted('current-user');
+      currentClient.handlers.onCommand({ type: 'node_pulse', node_id: 'current-node' });
+      currentClient.handlers.onDropped([{ op: 'current' }], 413);
+    });
+
+    expect(handlers.onResync).toHaveBeenCalledWith('current-resync');
+    expect(handlers.onSessionRenamed).toHaveBeenCalledWith('Current name');
+    expect(handlers.onSessionDeleted).toHaveBeenCalledWith('current-user');
+    expect(handlers.onCommand).toHaveBeenCalledWith({
+      type: 'node_pulse',
+      node_id: 'current-node',
+    });
+    expect(handlers.onDropped).toHaveBeenCalledWith([{ op: 'current' }], 413);
+  });
 });
 
 describe('useSyncConnection teardown', () => {
