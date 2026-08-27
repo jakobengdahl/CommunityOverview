@@ -713,7 +713,12 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
               </span>
             )}
           </div>
-          <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize" aria-label="Minimize">
+          <button
+            className="chat-collapse-button"
+            onClick={toggleChatPanel}
+            title={t('chat.minimize')}
+            aria-label={t('chat.minimize')}
+          >
             <ChevronRight size={18} />
           </button>
         </div>
