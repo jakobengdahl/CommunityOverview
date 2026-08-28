@@ -102,22 +102,23 @@ export function ToolSlotPicker({
     return () => document.removeEventListener('mousedown', handleOutside, true);
   }, [anchorRef]);
 
-  const handleKeyDown = (event) => {
-    if (event.key === 'Escape') {
+  // Document-level, not the panel's own onKeyDown: focus can legitimately be
+  // on the corner button that opened the picker rather than inside the panel
+  // (e.g. a second click on an already-open picker's corner button re-focuses
+  // it natively without remounting/refocusing the panel) — Escape has to
+  // close the picker from there too, not only while focus is inside it.
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
       event.preventDefault();
-      event.stopPropagation();
       onCloseRef.current();
-    }
-  };
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => document.removeEventListener('keydown', handleKeyDown, true);
+  }, []);
 
   return createPortal(
-    <div
-      ref={panelRef}
-      role="group"
-      aria-label={ariaLabel}
-      className="tool-slot-picker"
-      onKeyDown={handleKeyDown}
-    >
+    <div ref={panelRef} role="group" aria-label={ariaLabel} className="tool-slot-picker">
       {options.map((option) => (
         <button
           key={option.key}

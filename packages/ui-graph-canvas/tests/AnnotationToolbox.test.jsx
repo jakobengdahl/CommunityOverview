@@ -800,6 +800,27 @@ describe('AnnotationToolbox', () => {
       expect(screen.getByRole('button', { name: /choose a shape/i })).toHaveFocus();
     });
 
+    it('closes on Escape even when focus is on the corner button rather than inside the panel', () => {
+      // Regression test: the corner button can legitimately hold focus while
+      // the picker is open (e.g. a second click on an already-open picker's
+      // corner button re-focuses it natively without remounting/refocusing
+      // the panel) — Escape has to close the picker from there too, not only
+      // while focus is inside the panel itself.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      fireEvent.click(corner);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      act(() => {
+        corner.focus();
+      });
+      fireEvent.keyDown(corner, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
     it('closes the picker on an outside click, without creating a shape', () => {
       const onCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} />);
