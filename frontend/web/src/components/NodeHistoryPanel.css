@@ -1,9 +1,11 @@
 .node-history {
   position: fixed;
-  bottom: 16px;
+  /* Keep recent-node history above the bottom annotation toolbox lane. */
+  bottom: 86px;
+  bottom: calc(86px + env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
-  z-index: 120;
+  z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -191,8 +193,14 @@
   flex-shrink: 0;
 }
 
-@media (pointer: coarse) {
+@media (max-width: 768px) {
   .node-history {
-    bottom: calc(80px + env(safe-area-inset-bottom));
+    top: calc(56px + env(safe-area-inset-top));
+    right: 12px;
+    right: calc(12px + env(safe-area-inset-right));
+    bottom: auto;
+    left: auto;
+    flex-direction: column-reverse;
+    align-items: flex-end;
   }
 }
