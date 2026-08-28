@@ -378,6 +378,15 @@ export class SessionSyncClient {
 
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
+    // Ops _takeBatch() has already spliced out of _queue for a POST that has
+    // not yet settled — tracked separately so getPendingOps() (the reconnect
+    // path's "what did this client edit that the server doesn't have yet"
+    // read — see that method) still reports them. Without this, an op whose
+    // batch happened to be mid-flight at the exact moment a connection drop
+    // and reconnect landed would be invisible to that read (spliced out of
+    // _queue already, not yet confirmed delivered), reproducing the same
+    // vanishing-edit bug on a narrower trigger.
+    this._inFlightOps = [];
     this._seq = 0;
     // Highest seq actually applied from a stream event (snapshot/catch_up/op),
     // as opposed to `_seq` — which `_flush` also optimistically advances to the
@@ -439,9 +448,14 @@ export class SessionSyncClient {
    * *before* the reload and replays it afterwards; nothing here removes the
    * ops from the queue, so the normal flush still delivers them to the
    * server exactly once ordinary delivery would.
+   *
+   * Includes ops _takeBatch() has already spliced out of the queue for a POST
+   * still awaiting a response (_inFlightOps), not just what is still sitting
+   * in _queue — a connection can drop while a batch is mid-flight, and that
+   * batch will not rejoin _queue until its own request eventually settles.
    */
   getPendingOps() {
-    return this._queue.slice();
+    return this._inFlightOps.concat(this._queue);
   }
 
   /**
@@ -878,6 +892,10 @@ export class SessionSyncClient {
     let batch = null;
     try {
       batch = this._takeBatch();
+      // Tracked from the moment it leaves _queue until this POST settles (see
+      // getPendingOps' docstring) — a connection can drop while this exact
+      // request is in flight.
+      this._inFlightOps = this._inFlightOps.concat(batch);
       const resp = await this._postOps(batch);
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
@@ -913,6 +931,14 @@ export class SessionSyncClient {
       if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
+      // Whatever happened to this batch — delivered, terminally dropped, or
+      // requeued into _queue above — it is no longer in flight. Filter by
+      // reference (not content) so an unrelated op with identical fields
+      // already re-added to _queue is never mistaken for this one.
+      if (batch && batch.length) {
+        const settled = new Set(batch);
+        this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
+      }
       this._flushing = false;
       this._flushSoon();
     }

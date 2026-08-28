@@ -252,6 +252,12 @@ function App() {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length) break;
+          // The only case here with an internal await, so the only one where
+          // the active session can change out from under it (a session
+          // switch mid-fetch, review round 5): capture which session this op
+          // is for and re-check before writing to the store below, which is
+          // not itself session-scoped.
+          const sessionAtStart = syncRef.current?.sessionId;
           const addNodes = [];
           const addEdges = [];
           await Promise.all(
@@ -267,6 +273,7 @@ function App() {
               }
             })
           );
+          if (syncRef.current?.sessionId !== sessionAtStart) break; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -470,14 +477,11 @@ function App() {
       // server truth" goal an already-in-flight resync accomplishes anyway.
       if (resyncInFlightRef.current) return 0;
       resyncInFlightRef.current = true;
-      // A token, not just the boolean: if this call is still stuck past its
-      // own timeout below when a *later* resync legitimately starts (its own
-      // guard-clear already ran), this call's eventual (or timed-out) finally
-      // must not clear a flag it no longer owns (review round 3).
+      // A token, not just the boolean: if the guard timer below fires (its
+      // request never settles) while a *later* resync has since legitimately
+      // taken over, this call's eventual finally must not clear a flag it no
+      // longer owns (review round 3).
       const myToken = ++resyncGuardTokenRef.current;
-      const guardTimer = setTimeout(() => {
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
-      }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Read whatever is still queued *before* the network round-trip
         // below, not after: SessionSyncClient arms its own flush
@@ -495,11 +499,25 @@ function App() {
         const pendingOps = (
           syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []
         ).filter((op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released');
+        // The timeout guards only this one request, not the whole function
+        // (review round 5): api.js's fetch has no timeout of its own, unlike
+        // SessionSyncClient's outbound ops POST, so this GET specifically
+        // could hang forever and must not wedge reconnect recovery for the
+        // rest of the session. A slow-but-finishing replay afterwards (the
+        // loop below can itself await a network call per recovered
+        // nodes_added) is not what this guards against — spanning the timer
+        // over that too would risk it firing on a merely-slow-but-still-
+        // running call and letting a redundant concurrent resync start.
         let payload;
+        const guardTimer = setTimeout(() => {
+          if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        }, RESYNC_GUARD_TIMEOUT_MS);
         try {
           payload = await api.getSession(targetId, { resolve: true });
         } catch {
           return 0;
+        } finally {
+          clearTimeout(guardTimer);
         }
         // Also bail if the guard timeout already fired and a newer resync
         // now owns it (review round 4): the token check above only stops
@@ -543,12 +561,22 @@ function App() {
         }
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
+        // Re-checked every iteration, not just once before the loop (review
+        // round 5): applyRemoteOp awaits a network call for nodes_added, and
+        // the canvas store it writes to is not scoped by session — if the
+        // user switches to a different session while that await is pending,
+        // this session's recovered op would otherwise land on the newly
+        // loaded session's canvas instead.
         for (const op of pendingOps) {
+          if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
           await applyRemoteOp(op);
         }
         return pendingOps.length;
       } finally {
-        clearTimeout(guardTimer);
+        // The guard timer around the getSession request above already
+        // clears itself (its own finally); this is the ordinary path's
+        // release of the reentrancy flag once this call has genuinely
+        // finished (or bailed out early above).
         if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
       }
     },

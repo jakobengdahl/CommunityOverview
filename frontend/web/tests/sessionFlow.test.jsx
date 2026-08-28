@@ -660,6 +660,89 @@ describe('Server-backed session lifecycle', () => {
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
   });
 
+  // Review round 5 regression: resyncFromServer's replay loop awaits a
+  // network call per recovered nodes_added op; the canvas store it writes to
+  // is not scoped by session. If the user switches sessions while that await
+  // is still pending, a later op in the *old* session's recovered batch must
+  // not go on to land on the *new* session's now-loaded canvas.
+  it('stops replaying recovered ops once the user switches sessions mid-replay', async () => {
+    sessionStore.touchSession('5555-6666');
+
+    let releaseNodeA;
+    const nodeAGate = new Promise((resolve) => {
+      releaseNodeA = resolve;
+    });
+    // Two ops in the "offline" batch: the first stalls on its node fetch (so
+    // the test can switch sessions while the loop is paused there), the
+    // second must never apply once that switch has happened.
+    const pendingOps = [
+      { op: 'nodes_added', node_ids: ['node-a'] },
+      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
+    ];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue(pendingOps);
+    api.getNodeDetails.mockImplementation(async (id) => {
+      if (id !== 'node-a') return { success: false };
+      await nodeAGate;
+      return { node: NODE_A, edges: [] };
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // The replay loop is now paused inside applyRemoteOp's fetch for node-a.
+    await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+
+    // Switch to a different, already-known session while that fetch is
+    // still pending.
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('5555-6666'));
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    });
+
+    // Now let the stalled fetch resolve — the loop must re-check the active
+    // session before its next iteration and stop, so neither node-a (from
+    // the old session's own recovered op) nor the hidden-node effect of the
+    // batch's second op ever reaches session B's canvas.
+    await act(async () => {
+      releaseNodeA();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('ghost-node');
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {
     // A session renamed locally before the server ever materialised it (or
     // simply one the server hasn't got a name for) must keep its local name

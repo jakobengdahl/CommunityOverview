@@ -271,6 +271,36 @@ describe('SessionSyncClient', () => {
     expect(client.getPendingOps()).toEqual([]);
   });
 
+  // Review round 5 (PR #496 / task fbd32fc9): _takeBatch() splices an op out
+  // of _queue *before* its POST resolves, so a connection can drop while that
+  // batch is mid-flight — narrower than "never sent at all", but the same
+  // vanishing-edit risk if getPendingOps only looked at _queue.
+  it('getPendingOps also reports an op whose POST is still in flight, not just queued ones', async () => {
+    let releasePost;
+    const postGate = new Promise((resolve) => {
+      releasePost = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await postGate;
+      return { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) };
+    });
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    await flush();
+
+    client.syncState({ node_refs: ['a'] });
+    await flush(); // lets the 1ms-debounced flush start the (gated) POST
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Spliced out of _queue already (the POST is in flight) — still reported.
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+
+    releasePost();
+    await flush();
+    expect(client.getPendingOps()).toEqual([]);
+  });
+
   it('calls onReady on the first snapshot and onResync on a later one', async () => {
     const onReady = vi.fn();
     const onResync = vi.fn();
