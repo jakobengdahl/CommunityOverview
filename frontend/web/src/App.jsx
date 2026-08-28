@@ -501,6 +501,14 @@ function App() {
         } catch {
           return 0;
         }
+        // Also bail if the guard timeout already fired and a newer resync
+        // now owns it (review round 4): the token check above only stops
+        // *this* stale call from clearing a flag it no longer owns — without
+        // this check here too, a call that finally resolves after its own
+        // timeout would still go on to apply its now-outdated payload/replay
+        // over whatever the newer resync already established, silently
+        // reintroducing the very data loss this PR fixes.
+        if (resyncGuardTokenRef.current !== myToken) return 0;
         if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
