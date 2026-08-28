@@ -389,7 +389,9 @@ describe('Server-backed session lifecycle', () => {
       expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
     });
     await waitFor(() => {
-      expect(screen.getByText('Reconnected — restored 1 change(s) made while offline')).toBeInTheDocument();
+      expect(
+        screen.getByText('Reconnected — restored 1 change(s) made while offline')
+      ).toBeInTheDocument();
     });
 
     getPendingOpsSpy.mockRestore();
