@@ -94,6 +94,37 @@ describe('useSharedSession.applyServerSession', () => {
     expect(deps.setPendingGroups).toHaveBeenCalled();
   });
 
+  it('restores saved session overlay annotations from server state', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: {
+          annotations: [
+            {
+              id: 'note-1',
+              type: 'note',
+              kind: 'note',
+              position: { x: 7, y: 8 },
+              text: 'saved note',
+            },
+          ],
+        },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setPendingAnnotations).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 7, y: 8 },
+        text: 'saved note',
+      }),
+    ]);
+  });
+
   it('restores dimmed ids and the edge-intensity baseline from session state', () => {
     const deps = makeDeps();
     const { result } = renderHook(() => useSharedSession(deps));

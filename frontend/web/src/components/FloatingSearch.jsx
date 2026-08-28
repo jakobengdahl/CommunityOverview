@@ -5,6 +5,7 @@ import { resolveIcon, resolveColor } from './FloatingToolbar';
 import * as api from '../services/api';
 import './FloatingSearch.css';
 import { useI18n } from '../i18n';
+import { savedViewMetadataToCanvasMetadata } from '../utils/sessionAnnotations';
 
 function FloatingSearch({ variant = 'floating' }) {
   const { t, language } = useI18n();
@@ -15,6 +16,7 @@ function FloatingSearch({ variant = 'floating' }) {
     clearVisualization,
     setFocusNodeId,
     setPendingGroups,
+    setPendingAnnotations,
     federationDepth,
     stats,
     schema,
@@ -249,8 +251,7 @@ function FloatingSearch({ variant = 'floating' }) {
           const positions = node.metadata?.positions || {};
           const savedEdges = node.metadata?.edges || [];
           const savedEdgeIds = new Set(node.metadata?.edge_ids || []);
-          const savedGroups = node.metadata?.groups || [];
-          const savedParentIds = node.metadata?.parentIds || {};
+          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(node.metadata || {});
           if (nodeIds.length > 0) {
             clearVisualization();
             const details = await Promise.all(
@@ -289,8 +290,14 @@ function FloatingSearch({ variant = 'floating' }) {
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
 
               // Restore groups if any were saved
-              if (savedGroups.length > 0) {
-                setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+              if (savedViewAnnotations.groups.length > 0) {
+                setPendingGroups({
+                  groups: savedViewAnnotations.groups,
+                  parentIds: savedViewAnnotations.parentIds,
+                });
+              }
+              if (savedViewAnnotations.annotations.length > 0) {
+                setPendingAnnotations(savedViewAnnotations.annotations);
               }
             }
           }
@@ -344,6 +351,7 @@ function FloatingSearch({ variant = 'floating' }) {
       clearVisualization,
       setFocusNodeId,
       setPendingGroups,
+      setPendingAnnotations,
     ]
   );
 
