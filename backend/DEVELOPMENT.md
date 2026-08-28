@@ -564,7 +564,11 @@ not followed and an archived neighbour is not reached (so an archived node canno
 re-enter results via a later hop); the starting node is always returned as the
 anchor. A fetch by id (`GET /api/nodes/{id}` / `get_node_details`) still returns an
 archived node — the default-exclude applies to search and traversal, not to direct
-lookups. Federated nodes/edges preserve the origin graph's `archived` flag, so a
+lookups. The same fetch's incident `edges` (added so a client that just received
+this node's id over a live session op, e.g. `nodes_added` from an MCP
+`add_nodes_to_session`, can hydrate its edges to already-visible nodes) does apply
+the default-exclude: an archived edge, or one with an archived endpoint, is
+omitted. Federated nodes/edges preserve the origin graph's `archived` flag, so a
 node archived upstream stays hidden downstream.
 
 **Mutations.** Archiving goes through dedicated operations rather than a generic

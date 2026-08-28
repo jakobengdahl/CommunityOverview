@@ -299,7 +299,9 @@ def register_mcp_tools(
             node_id: ID of the node
 
         Returns:
-            Dict with node data or error
+            Dict with the node and its incident edges (``edges``, visible ones
+            only — an edge whose other endpoint is not visible or is archived
+            is omitted), or an error.
         """
         return service.get_node_details(node_id)
 
