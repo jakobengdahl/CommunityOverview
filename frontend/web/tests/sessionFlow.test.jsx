@@ -530,6 +530,65 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  // Review round 3 regression: replaying a recovered op onto the canvas
+  // (applyRemoteOp) without also folding it into the sync client's own
+  // baseline (foldLocalOp) leaves the baseline stale — since this client's
+  // own echo for that op never arrives (echoes of one's own ops are always
+  // skipped), nothing else would ever fold it in, so every later autosave's
+  // diff would treat the recovered content as still-unsent and resend it
+  // indefinitely.
+  //
+  // (The other review-round-3 finding — a hung reload permanently wedging
+  // the reentrancy guard — is fixed by a token-guarded setTimeout self-heal
+  // matching SessionSyncClient's own already-unit-tested request-timeout
+  // precedent; simulating a real ~20s hang end-to-end through the full save
+  // dialog flow was judged impractical to do reliably here.)
+  it('folds each recovered op into the sync baseline, not just the canvas', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    const foldLocalOpSpy = vi.spyOn(SessionSyncClient.prototype, 'foldLocalOp');
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(foldLocalOpSpy).toHaveBeenCalledWith(pendingOp);
+    });
+
+    getPendingOpsSpy.mockRestore();
+    foldLocalOpSpy.mockRestore();
+  });
+
   // Review round 1 regression: a bare local selection (no offline edits at
   // all) re-queues a selection_claimed op on every reconnect
   // (_readvertiseSelection). applyRemoteOp has no case for it — replaying it

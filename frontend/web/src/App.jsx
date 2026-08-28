@@ -33,6 +33,15 @@ import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import './App.css';
 
+// Ceiling on how long resyncFromServer's reentrancy guard may stay held.
+// api.js's fetch carries no timeout (unlike SessionSyncClient's own outbound
+// ops POST, which bounds itself against exactly this: "SSE deployments
+// commonly sit behind Cloud Run / an ingress that can hold a half-open
+// request open indefinitely" — sessionSyncClient.js), so a hung reload must
+// not permanently disable reconnect recovery for the rest of the session
+// (review round 3). Matches that same request's own timeout.
+const RESYNC_GUARD_TIMEOUT_MS = 20_000;
+
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
 const _akcShortName = _urlParams.get('akc');
@@ -214,7 +223,13 @@ function App() {
   // a flaky connection can drop and reconnect more than once before a slow
   // reload request settles, and running two resyncs concurrently would
   // replay the same pending ops twice and show a duplicate recovery toast.
+  // resyncGuardTokenRef lets a request that eventually settles after its own
+  // timeout guard already self-cleared (review round 3 — api.js's fetch has
+  // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
+  // GET must not wedge reconnect recovery forever) recognise it is no longer
+  // the current owner and not stomp on a newer resync that started meanwhile.
   const resyncInFlightRef = useRef(false);
+  const resyncGuardTokenRef = useRef(0);
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
@@ -450,9 +465,19 @@ function App() {
       // replay the same still-pending ops a second time and the caller would
       // show a duplicate recovery toast (review round 2). The in-flight
       // resync already reloads current server truth, so skipping a
-      // concurrent one loses nothing a later op/resync wouldn't also catch.
+      // concurrent one loses nothing a later op/resync wouldn't also catch —
+      // including onDropped's own resync call, whose "converge back to
+      // server truth" goal an already-in-flight resync accomplishes anyway.
       if (resyncInFlightRef.current) return 0;
       resyncInFlightRef.current = true;
+      // A token, not just the boolean: if this call is still stuck past its
+      // own timeout below when a *later* resync legitimately starts (its own
+      // guard-clear already ran), this call's eventual (or timed-out) finally
+      // must not clear a flag it no longer owns (review round 3).
+      const myToken = ++resyncGuardTokenRef.current;
+      const guardTimer = setTimeout(() => {
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+      }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Read whatever is still queued *before* the network round-trip
         // below, not after: SessionSyncClient arms its own flush
@@ -492,6 +517,22 @@ function App() {
         // the second one, if the annotation was already edited in between,
         // would revert that edit.
         selfIngestedImageAnnotationIdsRef.current.clear();
+        // Fold every recovered op into the sync baseline *before* replaying
+        // any of them onto the canvas — the same mechanism foldLocalOp exists
+        // for (applying an op to the canvas without it having come over the
+        // stream; see its docstring). Two consequences of skipping this
+        // (review round 3): the next auto-save's diff would see the baseline
+        // as if these ops never happened and re-send every one of them again
+        // (our own echo for them never arrives to fold it in later, since the
+        // client skips its own echoes by design); and nodes_added's
+        // position-seed lookup (baselinePosition, below) would not see a
+        // node_moved for the same id that is later in this same batch, so
+        // the recovered node would settle at an auto-layout spot instead of
+        // where it was actually left. Folding the whole batch first — rather
+        // than interleaved with replay — means that lookup already sees it.
+        for (const op of pendingOps) {
+          syncRef.current.foldLocalOp(op);
+        }
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
         for (const op of pendingOps) {
@@ -499,7 +540,8 @@ function App() {
         }
         return pendingOps.length;
       } finally {
-        resyncInFlightRef.current = false;
+        clearTimeout(guardTimer);
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
       }
     },
     [syncRef, applyRemoteOp]
