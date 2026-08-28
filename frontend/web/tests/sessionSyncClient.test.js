@@ -250,6 +250,27 @@ describe('SessionSyncClient', () => {
     expect(fetchImpl.calls[0].body.client_id).toBe('client-me');
   });
 
+  // task fbd32fc9: the reconnect path reads this list before reloading the
+  // canvas from the server, so it can replay whatever never reached the
+  // server instead of silently discarding it.
+  it('getPendingOps reports queued-but-unsent ops and clears once they flush', async () => {
+    const { client } = makeClient();
+    client.connect();
+    // Not ready yet (no snapshot delivered) — same "offline" condition as the
+    // buffering test above, so the op sits in the queue rather than flushing.
+    client.syncState({ node_refs: ['a'] });
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+
+    // Returns a copy: mutating it must not reach into the live queue.
+    const snapshot = client.getPendingOps();
+    snapshot.push({ op: 'nodes_added', node_ids: ['bogus'] });
+    expect(client.getPendingOps()).not.toContainEqual({ op: 'nodes_added', node_ids: ['bogus'] });
+
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    await flush();
+    expect(client.getPendingOps()).toEqual([]);
+  });
+
   it('calls onReady on the first snapshot and onResync on a later one', async () => {
     const onReady = vi.fn();
     const onResync = vi.fn();

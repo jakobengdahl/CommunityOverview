@@ -423,18 +423,35 @@ function App() {
     ]
   );
 
-  // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
-  // session from the server and reset the baseline. Destructive, but a resync
-  // only fires after a dropped stream, when the local user was not editing.
+  // Reconnect / catch-up path (missed ops after a disconnect, or a delayed op
+  // finally landing): reload the whole session from the server — the
+  // authoritative source for node/edge visibility — and reset the sync
+  // baseline. The reload itself is a wholesale replace, but it would silently
+  // discard whatever this client edited while offline (queued ops the server
+  // never received) if nothing put them back: capture them before the reload
+  // and replay each through applyRemoteOp afterwards, which — like any remote
+  // op — touches only the entities it names rather than clobbering the fresh
+  // server state (task fbd32fc9). Replaying does not touch the sync client's
+  // own queue, so the same ops still flush to the server exactly once normal
+  // delivery would; a concurrent edit to the same entity resolves the same
+  // way any two racing ops already do (last write wins), which is the
+  // existing idempotent-op contract, not something new this adds.
+  // Returns the number of local ops recovered this way, so the caller can
+  // report the recovery back to the user.
   const resyncFromServer = useCallback(
     async (targetId) => {
       let payload;
       try {
         payload = await api.getSession(targetId, { resolve: true });
       } catch {
-        return;
+        return 0;
       }
-      if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
+      if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
+      // Read whatever is still queued right before the destructive reload —
+      // ops enqueued during the request above are included, since queuing is
+      // synchronous and nothing else runs between this line and the awaits
+      // that already resolved.
+      const pendingOps = syncRef.current.getPendingOps();
       applyServerSessionRef.current?.(payload);
       const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
       syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
@@ -448,13 +465,16 @@ function App() {
       // upload genuinely in flight when the stream drops) clears that
       // reservation too, so both deliveries would then render unguarded —
       // the second one, if the annotation was already edited in between,
-      // would revert that edit. This mirrors the same trade-off
-      // resyncFromServer already makes for local edits in general (a resync
-      // "only fires after a dropped stream, when the local user was not
-      // editing", see below) rather than a new risk this dedup introduces.
+      // would revert that edit.
       selfIngestedImageAnnotationIdsRef.current.clear();
+      // Sequential, not Promise.all: ops must replay in their original order
+      // (e.g. nodes_added before a node_moved for the same id), not race.
+      for (const op of pendingOps) {
+        await applyRemoteOp(op);
+      }
+      return pendingOps.length;
     },
-    [syncRef]
+    [syncRef, applyRemoteOp]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -1689,7 +1709,16 @@ function App() {
   useEffect(() => {
     syncHandlersRef.current = {
       onReady: () => {},
-      onResync: () => resyncFromServer(sessionId),
+      // Report recovery status back to the user (task fbd32fc9): a resync
+      // that had to replay locally-queued ops means real, user-visible
+      // content survived a dropped connection — worth a confirmation rather
+      // than a silent reconciliation.
+      onResync: async () => {
+        const recovered = await resyncFromServer(sessionId);
+        if (recovered > 0) {
+          showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
+        }
+      },
       onRemoteOps: (ops) => {
         (ops || []).forEach((op) => applyRemoteOp(op));
       },

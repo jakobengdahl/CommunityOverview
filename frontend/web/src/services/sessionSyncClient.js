@@ -427,6 +427,24 @@ export class SessionSyncClient {
   }
 
   /**
+   * Ops enqueued locally that have not yet been confirmed delivered to the
+   * server (queued while offline, awaiting a retry, or simply not flushed
+   * yet). A shallow copy, so callers cannot mutate the live queue.
+   *
+   * Exists for the reconnect path (task fbd32fc9): a resync after a dropped
+   * connection reloads the canvas wholesale from server truth (see App.jsx's
+   * resyncFromServer), which would otherwise silently discard whatever this
+   * client edited while offline — that content never reached the server, so
+   * the reload has no way to know about it. The caller reads this list
+   * *before* the reload and replays it afterwards; nothing here removes the
+   * ops from the queue, so the normal flush still delivers them to the
+   * server exactly once ordinary delivery would.
+   */
+  getPendingOps() {
+    return this._queue.slice();
+  }
+
+  /**
    * The position the baseline currently holds for a node, or null. Lets the host
    * place a node that another client added-then-moved at its authoritative spot,
    * even though the two ops arrive as separate async-applied events.

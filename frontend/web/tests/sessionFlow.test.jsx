@@ -334,6 +334,67 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
+  // task fbd32fc9: a reconnect used to reload the canvas wholesale from
+  // server truth with no way back for whatever this client edited while
+  // disconnected. resyncFromServer now reads the sync client's still-queued
+  // (never-delivered) ops before that reload and replays them afterwards, so
+  // the local edit survives instead of silently vanishing.
+  it('a reconnect resync restores a local edit that never reached the server, and reports the recovery', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+
+    // Materialize a session (and its realtime stream) the same way the other
+    // tests do — the actual queued content is irrelevant here since
+    // getPendingOps is stubbed above to stand in for "an edit made offline".
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    // The server has no record of node-a (it never got delivered) — the
+    // default getSession mock resolves an empty session. A catch_up with a
+    // missed op is what a genuine reconnect after a drop delivers.
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // The reload would otherwise have wiped node-a from the canvas along with
+    // it — it must come back, and the recovery must be reported to the user.
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Reconnected — restored 1 change(s) made while offline')).toBeInTheDocument();
+    });
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
