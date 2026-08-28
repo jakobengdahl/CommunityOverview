@@ -131,6 +131,17 @@
   line-height: 1;
 }
 
+.annotation-toolbox-shape-glyph {
+  display: block;
+  width: 24px;
+  height: 16px;
+  background: currentColor;
+}
+
+.annotation-toolbox-shape-glyph--process-arrow {
+  clip-path: polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%);
+}
+
 /* The collapsed shape slot (task-annotation-shapes-under-one-toolbox-slot):
    a plain positioning wrapper, sized by its main button (which keeps the
    ordinary .annotation-toolbox-item look), with the corner picker-opener
