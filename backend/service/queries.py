@@ -296,9 +296,17 @@ def get_node_details(
     # MCP's add_nodes_to_session included — actually goes through. Mirrors
     # search_graph's archived/visibility filtering for incident edges.
     def _archived_endpoint(edge) -> bool:
-        return _is_archived(storage.get_node(edge.source)) or _is_archived(
-            storage.get_node(edge.target)
-        )
+        # The anchor is always part of the result (get_node_details returns an
+        # archived node on a direct lookup — see the docstring/DEVELOPMENT.md
+        # note above), so an edge back to it must not be dropped just because
+        # the anchor itself is archived. Mirrors get_related_nodes'
+        # `_neighbor_blocked` anchor exemption in storage_search.py.
+        for endpoint_id in (edge.source, edge.target):
+            if endpoint_id == node_id:
+                continue
+            if _is_archived(storage.get_node(endpoint_id)):
+                return True
+        return False
 
     incident_edges = [
         edge
