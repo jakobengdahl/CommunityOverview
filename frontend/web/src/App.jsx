@@ -440,6 +440,22 @@ function App() {
   // report the recovery back to the user.
   const resyncFromServer = useCallback(
     async (targetId) => {
+      // Read whatever is still queued *before* the network round-trip below,
+      // not after: SessionSyncClient arms its own flush (_flushSoon) right
+      // after the onResync handler it called this from returns, so an
+      // `await` ahead of this read would race that flush — it can splice the
+      // very ops we want to capture out of the queue first, and if the
+      // server happens to apply this GET before that POST, we would see
+      // neither the reload nor a replay reflect them (review round 1).
+      // Selection claims are excluded: `_readvertiseSelection()` re-queues
+      // one on every reconnect whenever the user merely has something
+      // selected, regardless of whether anything was actually edited
+      // offline, and applyRemoteOp has no case for it (a no-op) — counting
+      // it would misreport a reconnect with zero real edits as a recovery
+      // (review round 1).
+      const pendingOps = (
+        syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []
+      ).filter((op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released');
       let payload;
       try {
         payload = await api.getSession(targetId, { resolve: true });
@@ -447,11 +463,6 @@ function App() {
         return 0;
       }
       if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
-      // Read whatever is still queued right before the destructive reload —
-      // ops enqueued during the request above are included, since queuing is
-      // synchronous and nothing else runs between this line and the awaits
-      // that already resolved.
-      const pendingOps = syncRef.current.getPendingOps();
       applyServerSessionRef.current?.(payload);
       const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
       syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));

@@ -395,6 +395,111 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  // Review round 1 regression: reading the pending-ops queue *after* awaiting
+  // the reload request would race SessionSyncClient's own reconnect flush
+  // (armed right after onResync returns) — a flush that fires first can
+  // splice those exact ops out of the queue before this read ever sees them,
+  // silently reintroducing the data loss the test above guards against. The
+  // fix is call *order*: getPendingOps must run before getSession, not after.
+  it('captures pending ops before the reload request, not after (reconnect-flush race)', async () => {
+    const callOrder = [];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockImplementation(function pendingOpsSpy() {
+        callOrder.push('getPendingOps');
+        return [];
+      });
+    const getSessionMock = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (...args) => {
+      callOrder.push('getSession');
+      return getSessionMock(...args);
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(callOrder).toContain('getSession');
+    });
+    expect(callOrder.indexOf('getPendingOps')).toBeGreaterThanOrEqual(0);
+    expect(callOrder.indexOf('getPendingOps')).toBeLessThan(callOrder.indexOf('getSession'));
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 1 regression: a bare local selection (no offline edits at
+  // all) re-queues a selection_claimed op on every reconnect
+  // (_readvertiseSelection). applyRemoteOp has no case for it — replaying it
+  // is a no-op — so it must not inflate the reported recovery count or claim
+  // a recovery happened when nothing the user did was actually restored.
+  it('does not report a recovery for a bare reconnect selection re-advertisement', async () => {
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([{ op: 'selection_claimed', element_ids: ['node-a'] }]);
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // Give the (fire-and-forget) resync a tick to complete.
+    await waitFor(() => {
+      expect(getPendingOpsSpy).toHaveBeenCalled();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
