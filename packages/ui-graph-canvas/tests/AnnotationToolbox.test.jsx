@@ -781,6 +781,46 @@ describe('AnnotationToolbox', () => {
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
 
+    it('does not let a right-click on the main slot button also fire the left-click picker-close handler', () => {
+      // Regression test: mousedown always precedes contextmenu for a real
+      // right-click, so the mousedown-driven close above must ignore
+      // anything but the primary (left) button — otherwise right-clicking
+      // an already-open picker would close it via mousedown and then
+      // immediately reopen it via onContextMenu, a visible flicker that
+      // also resets whatever option had focus. Real event order (mousedown
+      // then contextmenu), not the RTL fireEvent.contextMenu shortcut alone,
+      // which dispatches only a bare contextmenu event.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+
+      fireEvent.mouseDown(slot, { button: 2 });
+      fireEvent.contextMenu(slot);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      // A second right-click's own mousedown, on the now-open picker, must
+      // not close it before its contextmenu re-opens it.
+      fireEvent.mouseDown(slot, { button: 2 });
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('moves focus onto the main slot button after selecting a shape in the picker', () => {
+      // Regression test: without this, ToolSlotPicker's cleanup effect would
+      // land focus on the corner button instead of the slot the user just
+      // gave a new shape to — surprising right after picking one, and it
+      // would silently turn a keyboard user's next Enter/Space (expecting
+      // to create the shape they just chose) into reopening the picker.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      selectShapeVariant(/^hexagon$/i);
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      expect(within(toolbox).getByRole('button', { name: /^hexagon$/i })).toHaveFocus();
+    });
+
     it('opens the picker on a corner-button click, without creating a shape', () => {
       const onCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} />);

@@ -146,6 +146,10 @@ function AnnotationToolbox({
   const [shapePickerOpen, setShapePickerOpen] = useState(false);
   const shapeSlotRef = useRef(null);
   const shapeCornerButtonRef = useRef(null);
+  // Lets the picker's onSelect callback focus the slot itself after a
+  // selection, the same way the slot's own onClick already does — see
+  // renderShapeSlot below.
+  const shapeMainButtonRef = useRef(null);
   // Collapsing the toolbox unmounts the items row (and the slot/corner
   // button inside it) out from under an open picker — close it in step
   // rather than leaving a dangling `shapePickerOpen: true` that a later
@@ -444,6 +448,7 @@ function AnnotationToolbox({
     return (
       <div className="annotation-toolbox-slot" key="shape-slot" ref={shapeSlotRef}>
         <button
+          ref={shapeMainButtonRef}
           type="button"
           className="annotation-toolbox-item annotation-toolbox-item--draggable"
           // The picker floats above the toolbox, not over the main button,
@@ -455,8 +460,15 @@ function AnnotationToolbox({
           // fires this button's own onClick once a real drag completes, see
           // finishDrag's comment above) and again in onClick (the only path
           // a keyboard Enter/Space activation takes, since it never fires
-          // mousedown/pointerdown at all).
-          onMouseDown={() => setShapePickerOpen(false)}
+          // mousedown/pointerdown at all). Left button only: mousedown
+          // always precedes contextmenu for a real right-click, so without
+          // this check, right-clicking an already-open picker would close
+          // it here and then immediately reopen it from onContextMenu below
+          // — a visible flicker that also resets whatever option had focus.
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            setShapePickerOpen(false);
+          }}
           onClick={(event) => {
             setShapePickerOpen(false);
             // Explicit rather than relying on the browser's own
@@ -501,8 +513,10 @@ function AnnotationToolbox({
                   // Touch has no separate mousedown-vs-click split — this is
                   // the one entry point for both a tap and a drag, so the
                   // picker-close call above's touch-path equivalent lives
-                  // here rather than being reachable from onMouseDown.
-                  setShapePickerOpen(false);
+                  // here rather than being reachable from onMouseDown. Same
+                  // primary-button guard as onMouseDown, for a stylus's
+                  // secondary (barrel) button.
+                  if (e.button === 0) setShapePickerOpen(false);
                   handlePointerDown(e, 'shape', options, variant.glyph, SHAPE_SLOT_ITEM_KEY);
                 }
               : undefined
@@ -534,6 +548,14 @@ function AnnotationToolbox({
             onSelect={(key) => {
               setCurrentShape(key);
               setShapePickerOpen(false);
+              // Same reasoning as the main button's own onClick: without an
+              // explicit focus() here, ToolSlotPicker's cleanup effect would
+              // land focus on the corner button instead of the slot the
+              // user just gave a new shape to — surprising right after
+              // picking one, and it would silently turn a keyboard user's
+              // next Enter/Space (expecting to create the shape they just
+              // chose) into reopening the picker instead.
+              shapeMainButtonRef.current?.focus();
             }}
             onClose={() => setShapePickerOpen(false)}
           />
