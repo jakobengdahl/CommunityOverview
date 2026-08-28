@@ -146,7 +146,9 @@ describe('AnnotationToolbox', () => {
 
     fireEvent.click(processOption);
     const processSlot = screen.getByRole('button', { name: /^process arrow$/i });
-    expect(processSlot.querySelector('.annotation-toolbox-shape-glyph--process-arrow')).toBeTruthy();
+    expect(
+      processSlot.querySelector('.annotation-toolbox-shape-glyph--process-arrow')
+    ).toBeTruthy();
     expect(processSlot.querySelector('.annotation-toolbox-item-glyph').textContent).not.toContain(
       '➜'
     );
