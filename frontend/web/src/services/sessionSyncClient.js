@@ -698,10 +698,38 @@ export class SessionSyncClient {
    * re-folding it when the echo arrives afterwards — the echo carries this
    * same creation-time content, and re-folding it over a baseline this call
    * already advanced would revert any edit made in the meantime.
+   *
+   * That marker is only ever consumed by an echo that reaches
+   * `_handleEvent`'s fold-skip check — which an ordinary, this-client-
+   * attributed op's echo never does, since the "echo of our own op" check
+   * just above it returns first (image ingest's op is the one documented
+   * exception: it is broadcast under a shared, non-personal client id
+   * specifically so this client's own echo does *not* get filtered there —
+   * see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py). For any op that
+   * *will* flush under this client's own id (queued ops enqueued the normal
+   * way, including a reconnect resync's recovered-ops replay — task
+   * fbd32fc9), calling this method would set a marker nothing will ever
+   * consume: it would sit until the next `setBaseline()` clears the whole
+   * set, and in the meantime could wrongly swallow a *different*
+   * collaborator's genuine edit to the same annotation id (their echo's
+   * `foldedId` would match the stale marker and skip folding their content).
+   * Use `foldOpIntoBaseline` for that case instead.
    */
   foldLocalOp(op) {
     const id = op?.annotation?.id;
     if (id) this._locallyFoldedAnnotationIds.add(id);
+    this._baseline = applyOpToMirror(this._baseline, op);
+  }
+
+  /**
+   * Fold one op into the baseline only — no annotation-echo marker. Use this
+   * for an op that will flush (or already flushed) under this client's own
+   * id, so its eventual echo is always filtered by the "echo of our own op"
+   * check in `_handleEvent` before it could ever reach — let alone need —
+   * `foldLocalOp`'s dedup marker (see that method's docstring for why
+   * setting one in that case is actively harmful, not just unnecessary).
+   */
+  foldOpIntoBaseline(op) {
     this._baseline = applyOpToMirror(this._baseline, op);
   }
 

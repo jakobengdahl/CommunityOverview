@@ -568,9 +568,7 @@ function App() {
         // would revert that edit.
         selfIngestedImageAnnotationIdsRef.current.clear();
         // Fold every recovered op into the sync baseline *before* replaying
-        // any of them onto the canvas — the same mechanism foldLocalOp exists
-        // for (applying an op to the canvas without it having come over the
-        // stream; see its docstring). Two consequences of skipping this
+        // any of them onto the canvas. Two consequences of skipping this
         // (review round 3): the next auto-save's diff would see the baseline
         // as if these ops never happened and re-send every one of them again
         // (our own echo for them never arrives to fold it in later, since the
@@ -580,8 +578,19 @@ function App() {
         // the recovered node would settle at an auto-layout spot instead of
         // where it was actually left. Folding the whole batch first — rather
         // than interleaved with replay — means that lookup already sees it.
+        //
+        // foldOpIntoBaseline, not foldLocalOp (review round 7): these ops
+        // flush under this client's own id, so their eventual echo is always
+        // filtered by the "echo of our own op" check before it could reach
+        // foldLocalOp's dedup marker — setting that marker here would leak
+        // it forever and could wrongly swallow a different collaborator's
+        // later genuine edit to the same annotation. See foldLocalOp's own
+        // docstring for the full reasoning; foldLocalOp itself stays correct
+        // for its original caller (handleImageIngest), whose op is broadcast
+        // under a shared, non-personal client id specifically so its own
+        // echo is *not* filtered there.
         for (const op of pendingOps) {
-          syncRef.current.foldLocalOp(op);
+          syncRef.current.foldOpIntoBaseline(op);
         }
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.

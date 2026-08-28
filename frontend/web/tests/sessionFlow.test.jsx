@@ -588,22 +588,30 @@ describe('Server-backed session lifecycle', () => {
 
   // Review round 3 regression: replaying a recovered op onto the canvas
   // (applyRemoteOp) without also folding it into the sync client's own
-  // baseline (foldLocalOp) leaves the baseline stale — since this client's
-  // own echo for that op never arrives (echoes of one's own ops are always
-  // skipped), nothing else would ever fold it in, so every later autosave's
-  // diff would treat the recovered content as still-unsent and resend it
-  // indefinitely.
+  // baseline leaves the baseline stale — since this client's own echo for
+  // that op never arrives (echoes of one's own ops are always skipped),
+  // nothing else would ever fold it in, so every later autosave's diff would
+  // treat the recovered content as still-unsent and resend it indefinitely.
   //
   // (The other review-round-3 finding — a hung reload permanently wedging
   // the reentrancy guard — is fixed by a token-guarded setTimeout self-heal
   // matching SessionSyncClient's own already-unit-tested request-timeout
   // precedent; simulating a real ~20s hang end-to-end through the full save
   // dialog flow was judged impractical to do reliably here.)
+  //
+  // foldOpIntoBaseline, not foldLocalOp (review round 7): folding a recovered
+  // op with foldLocalOp — which additionally marks the annotation id to skip
+  // one *confirming echo* — left a marker nothing would ever consume (an
+  // ordinary op's echo is filtered by the "own client id" check before it
+  // could reach that marker), which could then wrongly swallow a *different*
+  // collaborator's later genuine edit to the same annotation. See
+  // foldOpIntoBaseline's docstring in sessionSyncClient.js.
   it('folds each recovered op into the sync baseline, not just the canvas', async () => {
     const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue([pendingOp]);
+    const foldOpIntoBaselineSpy = vi.spyOn(SessionSyncClient.prototype, 'foldOpIntoBaseline');
     const foldLocalOpSpy = vi.spyOn(SessionSyncClient.prototype, 'foldLocalOp');
     api.getNodeDetails.mockImplementation(async (id) =>
       id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
@@ -638,10 +646,13 @@ describe('Server-backed session lifecycle', () => {
     });
 
     await waitFor(() => {
-      expect(foldLocalOpSpy).toHaveBeenCalledWith(pendingOp);
+      expect(foldOpIntoBaselineSpy).toHaveBeenCalledWith(pendingOp);
     });
+    // Not the annotation-echo-marking variant — see the comment above.
+    expect(foldLocalOpSpy).not.toHaveBeenCalled();
 
     getPendingOpsSpy.mockRestore();
+    foldOpIntoBaselineSpy.mockRestore();
     foldLocalOpSpy.mockRestore();
   });
 

@@ -466,6 +466,58 @@ describe('SessionSyncClient', () => {
     });
   });
 
+  // task fbd32fc9 review round 7: resyncFromServer (App.jsx) folds recovered
+  // ops that will flush under this client's own id — unlike foldLocalOp's
+  // documented caller (image ingest, broadcast under a shared client id), so
+  // foldLocalOp's echo-skip marker would never be consumed and could wrongly
+  // swallow a *different* collaborator's later genuine edit to the same
+  // annotation. foldOpIntoBaseline is the marker-free variant for that case.
+  describe('foldOpIntoBaseline', () => {
+    it('advances the baseline the same way foldLocalOp does', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const annotation = { id: 'note-1', type: 'note', text: 'hi' };
+      client.foldOpIntoBaseline({ op: 'annotation_created', annotation });
+
+      client.syncState({ annotations: [annotation] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(0); // baseline already matches; no redundant op
+    });
+
+    it('does not poison a later genuine remote edit to the same annotation, unlike foldLocalOp would', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const created = { id: 'note-1', type: 'note', text: 'hi' };
+      client.foldOpIntoBaseline({ op: 'annotation_created', annotation: created });
+
+      // A different collaborator edits the same annotation. If this had used
+      // foldLocalOp instead, its marker would still be set (nothing had
+      // consumed it — this client's own echo for `created` was never even
+      // sent here), and this echo's fold would be wrongly skipped.
+      const editedByOther = { id: 'note-1', type: 'note', text: 'edited by someone else' };
+      es.emit({
+        type: 'op',
+        client_id: 'client-other',
+        op: { op: 'annotation_updated', annotation: editedByOther },
+        seq: 1,
+      });
+
+      // Re-syncing the *original* (pre-their-edit) content is now a real
+      // change from the baseline's point of view — proving the baseline
+      // picked up their update rather than a stale marker having swallowed it.
+      client.syncState({ annotations: [created] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(1);
+      expect(fetchImpl.calls[0].body.ops).toContainEqual({
+        op: 'annotation_updated',
+        annotation: created,
+      });
+    });
+  });
+
   describe('whenReady', () => {
     it('resolves immediately once the client is already ready', async () => {
       const { client } = makeClient();
