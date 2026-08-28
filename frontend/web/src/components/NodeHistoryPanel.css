@@ -200,6 +200,7 @@
     right: calc(12px + env(safe-area-inset-right));
     bottom: auto;
     left: auto;
+    transform: none;
     flex-direction: column-reverse;
     align-items: flex-end;
   }

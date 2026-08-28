@@ -61,6 +61,7 @@ describe('NodeHistoryPanel', () => {
     );
     expect(mobileBlock[1]).toMatch(/\.node-history \{[^}]*bottom:\s*auto/);
     expect(mobileBlock[1]).toMatch(/\.node-history \{[^}]*left:\s*auto/);
+    expect(mobileBlock[1]).toMatch(/\.node-history \{[^}]*transform:\s*none/);
     expect(mobileBlock[1]).toMatch(
       /\.node-history \{[^}]*right:\s*calc\(12px \+ env\(safe-area-inset-right\)\)/
     );
