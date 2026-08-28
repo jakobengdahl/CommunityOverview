@@ -520,6 +520,8 @@
     "shape_picker_open": "Choose a shape",
     "shape_picker": "Shapes",
     "icon": "Icon",
+    "icon_picker_open": "Choose an icon",
+    "icon_picker": "Icons",
     "vote_dot": "Vote dot",
     "image": "Image",
     "freehand": "Freehand",

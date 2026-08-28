@@ -1,7 +1,6 @@
 /* Bottom-mounted annotation creation surface. Deliberately its own visual
-   language (bottom-anchored, amber accent, pill toggle) rather than reusing
-   FloatingToolbar's left-rail/grid look, so graph-node creation and
-   annotation creation never read as the same control. */
+   language rather than reusing FloatingToolbar's left-rail/grid look, so
+   graph-node creation and annotation creation never read as the same control. */
 .annotation-toolbox {
   position: absolute;
   left: 50%;
@@ -22,9 +21,9 @@
   gap: 6px;
   padding: 8px 14px;
   border-radius: 999px;
-  border: 1px solid #b45309;
-  background: rgba(120, 53, 15, 0.92);
-  color: #fde68a;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: rgba(17, 24, 39, 0.94);
+  color: #f8fafc;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -33,7 +32,8 @@
 }
 
 .annotation-toolbox-toggle:hover {
-  background: rgba(146, 64, 14, 0.95);
+  border-color: #38bdf8;
+  background: rgba(30, 41, 59, 0.96);
 }
 
 .annotation-toolbox-toggle-glyph {
@@ -48,8 +48,8 @@
   gap: 6px;
   padding: 8px;
   border-radius: 14px;
-  border: 1px solid #b45309;
-  background: rgba(26, 22, 18, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.95);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
@@ -68,15 +68,15 @@
   height: 44px;
   padding: 0;
   border-radius: 8px;
-  border: 1px solid #57534e;
-  background: #292524;
-  color: #e7e5e4;
+  border: 1px solid rgba(100, 116, 139, 0.85);
+  background: #1f2937;
+  color: #e2e8f0;
   cursor: pointer;
 }
 
 .annotation-toolbox-item:hover {
-  border-color: #fbbf24;
-  background: #3f3a34;
+  border-color: #38bdf8;
+  background: #334155;
 }
 
 /* Only items with something draggable to create get the grab affordance;
@@ -109,9 +109,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 8px;
-  border: 1px solid #fbbf24;
-  background: rgba(41, 37, 36, 0.95);
-  color: #e7e5e4;
+  border: 1px solid #38bdf8;
+  background: rgba(30, 41, 59, 0.95);
+  color: #e2e8f0;
   font-size: 20px;
   pointer-events: none;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -121,14 +121,180 @@
    visually pressed until the stroke completes or is cancelled, so it reads
    the same way a held tool does in a drawing app. */
 .annotation-toolbox-item--active {
-  border-color: #fbbf24;
-  background: #57431a;
-  box-shadow: inset 0 0 0 1px #fbbf24;
+  border-color: #38bdf8;
+  background: #0f3b4f;
+  box-shadow: inset 0 0 0 1px #38bdf8;
 }
 
 .annotation-toolbox-item-glyph {
   font-size: 20px;
   line-height: 1;
+}
+
+.annotation-toolbox-visual,
+.annotation-toolbox-icon-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: currentColor;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.annotation-toolbox-visual--note {
+  width: 24px;
+  height: 24px;
+  border-radius: 3px;
+  background: #fde047;
+  color: #713f12;
+  box-shadow: inset 0 -4px 0 rgba(202, 138, 4, 0.28);
+}
+
+.annotation-toolbox-visual--note::before,
+.annotation-toolbox-visual--note::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--note::before {
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px 0 3px 0;
+  background: linear-gradient(135deg, rgba(202, 138, 4, 0.35) 50%, #fef3c7 50%);
+}
+
+.annotation-toolbox-visual--note::after {
+  left: 5px;
+  top: 7px;
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor;
+  opacity: 0.55;
+}
+
+.annotation-toolbox-visual--text {
+  font-family: ui-serif, Georgia, serif;
+  color: #f8fafc;
+}
+
+.annotation-toolbox-visual--label {
+  width: 25px;
+  height: 17px;
+  border-radius: 4px 8px 8px 4px;
+  background: #f472b6;
+  clip-path: polygon(0 0, 78% 0, 100% 50%, 78% 100%, 0 100%);
+}
+
+.annotation-toolbox-visual--label::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 7px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #831843;
+}
+
+.annotation-toolbox-visual--frame {
+  width: 24px;
+  height: 18px;
+  border: 2px solid #93c5fd;
+  border-radius: 3px;
+}
+
+.annotation-toolbox-visual--vote-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: inset 0 0 0 3px rgba(240, 253, 244, 0.65);
+}
+
+.annotation-toolbox-visual--image {
+  width: 25px;
+  height: 20px;
+  border: 2px solid #c4b5fd;
+  border-radius: 4px;
+  background: linear-gradient(135deg, transparent 52%, rgba(196, 181, 253, 0.45) 52%);
+}
+
+.annotation-toolbox-visual--image::before,
+.annotation-toolbox-visual--image::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--image::before {
+  left: 4px;
+  top: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #c4b5fd;
+}
+
+.annotation-toolbox-visual--image::after {
+  left: 4px;
+  bottom: 3px;
+  width: 15px;
+  height: 8px;
+  background: #c4b5fd;
+  clip-path: polygon(0 100%, 38% 28%, 56% 62%, 75% 38%, 100% 100%);
+}
+
+.annotation-toolbox-visual--freehand {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--freehand::before,
+.annotation-toolbox-visual--freehand::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--freehand::before {
+  left: 5px;
+  top: 11px;
+  width: 18px;
+  height: 4px;
+  border-radius: 999px;
+  background: #f8fafc;
+  transform: rotate(-38deg);
+}
+
+.annotation-toolbox-visual--freehand::after {
+  left: 4px;
+  bottom: 4px;
+  width: 13px;
+  height: 5px;
+  border-bottom: 2px solid #38bdf8;
+  border-radius: 50%;
+  transform: rotate(-18deg);
+}
+
+.annotation-toolbox-icon-glyph {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 2px solid #38bdf8;
+  background: rgba(8, 47, 73, 0.65);
+  color: #f8fafc;
+  font-size: 15px;
+}
+
+.annotation-toolbox-icon-glyph--abbreviated {
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .annotation-toolbox-shape-glyph {
@@ -162,9 +328,9 @@
   justify-content: center;
   padding: 0;
   border-radius: 999px;
-  border: 1px solid #b45309;
-  background: #1a1612;
-  color: #fbbf24;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  background: #0f172a;
+  color: #7dd3fc;
   font-size: 10px;
   line-height: 1;
   cursor: pointer;
@@ -172,8 +338,8 @@
 
 .annotation-toolbox-slot-corner:hover,
 .annotation-toolbox-slot-corner:focus-visible {
-  background: #3f3a34;
-  border-color: #fbbf24;
+  background: #1e293b;
+  border-color: #38bdf8;
 }
 
 /* Compact/touch cells grow past 44px (see the @media/--compact/--touch rules
@@ -210,9 +376,9 @@
   transform: translate(-50%, -100%);
   padding: 4px 8px;
   border-radius: 6px;
-  border: 1px solid #b45309;
-  background: rgba(26, 22, 18, 0.97);
-  color: #fde68a;
+  border: 1px solid rgba(148, 163, 184, 0.65);
+  background: rgba(15, 23, 42, 0.97);
+  color: #f8fafc;
   font-size: 12px;
   line-height: 1.3;
   white-space: nowrap;

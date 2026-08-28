@@ -4,10 +4,8 @@ import './ToolSlotPicker.css';
 
 /**
  * Fold-out list opened by a collapsed "tool slot" button (see
- * `useToolSlotSelection`). AnnotationToolbox's shape slot is the first
- * caller; task-annotation-icon-slot-and-visuals is meant to reuse this
- * component for its icon slot rather than growing a second, hand-copied
- * fold-out — the two should look and behave identically.
+ * `useToolSlotSelection`). AnnotationToolbox uses this for both shape and
+ * icon slots so the two collapsed tool families look and behave identically.
  *
  * Portalled to document.body (the toolbox's own stacking/clip context would
  * otherwise cut it off, the same reason AnnotationToolbox's hover tooltip is

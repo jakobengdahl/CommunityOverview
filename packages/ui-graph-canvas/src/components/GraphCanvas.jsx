@@ -405,7 +405,11 @@ function GraphCanvasInner({
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    shapePickerOpen: 'Choose a shape',
+    shapePicker: 'Shapes',
     icon: 'Icon',
+    iconPickerOpen: 'Choose an icon',
+    iconPicker: 'Icons',
     voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
@@ -1316,10 +1320,11 @@ function GraphCanvasInner({
   );
 
   // Create a free-floating annotation (note, label, arrow, or one of the
-  // generic overlay kinds - text/frame/shape) at the given flow position.
+  // generic overlay kinds - text/frame/shape/icon) at the given flow position.
   // These are persisted in the session annotation list via the save-view
   // round-trip; onAnnotationChange schedules that save. `options.shape` picks
-  // the shape variant for kind 'shape' (defaults to 'rectangle').
+  // the shape variant for kind 'shape' (defaults to 'rectangle');
+  // `options.icon` picks the icon for kind 'icon' (defaults to circle).
   const createAnnotation = useCallback(
     (kind, position, options = {}) => {
       const id = `${kind}-${Date.now()}`;
@@ -1361,9 +1366,8 @@ function GraphCanvasInner({
           type: 'shape',
           position,
           // `text: ''` (not omitted) matches the `text`-kind branch above —
-          // a freshly created shape has no caption yet
-          // (task-annotation-doubleclick-to-edit-text), but the field
-          // itself already exists rather than being absent until first edit.
+          // a freshly created shape has no caption yet, but the field itself
+          // already exists rather than being absent until first edit.
           data: { shape, text: '', color: undefined },
           style: newShapeSize(shape),
         };
@@ -1376,12 +1380,13 @@ function GraphCanvasInner({
         // instead of being dropped and later defaulted to a mismatched
         // 160x96 box. The default icon matches what an icon annotation with
         // no configured name already renders (resolveAnnotationIcon).
+        const icon = options.icon || DEFAULT_ANNOTATION_ICON;
         newNode = {
           id,
           type: 'icon',
           position,
           data: {
-            icon: DEFAULT_ANNOTATION_ICON,
+            icon,
             color: undefined,
             size: { ...ICON_INTRINSIC_SIZE },
           },

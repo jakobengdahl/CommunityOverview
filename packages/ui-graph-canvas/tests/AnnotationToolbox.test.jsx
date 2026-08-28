@@ -7,8 +7,8 @@ import AnnotationToolbox from '../src/components/AnnotationToolbox';
 // Read the stylesheet as text: jsdom applies no layout and vitest resolves a
 // CSS import to an empty module, so the only way to assert a rule from here is
 // to read the source. Named so the limitation is obvious at the call site.
-function readStylesheet() {
-  return readFileSync(join(process.cwd(), 'src/components/AnnotationToolbox.css'), 'utf8');
+function readStylesheet(file = 'AnnotationToolbox.css') {
+  return readFileSync(join(process.cwd(), 'src/components', file), 'utf8');
 }
 
 // Opens the shape slot's picker and selects `name` (a role name regex) from
@@ -18,6 +18,12 @@ function readStylesheet() {
 function selectShapeVariant(name) {
   fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
   const picker = screen.getByRole('group', { name: /^shapes$/i });
+  fireEvent.click(within(picker).getByRole('button', { name }));
+}
+
+function selectIconVariant(name) {
+  fireEvent.click(screen.getByRole('button', { name: /choose an icon/i }));
+  const picker = screen.getByRole('group', { name: /^icons$/i });
   fireEvent.click(within(picker).getByRole('button', { name }));
 }
 
@@ -54,7 +60,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
   });
 
-  it('expands to show every wired annotation kind on toggle click, with the shape slot standing in for every shape variant', () => {
+  it('expands to show every wired annotation kind on toggle click, with slots standing in for shapes and icons', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
@@ -63,15 +69,15 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^label$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^frame$/i })).toBeInTheDocument();
     // The shape slot shows the default shape (rectangle) as its own name;
-    // every other variant now lives in the picker, not as a top-level button
-    // (task-annotation-shapes-under-one-toolbox-slot).
+    // every other variant now lives in the picker, not as a top-level button.
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^circle$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^triangle$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^rhombus$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^hexagon$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^process arrow$/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^icon$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^icon: circle$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /choose an icon/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^vote dot$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
   });
@@ -171,13 +177,13 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('image', undefined);
   });
 
-  it('calls onCreate with the icon kind and no options', () => {
+  it('calls onCreate with the icon kind and default icon option', () => {
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    fireEvent.click(screen.getByRole('button', { name: /^icon$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('icon', undefined);
+    fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+    expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'circle' });
   });
 
   it('calls onCreate with the vote_dot kind and no options', () => {
@@ -330,38 +336,23 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('tooltip')).toHaveTextContent('Lägg till en klisterlapp');
   });
 
-  it('gives every emoji glyph that needs one its variation selector', () => {
-    // A pictographic code point with Emoji_Presentation=No renders text-style
-    // or as tofu unless U+FE0F follows it. U+1F5D2 (sticky note) and U+270F
-    // (pencil) are both in that class; U+1F518 and U+26AB are
-    // Emoji_Presentation=Yes and correctly carry none.
-    //
-    // This is a checked LIST, not a derived rule — the property is a Unicode
-    // table this package does not carry, so a glyph added later is not
-    // covered until it is added here. Naming that plainly rather than dressing
-    // the list up as a rule, because the first version of this test claimed
-    // the rule and then skipped U+270F, which is in the toolbox already.
-    const NEEDS_SELECTOR = new Set([0x1f5d2, 0x1f3f7, 0x1f5bc, 0x270f]);
-
+  it('draws toolbox visuals from one modern glyph system, with the note as a post-it', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    const glyphs = [...document.querySelectorAll('.annotation-toolbox-item-glyph')].map(
-      (el) => el.textContent
-    );
-    expect(glyphs.length).toBeGreaterThan(1);
+    const note = screen.getByRole('button', { name: /^note$/i });
+    expect(note.querySelector('.annotation-toolbox-visual--note')).toBeTruthy();
+    expect(note.querySelector('.annotation-toolbox-item-glyph').textContent).not.toContain('🗒');
 
-    const checked = new Set();
-    for (const glyph of glyphs) {
-      const [first, second] = [...glyph].map((c) => c.codePointAt(0));
-      if (!NEEDS_SELECTOR.has(first)) continue;
-      checked.add(first);
-      expect(second).toBe(0xfe0f);
+    for (const name of ['text', 'label', 'frame', 'vote-dot', 'image', 'freehand']) {
+      expect(document.querySelector(`.annotation-toolbox-visual--${name}`)).toBeTruthy();
     }
-    // Guard the other direction: if one of these glyphs leaves the toolbox the
-    // test would otherwise pass for no reason. Distinct code points, so a
-    // second item legitimately reusing one does not read as drift.
-    expect(checked.size).toBe(NEEDS_SELECTOR.size);
+    expect(document.querySelector('.annotation-toolbox-icon-glyph')).toBeTruthy();
+
+    const css = readStylesheet();
+    expect(css).toMatch(/\.annotation-toolbox-visual--note \{[^}]*background:\s*#fde047/);
+    expect(css).toMatch(/\.annotation-toolbox-visual--note::before \{[^}]*bottom:\s*0/);
+    expect(css).toMatch(/\.annotation-toolbox-icon-glyph \{[^}]*border:\s*2px solid #38bdf8/);
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {
@@ -429,6 +420,21 @@ describe('AnnotationToolbox', () => {
       );
     });
 
+    it("includes the icon option in the dataTransfer payload for the slot's current icon variant", () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectIconVariant(/^star$/i);
+
+      const setData = vi.fn();
+      fireEvent.dragStart(screen.getByRole('button', { name: /^icon: star$/i }), {
+        dataTransfer: { setData, effectAllowed: '' },
+      });
+      expect(setData).toHaveBeenCalledWith(
+        'application/annotation-kind',
+        JSON.stringify({ kind: 'icon', icon: 'star' })
+      );
+    });
+
     it('never fires a dataTransfer payload for image or freehand (no dragstart handler at all)', () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -486,6 +492,20 @@ describe('AnnotationToolbox', () => {
       dispatch(window, pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
 
       expect(onDragCreate).toHaveBeenCalledWith('shape', { shape: 'circle' }, { x: 60, y: 60 });
+    });
+
+    it("passes the icon option through onDragCreate for the slot's current icon variant", () => {
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectIconVariant(/^flag$/i);
+
+      const icon = screen.getByRole('button', { name: /^icon: flag$/i });
+      dispatch(icon, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
+
+      expect(onDragCreate).toHaveBeenCalledWith('icon', { icon: 'flag' }, { x: 60, y: 60 });
     });
 
     it('treats a press-and-release under the threshold as a plain click, not a drag', () => {
@@ -1084,6 +1104,57 @@ describe('AnnotationToolbox', () => {
 
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
       expect(elsewhere).toHaveFocus();
+    });
+  });
+
+  describe('icon slot', () => {
+    const STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
+
+    it('creates the current default icon on a plain click', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'circle' });
+    });
+
+    it('creates the selected icon after picking it from the slot picker', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose an icon/i }));
+      const css = readStylesheet('ToolSlotPicker.css');
+      expect(css).toMatch(
+        /\.tool-slot-picker \{[^}]*max-height:\s*min\(360px, calc\(100vh - 120px\)\)/
+      );
+      expect(css).toMatch(/\.tool-slot-picker \{[^}]*overflow-y:\s*auto/);
+      fireEvent.click(
+        within(screen.getByRole('group', { name: /^icons$/i })).getByRole('button', {
+          name: /^star$/i,
+        })
+      );
+      expect(screen.queryByRole('group', { name: /^icons$/i })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /^icon: star$/i }));
+      expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'star' });
+    });
+
+    it('remembers the selected icon in localStorage and ignores stale values', () => {
+      localStorage.setItem(STORAGE_KEY, 'flag');
+      const { unmount } = render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectIconVariant(/^star$/i);
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('star');
+      unmount();
+
+      localStorage.setItem(STORAGE_KEY, 'missing-icon');
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+      expect(onCreate).toHaveBeenCalledWith('icon', { icon: 'circle' });
     });
   });
 });

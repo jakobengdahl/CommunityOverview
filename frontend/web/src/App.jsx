@@ -2472,6 +2472,8 @@ function App() {
             shapePickerOpen: t('annotation_toolbox.shape_picker_open'),
             shapePicker: t('annotation_toolbox.shape_picker'),
             icon: t('annotation_toolbox.icon'),
+            iconPickerOpen: t('annotation_toolbox.icon_picker_open'),
+            iconPicker: t('annotation_toolbox.icon_picker'),
             voteDot: t('annotation_toolbox.vote_dot'),
             image: t('annotation_toolbox.image'),
             freehand: t('annotation_toolbox.freehand'),

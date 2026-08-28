@@ -1,7 +1,7 @@
 /* Fold-out list opened by a tool slot's corner button / right-click (see
-   ToolSlotPicker.jsx). Same amber/dark visual language as AnnotationToolbox
-   so the two read as one surface, positioned in screen space the same way
-   the toolbox's own hover tooltip and drag ghost are. */
+   ToolSlotPicker.jsx). Same dark visual language as AnnotationToolbox so the
+   two read as one surface, positioned in screen space the same way the
+   toolbox's own hover tooltip and drag ghost are. */
 .tool-slot-picker {
   position: fixed;
   z-index: 2000;
@@ -10,10 +10,13 @@
   flex-wrap: wrap;
   gap: 6px;
   max-width: 220px;
+  max-height: min(360px, calc(100vh - 120px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   border-radius: 12px;
-  border: 1px solid #b45309;
-  background: rgba(26, 22, 18, 0.97);
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: rgba(15, 23, 42, 0.97);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 

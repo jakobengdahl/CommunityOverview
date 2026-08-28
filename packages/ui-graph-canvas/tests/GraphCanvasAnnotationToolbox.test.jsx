@@ -2,11 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
-// The shape slot (task-annotation-shapes-under-one-toolbox-slot) shows only
-// the currently selected shape as a top-level button; every other variant
-// has to be picked from its fold-out first. `within` scopes the picker
-// selection so it can never match the slot's own current-shape button (e.g.
-// selecting "Rectangle" while the slot already shows "Rectangle").
+// The shape slot shows only the currently selected shape as a top-level
+// button; every other variant has to be picked from its fold-out first.
+// `within` scopes the picker selection so it can never match the slot's own
+// current-shape button (e.g. selecting "Rectangle" while the slot already
+// shows "Rectangle").
 function selectShapeVariant(name) {
   fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
   const picker = screen.getByRole('group', { name: /^shapes$/i });
@@ -166,9 +166,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(shape.data.shape).toBe('circle');
   });
 
-  // task-annotation-doubleclick-to-edit-text: a shape's optional caption
-  // field is present from creation (matching `text`-kind's own branch just
-  // above in GraphCanvas.jsx), not merely absent until a user's first edit.
+  // A shape's optional caption field is present from creation (matching
+  // `text`-kind's own branch just above in GraphCanvas.jsx), not merely
+  // absent until a user's first edit.
   it('creates a shape annotation with an empty caption already present', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -178,12 +178,10 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(shape.data.text).toBe('');
   });
 
-  // task-annotation-render-direct-manipulation remaining_scope: "icon/vote_dot
-  // GUI creation is still not implemented" — closed here.
-  it('creates an icon annotation via the toolbox with a default icon and size', () => {
+  it('creates an icon annotation via the toolbox with the default icon and size', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^icon$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
 
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
@@ -191,6 +189,20 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // No `style` box (fixed intrinsic size) — geometry lives in `data.size`
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
+    expect(icon.data.size).toEqual({ w: 32, h: 32 });
+  });
+
+  it('creates the icon selected in the toolbox icon slot', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /choose an icon/i }));
+    const picker = screen.getByRole('group', { name: /^icons$/i });
+    fireEvent.click(within(picker).getByRole('button', { name: /^star$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^icon: star$/i }));
+
+    const icon = findCreatedNode('icon');
+    expect(icon).toBeTruthy();
+    expect(icon.data.icon).toBe('star');
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
   });
 
