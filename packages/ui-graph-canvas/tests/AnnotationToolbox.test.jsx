@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import AnnotationToolbox from '../src/components/AnnotationToolbox';
 
 // Read the stylesheet as text: jsdom applies no layout and vitest resolves a
@@ -11,7 +11,22 @@ function readStylesheet() {
   return readFileSync(join(process.cwd(), 'src/components/AnnotationToolbox.css'), 'utf8');
 }
 
+// Opens the shape slot's picker and selects `name` (a role name regex) from
+// it, scoped to the picker panel (`within`) so an ambiguous match against the
+// slot's own current-shape button — e.g. selecting "Rectangle" while the slot
+// is already showing "Rectangle" — can never occur.
+function selectShapeVariant(name) {
+  fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+  const picker = screen.getByRole('group', { name: /^shapes$/i });
+  fireEvent.click(within(picker).getByRole('button', { name }));
+}
+
 describe('AnnotationToolbox', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+
   it('renders collapsed by default, showing only the toggle', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     expect(screen.getByTestId('annotation-toolbox')).toBeInTheDocument();
@@ -19,7 +34,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
   });
 
-  it('expands to show every wired annotation kind on toggle click', () => {
+  it('expands to show every wired annotation kind on toggle click, with the shape slot standing in for every shape variant', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
@@ -27,12 +42,15 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^text$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^label$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^frame$/i })).toBeInTheDocument();
+    // The shape slot shows the default shape (rectangle) as its own name;
+    // every other variant now lives in the picker, not as a top-level button
+    // (task-annotation-shapes-under-one-toolbox-slot).
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^circle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^triangle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^rhombus$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^process arrow$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^circle$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^triangle$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^rhombus$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^hexagon$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^process arrow$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^icon$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^vote dot$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
@@ -65,8 +83,9 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('frame', undefined);
   });
 
-  // Every accepted content.shape variant is offered, not only the two that
-  // used to render distinctly (docs/ANNOTATION_CONTRACT.md, `shape` row).
+  // Every accepted content.shape variant is still offered — now via the
+  // shape slot's picker rather than its own top-level button
+  // (docs/ANNOTATION_CONTRACT.md, `shape` row).
   it.each([
     [/^rectangle$/i, 'rectangle'],
     [/^circle$/i, 'circle'],
@@ -74,14 +93,21 @@ describe('AnnotationToolbox', () => {
     [/^rhombus$/i, 'rhombus'],
     [/^hexagon$/i, 'hexagon'],
     [/^process arrow$/i, 'process_arrow'],
-  ])('calls onCreate with the shape kind and the %s variant', (name, shape) => {
-    const onCreate = vi.fn();
-    render(<AnnotationToolbox onCreate={onCreate} />);
-    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+  ])(
+    'calls onCreate with the shape kind and the %s variant once selected in the picker',
+    (name, shape) => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    fireEvent.click(screen.getByRole('button', { name }));
-    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
-  });
+      selectShapeVariant(name);
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+
+      // Selecting made the slot itself this shape; clicking it creates it.
+      fireEvent.click(screen.getByRole('button', { name }));
+      expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
+    }
+  );
 
   it('calls onCreate with the image kind and no options, like the other simple kinds', () => {
     const onCreate = vi.fn();
@@ -354,9 +380,10 @@ describe('AnnotationToolbox', () => {
       );
     });
 
-    it('includes the shape option in the dataTransfer payload for a shape variant', () => {
+    it("includes the shape option in the dataTransfer payload for the slot's current shape variant", () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectShapeVariant(/^hexagon$/i);
 
       const setData = vi.fn();
       fireEvent.dragStart(screen.getByRole('button', { name: /^hexagon$/i }), {
@@ -413,10 +440,11 @@ describe('AnnotationToolbox', () => {
       expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
     });
 
-    it('passes the shape option through onDragCreate for a shape variant', () => {
+    it("passes the shape option through onDragCreate for the slot's current shape variant", () => {
       const onDragCreate = vi.fn();
       render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectShapeVariant(/^circle$/i);
 
       const circle = screen.getByRole('button', { name: /^circle$/i });
       dispatch(circle, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
@@ -477,7 +505,11 @@ describe('AnnotationToolbox', () => {
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
       const note = screen.getByRole('button', { name: /^note$/i });
-      const circle = screen.getByRole('button', { name: /^circle$/i });
+      // `label` stands in for the old `circle` shape button as "a different
+      // item" here — any two distinct toolbox buttons prove the same
+      // per-item independence; the shape slot collapsing six of them into
+      // one is orthogonal to what this regression test is about.
+      const label = screen.getByRole('button', { name: /^label$/i });
 
       // Pointer 1 completes a drag on `note` — opens note's suppression window.
       dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
@@ -486,17 +518,17 @@ describe('AnnotationToolbox', () => {
       expect(onDragCreate).toHaveBeenCalledTimes(1);
 
       // Before note's own synthetic click arrives, pointer 2 presses and
-      // releases `circle` as a plain tap (under the drag threshold) — a
+      // releases `label` as a plain tap (under the drag threshold) — a
       // genuine, unrelated click on a different button.
-      dispatch(circle, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
+      dispatch(label, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
       dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 6, clientY: 5 }));
-      fireEvent.click(circle);
-      // circle's own click must NOT be swallowed by note's pending suppression.
-      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'circle' });
+      fireEvent.click(label);
+      // label's own click must NOT be swallowed by note's pending suppression.
+      expect(onCreate).toHaveBeenCalledWith('label', undefined);
 
       // note's own synthetic click now arrives — it must still be suppressed.
       fireEvent.click(note);
-      expect(onCreate).toHaveBeenCalledTimes(1); // only circle's, not note's
+      expect(onCreate).toHaveBeenCalledTimes(1); // only label's, not note's
       expect(onDragCreate).toHaveBeenCalledTimes(1);
     });
 
@@ -653,6 +685,159 @@ describe('AnnotationToolbox', () => {
 
       expect(onDragCreate).not.toHaveBeenCalled();
       expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
+  });
+
+  describe('shape slot', () => {
+    const STORAGE_KEY = 'communityoverview:annotation-toolbox:shape-slot';
+
+    it('creates the current (default) shape on a plain click, same as any other item', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
+    });
+
+    it('opens the picker on a corner-button click, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('opens the picker on a right-click of the slot, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.contextMenu(screen.getByRole('button', { name: /^rectangle$/i }));
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('is keyboard-reachable: the corner button is a real, enabled, native <button> distinct from the slot, so Enter/Space opens the picker', () => {
+      // jsdom does not synthesize the browser's native "Enter/Space on a
+      // focused <button> fires click" behaviour, so there is nothing to
+      // dispatch here beyond what any real user agent already guarantees for
+      // a native, enabled <button>. What actually has to be proven is that
+      // the corner button IS that — not a div/span standing in for one,
+      // which Enter/Space would silently do nothing to.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const slot = screen.getByRole('button', { name: /^rectangle$/i });
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      expect(corner).not.toBe(slot);
+      expect(corner.tagName).toBe('BUTTON');
+      expect(corner).toHaveAttribute('type', 'button');
+      expect(corner).not.toBeDisabled();
+
+      fireEvent.click(corner);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('keeps the slot and the corner button as two separate, sequential elements in tab order', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const slot = screen.getByRole('button', { name: /^rectangle$/i });
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      expect(slot).not.toBe(corner);
+      // Neither opts out of the natural tab order.
+      expect(slot).not.toHaveAttribute('tabindex', '-1');
+      expect(corner).not.toHaveAttribute('tabindex', '-1');
+      // DOM order is tab order here (both at the default tabIndex) — the
+      // slot's own button must precede its corner button.
+      const position = slot.compareDocumentPosition(corner);
+      expect(Boolean(position & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    });
+
+    it('selecting a shape in the picker updates the slot and persists the choice to localStorage', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      selectShapeVariant(/^hexagon$/i);
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('hexagon');
+    });
+
+    it('reads the remembered shape from localStorage on mount, not the built-in default', () => {
+      localStorage.setItem(STORAGE_KEY, 'triangle');
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^triangle$/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^rectangle$/i })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the built-in default for a stored value that names no real shape', () => {
+      localStorage.setItem(STORAGE_KEY, 'not-a-real-shape');
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
+    });
+
+    it('closes the picker on Escape and returns focus to the corner button', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      fireEvent.keyDown(picker, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /choose a shape/i })).toHaveFocus();
+    });
+
+    it('closes the picker on an outside click, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      fireEvent.mouseDown(document.body);
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('does not open the picker or create anything from a plain click inside the picker background', () => {
+      // Regression guard for the outside-click handler: clicking one of the
+      // picker's own option buttons must select it (covered elsewhere), not
+      // be treated as "outside" and just close without effect.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      fireEvent.mouseDown(picker);
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('closes the picker when the toolbox itself collapses', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      const toggle = screen.getByRole('button', { name: /add annotation/i });
+      fireEvent.click(toggle);
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /collapse annotation toolbox/i }));
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
   });
 });
