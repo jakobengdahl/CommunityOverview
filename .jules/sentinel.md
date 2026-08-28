@@ -10,3 +10,7 @@
 **Vulnerability:** API endpoints returned `str(e)` in 500 error responses, potentially leaking sensitive internal information (for example file paths, database schemas, or stack traces).
 **Learning:** Passing the raw exception string directly to the `HTTPException` detail parameter is a common CWE-209 pattern.
 **Prevention:** Use `logger.exception()` to log the full traceback server-side, and return a generic message such as `Internal server error` to the client for unexpected 500 responses.
+## 2025-02-26 - Substring-based authentication bypass
+**Vulnerability:** Substring-based authentication bypass
+**Learning:** Using `"/api/sessions/" in request.url.path` to conditionally skip authentication in FastAPI middleware is vulnerable to substring bypasses. For example, an attacker requesting `/admin_secret/api/sessions/foo/stream` (a hypothetical sensitive endpoint) would inadvertently bypass authentication because it contains `/api/sessions/`.
+**Prevention:** Use a combination of exact string matching (`path == "/route"`) and strict subdirectory matching (`path.startswith("/route/")`) to accurately and securely identify the intended routes for auth exclusion/inclusion. Never use `in` operator for route matching.

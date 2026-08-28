@@ -242,7 +242,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # Visualization session endpoints are secured by the session ID itself
         # (CSPRNG, 100M-combination address space).  The browser's EventSource
         # cannot send Authorization headers, so these routes must bypass auth.
-        if request.url.path.startswith("/sessions/"):
+        if request.url.path == "/sessions" or request.url.path.startswith("/sessions/"):
             return await call_next(request)
 
         # The shared-session SSE stream (/api/sessions/{id}/stream) is likewise
@@ -252,7 +252,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # bypassed; the CRUD/ops endpoints are reached by fetch and stay guarded.
         if (
             request.url.path.endswith("/stream")
-            and "/api/sessions/" in request.url.path
+            and request.url.path.startswith("/api/sessions/")
         ):
             return await call_next(request)
 
