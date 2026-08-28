@@ -446,14 +446,26 @@ function AnnotationToolbox({
         <button
           type="button"
           className="annotation-toolbox-item annotation-toolbox-item--draggable"
-          onClick={() => {
-            // The picker floats above the toolbox, not over the main
-            // button, and the button sits inside the picker's own anchor
-            // (shapeSlotRef) — so ToolSlotPicker's outside-click check
-            // treats a click here as "inside the anchor" and leaves it
-            // open. Close it explicitly on any interaction with the main
-            // button, whether or not this click goes on to create.
+          // The picker floats above the toolbox, not over the main button,
+          // and the button sits inside the picker's own anchor
+          // (shapeSlotRef) — so ToolSlotPicker's outside-click check treats
+          // an interaction here as "inside the anchor" and leaves it open
+          // on its own. Close it explicitly on mousedown (covers both a
+          // plain click and the start of an HTML5 drag — neither of which
+          // fires this button's own onClick once a real drag completes, see
+          // finishDrag's comment above) and again in onClick (the only path
+          // a keyboard Enter/Space activation takes, since it never fires
+          // mousedown/pointerdown at all).
+          onMouseDown={() => setShapePickerOpen(false)}
+          onClick={(event) => {
             setShapePickerOpen(false);
+            // Explicit rather than relying on the browser's own
+            // click-focuses-the-button behaviour: WebKit (desktop Safari,
+            // iOS Safari) does not focus a <button> on click/tap, so without
+            // this ToolSlotPicker's cleanup effect would see focus as never
+            // having moved and force it onto the corner button instead of
+            // leaving it here, on the control the user actually activated.
+            event.currentTarget.focus();
             if (consumeSuppressedClick(SHAPE_SLOT_ITEM_KEY)) return;
             setHovered(null);
             onCreate?.('shape', options);
@@ -485,7 +497,14 @@ function AnnotationToolbox({
           }}
           onPointerDown={
             touch
-              ? (e) => handlePointerDown(e, 'shape', options, variant.glyph, SHAPE_SLOT_ITEM_KEY)
+              ? (e) => {
+                  // Touch has no separate mousedown-vs-click split — this is
+                  // the one entry point for both a tap and a drag, so the
+                  // picker-close call above's touch-path equivalent lives
+                  // here rather than being reachable from onMouseDown.
+                  setShapePickerOpen(false);
+                  handlePointerDown(e, 'shape', options, variant.glyph, SHAPE_SLOT_ITEM_KEY);
+                }
               : undefined
           }
         >

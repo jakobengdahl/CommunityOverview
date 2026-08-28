@@ -21,6 +21,27 @@ function selectShapeVariant(name) {
   fireEvent.click(within(picker).getByRole('button', { name }));
 }
 
+// jsdom has no PointerEvent constructor — build one from MouseEvent, the same
+// pattern GraphCanvasFreehandDrawing.test.jsx and GraphCanvasTouch.test.jsx
+// use for the identical limitation. Module-scoped (not just inside the
+// 'drag-to-create' describe below) so the 'shape slot' describe can drive the
+// same coarse-pointer drag path.
+function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  return event;
+}
+
+// The pointer handlers are attached via plain addEventListener (see
+// AnnotationToolbox's handlePointerDown), not React's synthetic event system,
+// so a dispatch outside act() leaves the resulting state update unflushed
+// when the very next line asserts on it.
+function dispatch(target, event) {
+  act(() => {
+    target.dispatchEvent(event);
+  });
+}
+
 describe('AnnotationToolbox', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -318,25 +339,6 @@ describe('AnnotationToolbox', () => {
   });
 
   describe('drag-to-create', () => {
-    // jsdom has no PointerEvent constructor — build one from MouseEvent, the
-    // same pattern GraphCanvasFreehandDrawing.test.jsx and
-    // GraphCanvasTouch.test.jsx use for the identical limitation.
-    function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
-      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
-      Object.defineProperty(event, 'pointerId', { value: pointerId });
-      return event;
-    }
-
-    // The pointer handlers are attached via plain addEventListener (see
-    // AnnotationToolbox's handlePointerDown), not React's synthetic event
-    // system, so a dispatch outside act() leaves the resulting state update
-    // unflushed when the very next line asserts on it.
-    function dispatch(target, event) {
-      act(() => {
-        target.dispatchEvent(event);
-      });
-    }
-
     it('is HTML5-draggable by default (fine pointer) for every kind that creates an object', () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -721,6 +723,61 @@ describe('AnnotationToolbox', () => {
       fireEvent.click(within(toolbox).getByRole('button', { name: /^rectangle$/i }));
 
       expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('moves focus onto the main slot button itself when it closes an open picker on click', () => {
+      // Regression test: relying on the browser's own click-focuses-the-
+      // button behaviour is not cross-browser (WebKit does not focus a
+      // <button> on click/tap) — without an explicit focus() call here,
+      // ToolSlotPicker's cleanup effect would see focus as never having
+      // moved and force it onto the corner button instead of leaving it on
+      // the control the user actually activated.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      fireEvent.click(slot);
+
+      expect(slot).toHaveFocus();
+    });
+
+    it('closes an open picker when a drag-to-create is performed on the main slot button (coarse-pointer path)', () => {
+      // Regression test: the picker-closing fix originally lived only in the
+      // main button's onClick, but a completed drag never fires onClick (the
+      // browser's synthetic click after a real drag release, if any,
+      // typically lands away from the button — see finishDrag's own comment
+      // in AnnotationToolbox.jsx) — so a drag-to-create used to leave the
+      // picker dangling open above the toolbox after the shape had already
+      // been created.
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      dispatch(slot, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 50, clientY: 50 }));
+
+      expect(onDragCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' }, { x: 50, y: 50 });
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('closes an open picker as soon as an HTML5 (fine-pointer) drag starts on the main slot button', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      fireEvent.mouseDown(slot);
+
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
 
