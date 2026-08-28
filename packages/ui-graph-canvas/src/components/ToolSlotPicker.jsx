@@ -14,11 +14,19 @@ import './ToolSlotPicker.css';
  * portalled) and positioned above `anchorRef`'s element, centred on it — "a
  * fold-out above the toolbox" per the owner's spec; anchoring on the slot
  * itself, which sits inside the bottom-anchored toolbox, satisfies that
- * without needing a second ref just for vertical placement.
+ * without needing a second ref just for vertical placement. Uses `top`
+ * (the anchor's own top edge, minus a gap) together with the CSS
+ * `translateY(-100%)`, the exact same pairing AnnotationToolbox's own hover
+ * tooltip uses (see `showTip`) to sit flush above a point — pairing that
+ * transform with `bottom` instead would double-offset the panel upward by
+ * its own height on top of the intended gap.
  *
  * Dismisses on Escape or an outside click/tap and returns focus to
  * `returnFocusRef`'s element, the same convention ContextMenus.jsx's
- * `Submenu` uses for its own flyout.
+ * `useMenuOpenFocus` uses for its own flyouts — including not stealing focus
+ * back on close if it had already moved elsewhere on the page while the
+ * picker was open (e.g. the outside click that closed it landed on a real
+ * focusable control, not just the canvas background).
  */
 export function ToolSlotPicker({
   anchorRef,
@@ -30,6 +38,16 @@ export function ToolSlotPicker({
   ariaLabel,
 }) {
   const panelRef = useRef(null);
+  const focusMovedAwayRef = useRef(false);
+  // Kept current via refs (not effect dependencies) so the outside-click
+  // listener below is wired up once per mount rather than torn down and
+  // re-added on every unrelated re-render of the host toolbox while the
+  // picker happens to be open — `onSelect`/`onClose` are fresh inline
+  // closures from the caller's render on every such render.
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // Measures and positions the panel imperatively (rather than round-tripping
   // through React state) so the very first paint already shows it in the
@@ -41,16 +59,31 @@ export function ToolSlotPicker({
     if (!anchor || !panel) return;
     const rect = anchor.getBoundingClientRect();
     panel.style.left = `${rect.left + rect.width / 2}px`;
-    panel.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    panel.style.top = `${rect.top - 8}px`;
     panel.querySelector('button')?.focus();
   }, [anchorRef]);
 
+  // Tracks whether focus already moved somewhere else on the page while the
+  // picker was open, so the close effect below doesn't yank it back out of
+  // wherever the user actually clicked/tabbed to.
+  useEffect(() => {
+    focusMovedAwayRef.current = false;
+    const handleFocusIn = (event) => {
+      if (panelRef.current && !panelRef.current.contains(event.target)) {
+        focusMovedAwayRef.current = true;
+      }
+    };
+    document.addEventListener('focusin', handleFocusIn, true);
+    return () => document.removeEventListener('focusin', handleFocusIn, true);
+  }, []);
+
   // Returns focus to whatever opened the picker (the corner button,
   // typically) once it closes for any reason — Escape, an outside
-  // click/tap, or picking an option — mirrors useMenuOpenFocus in
-  // ContextMenus.jsx.
+  // click/tap, or picking an option — unless focus already moved away on
+  // its own (see the effect above).
   useEffect(
     () => () => {
+      if (focusMovedAwayRef.current) return;
       const target = returnFocusRef?.current;
       if (target && typeof target.focus === 'function' && document.contains(target)) {
         target.focus();
@@ -63,22 +96,28 @@ export function ToolSlotPicker({
     const handleOutside = (event) => {
       if (panelRef.current?.contains(event.target)) return;
       if (anchorRef.current?.contains(event.target)) return;
-      onClose();
+      onCloseRef.current();
     };
     document.addEventListener('mousedown', handleOutside, true);
     return () => document.removeEventListener('mousedown', handleOutside, true);
-  }, [anchorRef, onClose]);
+  }, [anchorRef]);
 
   const handleKeyDown = (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      onClose();
+      onCloseRef.current();
     }
   };
 
   return createPortal(
-    <div ref={panelRef} role="group" aria-label={ariaLabel} className="tool-slot-picker" onKeyDown={handleKeyDown}>
+    <div
+      ref={panelRef}
+      role="group"
+      aria-label={ariaLabel}
+      className="tool-slot-picker"
+      onKeyDown={handleKeyDown}
+    >
       {options.map((option) => (
         <button
           key={option.key}
@@ -87,7 +126,7 @@ export function ToolSlotPicker({
           className={`tool-slot-picker-item${
             option.key === currentKey ? ' tool-slot-picker-item--current' : ''
           }`}
-          onClick={() => onSelect(option.key)}
+          onClick={() => onSelectRef.current(option.key)}
         >
           <span className="tool-slot-picker-item-glyph" aria-hidden="true">
             {option.glyph}

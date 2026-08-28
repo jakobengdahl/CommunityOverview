@@ -839,5 +839,51 @@ describe('AnnotationToolbox', () => {
 
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
+
+    it("positions the panel with `top` (paired with the CSS translateY(-100%)), not `bottom`, so it isn't double-offset away from the slot", () => {
+      // Regression test: `position: fixed` + `bottom: Npx` already anchors
+      // the panel's own bottom edge N px above the viewport bottom: pairing
+      // that with the stylesheet's translateY(-100%) (meant for the `top`
+      // convention AnnotationToolbox's own hover tooltip uses — see
+      // `showTip`) shifts it up by its own height a second time, landing it
+      // detached from the slot instead of flush above it.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      expect(picker.style.top).not.toBe('');
+      expect(picker.style.bottom).toBe('');
+    });
+
+    it('does not steal focus back on close once it has already moved elsewhere while the picker was open', () => {
+      // Regression test: once focus has genuinely moved to some other
+      // focusable element while the picker is open (a `focusin` outside the
+      // panel), closing the picker must not yank it back onto the corner
+      // button — mirrors ContextMenus.jsx's useMenuOpenFocus, which skips its
+      // own restore once a `focusin` fired somewhere outside the menu.
+      render(
+        <div>
+          <button type="button">elsewhere</button>
+          <AnnotationToolbox onCreate={vi.fn()} />
+        </div>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+
+      // Focus genuinely moves elsewhere while the picker is still open.
+      const elsewhere = screen.getByRole('button', { name: /^elsewhere$/i });
+      act(() => {
+        elsewhere.focus();
+      });
+
+      // Close via Escape — must not restore focus to the corner button now
+      // that it has already moved away on its own.
+      fireEvent.keyDown(picker, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(elsewhere).toHaveFocus();
+    });
   });
 });
