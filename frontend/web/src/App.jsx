@@ -20,6 +20,7 @@ import {
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
+import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportMode } from './hooks/useViewportMode';
@@ -33,14 +34,16 @@ import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import './App.css';
 
-// Ceiling on how long resyncFromServer's reentrancy guard may stay held.
-// api.js's fetch carries no timeout (unlike SessionSyncClient's own outbound
-// ops POST, which bounds itself against exactly this: "SSE deployments
-// commonly sit behind Cloud Run / an ingress that can hold a half-open
-// request open indefinitely" — sessionSyncClient.js), so a hung reload must
-// not permanently disable reconnect recovery for the rest of the session
-// (review round 3). Matches that same request's own timeout.
-const RESYNC_GUARD_TIMEOUT_MS = 20_000;
+// Ceiling on how long resyncFromServer's api.getSession() call may stay
+// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
+// itself against exactly this: "SSE deployments commonly sit behind Cloud
+// Run / an ingress that can hold a half-open request open indefinitely" —
+// sessionSyncClient.js), so a hung reload must not permanently disable
+// reconnect recovery for the rest of the session (review round 3). Reuses
+// that same request's own timeout value (imported, not duplicated — a
+// hardcoded copy could silently drift out of sync, review round 6).
+const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -483,22 +486,27 @@ function App() {
       // longer owns (review round 3).
       const myToken = ++resyncGuardTokenRef.current;
       try {
-        // Read whatever is still queued *before* the network round-trip
-        // below, not after: SessionSyncClient arms its own flush
+        // Selection claims are excluded from every capture below:
+        // `_readvertiseSelection()` re-queues one on every reconnect whenever
+        // the user merely has something selected, regardless of whether
+        // anything was actually edited offline, and applyRemoteOp has no
+        // case for it (a no-op) — counting it would misreport a reconnect
+        // with zero real edits as a recovery (review round 1).
+        const capturePendingOps = () =>
+          (syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []).filter(
+            (op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released'
+          );
+        // Read whatever is already queued *before* the network round-trip
+        // below, not only after: SessionSyncClient arms its own flush
         // (_flushSoon) right after the onResync handler it called this from
-        // returns, so an `await` ahead of this read would race that flush —
-        // it can splice the very ops we want to capture out of the queue
-        // first, and if the server happens to apply this GET before that
-        // POST, we would see neither the reload nor a replay reflect them
-        // (review round 1). Selection claims are excluded:
-        // `_readvertiseSelection()` re-queues one on every reconnect
-        // whenever the user merely has something selected, regardless of
-        // whether anything was actually edited offline, and applyRemoteOp
-        // has no case for it (a no-op) — counting it would misreport a
-        // reconnect with zero real edits as a recovery (review round 1).
-        const pendingOps = (
-          syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []
-        ).filter((op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released');
+        // returns, so an `await` ahead of this first read would race that
+        // flush — it can splice the very ops we want to capture out of the
+        // queue first (review round 1; SessionSyncClient's own in-flight
+        // tracking, added in round 5, means a second read below no longer
+        // loses ops that race is finished spliced into, but reading once
+        // before starting the request is still the only way to see an op
+        // that flushes and gets fully confirmed *during* that request).
+        const pendingOpsBefore = capturePendingOps();
         // The timeout guards only this one request, not the whole function
         // (review round 5): api.js's fetch has no timeout of its own, unlike
         // SessionSyncClient's outbound ops POST, so this GET specifically
@@ -528,6 +536,22 @@ function App() {
         // reintroducing the very data loss this PR fixes.
         if (resyncGuardTokenRef.current !== myToken) return 0;
         if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
+        // Capture again, right before the destructive reload below: an op
+        // enqueued *during* the getSession request above is not reflected in
+        // `payload` either, and without this second read it would be
+        // silently wiped by the reload with nothing to bring it back (review
+        // round 6). An op present only in the first read (delivered and
+        // confirmed by the server while we waited) is harmless to keep too —
+        // replaying an already-confirmed op is redundant, never wrong, under
+        // the same idempotent-op contract this whole function already relies
+        // on (see this function's opening comment), so the union below errs
+        // on the side of including rather than trying to guess which read is
+        // more current.
+        const pendingOpsAfter = capturePendingOps();
+        const seenBefore = new Set(pendingOpsBefore);
+        const pendingOps = pendingOpsBefore.concat(
+          pendingOpsAfter.filter((op) => !seenBefore.has(op))
+        );
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
         syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));

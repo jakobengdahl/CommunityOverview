@@ -395,6 +395,62 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  // Review round 6 regression: an op enqueued *while* the reload request is
+  // still in flight is neither reflected in the reload's payload nor in the
+  // pre-request pending-ops snapshot (round 1's fix) — a second capture right
+  // before the destructive apply must pick it up too.
+  it('recovers an op enqueued while the reload request is still in flight', async () => {
+    let callCount = 0;
+    const lateOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockImplementation(() => {
+        callCount += 1;
+        // First read (before the request starts): nothing queued yet.
+        // Second read (right after it resolves): the op the user made
+        // while it was in flight.
+        return callCount === 1 ? [] : [lateOp];
+      });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    expect(callCount).toBeGreaterThanOrEqual(2);
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   // Review round 1 regression: reading the pending-ops queue *after* awaiting
   // the reload request would race SessionSyncClient's own reconnect flush
   // (armed right after onResync returns) — a flush that fires first can

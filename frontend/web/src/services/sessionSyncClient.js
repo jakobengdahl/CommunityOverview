@@ -52,7 +52,12 @@ const MAX_BATCH_BYTES = 240 * 1024;
 // the same at-least-once retry the pre-existing network-error path already did.
 // Resends are safe: set ops and moves are idempotent and annotation_created is
 // an upsert-by-id server-side (R3), so a resend after a lost response converges.
-const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+// Exported so App.jsx's reconnect-resync reentrancy guard (resyncFromServer,
+// task fbd32fc9) can bound its own api.getSession() call by the same value
+// rather than duplicating the number — the two exist for the same reason
+// (api.js's fetch has no timeout of its own) and must not silently drift
+// apart (review round 6).
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 // Selection claims are advisory soft-locks (design 3.5). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
