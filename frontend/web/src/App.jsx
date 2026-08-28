@@ -210,6 +210,11 @@ function App() {
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
+  // Guards resyncFromServer against overlapping reconnects (review round 2):
+  // a flaky connection can drop and reconnect more than once before a slow
+  // reload request settles, and running two resyncs concurrently would
+  // replay the same pending ops twice and show a duplicate recovery toast.
+  const resyncInFlightRef = useRef(false);
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
@@ -440,50 +445,62 @@ function App() {
   // report the recovery back to the user.
   const resyncFromServer = useCallback(
     async (targetId) => {
-      // Read whatever is still queued *before* the network round-trip below,
-      // not after: SessionSyncClient arms its own flush (_flushSoon) right
-      // after the onResync handler it called this from returns, so an
-      // `await` ahead of this read would race that flush — it can splice the
-      // very ops we want to capture out of the queue first, and if the
-      // server happens to apply this GET before that POST, we would see
-      // neither the reload nor a replay reflect them (review round 1).
-      // Selection claims are excluded: `_readvertiseSelection()` re-queues
-      // one on every reconnect whenever the user merely has something
-      // selected, regardless of whether anything was actually edited
-      // offline, and applyRemoteOp has no case for it (a no-op) — counting
-      // it would misreport a reconnect with zero real edits as a recovery
-      // (review round 1).
-      const pendingOps = (
-        syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []
-      ).filter((op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released');
-      let payload;
+      // A flaky connection can drop and reconnect more than once before a
+      // slow reload below settles; without this guard a second resync would
+      // replay the same still-pending ops a second time and the caller would
+      // show a duplicate recovery toast (review round 2). The in-flight
+      // resync already reloads current server truth, so skipping a
+      // concurrent one loses nothing a later op/resync wouldn't also catch.
+      if (resyncInFlightRef.current) return 0;
+      resyncInFlightRef.current = true;
       try {
-        payload = await api.getSession(targetId, { resolve: true });
-      } catch {
-        return 0;
+        // Read whatever is still queued *before* the network round-trip
+        // below, not after: SessionSyncClient arms its own flush
+        // (_flushSoon) right after the onResync handler it called this from
+        // returns, so an `await` ahead of this read would race that flush —
+        // it can splice the very ops we want to capture out of the queue
+        // first, and if the server happens to apply this GET before that
+        // POST, we would see neither the reload nor a replay reflect them
+        // (review round 1). Selection claims are excluded:
+        // `_readvertiseSelection()` re-queues one on every reconnect
+        // whenever the user merely has something selected, regardless of
+        // whether anything was actually edited offline, and applyRemoteOp
+        // has no case for it (a no-op) — counting it would misreport a
+        // reconnect with zero real edits as a recovery (review round 1).
+        const pendingOps = (
+          syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []
+        ).filter((op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released');
+        let payload;
+        try {
+          payload = await api.getSession(targetId, { resolve: true });
+        } catch {
+          return 0;
+        }
+        if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
+        applyServerSessionRef.current?.(payload);
+        const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+        syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        // A full reload re-hydrates every annotation from server truth, so any
+        // image-ingest race this browser was still waiting to resolve (see
+        // createSelfEchoDedup) is moot — drop it rather than let it linger and
+        // wrongly veto an unrelated later update for the same id.
+        //
+        // Accepted narrow edge case: a resync landing in the brief window
+        // between markPending(id) and either delivery reaching claim() (an
+        // upload genuinely in flight when the stream drops) clears that
+        // reservation too, so both deliveries would then render unguarded —
+        // the second one, if the annotation was already edited in between,
+        // would revert that edit.
+        selfIngestedImageAnnotationIdsRef.current.clear();
+        // Sequential, not Promise.all: ops must replay in their original order
+        // (e.g. nodes_added before a node_moved for the same id), not race.
+        for (const op of pendingOps) {
+          await applyRemoteOp(op);
+        }
+        return pendingOps.length;
+      } finally {
+        resyncInFlightRef.current = false;
       }
-      if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
-      applyServerSessionRef.current?.(payload);
-      const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-      syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
-      // A full reload re-hydrates every annotation from server truth, so any
-      // image-ingest race this browser was still waiting to resolve (see
-      // createSelfEchoDedup) is moot — drop it rather than let it linger and
-      // wrongly veto an unrelated later update for the same id.
-      //
-      // Accepted narrow edge case: a resync landing in the brief window
-      // between markPending(id) and either delivery reaching claim() (an
-      // upload genuinely in flight when the stream drops) clears that
-      // reservation too, so both deliveries would then render unguarded —
-      // the second one, if the annotation was already edited in between,
-      // would revert that edit.
-      selfIngestedImageAnnotationIdsRef.current.clear();
-      // Sequential, not Promise.all: ops must replay in their original order
-      // (e.g. nodes_added before a node_moved for the same id), not race.
-      for (const op of pendingOps) {
-        await applyRemoteOp(op);
-      }
-      return pendingOps.length;
     },
     [syncRef, applyRemoteOp]
   );

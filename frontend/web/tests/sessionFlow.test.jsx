@@ -409,8 +409,11 @@ describe('Server-backed session lifecycle', () => {
         callOrder.push('getPendingOps');
         return [];
       });
+    // Once, not permanently: a lasting override would leak past
+    // vi.clearAllMocks() (which resets call history, not implementations)
+    // into later tests.
     const getSessionMock = api.getSession.getMockImplementation();
-    api.getSession.mockImplementation(async (...args) => {
+    api.getSession.mockImplementationOnce(async (...args) => {
       callOrder.push('getSession');
       return getSessionMock(...args);
     });
@@ -448,6 +451,81 @@ describe('Server-backed session lifecycle', () => {
     });
     expect(callOrder.indexOf('getPendingOps')).toBeGreaterThanOrEqual(0);
     expect(callOrder.indexOf('getPendingOps')).toBeLessThan(callOrder.indexOf('getSession'));
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 2 regression: a flaky connection reconnecting twice before a
+  // slow reload settles must not run two overlapping resyncs — that would
+  // replay the same pending ops twice and show a duplicate recovery toast.
+  it('a second reconnect while a resync is still in flight does not start a second reload', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    let releaseGetSession;
+    const getSessionGate = new Promise((resolve) => {
+      releaseGetSession = resolve;
+    });
+    const getSessionCalls = [];
+    // Once, not permanently: only one real call is expected (the guard must
+    // block the second reconnect's), and a lasting override would leak past
+    // vi.clearAllMocks() into later tests.
+    api.getSession.mockImplementationOnce(async (id) => {
+      getSessionCalls.push(id);
+      await getSessionGate;
+      return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    const deliverCatchUp = () =>
+      act(() => {
+        sessionSource.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+
+    deliverCatchUp(); // first reconnect: getSession call #1 starts, gated
+    await waitFor(() => expect(getSessionCalls.length).toBe(1));
+    deliverCatchUp(); // second reconnect while the first resync is still in flight
+    await new Promise((r) => setTimeout(r, 20));
+    expect(getSessionCalls.length).toBe(1); // the second resync never called getSession
+
+    await act(async () => {
+      releaseGetSession();
+      await Promise.resolve();
+    });
+
+    // The (single) in-flight resync still completed and recovered the op.
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    expect(getSessionCalls.length).toBe(1);
 
     getPendingOpsSpy.mockRestore();
   });
