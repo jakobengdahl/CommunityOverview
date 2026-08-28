@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import AnnotationToolbox from '../src/components/AnnotationToolbox';
 
 // Read the stylesheet as text: jsdom applies no layout and vitest resolves a
@@ -11,7 +11,42 @@ function readStylesheet() {
   return readFileSync(join(process.cwd(), 'src/components/AnnotationToolbox.css'), 'utf8');
 }
 
+// Opens the shape slot's picker and selects `name` (a role name regex) from
+// it, scoped to the picker panel (`within`) so an ambiguous match against the
+// slot's own current-shape button — e.g. selecting "Rectangle" while the slot
+// is already showing "Rectangle" — can never occur.
+function selectShapeVariant(name) {
+  fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+  const picker = screen.getByRole('group', { name: /^shapes$/i });
+  fireEvent.click(within(picker).getByRole('button', { name }));
+}
+
+// jsdom has no PointerEvent constructor — build one from MouseEvent, the same
+// pattern GraphCanvasFreehandDrawing.test.jsx and GraphCanvasTouch.test.jsx
+// use for the identical limitation. Module-scoped (not just inside the
+// 'drag-to-create' describe below) so the 'shape slot' describe can drive the
+// same coarse-pointer drag path.
+function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  return event;
+}
+
+// The pointer handlers are attached via plain addEventListener (see
+// AnnotationToolbox's handlePointerDown), not React's synthetic event system,
+// so a dispatch outside act() leaves the resulting state update unflushed
+// when the very next line asserts on it.
+function dispatch(target, event) {
+  act(() => {
+    target.dispatchEvent(event);
+  });
+}
+
 describe('AnnotationToolbox', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it('renders collapsed by default, showing only the toggle', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     expect(screen.getByTestId('annotation-toolbox')).toBeInTheDocument();
@@ -19,7 +54,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
   });
 
-  it('expands to show every wired annotation kind on toggle click', () => {
+  it('expands to show every wired annotation kind on toggle click, with the shape slot standing in for every shape variant', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
@@ -27,12 +62,15 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^text$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^label$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^frame$/i })).toBeInTheDocument();
+    // The shape slot shows the default shape (rectangle) as its own name;
+    // every other variant now lives in the picker, not as a top-level button
+    // (task-annotation-shapes-under-one-toolbox-slot).
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^circle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^triangle$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^rhombus$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^process arrow$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^circle$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^triangle$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^rhombus$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^hexagon$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^process arrow$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^icon$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^vote dot$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^image$/i })).toBeInTheDocument();
@@ -65,8 +103,9 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('frame', undefined);
   });
 
-  // Every accepted content.shape variant is offered, not only the two that
-  // used to render distinctly (docs/ANNOTATION_CONTRACT.md, `shape` row).
+  // Every accepted content.shape variant is still offered — now via the
+  // shape slot's picker rather than its own top-level button
+  // (docs/ANNOTATION_CONTRACT.md, `shape` row).
   it.each([
     [/^rectangle$/i, 'rectangle'],
     [/^circle$/i, 'circle'],
@@ -74,14 +113,21 @@ describe('AnnotationToolbox', () => {
     [/^rhombus$/i, 'rhombus'],
     [/^hexagon$/i, 'hexagon'],
     [/^process arrow$/i, 'process_arrow'],
-  ])('calls onCreate with the shape kind and the %s variant', (name, shape) => {
-    const onCreate = vi.fn();
-    render(<AnnotationToolbox onCreate={onCreate} />);
-    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+  ])(
+    'calls onCreate with the shape kind and the %s variant once selected in the picker',
+    (name, shape) => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
-    fireEvent.click(screen.getByRole('button', { name }));
-    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
-  });
+      selectShapeVariant(name);
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+
+      // Selecting made the slot itself this shape; clicking it creates it.
+      fireEvent.click(screen.getByRole('button', { name }));
+      expect(onCreate).toHaveBeenLastCalledWith('shape', { shape });
+    }
+  );
 
   it('calls onCreate with the image kind and no options, like the other simple kinds', () => {
     const onCreate = vi.fn();
@@ -293,25 +339,6 @@ describe('AnnotationToolbox', () => {
   });
 
   describe('drag-to-create', () => {
-    // jsdom has no PointerEvent constructor — build one from MouseEvent, the
-    // same pattern GraphCanvasFreehandDrawing.test.jsx and
-    // GraphCanvasTouch.test.jsx use for the identical limitation.
-    function pointerEvent(type, { pointerId = 1, clientX = 0, clientY = 0 } = {}) {
-      const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
-      Object.defineProperty(event, 'pointerId', { value: pointerId });
-      return event;
-    }
-
-    // The pointer handlers are attached via plain addEventListener (see
-    // AnnotationToolbox's handlePointerDown), not React's synthetic event
-    // system, so a dispatch outside act() leaves the resulting state update
-    // unflushed when the very next line asserts on it.
-    function dispatch(target, event) {
-      act(() => {
-        target.dispatchEvent(event);
-      });
-    }
-
     it('is HTML5-draggable by default (fine pointer) for every kind that creates an object', () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -354,9 +381,10 @@ describe('AnnotationToolbox', () => {
       );
     });
 
-    it('includes the shape option in the dataTransfer payload for a shape variant', () => {
+    it("includes the shape option in the dataTransfer payload for the slot's current shape variant", () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectShapeVariant(/^hexagon$/i);
 
       const setData = vi.fn();
       fireEvent.dragStart(screen.getByRole('button', { name: /^hexagon$/i }), {
@@ -413,10 +441,11 @@ describe('AnnotationToolbox', () => {
       expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
     });
 
-    it('passes the shape option through onDragCreate for a shape variant', () => {
+    it("passes the shape option through onDragCreate for the slot's current shape variant", () => {
       const onDragCreate = vi.fn();
       render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      selectShapeVariant(/^circle$/i);
 
       const circle = screen.getByRole('button', { name: /^circle$/i });
       dispatch(circle, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
@@ -477,7 +506,11 @@ describe('AnnotationToolbox', () => {
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
       const note = screen.getByRole('button', { name: /^note$/i });
-      const circle = screen.getByRole('button', { name: /^circle$/i });
+      // `label` stands in for the old `circle` shape button as "a different
+      // item" here — any two distinct toolbox buttons prove the same
+      // per-item independence; the shape slot collapsing six of them into
+      // one is orthogonal to what this regression test is about.
+      const label = screen.getByRole('button', { name: /^label$/i });
 
       // Pointer 1 completes a drag on `note` — opens note's suppression window.
       dispatch(note, pointerEvent('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }));
@@ -486,17 +519,17 @@ describe('AnnotationToolbox', () => {
       expect(onDragCreate).toHaveBeenCalledTimes(1);
 
       // Before note's own synthetic click arrives, pointer 2 presses and
-      // releases `circle` as a plain tap (under the drag threshold) — a
+      // releases `label` as a plain tap (under the drag threshold) — a
       // genuine, unrelated click on a different button.
-      dispatch(circle, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
+      dispatch(label, pointerEvent('pointerdown', { pointerId: 2, clientX: 5, clientY: 5 }));
       dispatch(window, pointerEvent('pointerup', { pointerId: 2, clientX: 6, clientY: 5 }));
-      fireEvent.click(circle);
-      // circle's own click must NOT be swallowed by note's pending suppression.
-      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'circle' });
+      fireEvent.click(label);
+      // label's own click must NOT be swallowed by note's pending suppression.
+      expect(onCreate).toHaveBeenCalledWith('label', undefined);
 
       // note's own synthetic click now arrives — it must still be suppressed.
       fireEvent.click(note);
-      expect(onCreate).toHaveBeenCalledTimes(1); // only circle's, not note's
+      expect(onCreate).toHaveBeenCalledTimes(1); // only label's, not note's
       expect(onDragCreate).toHaveBeenCalledTimes(1);
     });
 
@@ -653,6 +686,371 @@ describe('AnnotationToolbox', () => {
 
       expect(onDragCreate).not.toHaveBeenCalled();
       expect(document.querySelector('.annotation-toolbox-drag-ghost')).toBeNull();
+    });
+  });
+
+  describe('shape slot', () => {
+    const STORAGE_KEY = 'communityoverview:annotation-toolbox:shape-slot';
+
+    it('creates the current (default) shape on a plain click, same as any other item', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
+    });
+
+    it('closes an open picker when the main slot button itself is clicked', () => {
+      // Regression test: the main button sits inside the picker's own
+      // anchor (the slot wrapper), so ToolSlotPicker's outside-click check
+      // treats a click on it as "inside the anchor" and leaves the picker
+      // open on its own — the slot's click handler has to close it
+      // explicitly.
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      // While the picker is open, its own "Rectangle" option shares the
+      // slot's accessible name — the picker is portalled to document.body,
+      // so it is not a descendant of the toolbox itself, and `within` the
+      // toolbox unambiguously reaches the slot's own button, not the
+      // picker's option.
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      fireEvent.click(within(toolbox).getByRole('button', { name: /^rectangle$/i }));
+
+      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('moves focus onto the main slot button itself when it closes an open picker on click', () => {
+      // Regression test: relying on the browser's own click-focuses-the-
+      // button behaviour is not cross-browser (WebKit does not focus a
+      // <button> on click/tap) — without an explicit focus() call here,
+      // ToolSlotPicker's cleanup effect would see focus as never having
+      // moved and force it onto the corner button instead of leaving it on
+      // the control the user actually activated.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      fireEvent.click(slot);
+
+      expect(slot).toHaveFocus();
+    });
+
+    it('closes an open picker when a drag-to-create is performed on the main slot button (coarse-pointer path)', () => {
+      // Regression test: the picker-closing fix originally lived only in the
+      // main button's onClick, but a completed drag never fires onClick (the
+      // browser's synthetic click after a real drag release, if any,
+      // typically lands away from the button — see finishDrag's own comment
+      // in AnnotationToolbox.jsx) — so a drag-to-create used to leave the
+      // picker dangling open above the toolbox after the shape had already
+      // been created.
+      const onDragCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={vi.fn()} onDragCreate={onDragCreate} touch />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      dispatch(slot, pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+      dispatch(window, pointerEvent('pointermove', { clientX: 50, clientY: 50 }));
+      dispatch(window, pointerEvent('pointerup', { clientX: 50, clientY: 50 }));
+
+      expect(onDragCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' }, { x: 50, y: 50 });
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('closes an open picker as soon as an HTML5 (fine-pointer) drag starts on the main slot button', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+      fireEvent.mouseDown(slot);
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('does not let a right-click on the main slot button also fire the left-click picker-close handler', () => {
+      // Regression test: mousedown always precedes contextmenu for a real
+      // right-click, so the mousedown-driven close above must ignore
+      // anything but the primary (left) button — otherwise right-clicking
+      // an already-open picker would close it via mousedown and then
+      // immediately reopen it via onContextMenu, a visible flicker that
+      // also resets whatever option had focus. Real event order (mousedown
+      // then contextmenu), not the RTL fireEvent.contextMenu shortcut alone,
+      // which dispatches only a bare contextmenu event.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      const slot = within(toolbox).getByRole('button', { name: /^rectangle$/i });
+
+      fireEvent.mouseDown(slot, { button: 2 });
+      fireEvent.contextMenu(slot);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      // A second right-click's own mousedown, on the now-open picker, must
+      // not close it before its contextmenu re-opens it.
+      fireEvent.mouseDown(slot, { button: 2 });
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('moves focus onto the main slot button after selecting a shape in the picker', () => {
+      // Regression test: without this, ToolSlotPicker's cleanup effect would
+      // land focus on the corner button instead of the slot the user just
+      // gave a new shape to — surprising right after picking one, and it
+      // would silently turn a keyboard user's next Enter/Space (expecting
+      // to create the shape they just chose) into reopening the picker.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      selectShapeVariant(/^hexagon$/i);
+
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      expect(within(toolbox).getByRole('button', { name: /^hexagon$/i })).toHaveFocus();
+    });
+
+    it('opens the picker on a corner-button click, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('opens the picker on a right-click of the slot, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.contextMenu(screen.getByRole('button', { name: /^rectangle$/i }));
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('is keyboard-reachable: the corner button is a real, enabled, native <button> distinct from the slot, so Enter/Space opens the picker', () => {
+      // jsdom does not synthesize the browser's native "Enter/Space on a
+      // focused <button> fires click" behaviour, so there is nothing to
+      // dispatch here beyond what any real user agent already guarantees for
+      // a native, enabled <button>. What actually has to be proven is that
+      // the corner button IS that — not a div/span standing in for one,
+      // which Enter/Space would silently do nothing to.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const slot = screen.getByRole('button', { name: /^rectangle$/i });
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      expect(corner).not.toBe(slot);
+      expect(corner.tagName).toBe('BUTTON');
+      expect(corner).toHaveAttribute('type', 'button');
+      expect(corner).not.toBeDisabled();
+
+      fireEvent.click(corner);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('keeps the slot and the corner button as two separate, sequential elements in tab order', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const slot = screen.getByRole('button', { name: /^rectangle$/i });
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      expect(slot).not.toBe(corner);
+      // Neither opts out of the natural tab order.
+      expect(slot).not.toHaveAttribute('tabindex', '-1');
+      expect(corner).not.toHaveAttribute('tabindex', '-1');
+      // DOM order is tab order here (both at the default tabIndex) — the
+      // slot's own button must precede its corner button.
+      const position = slot.compareDocumentPosition(corner);
+      expect(Boolean(position & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    });
+
+    it('selecting a shape in the picker updates the slot and persists the choice to localStorage', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      selectShapeVariant(/^hexagon$/i);
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^hexagon$/i })).toBeInTheDocument();
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('hexagon');
+    });
+
+    it('reads the remembered shape from localStorage on mount, not the built-in default', () => {
+      localStorage.setItem(STORAGE_KEY, 'triangle');
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^triangle$/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^rectangle$/i })).not.toBeInTheDocument();
+    });
+
+    it('falls back to the built-in default for a stored value that names no real shape', () => {
+      localStorage.setItem(STORAGE_KEY, 'not-a-real-shape');
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
+    });
+
+    it('closes the picker on Escape and returns focus to the corner button', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      fireEvent.keyDown(picker, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /choose a shape/i })).toHaveFocus();
+    });
+
+    it('closes on Escape even when focus is on the corner button rather than inside the panel', () => {
+      // Regression test: the corner button can legitimately hold focus while
+      // the picker is open (e.g. a second click on an already-open picker's
+      // corner button re-focuses it natively without remounting/refocusing
+      // the panel) — Escape has to close the picker from there too, not only
+      // while focus is inside the panel itself.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      const corner = screen.getByRole('button', { name: /choose a shape/i });
+      fireEvent.click(corner);
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      act(() => {
+        corner.focus();
+      });
+      fireEvent.keyDown(corner, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it('stops propagation so a host document Escape handler (e.g. GraphCanvas clearing the canvas selection) never sees it', () => {
+      // Regression test: GraphCanvas.jsx has its own document-level,
+      // bubble-phase Escape handler that clears the canvas selection and
+      // closes menus, with no special case for this picker's buttons (only
+      // INPUT/TEXTAREA/contentEditable are excluded there). Dismissing the
+      // picker with Escape must not let that handler also fire — simulated
+      // here with an extra bubble-phase document listener standing in for
+      // GraphCanvas's own, registered the same way (no capture flag).
+      const hostEscapeHandler = vi.fn();
+      document.addEventListener('keydown', hostEscapeHandler);
+      try {
+        render(<AnnotationToolbox onCreate={vi.fn()} />);
+        fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+        fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+        const picker = screen.getByRole('group', { name: /^shapes$/i });
+        fireEvent.keyDown(picker, { key: 'Escape' });
+
+        expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+        expect(hostEscapeHandler).not.toHaveBeenCalled();
+      } finally {
+        document.removeEventListener('keydown', hostEscapeHandler);
+      }
+    });
+
+    it('closes the picker on an outside click, without creating a shape', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      fireEvent.mouseDown(document.body);
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(onCreate).not.toHaveBeenCalled();
+    });
+
+    it('does not open the picker or create anything from a plain click inside the picker background', () => {
+      // Regression guard for the outside-click handler: clicking one of the
+      // picker's own option buttons must select it (covered elsewhere), not
+      // be treated as "outside" and just close without effect.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      fireEvent.mouseDown(picker);
+
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+    });
+
+    it('closes the picker when the toolbox itself collapses', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      const toggle = screen.getByRole('button', { name: /add annotation/i });
+      fireEvent.click(toggle);
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /collapse annotation toolbox/i }));
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
+    it("positions the panel with `top` (paired with the CSS translateY(-100%)), not `bottom`, so it isn't double-offset away from the slot", () => {
+      // Regression test: `position: fixed` + `bottom: Npx` already anchors
+      // the panel's own bottom edge N px above the viewport bottom: pairing
+      // that with the stylesheet's translateY(-100%) (meant for the `top`
+      // convention AnnotationToolbox's own hover tooltip uses — see
+      // `showTip`) shifts it up by its own height a second time, landing it
+      // detached from the slot instead of flush above it.
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+      expect(picker.style.top).not.toBe('');
+      expect(picker.style.bottom).toBe('');
+    });
+
+    it('does not steal focus back on close once it has already moved elsewhere while the picker was open', () => {
+      // Regression test: once focus has genuinely moved to some other
+      // focusable element while the picker is open (a `focusin` outside the
+      // panel), closing the picker must not yank it back onto the corner
+      // button — mirrors ContextMenus.jsx's useMenuOpenFocus, which skips its
+      // own restore once a `focusin` fired somewhere outside the menu.
+      render(
+        <div>
+          <button type="button">elsewhere</button>
+          <AnnotationToolbox onCreate={vi.fn()} />
+        </div>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      const picker = screen.getByRole('group', { name: /^shapes$/i });
+
+      // Focus genuinely moves elsewhere while the picker is still open.
+      const elsewhere = screen.getByRole('button', { name: /^elsewhere$/i });
+      act(() => {
+        elsewhere.focus();
+      });
+
+      // Close via Escape — must not restore focus to the corner button now
+      // that it has already moved away on its own.
+      fireEvent.keyDown(picker, { key: 'Escape' });
+
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+      expect(elsewhere).toHaveFocus();
     });
   });
 });
