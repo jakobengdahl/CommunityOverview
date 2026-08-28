@@ -63,6 +63,38 @@ class TestGraphServiceSearch:
         assert result["success"] is False
         assert "error" in result
 
+    def test_get_node_details_includes_incident_edges(
+        self, populated_service: GraphService
+    ):
+        """Regression for the MCP live-push edge-rendering bug.
+
+        A connected client that receives a newly-added node's id over the
+        session op stream (a `nodes_added` op) has no other way to learn its
+        edges to already-visible nodes: it hydrates the node one id at a time
+        via this exact call (see App.jsx's `applyRemoteOp`). Before this fix
+        the response carried only `node`, so the edge silently never rendered
+        until the user separately expanded the node.
+        """
+        result = populated_service.get_node_details("actor-1")
+
+        assert result["success"] is True
+        assert "edges" in result
+        edge_ids = {e["id"] for e in result["edges"]}
+        assert "edge-1" in edge_ids  # actor-1 -> init-1, from the fixture
+
+    def test_get_node_details_omits_archived_incident_edges(
+        self, populated_service: GraphService
+    ):
+        """Mirrors search_graph's default-exclude: an archived edge, or one
+        whose other endpoint is archived, must not leak back in through a
+        single-node fetch."""
+        populated_service.archive_edges(["edge-1"])
+
+        result = populated_service.get_node_details("actor-1")
+
+        edge_ids = {e["id"] for e in result["edges"]}
+        assert "edge-1" not in edge_ids
+
     def test_get_related_nodes(self, populated_service: GraphService):
         """Test getting related nodes."""
         result = populated_service.get_related_nodes("actor-1", depth=1)
