@@ -59,6 +59,91 @@ describe('LabelNode rotation control', () => {
   });
 });
 
+// task-shared-editable-text-hook: LabelNode's double-click/blur/Escape/
+// live-sync/Enter-commits text editing now runs through the shared
+// useEditableText hook (packages/ui-graph-canvas/src/hooks/useEditableText.js)
+// rather than its own copy of the state machine — see NoteNode.test.jsx's
+// "inline text editing" describe block for the counterpart on the
+// `<textarea>` components, where Enter does *not* commit.
+describe('LabelNode inline text editing', () => {
+  beforeEach(() => hoisted.setNodes.mockClear());
+
+  function applyUpdate(node) {
+    const call = hoisted.setNodes.mock.calls.at(-1);
+    return call[0]([node])[0];
+  }
+
+  it('enters edit mode on double-click, showing an input seeded with the current text', () => {
+    render(<LabelNode id="l1" data={{ text: 'Hello' }} selected={false} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toHaveValue('Hello');
+  });
+
+  it('syncs every keystroke live and commits the trimmed value on blur', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { labelPlaceholder: 'Label' } }}>
+        <LabelNode id="l1" data={{ text: 'Hello' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'typing' } });
+    expect(applyUpdate({ id: 'l1', data: { text: 'Hello' } }).data.text).toBe('typing');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+
+    fireEvent.change(input, { target: { value: '  world  ' } });
+    fireEvent.blur(input);
+    expect(applyUpdate({ id: 'l1', data: { text: 'Hello' } }).data.text).toBe('world');
+  });
+
+  it('commits the trimmed value on Enter — a label is a single-line input', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { labelPlaceholder: 'Label' } }}>
+        <LabelNode id="l1" data={{ text: 'Hello' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: '  world  ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(applyUpdate({ id: 'l1', data: { text: 'Hello' } }).data.text).toBe('world');
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('cancels the edit on Escape, reverting to the stored text without writing it', () => {
+    render(<LabelNode id="l1" data={{ text: 'Hello' }} selected={false} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'discard me' } });
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+  });
+
+  it('refuses to enter edit mode while another client holds the selection claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt,
+          labels: { labelPlaceholder: 'Label' },
+        }}
+      >
+        <LabelNode
+          id="l1"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          selected={false}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('LabelNode colour defaults', () => {
   beforeEach(() => hoisted.setNodes.mockClear());
 

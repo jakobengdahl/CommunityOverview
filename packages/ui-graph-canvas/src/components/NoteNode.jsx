@@ -10,6 +10,7 @@ import {
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import { useEditableText } from '../hooks/useEditableText';
 import './NoteNode.css';
 
 /**
@@ -28,10 +29,7 @@ const NOTE_FONT_SIZES = [12, 14, 18, 24];
 // this component can draw perfectly well — falling back to the placeholder
 // there would lose an annotation the user could otherwise still edit.
 function NoteNode({ id, data = {}, selected }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [text, setText] = useState(data.text || '');
   const [contextMenu, setContextMenu] = useState(null);
-  const inputRef = useRef(null);
   const contextMenuRef = useRef(null);
   // Snapshot of {x, y, width, height} at the start of the current resize
   // gesture, read by handleResizeEnd to map the gesture's net delta back
@@ -46,17 +44,8 @@ function NoteNode({ id, data = {}, selected }) {
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
-
-  useEffect(() => {
-    setText(data.text || '');
-  }, [data.text]);
-
-  useEffect(() => {
-    if (isEditing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [isEditing]);
+  const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
+    useEditableText(id, data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -79,45 +68,6 @@ function NoteNode({ id, data = {}, selected }) {
       document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [contextMenu]);
-
-  const commitText = () => {
-    setIsEditing(false);
-    if (remoteLocked) {
-      setText(data.text || '');
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    const trimmed = text.trim();
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
-    );
-    notifyChange('text');
-  };
-
-  // Live per-keystroke sync (docs/ANNOTATION_CONTRACT.md's "300 ms text
-  // debounce": in-progress edits coalesce and publish at most every 300 ms
-  // while typing, not only on blur). Pushes the raw, untrimmed value on
-  // every change — `commitText` still trims on blur/close, the authoritative
-  // final write. The host's scheduler (annotationChangeScheduler.js)
-  // debounces the 'text' kind, so a burst of keystrokes coalesces into one
-  // publish regardless of how often this fires.
-  const handleTextChange = (e) => {
-    const next = e.target.value;
-    setText(next);
-    if (remoteLocked) return;
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
-    );
-    notifyChange('text');
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      setText(data.text || '');
-      setIsEditing(false);
-    }
-  };
 
   const changeColor = (color) => {
     if (remoteLocked) {
@@ -248,14 +198,7 @@ function NoteNode({ id, data = {}, selected }) {
             outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
             outlineOffset: remoteLocked ? '2px' : undefined,
           }}
-          onDoubleClick={(e) => {
-            e.stopPropagation();
-            if (remoteLocked) {
-              notifyRemoteLockedAttempt();
-              return;
-            }
-            setIsEditing(true);
-          }}
+          onDoubleClick={startEditing}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
