@@ -43,6 +43,16 @@ export function annotationDocumentToLegacyMetadata(documentInput) {
   };
 }
 
+export function savedViewMetadataToCanvasMetadata(metadata = {}) {
+  const document = legacyMetadataToAnnotationDocument(metadata);
+  const { groups, parentIds } = annotationsToGroups(document);
+  return {
+    groups,
+    parentIds,
+    annotations: annotationsToOverlays(document),
+  };
+}
+
 export function legacyMetadataToAnnotationDocument(metadata = {}) {
   const skip = { onSkipped: skippedAnnotation };
   if (metadata.annotation_document)

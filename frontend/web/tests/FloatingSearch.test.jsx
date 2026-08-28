@@ -121,6 +121,66 @@ describe('FloatingSearch federation labels', () => {
     });
   });
 
+  it('opens a saved view whose annotations are stored only in the v1 document', async () => {
+    useGraphStore.setState({
+      stats: {
+        federation: {
+          search_has_multiple_graphs: false,
+          graph_display_names: { local: 'Local Graph' },
+          max_selectable_depth: 1,
+        },
+      },
+    });
+    api.searchGraph.mockResolvedValueOnce({
+      nodes: [
+        {
+          id: 'view-1',
+          type: 'SavedView',
+          name: 'Annotated view',
+          metadata: {
+            node_ids: ['node-a'],
+            positions: { 'node-a': { x: 1, y: 2 } },
+            annotation_document: {
+              schema_version: 1,
+              annotations: [
+                {
+                  id: 'note-1',
+                  type: 'note',
+                  kind: 'note',
+                  position: { x: 10, y: 20 },
+                  text: 'reopened note',
+                },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [],
+    });
+    api.getNodeDetails.mockResolvedValueOnce({
+      success: true,
+      node: { id: 'node-a', type: 'Actor', name: 'Actor A' },
+      edges: [],
+    });
+
+    render(<FloatingSearch />);
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText('Search graph...'), 'annotated');
+
+    await user.click(await screen.findByText('Annotated view'));
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().pendingAnnotations).toEqual([
+        expect.objectContaining({
+          id: 'note-1',
+          kind: 'note',
+          position: { x: 10, y: 20 },
+          text: 'reopened note',
+        }),
+      ]);
+    });
+  });
+
   it('uses the measured header edge instead of overlapping top chrome', async () => {
     const header = document.createElement('div');
     header.className = 'floating-header';

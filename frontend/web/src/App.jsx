@@ -18,6 +18,7 @@ import {
   annotationsToOverlays,
   annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
+  savedViewMetadataToCanvasMetadata,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
 import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
@@ -952,9 +953,7 @@ function App() {
           const nodeIds = nodeData.metadata?.node_ids || [];
           const positions = nodeData.metadata?.positions || {};
           const savedEdges = nodeData.metadata?.edges || [];
-          const savedGroups = nodeData.metadata?.groups || [];
-          const savedParentIds = nodeData.metadata?.parentIds || {};
-          const savedAnnotations = nodeData.metadata?.annotations || [];
+          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
           if (nodeIds.length > 0) {
             clearVisualization();
             const details = await Promise.all(
@@ -988,11 +987,14 @@ function App() {
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-              if (savedGroups.length > 0) {
-                setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+              if (savedViewAnnotations.groups.length > 0) {
+                setPendingGroups({
+                  groups: savedViewAnnotations.groups,
+                  parentIds: savedViewAnnotations.parentIds,
+                });
               }
-              if (savedAnnotations.length > 0) {
-                setPendingAnnotations(savedAnnotations);
+              if (savedViewAnnotations.annotations.length > 0) {
+                setPendingAnnotations(savedViewAnnotations.annotations);
               }
             }
           }
