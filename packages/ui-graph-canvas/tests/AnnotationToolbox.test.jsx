@@ -821,6 +821,31 @@ describe('AnnotationToolbox', () => {
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
 
+    it("stops propagation so a host document Escape handler (e.g. GraphCanvas clearing the canvas selection) never sees it", () => {
+      // Regression test: GraphCanvas.jsx has its own document-level,
+      // bubble-phase Escape handler that clears the canvas selection and
+      // closes menus, with no special case for this picker's buttons (only
+      // INPUT/TEXTAREA/contentEditable are excluded there). Dismissing the
+      // picker with Escape must not let that handler also fire — simulated
+      // here with an extra bubble-phase document listener standing in for
+      // GraphCanvas's own, registered the same way (no capture flag).
+      const hostEscapeHandler = vi.fn();
+      document.addEventListener('keydown', hostEscapeHandler);
+      try {
+        render(<AnnotationToolbox onCreate={vi.fn()} />);
+        fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+        fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+
+        const picker = screen.getByRole('group', { name: /^shapes$/i });
+        fireEvent.keyDown(picker, { key: 'Escape' });
+
+        expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+        expect(hostEscapeHandler).not.toHaveBeenCalled();
+      } finally {
+        document.removeEventListener('keydown', hostEscapeHandler);
+      }
+    });
+
     it('closes the picker on an outside click, without creating a shape', () => {
       const onCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} />);

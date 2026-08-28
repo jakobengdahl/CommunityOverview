@@ -107,10 +107,18 @@ export function ToolSlotPicker({
   // (e.g. a second click on an already-open picker's corner button re-focuses
   // it natively without remounting/refocusing the panel) — Escape has to
   // close the picker from there too, not only while focus is inside it.
+  // Capture phase + stopPropagation, not just preventDefault: the host app
+  // (GraphCanvas.jsx) has its own document-level, bubble-phase Escape
+  // handler that clears the canvas selection and closes menus, and it does
+  // not special-case this picker's buttons (only INPUT/TEXTAREA/
+  // contentEditable are excluded there) — without stopping propagation here,
+  // dismissing the picker would also silently clear whatever was selected on
+  // the canvas underneath it.
   useEffect(() => {
     const handleKeyDown = (event) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
+      event.stopPropagation();
       onCloseRef.current();
     };
     document.addEventListener('keydown', handleKeyDown, true);
