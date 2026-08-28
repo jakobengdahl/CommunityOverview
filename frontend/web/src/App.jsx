@@ -483,8 +483,29 @@ function App() {
       // A token, not just the boolean: if the guard timer below fires (its
       // request never settles) while a *later* resync has since legitimately
       // taken over, this call's eventual finally must not clear a flag it no
-      // longer owns (review round 3).
+      // longer owns (review round 3). Every checkpoint below that could run
+      // after an arbitrarily long await (the reload, and each recovered
+      // nodes_added's node fetch inside the replay loop) re-checks this same
+      // token, not just the session id — so if the timer ever does fire
+      // *while this call is still legitimately running* (merely slow, not
+      // actually hung) and a newer resync starts, this call notices at its
+      // very next checkpoint and stops, instead of continuing to apply now-
+      // superseded results on top of what the newer resync already
+      // established (review round 7).
       const myToken = ++resyncGuardTokenRef.current;
+      // Spans the *whole* call, not just the initial reload request (reverted
+      // from round 5's narrower scoping — review round 7): api.js's fetch has
+      // no timeout of its own, and that is equally true of the replay loop's
+      // own per-op api.getNodeDetails calls (applyRemoteOp, below) as of the
+      // initial api.getSession reload — a hang in either must not wedge
+      // reconnect recovery forever. The per-checkpoint token re-checks above
+      // are what keep this safe against the failure mode round 5 originally
+      // found in a whole-call timer (a false self-heal firing mid-legitimate-
+      // run letting a redundant resync start): they stop this call from
+      // acting on stale state instead of preventing the timer from firing.
+      const guardTimer = setTimeout(() => {
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+      }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Selection claims are excluded from every capture below:
         // `_readvertiseSelection()` re-queues one on every reconnect whenever
@@ -507,25 +528,11 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
-        // The timeout guards only this one request, not the whole function
-        // (review round 5): api.js's fetch has no timeout of its own, unlike
-        // SessionSyncClient's outbound ops POST, so this GET specifically
-        // could hang forever and must not wedge reconnect recovery for the
-        // rest of the session. A slow-but-finishing replay afterwards (the
-        // loop below can itself await a network call per recovered
-        // nodes_added) is not what this guards against — spanning the timer
-        // over that too would risk it firing on a merely-slow-but-still-
-        // running call and letting a redundant concurrent resync start.
         let payload;
-        const guardTimer = setTimeout(() => {
-          if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
-        }, RESYNC_GUARD_TIMEOUT_MS);
         try {
           payload = await api.getSession(targetId, { resolve: true });
         } catch {
           return 0;
-        } finally {
-          clearTimeout(guardTimer);
         }
         // Also bail if the guard timeout already fired and a newer resync
         // now owns it (review round 4): the token check above only stops
@@ -599,17 +606,27 @@ function App() {
         // the canvas store it writes to is not scoped by session — if the
         // user switches to a different session while that await is pending,
         // this session's recovered op would otherwise land on the newly
-        // loaded session's canvas instead.
+        // loaded session's canvas instead. The token is re-checked too
+        // (review round 7): if the guard timer fired mid-replay because this
+        // call was merely slow, not hung, and a newer resync has since taken
+        // over, stop here rather than keep applying this call's now-stale
+        // ops on top of what the newer one already established — that newer
+        // resync's own return value is the one the caller should act on.
+        let appliedCount = 0;
         for (const op of pendingOps) {
+          if (resyncGuardTokenRef.current !== myToken) return 0;
           if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
           await applyRemoteOp(op);
+          appliedCount += 1;
         }
-        return pendingOps.length;
+        // Not pendingOps.length unconditionally (review round 7): a session
+        // switch mid-replay (the break above) can stop this short of the
+        // full batch, and reporting the full count either as "recovered" (a
+        // misleading toast in the session the user has since left) or a
+        // basis for double-counting would both be wrong.
+        return appliedCount;
       } finally {
-        // The guard timer around the getSession request above already
-        // clears itself (its own finally); this is the ordinary path's
-        // release of the reentrancy flag once this call has genuinely
-        // finished (or bailed out early above).
+        clearTimeout(guardTimer);
         if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
       }
     },
