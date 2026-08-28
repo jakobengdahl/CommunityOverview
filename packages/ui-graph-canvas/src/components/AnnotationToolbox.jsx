@@ -447,6 +447,13 @@ function AnnotationToolbox({
           type="button"
           className="annotation-toolbox-item annotation-toolbox-item--draggable"
           onClick={() => {
+            // The picker floats above the toolbox, not over the main
+            // button, and the button sits inside the picker's own anchor
+            // (shapeSlotRef) — so ToolSlotPicker's outside-click check
+            // treats a click here as "inside the anchor" and leaves it
+            // open. Close it explicitly on any interaction with the main
+            // button, whether or not this click goes on to create.
+            setShapePickerOpen(false);
             if (consumeSuppressedClick(SHAPE_SLOT_ITEM_KEY)) return;
             setHovered(null);
             onCreate?.('shape', options);

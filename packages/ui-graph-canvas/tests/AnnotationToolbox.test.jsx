@@ -26,7 +26,6 @@ describe('AnnotationToolbox', () => {
     localStorage.clear();
   });
 
-
   it('renders collapsed by default, showing only the toggle', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} />);
     expect(screen.getByTestId('annotation-toolbox')).toBeInTheDocument();
@@ -700,6 +699,31 @@ describe('AnnotationToolbox', () => {
       expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
     });
 
+    it('closes an open picker when the main slot button itself is clicked', () => {
+      // Regression test: the main button sits inside the picker's own
+      // anchor (the slot wrapper), so ToolSlotPicker's outside-click check
+      // treats a click on it as "inside the anchor" and leaves the picker
+      // open on its own — the slot's click handler has to close it
+      // explicitly.
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} />);
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+      expect(screen.getByRole('group', { name: /^shapes$/i })).toBeInTheDocument();
+
+      // While the picker is open, its own "Rectangle" option shares the
+      // slot's accessible name — the picker is portalled to document.body,
+      // so it is not a descendant of the toolbox itself, and `within` the
+      // toolbox unambiguously reaches the slot's own button, not the
+      // picker's option.
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      fireEvent.click(within(toolbox).getByRole('button', { name: /^rectangle$/i }));
+
+      expect(onCreate).toHaveBeenCalledWith('shape', { shape: 'rectangle' });
+      expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
+    });
+
     it('opens the picker on a corner-button click, without creating a shape', () => {
       const onCreate = vi.fn();
       render(<AnnotationToolbox onCreate={onCreate} />);
@@ -821,7 +845,7 @@ describe('AnnotationToolbox', () => {
       expect(screen.queryByRole('group', { name: /^shapes$/i })).not.toBeInTheDocument();
     });
 
-    it("stops propagation so a host document Escape handler (e.g. GraphCanvas clearing the canvas selection) never sees it", () => {
+    it('stops propagation so a host document Escape handler (e.g. GraphCanvas clearing the canvas selection) never sees it', () => {
       // Regression test: GraphCanvas.jsx has its own document-level,
       // bubble-phase Escape handler that clears the canvas selection and
       // closes menus, with no special case for this picker's buttons (only
