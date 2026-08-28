@@ -1,15 +1,12 @@
 /**
  * Persists which variant a collapsed "tool slot" button currently represents
- * — one visible button standing in for a family of options (e.g.
- * AnnotationToolbox's shape slot, and the icon slot
- * task-annotation-icon-slot-and-visuals is meant to reuse this for rather
- * than growing a second, hand-copied implementation).
+ * — one visible button standing in for a family of options, such as
+ * AnnotationToolbox's shape and icon slots.
  *
  * localStorage, not component state or the shared annotation session/graph:
- * owner decision 2026-08-26 on task-annotation-shapes-under-one-toolbox-slot.
  * Component state is lost on reload; the session state is shared with every
  * other participant in a collaborative canvas, which is wrong for what is a
- * personal "last shape I drew" tool preference, not document content.
+ * personal tool preference, not document content.
  *
  * `storageKey` must be unique per slot so two slots' remembered choices never
  * collide (e.g. one key for the shape slot, a different one for the icon

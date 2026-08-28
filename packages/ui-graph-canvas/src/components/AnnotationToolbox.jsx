@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useToolSlotSelection } from '../hooks/useToolSlotSelection';
+import {
+  ANNOTATION_ICONS,
+  DEFAULT_ANNOTATION_ICON,
+  resolveAnnotationIcon,
+} from '../utils/annotationIcons';
 import { ToolSlotPicker } from './ToolSlotPicker';
 import './AnnotationToolbox.css';
 
@@ -10,15 +15,13 @@ import './AnnotationToolbox.css';
 const DRAG_THRESHOLD_PX = 6;
 
 // The toolbox items that precede the shape slot. `frame` stays a distinct,
-// separate item here — collapsing it into the shape kind is a different,
-// not-yet-scheduled task (task-annotation-merge-frame-into-shape-rectangle)
-// that changes what the shape slot even contains, so it is out of scope for
-// this collapse.
+// separate item here — collapsing it into the shape kind would change what
+// the shape slot even contains, so it is out of scope for this collapse.
 const TOOLBOX_ITEMS_LEADING = [
-  { kind: 'note', glyph: '🗒️', labelKey: 'note' },
-  { kind: 'text', glyph: 'T', labelKey: 'text' },
-  { kind: 'label', glyph: '🏷️', labelKey: 'label' },
-  { kind: 'frame', glyph: '▢', labelKey: 'frame' },
+  { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
+  { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
+  { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
+  { kind: 'frame', glyph: { kind: 'toolbox-glyph', name: 'frame' }, labelKey: 'frame' },
 ];
 
 // Every `content.shape` variant the model accepts (SHAPE_STYLES in
@@ -43,30 +46,45 @@ const SHAPE_VARIANT_KEYS = SHAPE_VARIANTS.map((variant) => variant.shape);
 const DEFAULT_SHAPE = SHAPE_VARIANTS[0].shape;
 // Namespaced and versioned by slot identity, not by content — a personal
 // "which shape did I use last" preference, not something the shared session
-// or graph should ever see (owner decision 2026-08-26 on
-// task-annotation-shapes-under-one-toolbox-slot). The icon slot
-// task-annotation-icon-slot-and-visuals should give itself a different key
-// here, not reuse this one.
+// or graph should ever see. Other collapsed slots use their own keys.
 const SHAPE_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:shape-slot';
 // Stable regardless of which shape is currently selected, so the drag-click
 // suppression queue below (keyed by itemKey) and React's reconciliation both
 // keep treating the slot as the same item across a shape change mid-gesture.
 const SHAPE_SLOT_ITEM_KEY = 'shape-slot';
 
+const ICON_VARIANTS = Object.keys(ANNOTATION_ICONS).map((icon) => ({
+  icon,
+  glyph: { kind: 'annotation-icon', icon },
+  label: icon.replace(/_/g, ' '),
+}));
+const ICON_VARIANT_KEYS = ICON_VARIANTS.map((variant) => variant.icon);
+const ICON_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
+const ICON_SLOT_ITEM_KEY = 'icon-slot';
+
 const TOOLBOX_ITEMS_TRAILING = [
-  { kind: 'icon', glyph: '🔘', labelKey: 'icon' },
-  { kind: 'vote_dot', glyph: '⚫', labelKey: 'voteDot' },
+  { kind: 'vote_dot', glyph: { kind: 'toolbox-glyph', name: 'vote-dot' }, labelKey: 'voteDot' },
   // Opens a file picker rather than creating an object directly — there is
   // nothing to pick up and carry, so this item stays click-only (see
   // `isDraggableKind` below).
-  { kind: 'image', glyph: '🖼️', labelKey: 'image', draggable: false },
+  {
+    kind: 'image',
+    glyph: { kind: 'toolbox-glyph', name: 'image' },
+    labelKey: 'image',
+    draggable: false,
+  },
   // Unlike every other item, clicking this one does not create an annotation
   // immediately — GraphCanvas's onCreate special-cases 'freehand' to arm a
   // one-stroke drawing mode instead (docs/ANNOTATION_CONTRACT.md's "Physical
   // device acceptance" gap: this is the GUI creation entry point stylus input
   // needed). `activeKind` reflects that armed state back onto this button.
   // Arming a mode isn't an object to carry either, so it stays click-only too.
-  { kind: 'freehand', glyph: '✏️', labelKey: 'freehand', draggable: false },
+  {
+    kind: 'freehand',
+    glyph: { kind: 'toolbox-glyph', name: 'freehand' },
+    labelKey: 'freehand',
+    draggable: false,
+  },
 ];
 
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
@@ -83,6 +101,29 @@ function renderGlyph(glyph) {
       />
     );
   }
+  if (glyph?.kind === 'annotation-icon') {
+    const icon = resolveAnnotationIcon(glyph.icon);
+    return (
+      <span
+        className={`annotation-toolbox-icon-glyph${
+          icon.isGlyph ? '' : ' annotation-toolbox-icon-glyph--abbreviated'
+        }`}
+        aria-hidden="true"
+      >
+        {icon.text}
+      </span>
+    );
+  }
+  if (glyph?.kind === 'toolbox-glyph') {
+    return (
+      <span
+        className={`annotation-toolbox-visual annotation-toolbox-visual--${glyph.name}`}
+        aria-hidden="true"
+      >
+        {glyph.text}
+      </span>
+    );
+  }
   return glyph;
 }
 
@@ -97,22 +138,20 @@ function renderGlyph(glyph) {
  * the canvas".
  *
  * It creates note/text/label/frame, a shape (via the collapsed shape slot,
- * see `renderShapeSlot` below), icon, vote_dot, and image (which opens a file
+ * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
+ * `renderIconSlot` below), vote_dot, and image (which opens a file
  * picker rather than adding a node directly — the host's onCreate handles
- * that distinction; see GraphCanvas's onImageIngest). icon/vote_dot each
- * create with a fixed default (a generic glyph / a value of 1 — see
- * GraphCanvas's createAnnotation); an icon's right-click property editor
- * (GenericAnnotationNode.jsx) offers a picker over the full icon vocabulary
- * to change it after creation, the same pattern the shape slot's own picker
- * follows — there is no picker at creation time for icon/vote_dot yet.
+ * that distinction; see GraphCanvas's onImageIngest). vote_dot creates with a
+ * fixed default value of 1 (see GraphCanvas's createAnnotation). The icon slot
+ * creates whichever icon is currently selected, using the same vocabulary the
+ * icon annotation's right-click property editor offers after creation.
  * `activeKind` (currently only meaningful for 'freehand') marks that item as
  * pressed while its armed drawing mode is active, so a user mid-stroke can
  * see which tool is live.
  *
- * The shape slot (task-annotation-shapes-under-one-toolbox-slot) replaces
- * what used to be six separate shape-variant buttons — half the toolbox,
- * which is why it used to wrap to a second row — with one slot that shows
- * the currently selected shape and remembers it in localStorage
+ * The shape slot replaces what used to be six separate shape-variant buttons
+ * — half the toolbox, which is why it used to wrap to a second row — with one
+ * slot that shows the currently selected shape and remembers it in localStorage
  * (useToolSlotSelection; a personal tool preference, not shared session
  * state). A small corner button on the slot, right-clicking the slot, or
  * (per the owner's explicit accessibility direction) Enter/Space on that
@@ -121,9 +160,8 @@ function renderGlyph(glyph) {
  * is a second real focusable element, not just an invisible gesture, so
  * mouse, touch and keyboard each have a discoverable path to the picker —
  * see `renderShapeSlot` for the concrete wiring. Both pieces
- * (useToolSlotSelection, ToolSlotPicker) are written generically so the
- * planned icon slot (task-annotation-icon-slot-and-visuals) can reuse them
- * rather than duplicating the pattern.
+ * (useToolSlotSelection, ToolSlotPicker) are shared by the shape and icon
+ * slots so the two collapsed tool families behave the same way.
  *
  * Every item that creates an object (all but `image` and `freehand`, see
  * `draggable: false` on those two above) is also drag-to-create: picking it
@@ -163,18 +201,30 @@ function AnnotationToolbox({
     DEFAULT_SHAPE
   );
   const [shapePickerOpen, setShapePickerOpen] = useState(false);
+  const [currentIcon, setCurrentIcon] = useToolSlotSelection(
+    ICON_SLOT_STORAGE_KEY,
+    ICON_VARIANT_KEYS,
+    DEFAULT_ANNOTATION_ICON
+  );
+  const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const shapeSlotRef = useRef(null);
   const shapeCornerButtonRef = useRef(null);
+  const iconSlotRef = useRef(null);
+  const iconCornerButtonRef = useRef(null);
   // Lets the picker's onSelect callback focus the slot itself after a
   // selection, the same way the slot's own onClick already does — see
   // renderShapeSlot below.
   const shapeMainButtonRef = useRef(null);
+  const iconMainButtonRef = useRef(null);
   // Collapsing the toolbox unmounts the items row (and the slot/corner
   // button inside it) out from under an open picker — close it in step
   // rather than leaving a dangling `shapePickerOpen: true` that a later
   // re-expand would resurrect with no button left to have opened it.
   useEffect(() => {
-    if (!expanded) setShapePickerOpen(false);
+    if (!expanded) {
+      setShapePickerOpen(false);
+      setIconPickerOpen(false);
+    }
   }, [expanded]);
   // Sole purpose: swallow the click that follows a completed pointer drag
   // (pointerup fires, then the browser's synthetic click fires next in the
@@ -343,6 +393,8 @@ function AnnotationToolbox({
     shapePickerOpen: 'Choose a shape',
     shapePicker: 'Shapes',
     icon: 'Icon',
+    iconPickerOpen: 'Choose an icon',
+    iconPicker: 'Icons',
     voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
@@ -445,10 +497,10 @@ function AnnotationToolbox({
   };
 
   // The collapsed shape slot: one cell standing in for every SHAPE_VARIANTS
-  // entry (task-annotation-shapes-under-one-toolbox-slot). Its main button
-  // behaves exactly like a plain item above (click/drag creates the CURRENT
-  // shape) but shows whichever variant `useToolSlotSelection` currently
-  // holds; a second, independently focusable corner button opens
+  // entry. Its main button behaves exactly like a plain item above
+  // (click/drag creates the CURRENT shape) but shows whichever variant
+  // `useToolSlotSelection` currently holds; a second, independently focusable
+  // corner button opens
   // ToolSlotPicker, and so does a right-click on the main button. Both paths
   // — plus Enter/Space on the corner button, which needs no extra wiring
   // since it is a real `<button>` — are the owner-directed accessible
@@ -584,6 +636,96 @@ function AnnotationToolbox({
     );
   };
 
+  const renderIconSlot = () => {
+    const variant =
+      ICON_VARIANTS.find((candidate) => candidate.icon === currentIcon) ?? ICON_VARIANTS[0];
+    const options = { icon: variant.icon };
+    const pickerOptions = ICON_VARIANTS.map((candidate) => ({
+      key: candidate.icon,
+      glyph: candidate.glyph,
+      label: candidate.label,
+    }));
+
+    return (
+      <div className="annotation-toolbox-slot" key="icon-slot" ref={iconSlotRef}>
+        <button
+          ref={iconMainButtonRef}
+          type="button"
+          className="annotation-toolbox-item annotation-toolbox-item--draggable"
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            setIconPickerOpen(false);
+          }}
+          onClick={(event) => {
+            setIconPickerOpen(false);
+            event.currentTarget.focus();
+            if (consumeSuppressedClick(ICON_SLOT_ITEM_KEY)) return;
+            setHovered(null);
+            onCreate?.('icon', options);
+          }}
+          aria-label={`${lbl.icon}: ${variant.label}`}
+          aria-describedby={hovered?.key === 'icon' ? TOOLTIP_ID : undefined}
+          onMouseEnter={(e) => showTip(e, 'icon')}
+          onMouseLeave={() => setHovered(null)}
+          onFocus={(e) => showTip(e, 'icon')}
+          onBlur={() => setHovered(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setIconPickerOpen(true);
+          }}
+          draggable={!touch}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(
+              'application/annotation-kind',
+              JSON.stringify({ kind: 'icon', ...options })
+            );
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onPointerDown={
+            touch
+              ? (e) => {
+                  if (e.button === 0) setIconPickerOpen(false);
+                  handlePointerDown(e, 'icon', options, variant.glyph, ICON_SLOT_ITEM_KEY);
+                }
+              : undefined
+          }
+        >
+          <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+            {renderGlyph(variant.glyph)}
+          </span>
+          <span className="annotation-toolbox-item-label">{lbl.icon}</span>
+        </button>
+        <button
+          ref={iconCornerButtonRef}
+          type="button"
+          className="annotation-toolbox-slot-corner"
+          aria-label={lbl.iconPickerOpen}
+          aria-haspopup="true"
+          aria-expanded={iconPickerOpen}
+          onClick={() => setIconPickerOpen(true)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+        {iconPickerOpen && (
+          <ToolSlotPicker
+            anchorRef={iconSlotRef}
+            returnFocusRef={iconCornerButtonRef}
+            ariaLabel={lbl.iconPicker}
+            options={pickerOptions}
+            currentKey={variant.icon}
+            renderGlyph={renderGlyph}
+            onSelect={(key) => {
+              setCurrentIcon(key);
+              setIconPickerOpen(false);
+              iconMainButtonRef.current?.focus();
+            }}
+            onClose={() => setIconPickerOpen(false)}
+          />
+        )}
+      </div>
+    );
+  };
+
   return (
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
@@ -610,6 +752,7 @@ function AnnotationToolbox({
         <div className="annotation-toolbox-items">
           {TOOLBOX_ITEMS_LEADING.map(renderToolboxItem)}
           {renderShapeSlot()}
+          {renderIconSlot()}
           {TOOLBOX_ITEMS_TRAILING.map(renderToolboxItem)}
         </div>
       )}
