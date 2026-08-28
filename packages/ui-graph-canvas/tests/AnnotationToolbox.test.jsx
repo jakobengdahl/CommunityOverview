@@ -129,6 +129,39 @@ describe('AnnotationToolbox', () => {
     }
   );
 
+  it('draws the process shape toolbox icon as a process block, not as an arrow glyph', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+    const picker = screen.getByRole('group', { name: /^shapes$/i });
+    const processOption = within(picker).getByRole('button', { name: /^process arrow$/i });
+    expect(
+      processOption.querySelector('.annotation-toolbox-shape-glyph--process-arrow')
+    ).toBeTruthy();
+    expect(processOption.querySelector('.tool-slot-picker-item-glyph').textContent).not.toContain(
+      '➜'
+    );
+
+    fireEvent.click(processOption);
+    const processSlot = screen.getByRole('button', { name: /^process arrow$/i });
+    expect(
+      processSlot.querySelector('.annotation-toolbox-shape-glyph--process-arrow')
+    ).toBeTruthy();
+    expect(processSlot.querySelector('.annotation-toolbox-item-glyph').textContent).not.toContain(
+      '➜'
+    );
+
+    const css = readStylesheet();
+    expect(css).toMatch(
+      /\.annotation-toolbox-shape-glyph--process-arrow \{[^}]*clip-path:\s*polygon\(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%\)/
+    );
+
+    fireEvent.click(processSlot);
+    expect(onCreate).toHaveBeenLastCalledWith('shape', { shape: 'process_arrow' });
+  });
+
   it('calls onCreate with the image kind and no options, like the other simple kinds', () => {
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);

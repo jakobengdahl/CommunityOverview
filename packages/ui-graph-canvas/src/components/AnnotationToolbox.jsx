@@ -33,7 +33,11 @@ const SHAPE_VARIANTS = [
   { shape: 'triangle', glyph: '△', labelKey: 'shapeTriangle' },
   { shape: 'rhombus', glyph: '◇', labelKey: 'shapeRhombus' },
   { shape: 'hexagon', glyph: '⬡', labelKey: 'shapeHexagon' },
-  { shape: 'process_arrow', glyph: '➜', labelKey: 'shapeProcessArrow' },
+  {
+    shape: 'process_arrow',
+    glyph: { kind: 'shape-swatch', shape: 'process_arrow' },
+    labelKey: 'shapeProcessArrow',
+  },
 ];
 const SHAPE_VARIANT_KEYS = SHAPE_VARIANTS.map((variant) => variant.shape);
 const DEFAULT_SHAPE = SHAPE_VARIANTS[0].shape;
@@ -66,6 +70,21 @@ const TOOLBOX_ITEMS_TRAILING = [
 ];
 
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
+
+function renderGlyph(glyph) {
+  if (glyph?.kind === 'shape-swatch') {
+    return (
+      <span
+        className={`annotation-toolbox-shape-glyph annotation-toolbox-shape-glyph--${glyph.shape.replaceAll(
+          '_',
+          '-'
+        )}`}
+        aria-hidden="true"
+      />
+    );
+  }
+  return glyph;
+}
 
 /**
  * AnnotationToolbox - the bottom-mounted GUI creation surface for the v1
@@ -415,7 +434,7 @@ function AnnotationToolbox({
         }
       >
         <span className="annotation-toolbox-item-glyph" aria-hidden="true">
-          {glyph}
+          {renderGlyph(glyph)}
         </span>
         {/* Always rendered; CSS reveals it only where hover is
             unavailable, so the tooltip's job is covered on touch
@@ -523,7 +542,7 @@ function AnnotationToolbox({
           }
         >
           <span className="annotation-toolbox-item-glyph" aria-hidden="true">
-            {variant.glyph}
+            {renderGlyph(variant.glyph)}
           </span>
           <span className="annotation-toolbox-item-label">{lbl[variant.labelKey]}</span>
         </button>
@@ -545,6 +564,7 @@ function AnnotationToolbox({
             ariaLabel={lbl.shapePicker}
             options={pickerOptions}
             currentKey={variant.shape}
+            renderGlyph={renderGlyph}
             onSelect={(key) => {
               setCurrentShape(key);
               setShapePickerOpen(false);
@@ -620,7 +640,7 @@ function AnnotationToolbox({
             style={{ left: dragGhost.left, top: dragGhost.top }}
             aria-hidden="true"
           >
-            {dragGhost.glyph}
+            {renderGlyph(dragGhost.glyph)}
           </div>,
           document.body
         )}

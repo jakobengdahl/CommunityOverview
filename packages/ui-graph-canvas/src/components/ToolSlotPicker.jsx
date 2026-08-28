@@ -36,6 +36,7 @@ export function ToolSlotPicker({
   onSelect,
   onClose,
   ariaLabel,
+  renderGlyph = (glyph) => glyph,
 }) {
   const panelRef = useRef(null);
   const focusMovedAwayRef = useRef(false);
@@ -138,7 +139,7 @@ export function ToolSlotPicker({
           onClick={() => onSelectRef.current(option.key)}
         >
           <span className="tool-slot-picker-item-glyph" aria-hidden="true">
-            {option.glyph}
+            {renderGlyph(option.glyph)}
           </span>
           <span className="tool-slot-picker-item-label">{option.label}</span>
         </button>
