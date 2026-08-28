@@ -9,6 +9,7 @@ import {
   isAnnotationDraggable,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import { useEditableText } from '../hooks/useEditableText';
 import './LabelNode.css';
 
 /**
@@ -22,10 +23,7 @@ const DEFAULT_LABEL_COLOR = '#64748b';
 const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [text, setText] = useState(data.text || '');
   const [contextMenu, setContextMenu] = useState(null);
-  const inputRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
   const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
@@ -34,17 +32,11 @@ function LabelNode({ id, data, selected }) {
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const locked = Boolean(data?.locked);
-
-  useEffect(() => {
-    setText(data.text || '');
-  }, [data.text]);
-
-  useEffect(() => {
-    if (isEditing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [isEditing]);
+  // A single-line `<input>` commits on Enter too, unlike NoteNode/
+  // GenericAnnotationNode's `<textarea>` which leaves Enter alone to insert
+  // a newline — see useEditableText's doc comment.
+  const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
+    useEditableText(id, data, { commitOnEnter: true });
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -67,43 +59,6 @@ function LabelNode({ id, data, selected }) {
       document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [contextMenu]);
-
-  const commitText = () => {
-    setIsEditing(false);
-    if (remoteLocked) {
-      setText(data.text || '');
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    const trimmed = text.trim();
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
-    );
-    notifyChange('text');
-  };
-
-  // Live per-keystroke sync — see NoteNode's equivalent comment
-  // (docs/ANNOTATION_CONTRACT.md's "300 ms text debounce").
-  const handleTextChange = (e) => {
-    const next = e.target.value;
-    setText(next);
-    if (remoteLocked) return;
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
-    );
-    notifyChange('text');
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      commitText();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      setText(data.text || '');
-      setIsEditing(false);
-    }
-  };
 
   const changeColor = (color) => {
     if (remoteLocked) {
@@ -183,14 +138,7 @@ function LabelNode({ id, data, selected }) {
           outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
           outlineOffset: remoteLocked ? '2px' : undefined,
         }}
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          if (remoteLocked) {
-            notifyRemoteLockedAttempt();
-            return;
-          }
-          setIsEditing(true);
-        }}
+        onDoubleClick={startEditing}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
