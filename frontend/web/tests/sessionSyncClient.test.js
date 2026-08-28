@@ -761,6 +761,29 @@ describe('SessionSyncClient', () => {
     expect(dropFetch.calls).toHaveLength(1); // not retried
   });
 
+  // Review round 9 (PR #496 / task fbd32fc9): onDropped is invoked
+  // synchronously from inside _flush(), before _flush's own `finally` gets a
+  // chance to strip the batch out of _inFlightOps. A caller that reads
+  // getPendingOps() from within its onDropped handler (App.jsx's
+  // resyncFromServer, triggered by onDropped to converge the canvas back to
+  // server truth) must see the dropped op already gone — otherwise the very
+  // resync meant to drop it would instead resurrect it.
+  it('a dropped op is already gone from getPendingOps by the time onDropped fires', async () => {
+    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+    let pendingDuringDrop = null;
+    const onDropped = vi.fn(() => {
+      pendingDuringDrop = client.getPendingOps();
+    });
+    const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['x'] });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(onDropped).toHaveBeenCalled();
+    expect(pendingDuringDrop).toEqual([]);
+  });
+
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
     // Regression for the shared-session "moves silently stop persisting over
     // time" data-loss bug: a single hung POST (a half-open request held by a

@@ -947,6 +947,16 @@ export class SessionSyncClient {
           this._queue = batch.concat(this._queue);
           this._forceSingle = true;
         } else {
+          // Remove from _inFlightOps *before* the handler runs, not only in
+          // this call's `finally` below (review round 9): App.jsx's onDropped
+          // handler calls resyncFromServer synchronously, and that reads
+          // getPendingOps() before this function ever yields back to it — a
+          // read racing ahead of the `finally` would still see this
+          // terminally-rejected op as "pending" and resurrect it onto the
+          // canvas via the very resync meant to converge away from it. The
+          // `finally`'s own filter is then a harmless no-op for a batch
+          // already removed.
+          this._removeInFlight(batch);
           if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
@@ -964,17 +974,25 @@ export class SessionSyncClient {
       if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
-      // Whatever happened to this batch — delivered, terminally dropped, or
-      // requeued into _queue above — it is no longer in flight. Filter by
-      // reference (not content) so an unrelated op with identical fields
-      // already re-added to _queue is never mistaken for this one.
-      if (batch && batch.length) {
-        const settled = new Set(batch);
-        this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
-      }
+      // Whatever happened to this batch — delivered, terminally dropped
+      // (already removed above, ahead of the onDropped handler — a no-op
+      // here), or requeued into _queue — it is no longer in flight.
+      this._removeInFlight(batch);
       this._flushing = false;
       this._flushSoon();
     }
+  }
+
+  /**
+   * Remove exactly the ops in `batch` from `_inFlightOps` — by reference, not
+   * content, so an unrelated op with identical fields already re-added to
+   * `_queue` (a retry, or a later user edit with the same shape) is never
+   * mistaken for this one. Safe to call more than once for the same batch.
+   */
+  _removeInFlight(batch) {
+    if (!batch || !batch.length) return;
+    const settled = new Set(batch);
+    this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
   }
 
   _scheduleRetry() {
