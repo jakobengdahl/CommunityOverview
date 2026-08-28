@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
+
+// The shape slot (task-annotation-shapes-under-one-toolbox-slot) shows only
+// the currently selected shape as a top-level button; every other variant
+// has to be picked from its fold-out first. `within` scopes the picker
+// selection so it can never match the slot's own current-shape button (e.g.
+// selecting "Rectangle" while the slot already shows "Rectangle").
+function selectShapeVariant(name) {
+  fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+  const picker = screen.getByRole('group', { name: /^shapes$/i });
+  fireEvent.click(within(picker).getByRole('button', { name }));
+}
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
@@ -62,7 +73,14 @@ function findCreatedNode(type) {
 }
 
 describe('GraphCanvas bottom annotation toolbox', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The shape slot's current variant persists in localStorage (a personal
+    // preference, not component state) — clear it so one test's picker
+    // selection can't leak into the next test's "what does the slot show by
+    // default" assumption.
+    localStorage.clear();
+  });
 
   it('renders the toolbox as a surface distinct from the pane annotation context menu', () => {
     render(<GraphCanvas nodes={[]} edges={[]} />);
@@ -119,6 +137,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // reproduces the bug.
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    selectShapeVariant(new RegExp(`^${shape}$`, 'i'));
     fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${shape}$`, 'i') }));
 
     const node = findCreatedNode('shape');
@@ -139,6 +158,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
   it('creates a circle shape variant via the toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    selectShapeVariant(/^circle$/i);
     fireEvent.click(screen.getByRole('button', { name: /^circle$/i }));
 
     const shape = findCreatedNode('shape');

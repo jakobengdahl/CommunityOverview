@@ -517,6 +517,8 @@
     "shape_rhombus": "Rhombus",
     "shape_hexagon": "Hexagon",
     "shape_process_arrow": "Process arrow",
+    "shape_picker_open": "Choose a shape",
+    "shape_picker": "Shapes",
     "icon": "Icon",
     "vote_dot": "Vote dot",
     "image": "Image",

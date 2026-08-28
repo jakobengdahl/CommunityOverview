@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useToolSlotSelection } from '../hooks/useToolSlotSelection';
+import { ToolSlotPicker } from './ToolSlotPicker';
 import './AnnotationToolbox.css';
 
 // How far the pointer has to travel from the item before a press turns into a
@@ -7,23 +9,47 @@ import './AnnotationToolbox.css';
 // movement) from ever reaching the drag path.
 const DRAG_THRESHOLD_PX = 6;
 
-// The v1 annotation kinds this toolbox can create today. Each 'shape' entry
-// carries the `shape` option it creates; every variant the model accepts now
-// renders as its own visual (SHAPE_STYLES in GenericAnnotationNode.jsx), so
-// all six are offered. See docs/ANNOTATION_CONTRACT.md's acceptance matrix for
-// the per-type-editor gaps this still doesn't close - creating a shape from
-// here is not the same as being able to change an existing one's subtype.
-const TOOLBOX_ITEMS = [
+// The toolbox items that precede the shape slot. `frame` stays a distinct,
+// separate item here — collapsing it into the shape kind is a different,
+// not-yet-scheduled task (task-annotation-merge-frame-into-shape-rectangle)
+// that changes what the shape slot even contains, so it is out of scope for
+// this collapse.
+const TOOLBOX_ITEMS_LEADING = [
   { kind: 'note', glyph: '🗒️', labelKey: 'note' },
   { kind: 'text', glyph: 'T', labelKey: 'text' },
   { kind: 'label', glyph: '🏷️', labelKey: 'label' },
   { kind: 'frame', glyph: '▢', labelKey: 'frame' },
-  { kind: 'shape', glyph: '▭', labelKey: 'shapeRectangle', shape: 'rectangle' },
-  { kind: 'shape', glyph: '◯', labelKey: 'shapeCircle', shape: 'circle' },
-  { kind: 'shape', glyph: '△', labelKey: 'shapeTriangle', shape: 'triangle' },
-  { kind: 'shape', glyph: '◇', labelKey: 'shapeRhombus', shape: 'rhombus' },
-  { kind: 'shape', glyph: '⬡', labelKey: 'shapeHexagon', shape: 'hexagon' },
-  { kind: 'shape', glyph: '➜', labelKey: 'shapeProcessArrow', shape: 'process_arrow' },
+];
+
+// Every `content.shape` variant the model accepts (SHAPE_STYLES in
+// GenericAnnotationNode.jsx renders each distinctly) — these used to be six
+// separate top-level toolbox buttons and are now the options behind one
+// collapsed slot (see `renderShapeSlot` below and useToolSlotSelection).
+// docs/ANNOTATION_CONTRACT.md's acceptance matrix still applies: creating a
+// shape from here is not the same as changing an existing one's subtype.
+const SHAPE_VARIANTS = [
+  { shape: 'rectangle', glyph: '▭', labelKey: 'shapeRectangle' },
+  { shape: 'circle', glyph: '◯', labelKey: 'shapeCircle' },
+  { shape: 'triangle', glyph: '△', labelKey: 'shapeTriangle' },
+  { shape: 'rhombus', glyph: '◇', labelKey: 'shapeRhombus' },
+  { shape: 'hexagon', glyph: '⬡', labelKey: 'shapeHexagon' },
+  { shape: 'process_arrow', glyph: '➜', labelKey: 'shapeProcessArrow' },
+];
+const SHAPE_VARIANT_KEYS = SHAPE_VARIANTS.map((variant) => variant.shape);
+const DEFAULT_SHAPE = SHAPE_VARIANTS[0].shape;
+// Namespaced and versioned by slot identity, not by content — a personal
+// "which shape did I use last" preference, not something the shared session
+// or graph should ever see (owner decision 2026-08-26 on
+// task-annotation-shapes-under-one-toolbox-slot). The icon slot
+// task-annotation-icon-slot-and-visuals should give itself a different key
+// here, not reuse this one.
+const SHAPE_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:shape-slot';
+// Stable regardless of which shape is currently selected, so the drag-click
+// suppression queue below (keyed by itemKey) and React's reconciliation both
+// keep treating the slot as the same item across a shape change mid-gesture.
+const SHAPE_SLOT_ITEM_KEY = 'shape-slot';
+
+const TOOLBOX_ITEMS_TRAILING = [
   { kind: 'icon', glyph: '🔘', labelKey: 'icon' },
   { kind: 'vote_dot', glyph: '⚫', labelKey: 'voteDot' },
   // Opens a file picker rather than creating an object directly — there is
@@ -51,24 +77,41 @@ const TOOLTIP_ID = 'annotation-toolbox-tooltip';
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label/frame, every shape variant, icon, vote_dot, and
- * image (which opens a file picker rather than adding a node directly — the
- * host's onCreate handles that distinction; see GraphCanvas's onImageIngest).
- * icon/vote_dot each create with a fixed default (a generic glyph / a value
- * of 1 — see GraphCanvas's createAnnotation); an icon's right-click property
- * editor (GenericAnnotationNode.jsx) offers a picker over the full icon
- * vocabulary to change it after creation, the same pattern `shape`'s subtype
- * picker already established — there is no picker at creation time itself.
+ * It creates note/text/label/frame, a shape (via the collapsed shape slot,
+ * see `renderShapeSlot` below), icon, vote_dot, and image (which opens a file
+ * picker rather than adding a node directly — the host's onCreate handles
+ * that distinction; see GraphCanvas's onImageIngest). icon/vote_dot each
+ * create with a fixed default (a generic glyph / a value of 1 — see
+ * GraphCanvas's createAnnotation); an icon's right-click property editor
+ * (GenericAnnotationNode.jsx) offers a picker over the full icon vocabulary
+ * to change it after creation, the same pattern the shape slot's own picker
+ * follows — there is no picker at creation time for icon/vote_dot yet.
  * `activeKind` (currently only meaningful for 'freehand') marks that item as
  * pressed while its armed drawing mode is active, so a user mid-stroke can
  * see which tool is live.
  *
+ * The shape slot (task-annotation-shapes-under-one-toolbox-slot) replaces
+ * what used to be six separate shape-variant buttons — half the toolbox,
+ * which is why it used to wrap to a second row — with one slot that shows
+ * the currently selected shape and remembers it in localStorage
+ * (useToolSlotSelection; a personal tool preference, not shared session
+ * state). A small corner button on the slot, right-clicking the slot, or
+ * (per the owner's explicit accessibility direction) Enter/Space on that
+ * same corner button all open a fold-out picker (ToolSlotPicker) listing
+ * every shape; picking one becomes the new current shape. The corner button
+ * is a second real focusable element, not just an invisible gesture, so
+ * mouse, touch and keyboard each have a discoverable path to the picker —
+ * see `renderShapeSlot` for the concrete wiring. Both pieces
+ * (useToolSlotSelection, ToolSlotPicker) are written generically so the
+ * planned icon slot (task-annotation-icon-slot-and-visuals) can reuse them
+ * rather than duplicating the pattern.
+ *
  * Every item that creates an object (all but `image` and `freehand`, see
- * `draggable: false` on those two in TOOLBOX_ITEMS) is also drag-to-create:
- * picking it up and moving away from the button is the creation gesture, and
- * releasing places the object where the pointer lands, rather than a click
- * always landing it at the viewport centre via `onCreate`. Two input paths
- * cover this, chosen by `touch` (the host's coarse-pointer signal, matching
+ * `draggable: false` on those two above) is also drag-to-create: picking it
+ * up and moving away from the button is the creation gesture, and releasing
+ * places the object where the pointer lands, rather than a click always
+ * landing it at the viewport centre via `onCreate`. Two input paths cover
+ * this, chosen by `touch` (the host's coarse-pointer signal, matching
  * FloatingToolbar's own `isDraggable`/`isCoarsePointer` split):
  *   - fine pointer (mouse): native HTML5 `dataTransfer` drag, the same
  *     mechanism FloatingToolbar already uses for graph-node creation. The
@@ -82,7 +125,9 @@ const TOOLTIP_ID = 'annotation-toolbox-tooltip';
  * A plain click/tap that never crosses the threshold still calls `onCreate`
  * exactly as before — drag is additive, not a replacement for the existing
  * keyboard/click path (Enter/Space activation never goes through pointer
- * events at all, so it is unaffected either way).
+ * events at all, so it is unaffected either way). The shape slot's main
+ * button participates in this the same way every other item does, using
+ * whichever shape is currently selected.
  */
 function AnnotationToolbox({
   onCreate,
@@ -93,6 +138,25 @@ function AnnotationToolbox({
   activeKind = null,
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [currentShape, setCurrentShape] = useToolSlotSelection(
+    SHAPE_SLOT_STORAGE_KEY,
+    SHAPE_VARIANT_KEYS,
+    DEFAULT_SHAPE
+  );
+  const [shapePickerOpen, setShapePickerOpen] = useState(false);
+  const shapeSlotRef = useRef(null);
+  const shapeCornerButtonRef = useRef(null);
+  // Lets the picker's onSelect callback focus the slot itself after a
+  // selection, the same way the slot's own onClick already does — see
+  // renderShapeSlot below.
+  const shapeMainButtonRef = useRef(null);
+  // Collapsing the toolbox unmounts the items row (and the slot/corner
+  // button inside it) out from under an open picker — close it in step
+  // rather than leaving a dangling `shapePickerOpen: true` that a later
+  // re-expand would resurrect with no button left to have opened it.
+  useEffect(() => {
+    if (!expanded) setShapePickerOpen(false);
+  }, [expanded]);
   // Sole purpose: swallow the click that follows a completed pointer drag
   // (pointerup fires, then the browser's synthetic click fires next in the
   // same task) so a drag never also creates a second, click-positioned copy.
@@ -226,6 +290,21 @@ function AnnotationToolbox({
     activeDragCleanupsRef.current.add(cleanup);
   };
 
+  // Consumes a pending drag-click suppression token for `itemKey`, if any.
+  // Returns true when the click was consumed (i.e. the caller must NOT also
+  // create), matching the logic every plain item's onClick already ran
+  // inline — factored out so the shape slot's onClick can share it exactly
+  // rather than re-deriving the same queue semantics.
+  const consumeSuppressedClick = (itemKey) => {
+    const queue = pendingSuppressionsRef.current.get(itemKey);
+    if (queue && queue.length > 0) {
+      queue.shift();
+      if (queue.length === 0) pendingSuppressionsRef.current.delete(itemKey);
+      return true;
+    }
+    return false;
+  };
+
   const lbl = {
     toggleExpand: 'Add annotation',
     toggleCollapse: 'Collapse annotation toolbox',
@@ -239,6 +318,11 @@ function AnnotationToolbox({
     shapeRhombus: 'Rhombus',
     shapeHexagon: 'Hexagon',
     shapeProcessArrow: 'Process arrow',
+    // The corner button's own accessible name (a "choose a different shape"
+    // affordance, distinct from the slot's own name which is whichever shape
+    // is currently selected) and the fold-out picker's group label.
+    shapePickerOpen: 'Choose a shape',
+    shapePicker: 'Shapes',
     icon: 'Icon',
     voteDot: 'Vote dot',
     image: 'Image',
@@ -261,6 +345,223 @@ function AnnotationToolbox({
     imageHint: 'Add an image from a file',
     freehandHint: 'Draw a freehand stroke',
     ...labels,
+  };
+
+  // Shared per-item button, used for every toolbox entry except the shape
+  // slot (which needs the extra corner button and fold-out — see
+  // `renderShapeSlot` below). Unchanged in behaviour from before the shape
+  // slot existed; only pulled out into its own function so it can be called
+  // for the items on both sides of the slot.
+  const renderToolboxItem = ({ kind, glyph, labelKey, shape, draggable }) => {
+    // image/freehand have no draggable object to create (a file picker, an
+    // armed mode) — both stay click-only: no draggable attribute, no
+    // dragstart handler, no pointer-drag handlers, no grab cursor.
+    const isDraggableKind = draggable !== false;
+    const options = shape ? { shape } : undefined;
+    const itemKey = `${kind}-${labelKey}`;
+    return (
+      <button
+        key={itemKey}
+        type="button"
+        className={`annotation-toolbox-item${
+          activeKind === kind ? ' annotation-toolbox-item--active' : ''
+        }${isDraggableKind ? ' annotation-toolbox-item--draggable' : ''}`}
+        onClick={() => {
+          // Swallow the click a completed pointer drag synthesizes right
+          // after its pointerup — onDragCreate already created the
+          // annotation, so this would otherwise create a second,
+          // click-positioned one. See `consumeSuppressedClick`.
+          if (consumeSuppressedClick(itemKey)) return;
+          // A tap on a touch device fires the emulated mouseenter but no
+          // mouseleave until the user touches something else, so without
+          // this the tooltip stays on screen after the item is used.
+          setHovered(null);
+          onCreate?.(kind, options);
+        }}
+        aria-label={lbl[labelKey]}
+        aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
+        // The description is the accessible *description*, referenced
+        // rather than duplicated. A `title` would give the same text a
+        // second, native tooltip on top of the styled one — the visual
+        // clutter this redesign exists to reduce. FloatingToolbar sets
+        // no title for the same reason.
+        aria-describedby={hovered?.key === labelKey ? TOOLTIP_ID : undefined}
+        onMouseEnter={(e) => showTip(e, labelKey)}
+        onMouseLeave={() => setHovered(null)}
+        onFocus={(e) => showTip(e, labelKey)}
+        onBlur={() => setHovered(null)}
+        // Fine pointer (mouse): native HTML5 drag, off entirely on a
+        // coarse pointer — it never fires there, and leaving it on
+        // would fight the pointer-drag path below over the same
+        // gesture. Mirrors FloatingToolbar's isDraggable/isCoarsePointer split.
+        draggable={isDraggableKind && !touch}
+        onDragStart={
+          isDraggableKind
+            ? (e) => {
+                e.dataTransfer.setData(
+                  'application/annotation-kind',
+                  JSON.stringify(options ? { kind, ...options } : { kind })
+                );
+                e.dataTransfer.effectAllowed = 'move';
+              }
+            : undefined
+        }
+        // Coarse pointer (touch/stylus): Pointer Events stand in for
+        // HTML5 drag, which never fires there.
+        onPointerDown={
+          isDraggableKind && touch
+            ? (e) => handlePointerDown(e, kind, options, glyph, itemKey)
+            : undefined
+        }
+      >
+        <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+          {glyph}
+        </span>
+        {/* Always rendered; CSS reveals it only where hover is
+            unavailable, so the tooltip's job is covered on touch
+            without the label reintroducing the uneven rows. */}
+        <span className="annotation-toolbox-item-label">{lbl[labelKey]}</span>
+      </button>
+    );
+  };
+
+  // The collapsed shape slot: one cell standing in for every SHAPE_VARIANTS
+  // entry (task-annotation-shapes-under-one-toolbox-slot). Its main button
+  // behaves exactly like a plain item above (click/drag creates the CURRENT
+  // shape) but shows whichever variant `useToolSlotSelection` currently
+  // holds; a second, independently focusable corner button opens
+  // ToolSlotPicker, and so does a right-click on the main button. Both paths
+  // — plus Enter/Space on the corner button, which needs no extra wiring
+  // since it is a real `<button>` — are the owner-directed accessible
+  // affordances (2026-08-26): mouse, touch and keyboard each get a
+  // discoverable, non-gesture-only way to reach the picker.
+  const renderShapeSlot = () => {
+    const variant =
+      SHAPE_VARIANTS.find((candidate) => candidate.shape === currentShape) ?? SHAPE_VARIANTS[0];
+    const options = { shape: variant.shape };
+    const pickerOptions = SHAPE_VARIANTS.map((candidate) => ({
+      key: candidate.shape,
+      glyph: candidate.glyph,
+      label: lbl[candidate.labelKey],
+    }));
+
+    return (
+      <div className="annotation-toolbox-slot" key="shape-slot" ref={shapeSlotRef}>
+        <button
+          ref={shapeMainButtonRef}
+          type="button"
+          className="annotation-toolbox-item annotation-toolbox-item--draggable"
+          // The picker floats above the toolbox, not over the main button,
+          // and the button sits inside the picker's own anchor
+          // (shapeSlotRef) — so ToolSlotPicker's outside-click check treats
+          // an interaction here as "inside the anchor" and leaves it open
+          // on its own. Close it explicitly on mousedown (covers both a
+          // plain click and the start of an HTML5 drag — neither of which
+          // fires this button's own onClick once a real drag completes, see
+          // finishDrag's comment above) and again in onClick (the only path
+          // a keyboard Enter/Space activation takes, since it never fires
+          // mousedown/pointerdown at all). Left button only: mousedown
+          // always precedes contextmenu for a real right-click, so without
+          // this check, right-clicking an already-open picker would close
+          // it here and then immediately reopen it from onContextMenu below
+          // — a visible flicker that also resets whatever option had focus.
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            setShapePickerOpen(false);
+          }}
+          onClick={(event) => {
+            setShapePickerOpen(false);
+            // Explicit rather than relying on the browser's own
+            // click-focuses-the-button behaviour: WebKit (desktop Safari,
+            // iOS Safari) does not focus a <button> on click/tap, so without
+            // this ToolSlotPicker's cleanup effect would see focus as never
+            // having moved and force it onto the corner button instead of
+            // leaving it here, on the control the user actually activated.
+            event.currentTarget.focus();
+            if (consumeSuppressedClick(SHAPE_SLOT_ITEM_KEY)) return;
+            setHovered(null);
+            onCreate?.('shape', options);
+          }}
+          aria-label={lbl[variant.labelKey]}
+          aria-describedby={hovered?.key === variant.labelKey ? TOOLTIP_ID : undefined}
+          onMouseEnter={(e) => showTip(e, variant.labelKey)}
+          onMouseLeave={() => setHovered(null)}
+          onFocus={(e) => showTip(e, variant.labelKey)}
+          onBlur={() => setHovered(null)}
+          // Right-click is a mouse-only, invisible-until-tried path — real,
+          // but never the ONLY one (owner direction 2026-08-26). The wrapper
+          // canvas already suppresses the native browser context menu
+          // (GraphCanvas's own contextmenu listener on reactFlowWrapper),
+          // and this slot sits outside ReactFlow's own pane element, so
+          // opening the picker here never collides with the canvas's
+          // node/edge/pane context menus.
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setShapePickerOpen(true);
+          }}
+          draggable={!touch}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(
+              'application/annotation-kind',
+              JSON.stringify({ kind: 'shape', ...options })
+            );
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onPointerDown={
+            touch
+              ? (e) => {
+                  // Touch has no separate mousedown-vs-click split — this is
+                  // the one entry point for both a tap and a drag, so the
+                  // picker-close call above's touch-path equivalent lives
+                  // here rather than being reachable from onMouseDown. Same
+                  // primary-button guard as onMouseDown, for a stylus's
+                  // secondary (barrel) button.
+                  if (e.button === 0) setShapePickerOpen(false);
+                  handlePointerDown(e, 'shape', options, variant.glyph, SHAPE_SLOT_ITEM_KEY);
+                }
+              : undefined
+          }
+        >
+          <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+            {variant.glyph}
+          </span>
+          <span className="annotation-toolbox-item-label">{lbl[variant.labelKey]}</span>
+        </button>
+        <button
+          ref={shapeCornerButtonRef}
+          type="button"
+          className="annotation-toolbox-slot-corner"
+          aria-label={lbl.shapePickerOpen}
+          aria-haspopup="true"
+          aria-expanded={shapePickerOpen}
+          onClick={() => setShapePickerOpen(true)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+        {shapePickerOpen && (
+          <ToolSlotPicker
+            anchorRef={shapeSlotRef}
+            returnFocusRef={shapeCornerButtonRef}
+            ariaLabel={lbl.shapePicker}
+            options={pickerOptions}
+            currentKey={variant.shape}
+            onSelect={(key) => {
+              setCurrentShape(key);
+              setShapePickerOpen(false);
+              // Same reasoning as the main button's own onClick: without an
+              // explicit focus() here, ToolSlotPicker's cleanup effect would
+              // land focus on the corner button instead of the slot the
+              // user just gave a new shape to — surprising right after
+              // picking one, and it would silently turn a keyboard user's
+              // next Enter/Space (expecting to create the shape they just
+              // chose) into reopening the picker instead.
+              shapeMainButtonRef.current?.focus();
+            }}
+            onClose={() => setShapePickerOpen(false)}
+          />
+        )}
+      </div>
+    );
   };
 
   return (
@@ -287,92 +588,9 @@ function AnnotationToolbox({
 
       {expanded && (
         <div className="annotation-toolbox-items">
-          {TOOLBOX_ITEMS.map(({ kind, glyph, labelKey, shape, draggable }) => {
-            // image/freehand have no draggable object to create (a file
-            // picker, an armed mode) — both stay click-only: no draggable
-            // attribute, no dragstart handler, no pointer-drag handlers, no
-            // grab cursor.
-            const isDraggableKind = draggable !== false;
-            const options = shape ? { shape } : undefined;
-            const itemKey = `${kind}-${labelKey}`;
-            return (
-              <button
-                key={itemKey}
-                type="button"
-                className={`annotation-toolbox-item${
-                  activeKind === kind ? ' annotation-toolbox-item--active' : ''
-                }${isDraggableKind ? ' annotation-toolbox-item--draggable' : ''}`}
-                onClick={() => {
-                  // Swallow the click a completed pointer drag synthesizes
-                  // right after its pointerup — onDragCreate already created
-                  // the annotation, so this would otherwise create a second,
-                  // click-positioned one. Keyed by itemKey so a completed
-                  // drag on THIS button can never swallow a click landing on
-                  // a different one. Consumes the oldest queued token (any
-                  // pending token means some drag on this item is still owed
-                  // a suppressed click) rather than a count, so that if two
-                  // pointers each completed a drag on this same button close
-                  // together, consuming one here never erases the other's —
-                  // see the ref's declaration for why a count can't promise
-                  // that once its fallback timeout is in the picture.
-                  const queue = pendingSuppressionsRef.current.get(itemKey);
-                  if (queue && queue.length > 0) {
-                    queue.shift();
-                    if (queue.length === 0) pendingSuppressionsRef.current.delete(itemKey);
-                    return;
-                  }
-                  // A tap on a touch device fires the emulated mouseenter but no
-                  // mouseleave until the user touches something else, so without
-                  // this the tooltip stays on screen after the item is used.
-                  setHovered(null);
-                  onCreate?.(kind, options);
-                }}
-                aria-label={lbl[labelKey]}
-                aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
-                // The description is the accessible *description*, referenced
-                // rather than duplicated. A `title` would give the same text a
-                // second, native tooltip on top of the styled one — the visual
-                // clutter this redesign exists to reduce. FloatingToolbar sets
-                // no title for the same reason.
-                aria-describedby={hovered?.key === labelKey ? TOOLTIP_ID : undefined}
-                onMouseEnter={(e) => showTip(e, labelKey)}
-                onMouseLeave={() => setHovered(null)}
-                onFocus={(e) => showTip(e, labelKey)}
-                onBlur={() => setHovered(null)}
-                // Fine pointer (mouse): native HTML5 drag, off entirely on a
-                // coarse pointer — it never fires there, and leaving it on
-                // would fight the pointer-drag path below over the same
-                // gesture. Mirrors FloatingToolbar's isDraggable/isCoarsePointer split.
-                draggable={isDraggableKind && !touch}
-                onDragStart={
-                  isDraggableKind
-                    ? (e) => {
-                        e.dataTransfer.setData(
-                          'application/annotation-kind',
-                          JSON.stringify(options ? { kind, ...options } : { kind })
-                        );
-                        e.dataTransfer.effectAllowed = 'move';
-                      }
-                    : undefined
-                }
-                // Coarse pointer (touch/stylus): Pointer Events stand in for
-                // HTML5 drag, which never fires there.
-                onPointerDown={
-                  isDraggableKind && touch
-                    ? (e) => handlePointerDown(e, kind, options, glyph, itemKey)
-                    : undefined
-                }
-              >
-                <span className="annotation-toolbox-item-glyph" aria-hidden="true">
-                  {glyph}
-                </span>
-                {/* Always rendered; CSS reveals it only where hover is
-                    unavailable, so the tooltip's job is covered on touch
-                    without the label reintroducing the uneven rows. */}
-                <span className="annotation-toolbox-item-label">{lbl[labelKey]}</span>
-              </button>
-            );
-          })}
+          {TOOLBOX_ITEMS_LEADING.map(renderToolboxItem)}
+          {renderShapeSlot()}
+          {TOOLBOX_ITEMS_TRAILING.map(renderToolboxItem)}
         </div>
       )}
 

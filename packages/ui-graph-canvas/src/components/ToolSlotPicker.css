@@ -1,0 +1,57 @@
+/* Fold-out list opened by a tool slot's corner button / right-click (see
+   ToolSlotPicker.jsx). Same amber/dark visual language as AnnotationToolbox
+   so the two read as one surface, positioned in screen space the same way
+   the toolbox's own hover tooltip and drag ghost are. */
+.tool-slot-picker {
+  position: fixed;
+  z-index: 2000;
+  transform: translate(-50%, -100%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 220px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid #b45309;
+  background: rgba(26, 22, 18, 0.97);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.tool-slot-picker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 52px;
+  padding: 6px 4px;
+  border-radius: 8px;
+  border: 1px solid #57534e;
+  background: #292524;
+  color: #e7e5e4;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.tool-slot-picker-item:hover,
+.tool-slot-picker-item:focus-visible {
+  border-color: #fbbf24;
+  background: #3f3a34;
+}
+
+/* The variant the slot currently shows — same treatment as the toolbox's own
+   `--active` (armed) state, so "this is what's selected" reads consistently. */
+.tool-slot-picker-item--current {
+  border-color: #fbbf24;
+  background: #57431a;
+  box-shadow: inset 0 0 0 1px #fbbf24;
+}
+
+.tool-slot-picker-item-glyph {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.tool-slot-picker-item-label {
+  white-space: nowrap;
+}

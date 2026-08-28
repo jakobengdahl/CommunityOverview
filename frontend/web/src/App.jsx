@@ -2467,6 +2467,8 @@ function App() {
             shapeRhombus: t('annotation_toolbox.shape_rhombus'),
             shapeHexagon: t('annotation_toolbox.shape_hexagon'),
             shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
+            shapePickerOpen: t('annotation_toolbox.shape_picker_open'),
+            shapePicker: t('annotation_toolbox.shape_picker'),
             icon: t('annotation_toolbox.icon'),
             voteDot: t('annotation_toolbox.vote_dot'),
             image: t('annotation_toolbox.image'),

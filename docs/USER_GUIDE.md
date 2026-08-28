@@ -231,12 +231,18 @@ and edge data. Select an annotation and press **Delete** to remove it.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
-**Note**, **Text**, **Label**, **Frame**, a **Shape** — rectangle, circle, triangle,
-rhombus, hexagon or process arrow, each drawn as its own filled shape — **Icon**, **Vote
-dot**, **Image**, or **Freehand**. Each is a single icon — hover one to see what it will
-add. On a touch screen, where there is no hover, the names are shown next to the icons
-instead. It is hidden while a focus view is active, since annotations are set aside
-during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
+**Note**, **Text**, **Label**, **Frame**, a **Shape**, **Icon**, **Vote dot**, **Image**,
+or **Freehand**. Each is a single icon — hover one to see what it will add. On a touch
+screen, where there is no hover, the names are shown next to the icons instead. It is
+hidden while a focus view is active, since annotations are set aside during focus (see
+[9. On a phone](#9-on-a-phone) for how focus view works).
+
+The **Shape** entry is a single slot rather than one icon per variant: it shows whichever
+shape (rectangle, circle, triangle, rhombus, hexagon, or process arrow) you last used —
+rectangle to start — and clicking or dragging from it drops that shape, remembering your
+choice for next time. A small button in the slot's bottom-right corner opens a picker
+listing every shape; right-clicking the slot does the same. Pick one to make it the
+slot's new default.
 
 **Freehand** works differently from the rest of the toolbox: clicking it arms a
 drawing mode (the button stays highlighted and a banner reminds you Escape cancels)

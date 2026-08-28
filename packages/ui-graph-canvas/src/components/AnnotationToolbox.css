@@ -131,6 +131,50 @@
   line-height: 1;
 }
 
+/* The collapsed shape slot (task-annotation-shapes-under-one-toolbox-slot):
+   a plain positioning wrapper, sized by its main button (which keeps the
+   ordinary .annotation-toolbox-item look), with the corner picker-opener
+   button pinned to its bottom-right corner. */
+.annotation-toolbox-slot {
+  position: relative;
+  display: inline-flex;
+}
+
+.annotation-toolbox-slot-corner {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #b45309;
+  background: #1a1612;
+  color: #fbbf24;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-toolbox-slot-corner:hover,
+.annotation-toolbox-slot-corner:focus-visible {
+  background: #3f3a34;
+  border-color: #fbbf24;
+}
+
+/* Compact/touch cells grow past 44px (see the @media/--compact/--touch rules
+   below) — the corner button follows so it stays visually anchored to the
+   larger cell's actual corner instead of drifting inward. */
+.annotation-toolbox--compact .annotation-toolbox-slot-corner,
+.annotation-toolbox--touch .annotation-toolbox-slot-corner {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
 /* Hidden by default — the hover tooltip carries the name and the description
    instead. Shown wherever hover is unavailable, so a touch user never has to
    hover to learn what an icon means. Two independent signals, the same pair
