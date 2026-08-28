@@ -18,6 +18,7 @@ import {
   isAnnotationDraggable,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import { useEditableText } from '../hooks/useEditableText';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -340,24 +341,19 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // through this annotation's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
 
-  // Inline text editing for EDITABLE_TEXT_KINDS (`text`, `shape`) — state and
-  // effects mirror NoteNode/LabelNode's own exactly, so the same double-click/
-  // blur/Escape/live-sync behaviour holds for every editable kind rather than
-  // inventing a second editing model.
-  const [isEditingText, setIsEditingText] = useState(false);
-  const [textDraft, setTextDraft] = useState(data.text || '');
-  const textInputRef = useRef(null);
-
-  useEffect(() => {
-    setTextDraft(data.text || '');
-  }, [data.text]);
-
-  useEffect(() => {
-    if (isEditingText && textInputRef.current) {
-      textInputRef.current.focus();
-      textInputRef.current.select();
-    }
-  }, [isEditingText]);
+  // Inline text editing for EDITABLE_TEXT_KINDS (`text`, `shape`) — via the
+  // shared useEditableText hook, so the same double-click/blur/Escape/
+  // live-sync behaviour holds for every editable kind (NoteNode, LabelNode,
+  // this one) rather than three hand-copied editing models.
+  const {
+    isEditing: isEditingText,
+    text: textDraft,
+    inputRef: textInputRef,
+    startEditing: startEditingTextIfEditable,
+    commitText,
+    handleTextChange,
+    handleKeyDown: handleTextKeyDown,
+  } = useEditableText(id, data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -402,48 +398,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   // alone here so all three change together rather than one at a time.
   const startEditingText = (e) => {
     if (!EDITABLE_TEXT_KINDS.has(kind)) return;
-    e.stopPropagation();
-    if (remoteLocked) {
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    setIsEditingText(true);
-  };
-
-  // Authoritative write on blur/Escape — trims, matching NoteNode/LabelNode.
-  const commitText = () => {
-    setIsEditingText(false);
-    if (remoteLocked) {
-      setTextDraft(data.text || '');
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    const trimmed = textDraft.trim();
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
-    );
-    notifyChange('text');
-  };
-
-  // Live per-keystroke sync — see NoteNode/LabelNode's equivalent comment
-  // (docs/ANNOTATION_CONTRACT.md's "300 ms text debounce"). Pushes the raw,
-  // untrimmed value on every change; commitText still trims on blur/Escape.
-  const handleTextChange = (e) => {
-    const next = e.target.value;
-    setTextDraft(next);
-    if (remoteLocked) return;
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: next } } : n))
-    );
-    notifyChange('text');
-  };
-
-  const handleTextKeyDown = (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      setTextDraft(data.text || '');
-      setIsEditingText(false);
-    }
+    startEditingTextIfEditable(e);
   };
 
   const changeShape = (shape) => {

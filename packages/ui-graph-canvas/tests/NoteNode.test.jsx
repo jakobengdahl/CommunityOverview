@@ -192,6 +192,89 @@ describe('NoteNode locked context menu', () => {
   });
 });
 
+// task-shared-editable-text-hook: NoteNode's double-click/blur/Escape/live-sync
+// text editing now runs through the shared useEditableText hook
+// (packages/ui-graph-canvas/src/hooks/useEditableText.js) rather than its own
+// copy of the state machine. These pin the same behaviour
+// GenericAnnotationNode.test.jsx's "inline text editing" describe block pins
+// for its `text`/`shape` kinds, so a regression in the shared hook is caught
+// here too.
+describe('NoteNode inline text editing', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+  });
+
+  it('enters edit mode on double-click, showing a textarea seeded with the current text', () => {
+    render(<NoteNode id="n1" data={{ text: 'Hello' }} selected={false} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toHaveValue('Hello');
+  });
+
+  it('syncs every keystroke live and commits the trimmed value on blur', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { notePlaceholder: 'Note' } }}>
+        <NoteNode id="n1" data={{ text: 'Hello' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'typing' } });
+    const [afterKeystroke] = applyUpdate({ id: 'n1', data: { text: 'Hello' } });
+    expect(afterKeystroke.data.text).toBe('typing');
+    expect(notifyChange).toHaveBeenCalledWith('text');
+
+    fireEvent.change(textarea, { target: { value: '  world  ' } });
+    fireEvent.blur(textarea);
+    const [afterCommit] = applyUpdate({ id: 'n1', data: { text: 'Hello' } });
+    expect(afterCommit.data.text).toBe('world');
+  });
+
+  it('cancels the edit on Escape, reverting to the stored text without writing it', () => {
+    render(<NoteNode id="n1" data={{ text: 'Hello' }} selected={false} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'discard me' } });
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+  });
+
+  it('does not commit on Enter — a note is a multi-line textarea', () => {
+    const notifyChange = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { notePlaceholder: 'Note' } }}>
+        <NoteNode id="n1" data={{ text: 'Hello' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(notifyChange).not.toHaveBeenCalledWith('text');
+  });
+
+  it('refuses to enter edit mode while another client holds the selection claim', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt,
+          labels: { notePlaceholder: 'Note' },
+        }}
+      >
+        <NoteNode
+          id="n1"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          selected={false}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+});
+
 // The layer row is shared by every annotation context menu
 // (AnnotationLayerControls); GenericAnnotationNode.test.jsx pins the generic
 // kinds' wiring, this pins that a dedicated per-type editor gets the same
