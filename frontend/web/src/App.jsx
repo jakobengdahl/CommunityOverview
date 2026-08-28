@@ -233,6 +233,20 @@ function App() {
   // the current owner and not stomp on a newer resync that started meanwhile.
   const resyncInFlightRef = useRef(false);
   const resyncGuardTokenRef = useRef(0);
+  // Ops the sync client has told us (via onDropped) were terminally rejected
+  // by the server — 400/413/404/410, never retryable — since the current
+  // resyncFromServer call captured its `pendingOpsBefore` snapshot (review
+  // round 10). A drop concurrent with a resync's own getSession() wait can
+  // otherwise resurrect the rejected content: the op is gone from a second
+  // capture taken after the wait (so a plain "union the two reads" keeps it
+  // only via the *first* capture, which predates the drop), gets folded into
+  // the sync baseline as if it had synced successfully, and gets replayed
+  // onto the canvas — silently undoing the very rejection the "change not
+  // saved" notice just reported. The reentrancy guard suppresses onDropped's
+  // *own* resync call while one is already in flight, so the in-flight call
+  // is the only thing that will ever act on this — it reads and clears this
+  // set for itself right before finalising which ops to fold/replay.
+  const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
@@ -556,9 +570,17 @@ function App() {
         // more current.
         const pendingOpsAfter = capturePendingOps();
         const seenBefore = new Set(pendingOpsBefore);
-        const pendingOps = pendingOpsBefore.concat(
+        const unionedOps = pendingOpsBefore.concat(
           pendingOpsAfter.filter((op) => !seenBefore.has(op))
         );
+        // Drop anything the server terminally rejected while we were waiting
+        // above (review round 10) — kept in `pendingOpsBefore` by the union's
+        // own "err on the side of including" rule (it cannot tell "confirmed
+        // delivered" apart from "rejected" just from a second op-queue read),
+        // but onDropped already recorded it. Consumed here, not left for a
+        // later call: what this resync doesn't act on now, nothing else will.
+        const pendingOps = unionedOps.filter((op) => !recentlyDroppedOpsRef.current.has(op));
+        recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
         syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
@@ -1912,7 +1934,12 @@ function App() {
       // stays in the local canvas but will never persist or reach
       // collaborators. Surface it and resync so the canvas converges back to
       // whatever the server actually holds instead of silently drifting (R9).
-      onDropped: () => {
+      // Record the dropped op(s) first (review round 10): a resync already
+      // in flight when this fires must know to exclude them from what it
+      // folds/replays, or it would resurrect content the server just
+      // permanently rejected.
+      onDropped: (batch) => {
+        (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
         showNotification('error', t('sessions.change_not_saved'));
         resyncFromServer(sessionId);
       },
