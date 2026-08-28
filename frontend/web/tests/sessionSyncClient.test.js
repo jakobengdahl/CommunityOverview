@@ -250,6 +250,57 @@ describe('SessionSyncClient', () => {
     expect(fetchImpl.calls[0].body.client_id).toBe('client-me');
   });
 
+  // task fbd32fc9: the reconnect path reads this list before reloading the
+  // canvas from the server, so it can replay whatever never reached the
+  // server instead of silently discarding it.
+  it('getPendingOps reports queued-but-unsent ops and clears once they flush', async () => {
+    const { client } = makeClient();
+    client.connect();
+    // Not ready yet (no snapshot delivered) — same "offline" condition as the
+    // buffering test above, so the op sits in the queue rather than flushing.
+    client.syncState({ node_refs: ['a'] });
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+
+    // Returns a copy: mutating it must not reach into the live queue.
+    const snapshot = client.getPendingOps();
+    snapshot.push({ op: 'nodes_added', node_ids: ['bogus'] });
+    expect(client.getPendingOps()).not.toContainEqual({ op: 'nodes_added', node_ids: ['bogus'] });
+
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    await flush();
+    expect(client.getPendingOps()).toEqual([]);
+  });
+
+  // Review round 5 (PR #496 / task fbd32fc9): _takeBatch() splices an op out
+  // of _queue *before* its POST resolves, so a connection can drop while that
+  // batch is mid-flight — narrower than "never sent at all", but the same
+  // vanishing-edit risk if getPendingOps only looked at _queue.
+  it('getPendingOps also reports an op whose POST is still in flight, not just queued ones', async () => {
+    let releasePost;
+    const postGate = new Promise((resolve) => {
+      releasePost = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await postGate;
+      return { ok: true, status: 200, json: async () => ({ applied: [], seq: 1 }) };
+    });
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    await flush();
+
+    client.syncState({ node_refs: ['a'] });
+    await flush(); // lets the 1ms-debounced flush start the (gated) POST
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Spliced out of _queue already (the POST is in flight) — still reported.
+    expect(client.getPendingOps()).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+
+    releasePost();
+    await flush();
+    expect(client.getPendingOps()).toEqual([]);
+  });
+
   it('calls onReady on the first snapshot and onResync on a later one', async () => {
     const onReady = vi.fn();
     const onResync = vi.fn();
@@ -405,6 +456,58 @@ describe('SessionSyncClient', () => {
       // should have advanced to `editedByOther`), so it must emit a
       // correcting op — proving the baseline picked up their update rather
       // than the guard having swallowed it.
+      client.syncState({ annotations: [created] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(1);
+      expect(fetchImpl.calls[0].body.ops).toContainEqual({
+        op: 'annotation_updated',
+        annotation: created,
+      });
+    });
+  });
+
+  // task fbd32fc9 review round 7: resyncFromServer (App.jsx) folds recovered
+  // ops that will flush under this client's own id — unlike foldLocalOp's
+  // documented caller (image ingest, broadcast under a shared client id), so
+  // foldLocalOp's echo-skip marker would never be consumed and could wrongly
+  // swallow a *different* collaborator's later genuine edit to the same
+  // annotation. foldOpIntoBaseline is the marker-free variant for that case.
+  describe('foldOpIntoBaseline', () => {
+    it('advances the baseline the same way foldLocalOp does', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const annotation = { id: 'note-1', type: 'note', text: 'hi' };
+      client.foldOpIntoBaseline({ op: 'annotation_created', annotation });
+
+      client.syncState({ annotations: [annotation] });
+      await flush();
+      expect(fetchImpl.calls).toHaveLength(0); // baseline already matches; no redundant op
+    });
+
+    it('does not poison a later genuine remote edit to the same annotation, unlike foldLocalOp would', async () => {
+      const { client, fetchImpl } = makeClient();
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const created = { id: 'note-1', type: 'note', text: 'hi' };
+      client.foldOpIntoBaseline({ op: 'annotation_created', annotation: created });
+
+      // A different collaborator edits the same annotation. If this had used
+      // foldLocalOp instead, its marker would still be set (nothing had
+      // consumed it — this client's own echo for `created` was never even
+      // sent here), and this echo's fold would be wrongly skipped.
+      const editedByOther = { id: 'note-1', type: 'note', text: 'edited by someone else' };
+      es.emit({
+        type: 'op',
+        client_id: 'client-other',
+        op: { op: 'annotation_updated', annotation: editedByOther },
+        seq: 1,
+      });
+
+      // Re-syncing the *original* (pre-their-edit) content is now a real
+      // change from the baseline's point of view — proving the baseline
+      // picked up their update rather than a stale marker having swallowed it.
       client.syncState({ annotations: [created] });
       await flush();
       expect(fetchImpl.calls).toHaveLength(1);
@@ -656,6 +759,29 @@ describe('SessionSyncClient', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(onDropped).toHaveBeenCalled();
     expect(dropFetch.calls).toHaveLength(1); // not retried
+  });
+
+  // Review round 9 (PR #496 / task fbd32fc9): onDropped is invoked
+  // synchronously from inside _flush(), before _flush's own `finally` gets a
+  // chance to strip the batch out of _inFlightOps. A caller that reads
+  // getPendingOps() from within its onDropped handler (App.jsx's
+  // resyncFromServer, triggered by onDropped to converge the canvas back to
+  // server truth) must see the dropped op already gone — otherwise the very
+  // resync meant to drop it would instead resurrect it.
+  it('a dropped op is already gone from getPendingOps by the time onDropped fires', async () => {
+    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+    let pendingDuringDrop = null;
+    const onDropped = vi.fn(() => {
+      pendingDuringDrop = client.getPendingOps();
+    });
+    const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['x'] });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(onDropped).toHaveBeenCalled();
+    expect(pendingDuringDrop).toEqual([]);
   });
 
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {

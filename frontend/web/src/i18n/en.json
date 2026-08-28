@@ -326,6 +326,7 @@
     "session_deleted_remote": "This session was deleted by another user — started a new one",
     "connect_error": "Could not load session",
     "change_not_saved": "A change could not be saved — refreshing session",
+    "reconnect_recovered": "Reconnected — restored {count} change(s) made while offline",
     "lock_canvas": "Lock visualization",
     "unlock_canvas": "Unlock visualization",
     "settings": "Settings"

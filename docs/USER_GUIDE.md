@@ -603,6 +603,13 @@ recognisable name under **Settings → Your presence → Display name**; it is s
 to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
 
+**Reconnecting after a dropped connection.** If your connection drops — a
+network blip, closing your laptop, a poor signal — any edits you made while
+offline are kept locally and delivered once you reconnect; they are not lost.
+When the app reconnects and recovers edits made while you were offline, it
+shows a brief "Reconnected — restored N change(s) made while offline"
+notification.
+
 ### 5.2 Recent activity (audit log)
 
 Open **Recent activity** from the bottom of the session menu to see the activity

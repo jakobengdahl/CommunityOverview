@@ -326,6 +326,7 @@
     "session_deleted_remote": "Sessionen togs bort av en annan användare — startade en ny",
     "connect_error": "Kunde inte läsa in sessionen",
     "change_not_saved": "En ändring kunde inte sparas — uppdaterar sessionen",
+    "reconnect_recovered": "Återansluten — återställde {count} ändring(ar) gjorda offline",
     "lock_canvas": "Lås visualiseringen",
     "unlock_canvas": "Lås upp visualiseringen",
     "settings": "Inställningar"

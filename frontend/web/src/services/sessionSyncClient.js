@@ -52,7 +52,12 @@ const MAX_BATCH_BYTES = 240 * 1024;
 // the same at-least-once retry the pre-existing network-error path already did.
 // Resends are safe: set ops and moves are idempotent and annotation_created is
 // an upsert-by-id server-side (R3), so a resend after a lost response converges.
-const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+// Exported so App.jsx's reconnect-resync reentrancy guard (resyncFromServer,
+// task fbd32fc9) can bound its own api.getSession() call by the same value
+// rather than duplicating the number — the two exist for the same reason
+// (api.js's fetch has no timeout of its own) and must not silently drift
+// apart (review round 6).
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 // Selection claims are advisory soft-locks (design 3.5). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
@@ -378,6 +383,15 @@ export class SessionSyncClient {
 
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
+    // Ops _takeBatch() has already spliced out of _queue for a POST that has
+    // not yet settled — tracked separately so getPendingOps() (the reconnect
+    // path's "what did this client edit that the server doesn't have yet"
+    // read — see that method) still reports them. Without this, an op whose
+    // batch happened to be mid-flight at the exact moment a connection drop
+    // and reconnect landed would be invisible to that read (spliced out of
+    // _queue already, not yet confirmed delivered), reproducing the same
+    // vanishing-edit bug on a narrower trigger.
+    this._inFlightOps = [];
     this._seq = 0;
     // Highest seq actually applied from a stream event (snapshot/catch_up/op),
     // as opposed to `_seq` — which `_flush` also optimistically advances to the
@@ -424,6 +438,29 @@ export class SessionSyncClient {
   }
   get connected() {
     return this._source != null;
+  }
+
+  /**
+   * Ops enqueued locally that have not yet been confirmed delivered to the
+   * server (queued while offline, awaiting a retry, or simply not flushed
+   * yet). A shallow copy, so callers cannot mutate the live queue.
+   *
+   * Exists for the reconnect path (task fbd32fc9): a resync after a dropped
+   * connection reloads the canvas wholesale from server truth (see App.jsx's
+   * resyncFromServer), which would otherwise silently discard whatever this
+   * client edited while offline — that content never reached the server, so
+   * the reload has no way to know about it. The caller reads this list
+   * *before* the reload and replays it afterwards; nothing here removes the
+   * ops from the queue, so the normal flush still delivers them to the
+   * server exactly once ordinary delivery would.
+   *
+   * Includes ops _takeBatch() has already spliced out of the queue for a POST
+   * still awaiting a response (_inFlightOps), not just what is still sitting
+   * in _queue — a connection can drop while a batch is mid-flight, and that
+   * batch will not rejoin _queue until its own request eventually settles.
+   */
+  getPendingOps() {
+    return this._inFlightOps.concat(this._queue);
   }
 
   /**
@@ -661,10 +698,38 @@ export class SessionSyncClient {
    * re-folding it when the echo arrives afterwards — the echo carries this
    * same creation-time content, and re-folding it over a baseline this call
    * already advanced would revert any edit made in the meantime.
+   *
+   * That marker is only ever consumed by an echo that reaches
+   * `_handleEvent`'s fold-skip check — which an ordinary, this-client-
+   * attributed op's echo never does, since the "echo of our own op" check
+   * just above it returns first (image ingest's op is the one documented
+   * exception: it is broadcast under a shared, non-personal client id
+   * specifically so this client's own echo does *not* get filtered there —
+   * see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py). For any op that
+   * *will* flush under this client's own id (queued ops enqueued the normal
+   * way, including a reconnect resync's recovered-ops replay — task
+   * fbd32fc9), calling this method would set a marker nothing will ever
+   * consume: it would sit until the next `setBaseline()` clears the whole
+   * set, and in the meantime could wrongly swallow a *different*
+   * collaborator's genuine edit to the same annotation id (their echo's
+   * `foldedId` would match the stale marker and skip folding their content).
+   * Use `foldOpIntoBaseline` for that case instead.
    */
   foldLocalOp(op) {
     const id = op?.annotation?.id;
     if (id) this._locallyFoldedAnnotationIds.add(id);
+    this._baseline = applyOpToMirror(this._baseline, op);
+  }
+
+  /**
+   * Fold one op into the baseline only — no annotation-echo marker. Use this
+   * for an op that will flush (or already flushed) under this client's own
+   * id, so its eventual echo is always filtered by the "echo of our own op"
+   * check in `_handleEvent` before it could ever reach — let alone need —
+   * `foldLocalOp`'s dedup marker (see that method's docstring for why
+   * setting one in that case is actively harmful, not just unnecessary).
+   */
+  foldOpIntoBaseline(op) {
     this._baseline = applyOpToMirror(this._baseline, op);
   }
 
@@ -860,6 +925,10 @@ export class SessionSyncClient {
     let batch = null;
     try {
       batch = this._takeBatch();
+      // Tracked from the moment it leaves _queue until this POST settles (see
+      // getPendingOps' docstring) — a connection can drop while this exact
+      // request is in flight.
+      this._inFlightOps = this._inFlightOps.concat(batch);
       const resp = await this._postOps(batch);
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
@@ -878,6 +947,16 @@ export class SessionSyncClient {
           this._queue = batch.concat(this._queue);
           this._forceSingle = true;
         } else {
+          // Remove from _inFlightOps *before* the handler runs, not only in
+          // this call's `finally` below (review round 9): App.jsx's onDropped
+          // handler calls resyncFromServer synchronously, and that reads
+          // getPendingOps() before this function ever yields back to it — a
+          // read racing ahead of the `finally` would still see this
+          // terminally-rejected op as "pending" and resurrect it onto the
+          // canvas via the very resync meant to converge away from it. The
+          // `finally`'s own filter is then a harmless no-op for a batch
+          // already removed.
+          this._removeInFlight(batch);
           if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
@@ -895,9 +974,25 @@ export class SessionSyncClient {
       if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
+      // Whatever happened to this batch — delivered, terminally dropped
+      // (already removed above, ahead of the onDropped handler — a no-op
+      // here), or requeued into _queue — it is no longer in flight.
+      this._removeInFlight(batch);
       this._flushing = false;
       this._flushSoon();
     }
+  }
+
+  /**
+   * Remove exactly the ops in `batch` from `_inFlightOps` — by reference, not
+   * content, so an unrelated op with identical fields already re-added to
+   * `_queue` (a retry, or a later user edit with the same shape) is never
+   * mistaken for this one. Safe to call more than once for the same batch.
+   */
+  _removeInFlight(batch) {
+    if (!batch || !batch.length) return;
+    const settled = new Set(batch);
+    this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
   }
 
   _scheduleRetry() {

@@ -20,6 +20,7 @@ import {
   legacyMetadataToAnnotationDocument,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
+import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportMode } from './hooks/useViewportMode';
@@ -32,6 +33,17 @@ import { createAnnotationChangeScheduler } from './utils/annotationChangeSchedul
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
 import './App.css';
+
+// Ceiling on how long resyncFromServer's api.getSession() call may stay
+// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
+// itself against exactly this: "SSE deployments commonly sit behind Cloud
+// Run / an ingress that can hold a half-open request open indefinitely" —
+// sessionSyncClient.js), so a hung reload must not permanently disable
+// reconnect recovery for the rest of the session (review round 3). Reuses
+// that same request's own timeout value (imported, not duplicated — a
+// hardcoded copy could silently drift out of sync, review round 6).
+const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -210,6 +222,31 @@ function App() {
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
+  // Guards resyncFromServer against overlapping reconnects (review round 2):
+  // a flaky connection can drop and reconnect more than once before a slow
+  // reload request settles, and running two resyncs concurrently would
+  // replay the same pending ops twice and show a duplicate recovery toast.
+  // resyncGuardTokenRef lets a request that eventually settles after its own
+  // timeout guard already self-cleared (review round 3 — api.js's fetch has
+  // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
+  // GET must not wedge reconnect recovery forever) recognise it is no longer
+  // the current owner and not stomp on a newer resync that started meanwhile.
+  const resyncInFlightRef = useRef(false);
+  const resyncGuardTokenRef = useRef(0);
+  // Ops the sync client has told us (via onDropped) were terminally rejected
+  // by the server — 400/413/404/410, never retryable — since the current
+  // resyncFromServer call captured its `pendingOpsBefore` snapshot (review
+  // round 10). A drop concurrent with a resync's own getSession() wait can
+  // otherwise resurrect the rejected content: the op is gone from a second
+  // capture taken after the wait (so a plain "union the two reads" keeps it
+  // only via the *first* capture, which predates the drop), gets folded into
+  // the sync baseline as if it had synced successfully, and gets replayed
+  // onto the canvas — silently undoing the very rejection the "change not
+  // saved" notice just reported. The reentrancy guard suppresses onDropped's
+  // *own* resync call while one is already in flight, so the in-flight call
+  // is the only thing that will ever act on this — it reads and clears this
+  // set for itself right before finalising which ops to fold/replay.
+  const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
@@ -232,6 +269,12 @@ function App() {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length) break;
+          // The only case here with an internal await, so the only one where
+          // the active session can change out from under it (a session
+          // switch mid-fetch, review round 5): capture which session this op
+          // is for and re-check before writing to the store below, which is
+          // not itself session-scoped.
+          const sessionAtStart = syncRef.current?.sessionId;
           const addNodes = [];
           const addEdges = [];
           await Promise.all(
@@ -247,6 +290,7 @@ function App() {
               }
             })
           );
+          if (syncRef.current?.sessionId !== sessionAtStart) break; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -423,38 +467,192 @@ function App() {
     ]
   );
 
-  // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
-  // session from the server and reset the baseline. Destructive, but a resync
-  // only fires after a dropped stream, when the local user was not editing.
+  // Reconnect / catch-up path (missed ops after a disconnect, or a delayed op
+  // finally landing): reload the whole session from the server — the
+  // authoritative source for node/edge visibility — and reset the sync
+  // baseline. The reload itself is a wholesale replace, but it would silently
+  // discard whatever this client edited while offline (queued ops the server
+  // never received) if nothing put them back: capture them before the reload
+  // and replay each through applyRemoteOp afterwards, which — like any remote
+  // op — touches only the entities it names rather than clobbering the fresh
+  // server state (task fbd32fc9). Replaying does not touch the sync client's
+  // own queue, so the same ops still flush to the server exactly once normal
+  // delivery would; a concurrent edit to the same entity resolves the same
+  // way any two racing ops already do (last write wins), which is the
+  // existing idempotent-op contract, not something new this adds.
+  // Returns the number of local ops recovered this way, so the caller can
+  // report the recovery back to the user.
   const resyncFromServer = useCallback(
     async (targetId) => {
-      let payload;
+      // A flaky connection can drop and reconnect more than once before a
+      // slow reload below settles; without this guard a second resync would
+      // replay the same still-pending ops a second time and the caller would
+      // show a duplicate recovery toast (review round 2). The in-flight
+      // resync already reloads current server truth, so skipping a
+      // concurrent one loses nothing a later op/resync wouldn't also catch —
+      // including onDropped's own resync call, whose "converge back to
+      // server truth" goal an already-in-flight resync accomplishes anyway.
+      if (resyncInFlightRef.current) return 0;
+      resyncInFlightRef.current = true;
+      // A token, not just the boolean: if the guard timer below fires (its
+      // request never settles) while a *later* resync has since legitimately
+      // taken over, this call's eventual finally must not clear a flag it no
+      // longer owns (review round 3). Every checkpoint below that could run
+      // after an arbitrarily long await (the reload, and each recovered
+      // nodes_added's node fetch inside the replay loop) re-checks this same
+      // token, not just the session id — so if the timer ever does fire
+      // *while this call is still legitimately running* (merely slow, not
+      // actually hung) and a newer resync starts, this call notices at its
+      // very next checkpoint and stops, instead of continuing to apply now-
+      // superseded results on top of what the newer resync already
+      // established (review round 7).
+      const myToken = ++resyncGuardTokenRef.current;
+      // Spans the *whole* call, not just the initial reload request (reverted
+      // from round 5's narrower scoping — review round 7): api.js's fetch has
+      // no timeout of its own, and that is equally true of the replay loop's
+      // own per-op api.getNodeDetails calls (applyRemoteOp, below) as of the
+      // initial api.getSession reload — a hang in either must not wedge
+      // reconnect recovery forever. The per-checkpoint token re-checks above
+      // are what keep this safe against the failure mode round 5 originally
+      // found in a whole-call timer (a false self-heal firing mid-legitimate-
+      // run letting a redundant resync start): they stop this call from
+      // acting on stale state instead of preventing the timer from firing.
+      const guardTimer = setTimeout(() => {
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+      }, RESYNC_GUARD_TIMEOUT_MS);
       try {
-        payload = await api.getSession(targetId, { resolve: true });
-      } catch {
-        return;
+        // Selection claims are excluded from every capture below:
+        // `_readvertiseSelection()` re-queues one on every reconnect whenever
+        // the user merely has something selected, regardless of whether
+        // anything was actually edited offline, and applyRemoteOp has no
+        // case for it (a no-op) — counting it would misreport a reconnect
+        // with zero real edits as a recovery (review round 1).
+        const capturePendingOps = () =>
+          (syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []).filter(
+            (op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released'
+          );
+        // Read whatever is already queued *before* the network round-trip
+        // below, not only after: SessionSyncClient arms its own flush
+        // (_flushSoon) right after the onResync handler it called this from
+        // returns, so an `await` ahead of this first read would race that
+        // flush — it can splice the very ops we want to capture out of the
+        // queue first (review round 1; SessionSyncClient's own in-flight
+        // tracking, added in round 5, means a second read below no longer
+        // loses ops that race is finished spliced into, but reading once
+        // before starting the request is still the only way to see an op
+        // that flushes and gets fully confirmed *during* that request).
+        const pendingOpsBefore = capturePendingOps();
+        let payload;
+        try {
+          payload = await api.getSession(targetId, { resolve: true });
+        } catch {
+          return 0;
+        }
+        // Also bail if the guard timeout already fired and a newer resync
+        // now owns it (review round 4): the token check above only stops
+        // *this* stale call from clearing a flag it no longer owns — without
+        // this check here too, a call that finally resolves after its own
+        // timeout would still go on to apply its now-outdated payload/replay
+        // over whatever the newer resync already established, silently
+        // reintroducing the very data loss this PR fixes.
+        if (resyncGuardTokenRef.current !== myToken) return 0;
+        if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
+        // Capture again, right before the destructive reload below: an op
+        // enqueued *during* the getSession request above is not reflected in
+        // `payload` either, and without this second read it would be
+        // silently wiped by the reload with nothing to bring it back (review
+        // round 6). An op present only in the first read (delivered and
+        // confirmed by the server while we waited) is harmless to keep too —
+        // replaying an already-confirmed op is redundant, never wrong, under
+        // the same idempotent-op contract this whole function already relies
+        // on (see this function's opening comment), so the union below errs
+        // on the side of including rather than trying to guess which read is
+        // more current.
+        const pendingOpsAfter = capturePendingOps();
+        const seenBefore = new Set(pendingOpsBefore);
+        const unionedOps = pendingOpsBefore.concat(
+          pendingOpsAfter.filter((op) => !seenBefore.has(op))
+        );
+        // Drop anything the server terminally rejected while we were waiting
+        // above (review round 10) — kept in `pendingOpsBefore` by the union's
+        // own "err on the side of including" rule (it cannot tell "confirmed
+        // delivered" apart from "rejected" just from a second op-queue read),
+        // but onDropped already recorded it. Consumed here, not left for a
+        // later call: what this resync doesn't act on now, nothing else will.
+        const pendingOps = unionedOps.filter((op) => !recentlyDroppedOpsRef.current.has(op));
+        recentlyDroppedOpsRef.current.clear();
+        applyServerSessionRef.current?.(payload);
+        const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+        syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        // A full reload re-hydrates every annotation from server truth, so any
+        // image-ingest race this browser was still waiting to resolve (see
+        // createSelfEchoDedup) is moot — drop it rather than let it linger and
+        // wrongly veto an unrelated later update for the same id.
+        //
+        // Accepted narrow edge case: a resync landing in the brief window
+        // between markPending(id) and either delivery reaching claim() (an
+        // upload genuinely in flight when the stream drops) clears that
+        // reservation too, so both deliveries would then render unguarded —
+        // the second one, if the annotation was already edited in between,
+        // would revert that edit.
+        selfIngestedImageAnnotationIdsRef.current.clear();
+        // Fold every recovered op into the sync baseline *before* replaying
+        // any of them onto the canvas. Two consequences of skipping this
+        // (review round 3): the next auto-save's diff would see the baseline
+        // as if these ops never happened and re-send every one of them again
+        // (our own echo for them never arrives to fold it in later, since the
+        // client skips its own echoes by design); and nodes_added's
+        // position-seed lookup (baselinePosition, below) would not see a
+        // node_moved for the same id that is later in this same batch, so
+        // the recovered node would settle at an auto-layout spot instead of
+        // where it was actually left. Folding the whole batch first — rather
+        // than interleaved with replay — means that lookup already sees it.
+        //
+        // foldOpIntoBaseline, not foldLocalOp (review round 7): these ops
+        // flush under this client's own id, so their eventual echo is always
+        // filtered by the "echo of our own op" check before it could reach
+        // foldLocalOp's dedup marker — setting that marker here would leak
+        // it forever and could wrongly swallow a different collaborator's
+        // later genuine edit to the same annotation. See foldLocalOp's own
+        // docstring for the full reasoning; foldLocalOp itself stays correct
+        // for its original caller (handleImageIngest), whose op is broadcast
+        // under a shared, non-personal client id specifically so its own
+        // echo is *not* filtered there.
+        for (const op of pendingOps) {
+          syncRef.current.foldOpIntoBaseline(op);
+        }
+        // Sequential, not Promise.all: ops must replay in their original order
+        // (e.g. nodes_added before a node_moved for the same id), not race.
+        // Re-checked every iteration, not just once before the loop (review
+        // round 5): applyRemoteOp awaits a network call for nodes_added, and
+        // the canvas store it writes to is not scoped by session — if the
+        // user switches to a different session while that await is pending,
+        // this session's recovered op would otherwise land on the newly
+        // loaded session's canvas instead. The token is re-checked too
+        // (review round 7): if the guard timer fired mid-replay because this
+        // call was merely slow, not hung, and a newer resync has since taken
+        // over, stop here rather than keep applying this call's now-stale
+        // ops on top of what the newer one already established — that newer
+        // resync's own return value is the one the caller should act on.
+        let appliedCount = 0;
+        for (const op of pendingOps) {
+          if (resyncGuardTokenRef.current !== myToken) return 0;
+          if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
+          await applyRemoteOp(op);
+          appliedCount += 1;
+        }
+        // Not pendingOps.length unconditionally (review round 7): a session
+        // switch mid-replay (the break above) can stop this short of the
+        // full batch, and reporting the full count either as "recovered" (a
+        // misleading toast in the session the user has since left) or a
+        // basis for double-counting would both be wrong.
+        return appliedCount;
+      } finally {
+        clearTimeout(guardTimer);
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
       }
-      if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
-      applyServerSessionRef.current?.(payload);
-      const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-      syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
-      // A full reload re-hydrates every annotation from server truth, so any
-      // image-ingest race this browser was still waiting to resolve (see
-      // createSelfEchoDedup) is moot — drop it rather than let it linger and
-      // wrongly veto an unrelated later update for the same id.
-      //
-      // Accepted narrow edge case: a resync landing in the brief window
-      // between markPending(id) and either delivery reaching claim() (an
-      // upload genuinely in flight when the stream drops) clears that
-      // reservation too, so both deliveries would then render unguarded —
-      // the second one, if the annotation was already edited in between,
-      // would revert that edit. This mirrors the same trade-off
-      // resyncFromServer already makes for local edits in general (a resync
-      // "only fires after a dropped stream, when the local user was not
-      // editing", see below) rather than a new risk this dedup introduces.
-      selfIngestedImageAnnotationIdsRef.current.clear();
     },
-    [syncRef]
+    [syncRef, applyRemoteOp]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -1689,7 +1887,16 @@ function App() {
   useEffect(() => {
     syncHandlersRef.current = {
       onReady: () => {},
-      onResync: () => resyncFromServer(sessionId),
+      // Report recovery status back to the user (task fbd32fc9): a resync
+      // that had to replay locally-queued ops means real, user-visible
+      // content survived a dropped connection — worth a confirmation rather
+      // than a silent reconciliation.
+      onResync: async () => {
+        const recovered = await resyncFromServer(sessionId);
+        if (recovered > 0) {
+          showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
+        }
+      },
       onRemoteOps: (ops) => {
         (ops || []).forEach((op) => applyRemoteOp(op));
       },
@@ -1727,7 +1934,12 @@ function App() {
       // stays in the local canvas but will never persist or reach
       // collaborators. Surface it and resync so the canvas converges back to
       // whatever the server actually holds instead of silently drifting (R9).
-      onDropped: () => {
+      // Record the dropped op(s) first (review round 10): a resync already
+      // in flight when this fires must know to exclude them from what it
+      // folds/replays, or it would resurrect content the server just
+      // permanently rejected.
+      onDropped: (batch) => {
+        (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
         showNotification('error', t('sessions.change_not_saved'));
         resyncFromServer(sessionId);
       },
