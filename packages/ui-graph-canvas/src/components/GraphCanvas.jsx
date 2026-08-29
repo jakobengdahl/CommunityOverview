@@ -105,7 +105,7 @@ import './GraphCanvas.css';
  * Groups are placed first so they render behind regular nodes in the DOM,
  * allowing clicks to reach the custom nodes on top.
  */
-function reorderNodesForParentChild(nodes) {
+export function reorderNodesForParentChild(nodes) {
   const groups = [];
   const nonGroupWithoutParent = [];
   const withParent = [];
@@ -341,6 +341,7 @@ function GraphCanvasInner({
     annotationColor: 'Colour',
     deleteAnnotation: 'Delete',
     unlockAnnotation: 'Unlock',
+    duplicateAnnotation: 'Duplicate',
     notePlaceholder: 'Note',
     labelPlaceholder: 'Label',
     annotationTextSize: 'Text size',
@@ -650,6 +651,7 @@ function GraphCanvasInner({
         color: cml.annotationColor,
         delete: cml.deleteAnnotation,
         unlock: cml.unlockAnnotation,
+        duplicate: cml.duplicateAnnotation,
         notePlaceholder: cml.notePlaceholder,
         labelPlaceholder: cml.labelPlaceholder,
         textSize: cml.annotationTextSize,
@@ -692,6 +694,7 @@ function GraphCanvasInner({
       cml.annotationColor,
       cml.deleteAnnotation,
       cml.unlockAnnotation,
+      cml.duplicateAnnotation,
       cml.notePlaceholder,
       cml.labelPlaceholder,
       cml.annotationTextSize,

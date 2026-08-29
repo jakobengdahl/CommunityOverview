@@ -36,6 +36,9 @@ describe('ArrowNode locked context menu', () => {
     render(<ArrowNode id="a1" type="arrow" data={lockedData} selected={false} />);
     openMenu();
     expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    // Unlike Delete/recolour, Duplicate is one of the two actions the
+    // capability baseline leaves reachable on a locked object.
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.queryByText(/Delete/)).toBeNull();
     expect(screen.queryByText('Start arrowhead')).toBeNull();
     expect(screen.queryByText('End arrowhead')).toBeNull();
@@ -189,5 +192,62 @@ describe('ArrowNode default colour', () => {
     const inactive = buttons.find((b) => b.style.backgroundColor === 'rgb(230, 237, 243)');
     expect(active.className).toContain('active');
     expect(inactive.className).not.toContain('active');
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox: duplication was MCP-only (`duplicate_annotation`) with no
+// GUI action anywhere. See annotationDuplicateWiring.test.jsx for the
+// shared-hook wiring pinned across every kind; this pins ArrowNode's own —
+// including that the whole line (both ends) moves together, since a line's
+// far end is `dx`/`dy` relative to the node's own position rather than an
+// absolute second point.
+describe('ArrowNode duplicate control', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('creates a new, offset line and leaves the original untouched', () => {
+    const source = {
+      id: 'a1',
+      type: 'arrow',
+      position: { x: 10, y: 10 },
+      data: { dx: 100, dy: 0, endArrow: true },
+    };
+    hoisted.nodes = [source];
+    render(<ArrowNode id="a1" type="arrow" data={source.data} selected={false} />);
+    openMenu();
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    expect(updated).toHaveLength(2);
+    const [original, copy] = updated;
+    expect(original).toBe(source);
+    expect(copy.id).not.toBe('a1');
+    // Both ends move together: dx/dy (the far end, relative) are unchanged,
+    // only the shared position (the origin) is offset.
+    expect(copy.data.dx).toBe(100);
+    expect(copy.data.dy).toBe(0);
+    expect(copy.position).not.toEqual(source.position);
+    expect(copy.data.locked).toBe(false);
+  });
+
+  it('duplicates a locked line into an unlocked copy, and leaves the source locked', () => {
+    const lockedData = { dx: 100, dy: 0, locked: true };
+    const source = { id: 'a1', type: 'arrow', position: { x: 0, y: 0 }, data: lockedData };
+    hoisted.nodes = [source];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', duplicate: 'Duplicate' } }}
+      >
+        <ArrowNode id="a1" type="arrow" data={lockedData} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    openMenu();
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'a1');
+    expect(copy.data.locked).toBe(false);
+    expect(updated.find((n) => n.id === 'a1').data.locked).toBe(true);
   });
 });

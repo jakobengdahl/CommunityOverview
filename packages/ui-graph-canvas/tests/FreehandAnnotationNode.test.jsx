@@ -3,10 +3,10 @@ import { render, screen, fireEvent, within } from '@testing-library/react';
 import FreehandAnnotationNode from '../src/components/FreehandAnnotationNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
 
 vi.mock('reactflow', () => ({
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
 
 function applyLatestUpdate(node) {
@@ -243,6 +243,7 @@ describe('FreehandAnnotationNode locked context menu', () => {
           notifyChange: vi.fn(),
           labels: {
             unlock: 'Unlock',
+            duplicate: 'Duplicate',
             freehandColor: 'Colour',
             freehandWidth: 'Stroke width',
             freehandSmoothing: 'Smoothing',
@@ -256,6 +257,7 @@ describe('FreehandAnnotationNode locked context menu', () => {
     );
     fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
     expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.queryByText('Colour')).toBeNull();
     expect(screen.queryByText('Stroke width')).toBeNull();
     expect(screen.queryByText('Smoothing')).toBeNull();
@@ -362,5 +364,60 @@ describe('freehand default colour', () => {
     const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
     const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     expect(luminance).toBeLessThan(0.3);
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox: duplication was MCP-only (`duplicate_annotation`) with no
+// GUI action anywhere. See annotationDuplicateWiring.test.jsx for the
+// shared-hook wiring pinned across every kind; this pins
+// FreehandAnnotationNode's own — including that the whole stroke moves
+// together, since `points` are sampled relative to the node's own position.
+describe('FreehandAnnotationNode duplicate control', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('creates a new, offset stroke and leaves the original untouched', () => {
+    const source = {
+      id: 'f1',
+      type: 'freehand',
+      position: { x: 5, y: 5 },
+      data: { points: straightPoints, color: '#111827' },
+    };
+    hoisted.nodes = [source];
+    render(<FreehandAnnotationNode id="f1" data={source.data} />);
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    expect(updated).toHaveLength(2);
+    const [original, copy] = updated;
+    expect(original).toBe(source);
+    expect(copy.id).not.toBe('f1');
+    // The sampled points themselves are unchanged — relative to position,
+    // per this component's own doc comment — only the position moves.
+    expect(copy.data.points).toEqual(straightPoints);
+    expect(copy.position).not.toEqual(source.position);
+    expect(copy.data.locked).toBe(false);
+  });
+
+  it('duplicates a locked stroke into an unlocked copy, and leaves the source locked', () => {
+    const lockedData = { points: straightPoints, locked: true };
+    const source = { id: 'f1', type: 'freehand', position: { x: 0, y: 0 }, data: lockedData };
+    hoisted.nodes = [source];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', duplicate: 'Duplicate' } }}
+      >
+        <FreehandAnnotationNode id="f1" data={lockedData} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'f1');
+    expect(copy.data.locked).toBe(false);
+    expect(updated.find((n) => n.id === 'f1').data.locked).toBe(true);
   });
 });

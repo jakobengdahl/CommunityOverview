@@ -153,16 +153,20 @@ describe('NoteNode locked context menu', () => {
     hoisted.resizerProps.length = 0;
   });
 
-  it('shows only an unlock action for a locked note, hiding colour/size/rotation/delete', () => {
+  it('shows unlock and duplicate for a locked note, hiding colour/size/rotation/delete', () => {
     render(
       <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', notePlaceholder: 'Note' } }}
+        value={{
+          notifyChange: vi.fn(),
+          labels: { unlock: 'Unlock', duplicate: 'Duplicate', notePlaceholder: 'Note' },
+        }}
       >
         <NoteNode id="n1" data={{ locked: true }} selected={false} />
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByText('Note'));
     expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
@@ -188,6 +192,7 @@ describe('NoteNode locked context menu', () => {
     render(<NoteNode id="n1" data={{ locked: false }} selected={false} />);
     fireEvent.contextMenu(screen.getByText('Note'));
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
   });
 });
@@ -353,5 +358,94 @@ describe('NoteNode layer controls', () => {
     render(<NoteNode id="n1" data={{ text: 'hi', locked: true }} />);
     fireEvent.contextMenu(screen.getByText('hi'));
     expect(screen.queryByLabelText('Bring to front')).toBeNull();
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox: duplication was MCP-only (`duplicate_annotation`) with no
+// GUI action anywhere. AnnotationDuplicateControl.jsx pins the shared
+// wiring for line/label/freehand/generic; this pins that NoteNode's own
+// dedicated component gets the same control.
+describe('NoteNode duplicate control', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('creates a new, offset note and leaves the original untouched', () => {
+    const source = {
+      id: 'n1',
+      type: 'note',
+      position: { x: 10, y: 20 },
+      data: { text: 'hi', color: '#FEF08A' },
+      style: { width: 200, height: 140 },
+    };
+    hoisted.nodes = [source];
+    render(<NoteNode id="n1" data={source.data} />);
+    fireEvent.contextMenu(screen.getByText('hi'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    expect(updated).toHaveLength(2);
+    const [original, copy] = updated;
+    expect(original).toBe(source);
+    expect(copy.id).not.toBe('n1');
+    expect(copy.data.text).toBe('hi');
+    expect(copy.data.color).toBe('#FEF08A');
+    expect(copy.position).not.toEqual(source.position);
+    expect(copy.data.locked).toBe(false);
+  });
+
+  // The regression this task exists to prevent (PR #515/#517's bug class):
+  // duplicating a locked, formerly-attached note must never produce a
+  // second locked annotation — that combination is what the earlier lock
+  // fixes made structurally impossible for `locked` itself, and duplicate
+  // must not reintroduce it via a copy.
+  it('duplicates a locked note into an unlocked copy, and leaves the source locked', () => {
+    const source = {
+      id: 'n1',
+      type: 'note',
+      position: { x: 0, y: 0 },
+      data: { text: 'hi', locked: true },
+      // Mirrors overlayToFlowNode's top-level `draggable: false` on a locked
+      // node — the stale field the duplicate bug this test guards against
+      // used to inherit verbatim from `...source`.
+      draggable: false,
+    };
+    hoisted.nodes = [source];
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          labels: { unlock: 'Unlock', duplicate: 'Duplicate', notePlaceholder: 'Note' },
+        }}
+      >
+        <NoteNode id="n1" data={source.data} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('hi'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'n1');
+    expect(copy.data.locked).toBe(false);
+    expect(updated.find((n) => n.id === 'n1').data.locked).toBe(true);
+    // Regression: an unlocked `data.locked` copy must actually be draggable,
+    // not "phantom-locked" by a stale top-level `draggable` inherited from
+    // the locked source.
+    expect(copy.draggable).not.toBe(false);
+  });
+
+  it('publishes the duplicate as a create', () => {
+    const notifyChange = vi.fn();
+    hoisted.nodes = [{ id: 'n1', type: 'note', position: { x: 0, y: 0 }, data: { text: 'hi' } }];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange, labels: { notePlaceholder: 'Note', duplicate: 'Duplicate' } }}
+      >
+        <NoteNode id="n1" data={{ text: 'hi' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('hi'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    expect(notifyChange).toHaveBeenCalledWith('create');
   });
 });

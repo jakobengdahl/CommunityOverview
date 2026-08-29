@@ -303,6 +303,18 @@ forward again with **Bring to front**. One gap worth knowing: a group box can be
 *against* by other annotations, but cannot be layered itself — its own menu has no Layer
 row.
 
+The same set of annotations — notes, labels, arrows, freehand strokes, text, frames,
+shapes, icons, voting dots and images — also has a **Duplicate** action in their
+right-click menu, just below Layer. It places a copy right next to the original, carrying
+over its colour, size, rotation and any attachment to a node or another annotation.
+Unlike Layer or Delete, Duplicate still works on a **locked** annotation — locking
+protects an object from being changed, and duplicating it doesn't change it, so a locked
+annotation's right-click menu offers **Unlock** and **Duplicate** rather than Unlock
+alone. The copy itself is never locked, even when the original is: it's a new,
+independent annotation you're free to edit right away. A group box does not get a
+Duplicate action — its substance is the graph nodes it groups, not its own content, so
+copying the box alone would not be a real duplicate.
+
 ### 2.6 Saved views
 
 Click **Save view** in the toolbar or ask the AI assistant to save the current layout.
