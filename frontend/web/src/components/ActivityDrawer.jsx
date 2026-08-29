@@ -156,8 +156,17 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
       // The undo's inverse op reaches this browser's own canvas via the
       // existing session-stream broadcast (session_manager.py's
       // _apply_op_sync publishes it the same as any other op) — no local
-      // canvas mutation needed here. Re-fetching just refreshes this list
-      // (the record flips to undone; no new record is added).
+      // canvas mutation needed here. This relies on that broadcast being
+      // attributed to session_manager.py's dedicated _UNDO_REPLAY_CLIENT_ID
+      // marker rather than to `currentClientId`: sessionSyncClient.js drops
+      // an incoming op as a self-echo whenever its client_id matches this
+      // browser's own (see the "echo of our own op" check in
+      // sessionSyncClient.js), and this browser's own SSE subscription is
+      // exactly the one that receives this broadcast — so replaying the
+      // inverse op under `currentClientId` would make it indistinguishable
+      // from a self-authored echo and silently drop it before it ever
+      // reached the canvas. Re-fetching just refreshes this list (the record
+      // flips to undone; no new record is added).
       await loadSessionActivity();
     } catch (err) {
       setUndoNotice({ kind: 'error', reason: classifyUndoError(err) });
