@@ -557,6 +557,18 @@ export function resolveAnchoredArrow(arrow, centers) {
 // gesture aimed at "near this object", not a pixel-precise line endpoint.
 export const ATTACH_SNAP_RADIUS = 90;
 
+// Fixed offset (px, model space) from a target's centre that the "Nearby
+// object menu" creation entry point (docs/ANNOTATION_CONTRACT.md "Human
+// authoring surfaces") places a newly created, pre-wired label/icon/
+// vote_dot/text at. Diagonal (not simply "above" or "below") so the new
+// annotation doesn't sit exactly on top of the target's own centre, and its
+// magnitude (~51px) is deliberately well inside ATTACH_SNAP_RADIUS so the
+// annotation is attached from its very first rendered frame rather than
+// merely close enough to have qualified — the same margin
+// AnnotationDuplicateControl's DUPLICATE_OFFSET keeps for its own, unrelated
+// "don't land exactly on top of the source" nudge.
+export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
+
 // Compute the attachment a dropped attachable overlay (label/text/icon/
 // vote_dot) should carry after being released at `position`: attaches to the
 // nearest node/annotation centre within ATTACH_SNAP_RADIUS, storing the drop

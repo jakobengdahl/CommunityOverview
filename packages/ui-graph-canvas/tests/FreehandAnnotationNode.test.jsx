@@ -421,3 +421,33 @@ describe('FreehandAnnotationNode duplicate control', () => {
     expect(updated.find((n) => n.id === 'f1').data.locked).toBe(true);
   });
 });
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox's "Nearby object menu" contract entry point: a freehand
+// stroke is one of the annotation kinds that can itself be the target this
+// menu creates a new attachable annotation near.
+describe('FreehandAnnotationNode "Nearby object menu"', () => {
+  it("calls the context attachNearby with this stroke's id and the picked kind", () => {
+    const attachNearby = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby,
+          labels: {
+            nearbyMenu: 'Add nearby',
+            nearbyLabel: 'Label',
+            nearbyIcon: 'Icon',
+            nearbyVoteDot: 'Vote dot',
+            nearbyText: 'Text',
+          },
+        }}
+      >
+        <FreehandAnnotationNode id="f1" data={{ points: straightPoints }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
+    fireEvent.click(screen.getByRole('button', { name: '+ Vote dot' }));
+    expect(attachNearby).toHaveBeenCalledWith('f1', 'vote_dot');
+  });
+});

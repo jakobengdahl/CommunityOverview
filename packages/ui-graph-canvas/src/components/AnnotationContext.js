@@ -21,10 +21,18 @@ import { createContext } from 'react';
  * annotation's selection claim (leases are exclusive —
  * task-annotation-shared-session-realtime), so the host can surface the
  * attempt (e.g. a toast) rather than the change silently doing nothing.
+ *
+ * `attachNearby(targetId, kind)` is the "Nearby object menu" creation entry
+ * point (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a
+ * new label/icon/vote_dot/text pre-wired to attach to `targetId` (this
+ * annotation, or the graph node/annotation a caller anchors the control to),
+ * using the exact same `content.attachment` shape and resolve/follow
+ * mechanism the post-creation drag-to-attach path uses.
  */
 export const AnnotationContext = createContext({
   notifyChange: () => {},
   notifyRemoteLockedAttempt: () => {},
+  attachNearby: () => {},
   labels: {
     color: 'Colour',
     delete: 'Delete',
@@ -62,5 +70,10 @@ export const AnnotationContext = createContext({
     voteValue: 'Value',
     voteValueDecrease: 'Decrease value',
     voteValueIncrease: 'Increase value',
+    nearbyMenu: 'Add nearby',
+    nearbyLabel: 'Label',
+    nearbyIcon: 'Icon',
+    nearbyVoteDot: 'Vote dot',
+    nearbyText: 'Text',
   },
 });

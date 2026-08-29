@@ -449,3 +449,34 @@ describe('NoteNode duplicate control', () => {
     expect(notifyChange).toHaveBeenCalledWith('create');
   });
 });
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox's "Nearby object menu" contract entry point: a note is one
+// of the annotation kinds that can itself be the target this menu creates a
+// new attachable annotation near.
+describe('NoteNode "Nearby object menu"', () => {
+  it("calls the context attachNearby with this note's id and the picked kind", () => {
+    const attachNearby = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby,
+          labels: {
+            notePlaceholder: 'Note',
+            nearbyMenu: 'Add nearby',
+            nearbyLabel: 'Label',
+            nearbyIcon: 'Icon',
+            nearbyVoteDot: 'Vote dot',
+            nearbyText: 'Text',
+          },
+        }}
+      >
+        <NoteNode id="n1" data={{ text: 'hi' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('hi'));
+    fireEvent.click(screen.getByRole('button', { name: '+ Text' }));
+    expect(attachNearby).toHaveBeenCalledWith('n1', 'text');
+  });
+});

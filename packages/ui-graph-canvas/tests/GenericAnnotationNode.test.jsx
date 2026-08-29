@@ -1471,6 +1471,65 @@ describe('text/shape typography', () => {
   });
 });
 
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox's "Nearby object menu" contract entry point: every generic
+// kind except `frame` can itself be the target this menu creates a new
+// attachable annotation near — `frame` is excluded the same way it is
+// excluded from computeDroppedAttachment's own target candidacy (the
+// contract's Attachment section: a "visual-only framing box", not an
+// attachment target).
+describe('GenericAnnotationNode "Nearby object menu"', () => {
+  const nearbyLabels = {
+    nearbyMenu: 'Add nearby',
+    nearbyLabel: 'Label',
+    nearbyIcon: 'Icon',
+    nearbyVoteDot: 'Vote dot',
+    nearbyText: 'Text',
+  };
+
+  it("calls the context attachNearby with this icon's id and the picked kind", () => {
+    const attachNearby = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
+      >
+        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByTitle('circle'));
+    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
+    expect(attachNearby).toHaveBeenCalledWith('i1', 'label');
+  });
+
+  it("omits the section from a `frame`'s menu — frame is not an attachment target", () => {
+    const { container } = render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), attachNearby: vi.fn(), labels: nearbyLabels }}
+      >
+        <GenericAnnotationNode id="f1" type="frame" data={{}} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(container.querySelector('.kind-frame'));
+    expect(screen.queryByText('Add nearby')).toBeNull();
+  });
+
+  it("omits the section from a locked annotation's menu (capability baseline: only unlock/copy)", () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby: vi.fn(),
+          labels: { ...nearbyLabels, unlock: 'Unlock', duplicate: 'Duplicate' },
+        }}
+      >
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.kind-vote_dot'));
+    expect(screen.queryByText('Add nearby')).toBeNull();
+  });
+});
+
 describe('process arrow', () => {
   it('is a full-height block with a point, not a thin arrow', () => {
     const clip = clipPathFor('process_arrow');

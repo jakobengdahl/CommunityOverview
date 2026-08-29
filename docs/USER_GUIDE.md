@@ -315,6 +315,15 @@ independent annotation you're free to edit right away. A group box does not get 
 Duplicate action — its substance is the graph nodes it groups, not its own content, so
 copying the box alone would not be a real duplicate.
 
+Right-click a node, or any annotation except a frame or a group box, and its menu has an
+**Add nearby** section with four buttons: **Label**, **Icon**, **Vote dot**, **Text**.
+Choosing one creates that annotation already attached to whatever you right-clicked —
+positioned right next to it and following it if it moves — without the create-then-drag-near
+two steps that were previously the only way to attach a new label, icon, voting dot or piece
+of text. Detach it afterward the same way as any attached annotation: drag it away from its
+target. Arrows are not offered here, since dragging either of a newly placed arrow's
+endpoints already snaps it onto a nearby target the moment you draw it.
+
 ### 2.6 Saved views
 
 Click **Save view** in the toolbar or ask the AI assistant to save the current layout.

@@ -2456,6 +2456,11 @@ function App() {
             annotationVoteValue: t('context_menu.annotation_vote_value'),
             annotationVoteValueDecrease: t('context_menu.annotation_vote_value_decrease'),
             annotationVoteValueIncrease: t('context_menu.annotation_vote_value_increase'),
+            annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
+            annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
+            annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
+            annotationNearbyVoteDot: t('context_menu.annotation_nearby_vote_dot'),
+            annotationNearbyText: t('context_menu.annotation_nearby_text'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),

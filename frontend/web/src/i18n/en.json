@@ -503,7 +503,12 @@
     "freehand_width": "Stroke width",
     "freehand_smoothing": "Smoothing",
     "freehand_opacity": "Opacity",
-    "annotation_broken": "An annotation could not be drawn and was left out"
+    "annotation_broken": "An annotation could not be drawn and was left out",
+    "annotation_nearby_menu": "Add nearby",
+    "annotation_nearby_label": "Label",
+    "annotation_nearby_icon": "Icon",
+    "annotation_nearby_vote_dot": "Vote dot",
+    "annotation_nearby_text": "Text"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",

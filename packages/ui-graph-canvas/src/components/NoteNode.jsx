@@ -11,6 +11,7 @@ import {
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import './NoteNode.css';
 
@@ -37,7 +38,8 @@ function NoteNode({ id, data = {}, selected }) {
   // through this note's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+    useContext(AnnotationContext);
   // Another client's live selection claim makes this note's lease exclusive
   // (task-annotation-shared-session-realtime): every mutation below refuses
   // to run while it is held, surfacing the attempt instead of silently
@@ -315,6 +317,10 @@ function NoteNode({ id, data = {}, selected }) {
                   labels={labels}
                   locked={data.locked}
                   onChangeLayer={changeLayer}
+                />
+                <NearbyObjectMenuSection
+                  labels={labels}
+                  onAttach={(kind) => attachNearby(id, kind)}
                 />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>

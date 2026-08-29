@@ -503,7 +503,12 @@
     "freehand_width": "Streckbredd",
     "freehand_smoothing": "Utjämning",
     "freehand_opacity": "Opacitet",
-    "annotation_broken": "En annotering kunde inte ritas upp och hoppades över"
+    "annotation_broken": "En annotering kunde inte ritas upp och hoppades över",
+    "annotation_nearby_menu": "Lägg till i närheten",
+    "annotation_nearby_label": "Etikett",
+    "annotation_nearby_icon": "Ikon",
+    "annotation_nearby_vote_dot": "Röstprick",
+    "annotation_nearby_text": "Text"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",

@@ -19,6 +19,7 @@ import {
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import './GenericAnnotationNode.css';
 
@@ -307,7 +308,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const kind = type;
   const color = data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+    useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live claim makes
   // this annotation's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
@@ -654,6 +656,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onDelete={remove}
       onUnlock={unlock}
       onDuplicate={duplicate}
+      // `frame` is excluded from the "Nearby object menu" the same way it is
+      // excluded from computeDroppedAttachment's target candidacy — the
+      // contract describes it as a "visual-only framing box", not an
+      // attachment target (docs/ANNOTATION_CONTRACT.md's Attachment section).
+      onAttachNearby={kind === 'frame' ? undefined : (nearbyKind) => attachNearby(id, nearbyKind)}
     />
   );
 
@@ -906,8 +913,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
-// layer row then duplicate then Delete, matching the note/label/line/
-// freehand menus. The
+// layer row then the "Nearby object menu" section (`onAttachNearby` is
+// undefined for `frame`, which NearbyObjectMenuSection treats as "don't
+// render" — frame is excluded from attachment-target candidacy, see
+// GenericAnnotationNode's own onAttachNearby wiring above) then duplicate
+// then Delete, matching the note/label/line/freehand menus. The
 // colour swatches show for COLORABLE_KINDS, the nine-position alignment grid,
 // font-size picker and curated font-family picker
 // (task-annotation-text-alignment-and-font) for EDITABLE_TEXT_KINDS (`text`,
@@ -943,6 +953,7 @@ function ContextMenuPortal({
   onDelete,
   onUnlock,
   onDuplicate,
+  onAttachNearby,
 }) {
   if (locked) {
     return createPortal(
@@ -1141,6 +1152,7 @@ function ContextMenuPortal({
         </button>
       </div>
       <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
+      <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
       <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}
