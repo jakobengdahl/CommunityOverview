@@ -231,7 +231,7 @@ and edge data. Select an annotation and press **Delete** to remove it.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
-**Note**, **Text**, **Label**, **Frame**, a **Shape**, **Icon**, **Vote dot**, **Image**,
+**Note**, **Text**, **Label**, a **Shape**, **Icon**, **Vote dot**, **Image**,
 or **Freehand**. Each is a single icon — hover one to see what it will add. On a touch
 screen, where there is no hover, the names are shown next to the icons instead. It is
 hidden while a focus view is active, since annotations are set aside during focus (see
@@ -278,9 +278,14 @@ difference; for a Text annotation, which always sizes itself to its own content,
 left/center/right currently make a visible difference, and only once the text spans more
 than one line.
 
-Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
-the note and label menus offer, plus a colour picker for everything that paints a colour
-(an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype
+Right-click any Text, Shape, Icon or Image annotation for the same rotate control
+the note and label menus offer, plus a colour picker for the kinds that paint one
+(an image keeps its own pixels, so it gets no swatches). A Shape's menu instead has
+independent **Fill** and **Border** swatch sections — each including a **Transparent**
+option — so you can give a shape a solid fill and no border (the classic look), a
+transparent fill with a coloured outline (a plain framing box, drawn around whatever
+it sits over — the "add a frame" toolbox button used to make exactly this, before it
+was folded into Shape), or any combination of the two. A Shape's menu also has a subtype
 picker to swap its variant (circle, triangle, and so on) after it's been placed. An
 **Icon** annotation starts with a generic default glyph — right-click it to open a picker
 grid covering the full icon vocabulary and choose the one you actually want. A **voting
@@ -288,22 +293,22 @@ dot**'s menu has a value stepper, so you can raise or lower the count after it's
 placed. Icon and voting-dot annotations also support the same attach behaviour as labels
 once placed: drag one near a node or another annotation to attach it.
 
-Notes, labels, arrows, freehand strokes, text, frames, shapes, icons, voting dots and
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
 images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
-underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
-label. The buttons do nothing once an annotation is already alone at the front or the
-back, and a locked annotation has no Layer row at all — right-click it and choose
-**Unlock** first. Pressing **Delete** will not remove a locked annotation either;
+underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
+a shape behind a label. The buttons do nothing once an annotation is already alone at the
+front or the back, and a locked annotation has no Layer row at all — right-click it and
+choose **Unlock** first. Pressing **Delete** will not remove a locked annotation either;
 it stays put and tells you to unlock it first.
 
 Send to back normally goes all the way back, behind your graph's own nodes and edges —
-which is what you want for a frame that should sit behind the nodes it frames. Bring it
-forward again with **Bring to front**. One gap worth knowing: a group box can be layered
+which is what you want for a shape you're using to frame a group of nodes visually. Bring
+it forward again with **Bring to front**. One gap worth knowing: a group box can be layered
 *against* by other annotations, but cannot be layered itself — its own menu has no Layer
 row.
 
-The same set of annotations — notes, labels, arrows, freehand strokes, text, frames,
+The same set of annotations — notes, labels, arrows, freehand strokes, text,
 shapes, icons, voting dots and images — also has a **Duplicate** action in their
 right-click menu, just below Layer. It places a copy right next to the original, carrying
 over its colour, size, rotation and any attachment to a node or another annotation.
@@ -315,8 +320,10 @@ independent annotation you're free to edit right away. A group box does not get 
 Duplicate action — its substance is the graph nodes it groups, not its own content, so
 copying the box alone would not be a real duplicate.
 
-Right-click a node, or any annotation except a frame or a group box, and its menu has an
+Right-click a node, or any annotation except a group box, and its menu has an
 **Add nearby** section with four buttons: **Label**, **Icon**, **Vote dot**, **Text**.
+A transparent-fill shape is included here too — its menu offers "Add nearby" the
+same as any other shape.
 Choosing one creates that annotation already attached to whatever you right-clicked —
 positioned right next to it and following it if it moves — without the create-then-drag-near
 two steps that were previously the only way to attach a new label, icon, voting dot or piece

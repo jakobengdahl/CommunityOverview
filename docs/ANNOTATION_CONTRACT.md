@@ -20,12 +20,12 @@ V1 supports these annotation types:
 - `text` — free text / heading
 - `label` — label / callout
 - `line` — line / arrow (`arrow` is an accepted legacy alias)
-- `frame` — visual-only framing box (see [Attachment and detach
-  behavior](#attachment-and-detach-behavior); frames never participate in
-  attachment)
 - `group` — node-membership box
 - `shape` — rectangle, circle, triangle, rhombus, hexagon or process arrow,
-  selected via `content.shape`
+  selected via `content.shape`, with independent fill and border settings
+  (each a colour or `"transparent"`) — see
+  [Canvas rendering](#canvas-rendering) and
+  [Fill and border](#fill-and-border-shape)
 - `icon` — a configured icon from the icon set
 - `vote_dot` — a colored voting dot
 - `image` — an embedded, ingested image
@@ -33,6 +33,23 @@ V1 supports these annotation types:
 
 Existing canvas note, label, arrow and group descriptors are migrated into
 the v1 model.
+
+**`frame` is retired.** A former v1 type — a visual-only framing box with no
+fill — `frame` is now folded into `shape` (task-annotation-merge-frame-into-
+shape-rectangle): a `shape` with `style.fill: "transparent"` and a coloured
+`style.border` covers exactly what `frame` used to draw. `frame` is no
+longer a recognised annotation kind at all — not in the toolbox, not in the
+generic MCP tool set, not in `ANNOTATION_TYPES`/`GENERIC_ANNOTATION_TYPES` on
+either side of the stack. No migration was written for annotations already
+stored with kind `frame`: nobody used the annotation feature yet (owner
+direction 2026-08-25, the same one that retired the backward-compatibility
+requirement — see [Unrecognised annotation
+data](#unrecognised-annotation-data)), so a stored `frame` is simply an
+unrecognised kind now, dropped while normalising like any other, never
+reaching the canvas. It does not crash — that guarantee is exactly what
+task-annotation-tolerate-unexpected-data built, and
+`AnnotationBadData.test.jsx`/`annotationModel.test.js` pin a stored `frame`
+specifically as a regression case, not just "some unknown kind".
 
 GUI authoring (creation and editing through the desktop/mobile canvas) and
 MCP/headless authoring are **both** required v1 surfaces for every type
@@ -98,7 +115,7 @@ MCP. The required entry points are:
 │ ▲ toolbox (collapsed)                                            │
 ├───────────────────────────────────────────────────────────────┤
 │ ▼ toolbox (expanded)                                             │
-│  [note] [text] [label]   [shape ▾] [line] [frame] [group]        │
+│  [note] [text] [label]   [shape ▾] [line] [group]                │
 │  [icon ▾] [vote dot ▾]   [image]  [freehand]                     │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -115,15 +132,15 @@ MCP. The required entry points are:
 │   ▔▔▔ (grab handle) ▔▔▔  │  ← bottom sheet, collapsed to a handle
 ├─────────────────────────┤
 │  note   text   label     │
-│  shape  line   frame      │
-│  group  icon   vote dot   │
+│  shape  line   group      │
+│  icon   vote dot          │
 │  image  freehand          │
 └─────────────────────────┘
 ```
 
 **Current gap:** `note`, `label`, `line` and `group` have GUI creation today
-(dedicated toolbar/toolbox actions). The bottom toolbox also creates `text`,
-`frame`, and `shape` in every variant `content.shape` accepts — rectangle,
+(dedicated toolbar/toolbox actions). The bottom toolbox also creates `text`
+and `shape` in every variant `content.shape` accepts — rectangle,
 circle, triangle, rhombus, hexagon and process arrow — each of which now
 renders as its own distinct visual. `image` also has GUI creation now
 (toolbox file picker, clipboard paste, and OS file drop — all through the
@@ -143,10 +160,12 @@ that geometry survives the session save round trip (see
 `61d5cc7b`/`smallfix-annotation-unsized-generic-geometry-clobber`) instead of
 being silently reset to a mismatched box on the next reload. A right-click
 property editor now exists for every rotatable kind (`note`, `label`, `text`,
-`frame`, `shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps
-plus reset), a colour picker for the kinds that paint one (`text`, `frame`,
-`shape`, `icon`, `vote_dot` — `image` carries a `color` in the model but
-renders none, so it is offered no swatches), for `shape` a subtype picker, for
+`shape`, `icon`, `vote_dot`, `image`): a rotation control (±15° steps
+plus reset), a colour picker for the kinds that paint one (`text`,
+`icon`, `vote_dot` — `image` carries a `color` in the model but
+renders none, so it is offered no swatches), independent Fill and Border
+swatch sections for `shape` (see [Fill and border](#fill-and-border-shape)),
+for `shape` also a subtype picker, for
 `icon` a picker grid over the full icon vocabulary, and for `vote_dot` a value
 stepper that never counts below zero; for `text` and `shape` (whose caption
 is now editable — see below), the right-click editor also carries a
@@ -168,9 +187,11 @@ distance of the target
 ([Attachment and detach behavior](#attachment-and-detach-behavior)). The
 "nearby object menu" (the wireframe above) now exists too, as a **"Add
 nearby"** section on the context menu of any eligible node or annotation
-(a graph node, or any annotation except `frame`/`group`/`arrow` — the same
+(a graph node, or any annotation except `group`/`arrow` — the same
 target candidacy `findSnapTarget` already applies to a post-creation drop via
-`computeDroppedAttachment`): picking `label`, `icon`, `vote dot` or `text`
+`computeDroppedAttachment`; a `shape` is included regardless of its
+fill/border, including a transparent-fill one — see [Fill and
+border](#fill-and-border-shape)): picking `label`, `icon`, `vote dot` or `text`
 there creates that annotation pre-wired to attach to the object whose menu it
 was opened from, offset a small, fixed distance from its centre (well inside
 the drag-to-attach snap radius), so it is attached and following its target
@@ -187,7 +208,7 @@ entry point closes for the four kinds that had no equivalent at creation
 time. A new annotation created this way is never locked, matching every
 other creation path. The menu is offered as an *anchor* from every eligible
 object's own context menu — a graph node, and every annotation kind except
-`frame`/`group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
+`group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
 `image`, `freehand`) — matching `findSnapTarget`'s full target candidacy
 (the same exclusion set `computeDroppedAttachment` and `findSnapTarget`'s own
 arrow-to-arrow guard apply), not only the four attachable kinds. `arrow`
@@ -405,7 +426,8 @@ created annotation, while send-to-back writes one below the backmost
 annotation. Whenever that backmost annotation is itself at or below 0 — the
 default, since every annotation is created at 0 — the result is negative and
 does place the annotation behind the graph's nodes and edges. That is
-intended and useful, and it is how a `frame` gets behind the nodes it frames;
+intended and useful, and it is how a `shape` with a transparent fill
+(standing in for the retired `frame`) gets behind the nodes it frames;
 it is not, however, a guarantee. Once every annotation has been pushed above
 0, send-to-back lands at 0 or higher — level with the graph (where paint
 order falls back to document order) or in front of it, but no longer behind
@@ -419,8 +441,9 @@ down to the bound would land level with the neighbour it is meant to pass,
 recreating the tie the control exists to break while publishing an operation
 that changes nothing on screen.
 
-Semantic default layers — a per-kind default `z` at creation time, so a frame
-starts behind the annotations it frames — are **not** implemented; every
+Semantic default layers — a per-kind default `z` at creation time, so a
+transparent-fill shape starts behind the annotations it frames — are **not**
+implemented; every
 annotation is created at `z = 0` and ordered manually from there.
 
 ## Operation layer
@@ -544,19 +567,20 @@ here. Actor-scoped conditional undo *is* implemented
 - If the attachment target is removed, the attached object detaches and
   keeps its last resolved model-space geometry — it does not disappear and
   does not snap to the origin.
-- `frame` and `group` are containment/visual constructs, not attachment
-  targets or attachers: a frame never attaches to anything and nothing
-  attaches to a frame; membership in a `group` is tracked separately via
-  `member_node_ids` and the `group_membership_changed` op, not via
-  `attachment`.
+- `group` is a containment/visual construct, not an attachment target or an
+  attacher: nothing attaches to a group; membership in a `group` is tracked
+  separately via `member_node_ids` and the `group_membership_changed` op, not
+  via `attachment`. (The retired `frame` kind used to carry this same rule —
+  see [Fill and border](#fill-and-border-shape) for why a `shape`, whatever
+  its fill/border, does not.)
 
 **GUI attach/detach.** `label`, `text`, `icon` and `vote_dot` can now be
 (re)attached and detached from the canvas, not only via a raw
 `content.attachment` payload: dropping one of these overlays within
 `ATTACH_SNAP_RADIUS` (90px, unscaled) of a node's or another attachable
-annotation's centre attaches it there (`frame` and `group` are excluded from
-candidacy, per this section's rule that nothing attaches to either — even
-when one is the nearest thing to the drop point, a further-away valid target
+annotation's centre attaches it there (`group` is excluded from candidacy,
+per this section's rule that nothing attaches to it — even
+when it is the nearest thing to the drop point, a further-away valid target
 is preferred, or the overlay stays unattached), storing the drop point's
 offset from that centre so
 the overlay keeps exactly where it was released rather than jumping onto the
@@ -773,7 +797,7 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
 
 The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
-accepted as a legacy alias), `frame`, `shape`, `icon`, `vote_dot`, `image`,
+accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
 `freehand` — is exposed the same way through a generic tool set:
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
@@ -892,11 +916,11 @@ text editing and attachment to a node/annotation, but renders no
 [acceptance matrix](#acceptance-matrix)). `line` supports endpoint drag and
 per-endpoint anchor/attach, but is not resizable either — its geometry is its
 two endpoints, not a box — and has no inline text editing. The rest of the v1
-model — `text`, `frame`, `shape`, `icon`, `vote_dot`, `image`, `freehand` —
+model — `text`, `shape`, `icon`, `vote_dot`, `image`, `freehand` —
 renders with
 selection and drag-to-move for every kind, plus model-space resize (via the
 same `NodeResizer` handles as `note`) for the kinds that carry an explicit
-box size: `frame`, `shape` and `image`. `text`, `icon` and `vote_dot` render
+box size: `shape` and `image`. `text`, `icon` and `vote_dot` render
 at a fixed intrinsic size and are not resizable. `freehand` is not resizable
 either, and for a further reason: its shape is not in a box at all but in its
 sampled `points`, so there is nothing for a resize to scale. The canvas
@@ -906,7 +930,7 @@ it. Nor does it survive contact with a browser. `freehand` is one of the
 three types whose canvas translator carries no size across —
 `freehandAnnotationToOverlay` in `sessionAnnotations.js`, alongside the
 `label` and `line` branches beside it, and unlike
-`genericAnnotationToOverlay`, which does carry it for all six generic kinds
+`genericAnnotationToOverlay`, which does carry it for all five generic kinds
 — so hydrating a stroke resets its box to the model's 160×96 default. The
 next autosave that ships that annotation writes the default back over
 whatever an agent set. When that happens depends on the client: a browser
@@ -970,11 +994,59 @@ ratios (`REGULAR_SHAPE_ASPECT`; there is no single side to grow that keeps
 the figure regular) and would move the annotation's stored geometry as a side
 effect of typing rather than of a deliberate resize gesture — inset-only
 means `shape`'s width/height semantics, and everything resize/aspect-lock
-does with them, are untouched by this. `frame` is deliberately excluded: the
-contract describes it above as a "visual-only framing box", and the reported
-gap named only `note`/`label`/`text`/the six `shape` variants. `icon`,
+does with them, are untouched by this. `icon`,
 `vote_dot` and `image` are excluded too — none carries a free-text field in
 the v1 content model (a vote's `value` is a number with its own stepper).
+
+### Fill and border (`shape`)
+
+`shape` carries two independent visual settings, `style.fill` and
+`style.border`, each either a CSS colour string or the literal string
+`"transparent"` (task-annotation-merge-frame-into-shape-rectangle) — the same
+`style`-not-`content` convention `fontSize`/`font`/`textAlign` already use —
+see [MCP access](#mcp-access) and `create_annotation`'s docstring
+(`backend/service/mcp_tools.py`). An omitted `fill` defaults to a solid grey
+(the same look every `shape` had before this field existed); an omitted
+`border` defaults to `"transparent"` (no visible border) — so an existing
+shape with neither field stored keeps rendering exactly as it did before.
+
+This is what subsumes the retired `frame` kind: a `shape` (any variant, not
+only `rectangle`) with `fill: "transparent"` and a coloured `border` is what
+`frame` used to be — a box with no fill and a visible outline. There is no
+migration from stored `frame` data to this — see [Unrecognised annotation
+data](#unrecognised-annotation-data) — the equivalence is only that a user
+or agent can now reach the same visual by configuring a `shape`.
+
+**Rendering limitation, stated plainly.** `rectangle` and `circle` draw a
+correct border (an axis-aligned CSS border, and a border on a
+`border-radius: 50%` box, both render exactly as expected). The four
+clip-path variants (`triangle`, `rhombus`, `hexagon`, `process_arrow`) do
+not: a CSS `border` is drawn as a ring around the axis-aligned box and *then*
+clipped by `clip-path` along with everything else, so only the portion of
+that ring that survives the clip is visible — which is not the same as a
+border tracing the polygon's own slanted edges (`GenericAnnotationNode.jsx`'s
+`shape` render branch has the full derivation). Tracing the true outline
+would need an SVG stroke or a second, larger clip-path per variant, which is
+out of scope for this task; a border is still offered uniformly across every
+variant rather than withheld from four of six, since a plain, imperfect
+border is strictly more useful than none. Tracked as a possible follow-up,
+not a decided non-goal.
+
+**Attachment/snap-target candidacy is unaffected by fill/border.** A `shape`
+remains a valid target for [Attachment and detach
+behavior](#attachment-and-detach-behavior)'s drag-to-attach and the "nearby
+object menu" regardless of its fill/border — including a transparent-fill
+one that looks exactly like the old `frame`. This is a deliberate decision,
+not an oversight: eligibility in `computeDroppedAttachment`
+(`packages/ui-graph-canvas/src/utils/annotations.js`) and
+`attachNearbyAnnotation` (`GraphCanvas.jsx`) is keyed on `node.type`
+everywhere else (`group`, `arrow`) — introducing a content-dependent
+exclusion just for one configuration of `shape` would be a new, inconsistent
+kind of rule, and a surprising one: two visually-similar transparent-fill
+shapes would attach differently depending on an internal field a user has no
+reason to remember they set. Keeping `shape` uniformly attachable is the
+smaller, more predictable change now that `frame` is no longer a distinct
+type.
 
 ### Typography controls (`text`, `shape`)
 
@@ -1054,27 +1126,20 @@ glyphs are pairwise distinct.
 
 `geometry.rotation` is drawn as a transform on the rendered element rather
 than on the ReactFlow node wrapper, so hit-testing, dragging and resizing keep
-operating on the unrotated bounding box. For the four kinds that are both
-rotatable and resizable — `note`, `frame`, `shape` and `image` — that has a
+operating on the unrotated bounding box. For the three kinds that are both
+rotatable and resizable — `note`, `shape` and `image` — that has a
 visible cost, not just a benign one: the `NodeResizer` outline and handles are
 drawn axis-aligned around the unrotated box, so on a rotated annotation they
 sit visibly askew from the object and a handle drag grows the box along the
-unrotated axes. `frame` and `shape` are where this is actually reachable
-today: both are toolbox-creatable and both accept a rotation through the
-generic MCP tools or the GUI rotation control described below. `image` needs
-MCP or the GUI control to create the object, but either can set the rotation.
-`note` no longer needs a raw op to reach a non-zero rotation — the GUI control
-below writes it directly, and `create_sticky_note`/`update_sticky_note` set
-one over MCP too (see below). Rotation-aware resize handles are an open gap.
-The capability baseline requires it for text/headings, labels/callouts, sticky notes,
-images, icons/dots and basic shapes including the process arrow; `frame` is
-drawn too, because the generic tools accept `rotation` for every type with no
-per-type validation (`create_annotation` no longer creates an `image` — #428
-moved that to `create_image_annotation`, which takes its own `rotation` — but
-`update_annotation` still rotates an existing one), and a frame is a single
-box like a shape — storing a rotation, reporting it back from
-`list_annotations` and then quietly drawing the frame axis-aligned would be a
-silent discard.
+unrotated axes. `shape` is where this is most reachable today: it is
+toolbox-creatable and accepts a rotation through the generic MCP tools or the
+GUI rotation control described below. `image` needs MCP or the GUI control to
+create the object, but either can set the rotation. `note` no longer needs a
+raw op to reach a non-zero rotation — the GUI control below writes it
+directly, and `create_sticky_note`/`update_sticky_note` set one over MCP too
+(see below). Rotation-aware resize handles are an open gap. The capability
+baseline requires it for text/headings, labels/callouts, sticky notes,
+images, icons/dots and basic shapes including the process arrow.
 
 `line` and `freehand` are the two that do **not** draw it: their geometry
 lives in endpoints and sampled points rather than in a box, so a rotation the
@@ -1085,10 +1150,10 @@ non-goal. `group` never reaches this translation layer at all — its helpers
 group has no rotation to draw or preserve. They do carry `z` and `locked`.
 
 **A GUI rotation control now exists.** Right-clicking a `note`, `label`,
-`text`, `frame`, `shape`, `icon`, `vote_dot` or `image` opens a property
+`text`, `shape`, `icon`, `vote_dot` or `image` opens a property
 editor with a rotation row: two step buttons (±15°) and a reset-to-0° button
-that also displays the current angle (`GenericAnnotationNode.jsx` for the six
-generic kinds; `NoteNode.jsx`/`LabelNode.jsx` for their own). It writes
+that also displays the current angle (`GenericAnnotationNode.jsx` for the
+five generic kinds; `NoteNode.jsx`/`LabelNode.jsx` for their own). It writes
 `data.rotation` on the ReactFlow node the same way the pre-existing
 color/text-size controls write their fields, so it round-trips through the same
 `overlayToFlowNode`/`flowNodeToOverlay` (`annotations.js`) and
@@ -1143,7 +1208,7 @@ This is the canvas UI's own enforcement of `locked` — the server never rejects
 a write to a locked annotation — but which *tool* performs that write differs
 by type:
 
-- For the generic types (`text`/`label`/`line`/`frame`/`shape`/`icon`/
+- For the generic types (`text`/`label`/`line`/`shape`/`icon`/
   `vote_dot`/`image`), `reorder_annotation`, `set_annotation_lock` and
   `update_annotation` all still apply regardless of the annotation's current
   `locked` value.
@@ -1182,12 +1247,11 @@ rule](#downstream-closure-rule).
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
 | `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer/duplicate (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ⬜ no formal pass yet |
-| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/duplicate/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape); no colour chosen defaults to `#94a3b8`, `GenericAnnotationNode.jsx`'s `DEFAULT_COLOR` — shared by `frame`/`shape`/`icon`/`vote_dot` below), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Text — pre-wired with the identical `content.attachment` shape); no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/duplicate/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape); no colour chosen defaults to `#94a3b8`, `GenericAnnotationNode.jsx`'s `DEFAULT_COLOR` — shared by `icon`/`vote_dot` below and by `shape`'s own unset-fill default), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Text — pre-wired with the identical `content.attachment` shape); no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `label` | ✅ toolbox create, inline edit, drag, rotate/recolor/resize-text/layer/duplicate (right-click; no colour chosen defaults to `#64748b`, `LabelNode.jsx`'s `DEFAULT_LABEL_COLOR`), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Label) — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles (this row previously claimed "resize" here — corrected, `smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay also carries only `color` and `fontSize` out of `style`, so any other style key an agent sets — `opacity` among them — is dropped on the same leg (`smallfix-label-overlay-drops-nonvisual-style-keys`). `text`, colour, font size, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ⬜ |
 | `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/duplicate/unlock (right-click; no colour chosen defaults to `#111827`, `ArrowNode.jsx`'s `DEFAULT_ARROW_COLOR`); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay carries only `color` out of `style`, so any other style key an agent sets is dropped on the same leg as the box — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only). `rotation`, `z`, `locked`, arrowheads, colour and the GUI's own anchors all survive | ✅ | ✅ | ⬜ |
-| `frame` | ✅ toolbox create (fixed default size), drag/resize, rotate/recolor/layer/duplicate (right-click; same `#94a3b8` default as `text` above) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) — and no duplicate action either, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
-| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, colour (same `#94a3b8` default as `text` above), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`) | ✅ | ✅ | ✅ | ⬜ |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, independent Fill and Border swatch sections (each a colour or `"transparent"` — task-annotation-merge-frame-into-shape-rectangle, see [Fill and border](#fill-and-border-shape); unset fill defaults to `#94a3b8` same as `text` above, unset border defaults to transparent — this is also where the retired `frame` kind's GUI cell merged into, since a transparent-fill, coloured-border shape is what `frame` used to be, with the border-rendering limitation for the four clip-path variants noted there), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`, `style.fill`/`style.border`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Icon); right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour (same `#94a3b8` default as `text` above), layer and duplicate | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate and a value stepper (right-click), and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Vote dot) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
@@ -1206,5 +1270,9 @@ must stay `in_progress` until its own full row set is ✅.
 
 ## V1 non-goals
 
-GIF, SVG, crop, image filters, threaded comments, vote counting, true frame
-grouping and cross-session annotation libraries are outside v1.
+GIF, SVG, crop, image filters, threaded comments, vote counting, and
+cross-session annotation libraries are outside v1. (The retired `frame`
+kind never had real containment/grouping behaviour of its own either — it
+was always a plain box, the same as any `shape` — see [Fill and
+border](#fill-and-border-shape) and the "true frame grouping" non-goal this
+line used to name.)
