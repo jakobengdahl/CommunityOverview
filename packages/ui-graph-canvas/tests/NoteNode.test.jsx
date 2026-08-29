@@ -326,10 +326,12 @@ describe('NoteNode inline text editing', () => {
   });
 });
 
-// The layer row is shared by every annotation context menu
-// (AnnotationLayerControls); GenericAnnotationNode.test.jsx pins the generic
-// kinds' wiring, this pins that a dedicated per-type editor gets the same
-// control rather than a parallel implementation of its own.
+// The layer row is shared by every *overlay* annotation's context menu
+// (AnnotationLayerControls) — `group` is the standing exception, with no
+// Layer row of its own (docs/USER_GUIDE.md's saved views section).
+// GenericAnnotationNode.test.jsx pins the generic kinds' wiring, this pins
+// that a dedicated per-type editor gets the same control rather than a
+// parallel implementation of its own.
 describe('NoteNode layer controls', () => {
   beforeEach(() => {
     hoisted.setNodes.mockClear();
