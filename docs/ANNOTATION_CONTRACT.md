@@ -207,12 +207,17 @@ change nothing (already alone at the front, or at the back) is a no-op and
 publishes no operation, and so is a click on an annotation another client
 currently holds the claim on (the attempt is surfaced, as for every other
 annotation mutation). A `locked` annotation is not offered the row at all,
-per the capability baseline's "remains selectable but offers only unlock or
-copy" — which every *overlay* annotation's menu now implements, `line`
-included. The canvas `Delete`/`Backspace` handler enforces it too: a locked
-overlay is skipped and the user is told to unlock it first, which closes the
-one path that could destroy a locked *overlay* without unlocking it. It is
-kind-agnostic, so it needs no per-component change.
+per the capability baseline's "remains selectable but offers only unlock" —
+which every *overlay* annotation's menu now implements, `line` included: the
+locked branch carries Unlock alone, not unlock-or-copy as this quote
+previously read. No `copy`/duplicate GUI action exists anywhere on the
+canvas — `duplicate_annotation` is MCP-only, like `set_annotation_lock` — so
+the "or copy" clause was dropped as an overclaim
+(`smallfix-contract-layer-order-overclaims-copy-on-locked-menu`). The canvas
+`Delete`/`Backspace` handler enforces it too: a locked overlay is skipped and
+the user is told to unlock it first, which closes the one path that could
+destroy a locked *overlay* without unlocking it. It is kind-agnostic, so it
+needs no per-component change.
 
 `group` now honours the flag, and follows the baseline exactly: **a locked
 group's menu offers Unlock and nothing else.** It honoured it nowhere until
