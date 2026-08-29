@@ -406,6 +406,10 @@ describe('NoteNode duplicate control', () => {
       type: 'note',
       position: { x: 0, y: 0 },
       data: { text: 'hi', locked: true },
+      // Mirrors overlayToFlowNode's top-level `draggable: false` on a locked
+      // node — the stale field the duplicate bug this test guards against
+      // used to inherit verbatim from `...source`.
+      draggable: false,
     };
     hoisted.nodes = [source];
     render(
@@ -424,6 +428,10 @@ describe('NoteNode duplicate control', () => {
     const copy = updated.find((n) => n.id !== 'n1');
     expect(copy.data.locked).toBe(false);
     expect(updated.find((n) => n.id === 'n1').data.locked).toBe(true);
+    // Regression: an unlocked `data.locked` copy must actually be draggable,
+    // not "phantom-locked" by a stale top-level `draggable` inherited from
+    // the locked source.
+    expect(copy.draggable).not.toBe(false);
   });
 
   it('publishes the duplicate as a create', () => {

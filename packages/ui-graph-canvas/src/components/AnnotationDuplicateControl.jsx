@@ -1,7 +1,7 @@
 import { useContext } from 'react';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { isRemoteLocked } from '../utils/annotations';
+import { isRemoteLocked, isAnnotationDraggable } from '../utils/annotations';
 import { reorderNodesForParentChild } from './GraphCanvas';
 
 // Small, fixed screen-space nudge so a freshly duplicated annotation lands
@@ -80,6 +80,7 @@ export function useAnnotationDuplicate(id, data) {
     const { remoteSelection: _remoteSelection, ...restData } = source.data || {};
     const newId = `${source.type}-${Date.now()}`;
     const position = source.position || { x: 0, y: 0 };
+    const newData = { ...restData, locked: false };
     const newNode = {
       ...source,
       id: newId,
@@ -88,7 +89,17 @@ export function useAnnotationDuplicate(id, data) {
         x: position.x + DUPLICATE_OFFSET,
         y: position.y + DUPLICATE_OFFSET,
       },
-      data: { ...restData, locked: false },
+      data: newData,
+      // `...source` above carries its stale top-level `draggable` (false when
+      // the source is locked, per `overlayToFlowNode`), but `data.locked` is
+      // just forced to `false` two lines up — recompute `draggable` from the
+      // copy's own (now-unlocked) data rather than inheriting the source's,
+      // the same way every other unlock path here does (NoteNode, LabelNode,
+      // FreehandAnnotationNode, GenericAnnotationNode's `isAnnotationDraggable`
+      // call; ArrowNode's equivalent inline check). Left stale, a duplicate of
+      // a locked annotation would report `data.locked: false` (full menu) yet
+      // stay structurally undraggable until a page reload.
+      draggable: isAnnotationDraggable({ ...source, data: newData }),
     };
     setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
     notifyChange('create');

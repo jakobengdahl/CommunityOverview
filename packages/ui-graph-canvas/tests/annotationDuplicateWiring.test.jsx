@@ -83,7 +83,17 @@ describe('shared annotation duplicate control', () => {
 
       it('offers duplicate on a locked annotation and never locks the copy', () => {
         const lockedData = { ...c.data, locked: true };
-        const source = { id: 'x1', type: c.flowType, position: { x: 0, y: 0 }, data: lockedData };
+        // `draggable: false` mirrors what `overlayToFlowNode` stamps onto a
+        // locked node's top level at hydration time — the field the bug this
+        // test guards against inherits verbatim from `...source` instead of
+        // recomputing from the copy's (now-unlocked) data.
+        const source = {
+          id: 'x1',
+          type: c.flowType,
+          position: { x: 0, y: 0 },
+          data: lockedData,
+          draggable: false,
+        };
         hoisted.nodes = [source];
         c.render(lockedData);
         c.open();
@@ -95,6 +105,10 @@ describe('shared annotation duplicate control', () => {
         expect(copy.data.locked).toBe(false);
         // The source itself stays locked — duplicating never mutates it.
         expect(updated.find((n) => n.id === 'x1').data.locked).toBe(true);
+        // Regression: an unlocked `data.locked` copy must actually be
+        // draggable, not "phantom-locked" by a stale top-level `draggable`
+        // inherited from the locked source.
+        expect(copy.draggable).not.toBe(false);
       });
     });
   }

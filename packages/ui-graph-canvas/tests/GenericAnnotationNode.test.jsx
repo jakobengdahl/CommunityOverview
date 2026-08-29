@@ -863,7 +863,10 @@ describe('GenericAnnotationNode duplicate control', () => {
 
   it('duplicates a locked annotation into an unlocked copy, and leaves the source locked', () => {
     const data = { locked: true, text: 'x' };
-    const source = { id: 'f1', type: 'frame', position: { x: 0, y: 0 }, data };
+    // Mirrors overlayToFlowNode's top-level `draggable: false` on a locked
+    // node — the stale field the duplicate bug this test guards against used
+    // to inherit verbatim from `...source`.
+    const source = { id: 'f1', type: 'frame', position: { x: 0, y: 0 }, data, draggable: false };
     hoisted.nodes = [source];
     render(
       <AnnotationContext.Provider
@@ -878,6 +881,10 @@ describe('GenericAnnotationNode duplicate control', () => {
     const copy = updated.find((n) => n.id !== 'f1');
     expect(copy.data.locked).toBe(false);
     expect(updated.find((n) => n.id === 'f1').data.locked).toBe(true);
+    // Regression: an unlocked `data.locked` copy must actually be draggable,
+    // not "phantom-locked" by a stale top-level `draggable` inherited from
+    // the locked source.
+    expect(copy.draggable).not.toBe(false);
   });
 
   it('publishes the duplicate as a create', () => {
