@@ -60,6 +60,9 @@ Environment variables already set by the caller are never overridden.
 ./start-dev.sh --profile scb --lang sv            # SCB profile in Swedish
 ```
 
+`--lang` is currently inert — the UI is temporarily locked to English. See
+[docs/USER_GUIDE.md](../docs/USER_GUIDE.md#language).
+
 For cloud environments (e.g. SSPCloud), use `scripts/start-sprint.sh` which auto-installs
 dependencies and loads the `stat-metadata` profile. See [docs/SSPCloud-setup.md](../docs/SSPCloud-setup.md).
 
