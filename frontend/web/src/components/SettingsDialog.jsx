@@ -25,7 +25,7 @@ const MAX_INLINE_TYPES = 5;
  * logout. Opened from the session drawer.
  */
 function SettingsDialog({ stats, onExportGraph, onClose }) {
-  const { t, language, setLanguage } = useI18n();
+  const { t, language, setLanguage, languageSwitchingEnabled } = useI18n();
   const {
     showMinimap,
     setShowMinimap,
@@ -198,16 +198,20 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
             <p className="settings-dialog-field-hint">{t('settings.display_name_hint')}</p>
           </div>
 
-          <div className="settings-dialog-section-divider" />
-          <div className="settings-dialog-section-title">{t('menu.language_section')}</div>
-          <button className="settings-dialog-menu-item" onClick={() => setLanguage('en')}>
-            <span>{t('menu.language_en')}</span>
-            <span className={`settings-dialog-toggle${language === 'en' ? ' active' : ''}`} />
-          </button>
-          <button className="settings-dialog-menu-item" onClick={() => setLanguage('sv')}>
-            <span>{t('menu.language_sv')}</span>
-            <span className={`settings-dialog-toggle${language === 'sv' ? ' active' : ''}`} />
-          </button>
+          {languageSwitchingEnabled && (
+            <>
+              <div className="settings-dialog-section-divider" />
+              <div className="settings-dialog-section-title">{t('menu.language_section')}</div>
+              <button className="settings-dialog-menu-item" onClick={() => setLanguage('en')}>
+                <span>{t('menu.language_en')}</span>
+                <span className={`settings-dialog-toggle${language === 'en' ? ' active' : ''}`} />
+              </button>
+              <button className="settings-dialog-menu-item" onClick={() => setLanguage('sv')}>
+                <span>{t('menu.language_sv')}</span>
+                <span className={`settings-dialog-toggle${language === 'sv' ? ' active' : ''}`} />
+              </button>
+            </>
+          )}
 
           <div className="settings-dialog-section-divider" />
           <div className="settings-dialog-section-title">{t('settings.admin_section')}</div>

@@ -15,7 +15,13 @@ describe('SettingsDialog', () => {
     });
   });
 
-  it('shows GUI language controls and persists selection', () => {
+  // Interim founder-directed constraint (2026-08-26, Corp task
+  // cb61993e-1154-41cb-9acb-80aaa26991ed): the language switcher is hidden
+  // and setLanguage is a no-op while LANGUAGE_SWITCHING_ENABLED is false in
+  // src/i18n/index.jsx. The underlying sv.json / SUPPORTED_LANGUAGES /
+  // useI18n() mechanism stays intact, so this test documents the interim
+  // state rather than the removed capability.
+  it('does not show language controls while switching is disabled', () => {
     render(
       <I18nProvider>
         <SettingsDialog
@@ -25,11 +31,9 @@ describe('SettingsDialog', () => {
       </I18nProvider>
     );
 
-    expect(screen.getByText('Language')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Svenska' }));
-
-    expect(window.localStorage.getItem('app_language')).toBe('sv');
+    expect(screen.queryByText('Language')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Svenska' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'English' })).not.toBeInTheDocument();
   });
 
   it('toggles the minimap setting', () => {

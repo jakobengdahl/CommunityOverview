@@ -40,7 +40,8 @@ Start the application with a specific profile using `--profile`:
 # Use the SCB profile
 ./start-dev.sh --profile scb
 
-# Combine with language and data options
+# Combine with language and data options (--lang is currently inert; the UI
+# is temporarily locked to English — see docs/USER_GUIDE.md#language)
 ./start-dev.sh --profile scb --lang sv --data data/examples/scb-seed.json
 ```
 
