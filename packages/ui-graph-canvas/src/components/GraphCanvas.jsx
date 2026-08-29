@@ -2826,16 +2826,45 @@ function GraphCanvasInner({
           draggable: g.locked ? false : undefined,
         };
         const members = new Set(op.members || []);
-        setNodes((nds) =>
-          reorderNodesForParentChild(
+        setNodes((nds) => {
+          // A member named here may arrive with no parent at all — most
+          // notably right after removeGroupKeepChildren (GroupNode.jsx)
+          // re-based it to absolute coordinates on delete — or with a
+          // different parent. Either way its position was computed in a
+          // different coordinate space than this group's, so re-parenting
+          // has to convert it the same way the local drag path does
+          // (computeGroupPlacement above): resolve to absolute using
+          // whatever parent it had, then subtract this group's origin.
+          // Skipped when the member already belongs here so a redundant
+          // upsert (e.g. a label-only edit) does not re-subtract the origin.
+          const priorById = new Map(nds.map((n) => [n.id, n]));
+          return reorderNodesForParentChild(
             [...nds.filter((n) => n.id !== g.id), groupNode].map((n) => {
               if (n.type === 'group') return n;
-              if (members.has(n.id)) return { ...n, parentId: g.id };
+              if (members.has(n.id)) {
+                if (n.parentId === g.id) return n;
+                const priorParent = n.parentId ? priorById.get(n.parentId) : null;
+                const absPos = priorParent
+                  ? {
+                      x: n.position.x + (priorParent.position?.x || 0),
+                      y: n.position.y + (priorParent.position?.y || 0),
+                    }
+                  : n.position;
+                return {
+                  ...n,
+                  parentId: g.id,
+                  position: {
+                    x: absPos.x - groupNode.position.x,
+                    y: absPos.y - groupNode.position.y,
+                  },
+                  extent: undefined,
+                };
+              }
               if (n.parentId === g.id) return { ...n, parentId: undefined };
               return n;
             })
-          )
-        );
+          );
+        });
       } else if (op.action === 'delete' && op.id) {
         setNodes((nds) =>
           nds
