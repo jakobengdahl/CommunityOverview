@@ -193,6 +193,20 @@ describe('LabelNode colour defaults', () => {
     );
     expect(swatches).toContain('rgb(230, 237, 243)');
   });
+
+  // smallfix-annotation-colour-swatch-no-active-marker: the swatch grid had
+  // no indication of the label's current colour at all, unlike
+  // FreehandAnnotationNode's picker (FreehandAnnotationNode.jsx:298).
+  it('marks the swatch matching the current colour as active, and no other', () => {
+    render(<LabelNode id="l1" data={{ text: 'Label text', color: '#FDE047' }} selected={false} />);
+    fireEvent.contextMenu(screen.getByText('Label text'));
+
+    const buttons = [...document.querySelectorAll('.color-button')];
+    const active = buttons.find((b) => b.style.backgroundColor === 'rgb(253, 224, 71)');
+    const inactive = buttons.find((b) => b.style.backgroundColor === 'rgb(230, 237, 243)');
+    expect(active.className).toContain('active');
+    expect(inactive.className).not.toContain('active');
+  });
 });
 
 // smallfix-annotation-context-menus-ignore-lock: the accepted capability

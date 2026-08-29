@@ -68,13 +68,26 @@
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  border: 2px solid transparent;
+  /* A resting border, not just transparent, so a dark swatch (e.g. arrow's
+     '#111827' or the generic annotation's '#0f172a') stays distinguishable
+     against this menu's own dark background (#2a2a2a above) instead of
+     nearly disappearing until hovered. */
+  border: 2px solid rgba(255, 255, 255, 0.3);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .graph-annotation-context-menu .color-button:hover {
   transform: scale(1.1);
+  border-color: white;
+}
+
+/* Marks which swatch is the annotation's current colour (ArrowNode,
+   LabelNode, NoteNode and GenericAnnotationNode's colour rows all apply the
+   `active` class here; FreehandAnnotationNode originated the pattern),
+   mirroring the `.size-button.active`/`.shape-picker-button.active`
+   convention those already use. */
+.graph-annotation-context-menu .color-button.active {
   border-color: white;
 }
 

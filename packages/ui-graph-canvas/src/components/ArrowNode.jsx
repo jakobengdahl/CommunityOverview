@@ -346,7 +346,7 @@ function ArrowNode({ id, data, selected }) {
                   {ARROW_COLORS.map((c) => (
                     <button
                       key={c}
-                      className="color-button"
+                      className={`color-button${color === c ? ' active' : ''}`}
                       style={{ backgroundColor: c }}
                       onClick={() => changeColor(c)}
                     />
