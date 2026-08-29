@@ -35,6 +35,7 @@ from backend.core.session_manager import (
     SessionNotFound,
     UndoConflict,
     _TokenBucket,
+    _UNDO_REPLAY_CLIENT_ID,
 )
 from backend.service.rest_api import _resolve_stream_event
 
@@ -2113,6 +2114,43 @@ class TestUndoLastAction:
         assert s.state["annotations"] == []
         assert res["undone_op"] == "annotation_created"
         assert res["revision"] == s.seq
+
+    async def test_undo_replay_broadcast_is_not_attributed_to_the_undoing_clients_own_id(
+        self,
+    ):
+        """Regression for smallfix-undo-inverse-op-dropped-as-own-echo.
+
+        sessionSyncClient.js drops any incoming SSE op whose ``client_id``
+        matches the receiving browser's own — correct behaviour for a genuine
+        self-authored echo (pinned by
+        sessionSyncClient.test.js's "suppresses echoes of its own client").
+        Before this fix, ``undo_last_action`` replayed the inverse op under
+        the *undoing* client's own ``client_id``, so the undoing browser's
+        own SSE subscription — the same one that receives every op it is
+        connected for — received a broadcast it would filter out as an echo
+        of its own action, even though the undo genuinely changed session
+        state and every other client saw it. This pins that the broadcast is
+        attributed to the dedicated ``_UNDO_REPLAY_CLIENT_ID`` marker
+        instead, mirroring rest_api.py's ``_HUMAN_IMAGE_INGEST_CLIENT_ID``
+        for the identical trap.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "c1", {"id": "note-1", "type": "note"})
+
+        # The undoing client's own SSE subscription — the exact vantage point
+        # sessionSyncClient.js's self-echo check filters from.
+        sub, _ = mgr.connect(s.id, "c1", "Undoer")
+        await _drain(sub)  # discard presence_joined
+
+        mgr.undo_last_action(s.id, "c1")
+
+        events = await _drain(sub)
+        op_events = [e for e in events if e.get("type") == "op"]
+        assert len(op_events) == 1
+        assert op_events[0]["client_id"] == _UNDO_REPLAY_CLIENT_ID
+        assert op_events[0]["client_id"] != "c1"
+        assert op_events[0]["op"]["op"] == "annotation_deleted"
 
     async def test_undo_update_restores_prior_fields(self):
         mgr = _manager()
