@@ -1082,9 +1082,7 @@ describe('root menu viewport-edge clamping (c3174865-f36e-4eb2-befa-cb10784babf0
   const edge = { id: 'e1', label: 'RELATES_TO', data: {} };
 
   it('leaves NodeContextMenu at the raw descriptor position when it fits the viewport', () => {
-    render(
-      <NodeContextMenu menu={{ x: 12, y: 34, node }} labels={labels} onClose={vi.fn()} />
-    );
+    render(<NodeContextMenu menu={{ x: 12, y: 34, node }} labels={labels} onClose={vi.fn()} />);
     const el = document.querySelector('.node-context-menu');
     expect(el.style.left).toBe('12px');
     expect(el.style.top).toBe('34px');
@@ -1093,9 +1091,7 @@ describe('root menu viewport-edge clamping (c3174865-f36e-4eb2-befa-cb10784babf0
   it('clamps NodeContextMenu back inside the viewport when it would overflow right/bottom', () => {
     const restore = mockOverflow(50, 30);
     try {
-      render(
-        <NodeContextMenu menu={{ x: 900, y: 700, node }} labels={labels} onClose={vi.fn()} />
-      );
+      render(<NodeContextMenu menu={{ x: 900, y: 700, node }} labels={labels} onClose={vi.fn()} />);
       const el = document.querySelector('.node-context-menu');
       expect(el.style.left).toBe('850px');
       expect(el.style.top).toBe('670px');
