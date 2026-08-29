@@ -350,6 +350,17 @@ export function annotationsToOverlays(annotations) {
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
+      // `start`/`end` (docs/ANNOTATION_CONTRACT.md's line-endpoint attachment,
+      // distinct from the GUI-only startAnchor/endAnchor snap above) always
+      // come back from createAnnotation as at least `{point}` — never
+      // undefined — so forwarding them unconditionally would put a `start`/
+      // `end` field on every arrow overlay, including ones nobody ever
+      // attached, and would make that stored point rather than
+      // `from`/`to`/`dx`/`dy` (the fields the canvas actually drags) look
+      // authoritative. The attachment itself is the agent-authored state this
+      // translator must not lose, so it is carried only when present.
+      if (a.start?.attachment) overlay.start = a.start;
+      if (a.end?.attachment) overlay.end = a.end;
       out.push(overlay);
     } else if (a?.type === 'freehand') {
       out.push(freehandAnnotationToOverlay(a));
@@ -430,6 +441,12 @@ export function overlaysToAnnotations(overlays) {
       };
       if (o.startAnchor) ann.startAnchor = o.startAnchor;
       if (o.endAnchor) ann.endAnchor = o.endAnchor;
+      // Carry an attached endpoint's `start`/`end` back onto the annotation
+      // (see the matching comment in annotationsToOverlays above) so the
+      // attachment an agent set survives this leg too, instead of being
+      // rebuilt as a bare point by annotationModel.js's normalizeEndpoint.
+      if (o.start) ann.start = o.start;
+      if (o.end) ann.end = o.end;
       annotations.push(createAnnotation(ann));
     } catch (error) {
       skippedOverlay(o, error);

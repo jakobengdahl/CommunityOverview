@@ -100,6 +100,78 @@ describe('annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
+  // smallfix-line-endpoint-attachment-dropped-by-translator: docs/ANNOTATION_
+  // CONTRACT.md makes a line's start/end endpoint attachment (attach to a
+  // node or another annotation) a first-class v1 field, validated server-side
+  // (backend/core/session_annotations.py's _line_endpoint_error). This
+  // translator used to read only from/to/startAnchor/endAnchor and never
+  // start/end, so the attachment was rebuilt as a bare point on the very
+  // first browser round trip, silently discarding what an MCP agent set.
+  it("preserves a line endpoint's attachment across the full round trip", () => {
+    const server = [
+      {
+        id: 'line-attached',
+        type: 'line',
+        position: { x: 0, y: 0 },
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        start: {
+          point: { x: 0, y: 0 },
+          attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: -5 } },
+        },
+        end: { point: { x: 160, y: 0 } },
+        startArrow: false,
+        endArrow: true,
+      },
+    ];
+    const overlays = annotationsToOverlays(server);
+    expect(overlays[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
+    // The unattached end endpoint stays a bare point and must not spuriously
+    // pick up an `end` field on the overlay.
+    expect(overlays[0].end).toBeUndefined();
+
+    const roundTripped = overlaysToAnnotations(overlays);
+    expect(roundTripped[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
+    expect(roundTripped[0].end.attachment).toBeUndefined();
+  });
+
+  // A line with no attachment on either endpoint must round-trip identically
+  // to before this fix — the overlay must not grow a spurious start/end
+  // field just because createAnnotation always produces at least `{point}`
+  // internally.
+  it('does not add a start/end field to a plain, unattached line overlay', () => {
+    const overlays = [
+      {
+        id: 'arrow-plain',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 100,
+        dy: 0,
+        color: '#fff',
+        startArrow: false,
+        endArrow: true,
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].start.attachment).toBeUndefined();
+    expect(server[0].end.attachment).toBeUndefined();
+    const roundTripped = annotationsToOverlays(server);
+    expect(roundTripped[0].start).toBeUndefined();
+    expect(roundTripped[0].end).toBeUndefined();
+    expect(roundTripped).toEqual(overlays);
+  });
+
   it('round-trips a freehand stroke via absolute model-space points', () => {
     const overlays = [
       {
