@@ -378,10 +378,14 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(restored.position).toEqual({ x: 50, y: 20 });
   });
 
-  // A redundant upsert-group (e.g. a label-only edit) that renames the same
-  // members must not re-subtract the group's origin from a member that is
-  // already parented here - that would displace it in the opposite direction
-  // on every subsequent no-op update.
+  // A redundant upsert-group (e.g. the group being dragged, which echoes a
+  // position change with the same membership) must not re-subtract the
+  // group's new origin from a member that is already parented here - that
+  // would displace it in the opposite direction on every such echo. The
+  // group's position in the op deliberately differs from its seeded position
+  // so the guard is actually exercised: with the same position in both, the
+  // add-then-subtract math cancels out whether or not the guard runs, which
+  // would let this test pass even with the guard removed.
   it('leaves an already-adopted member position untouched on a redundant upsert-group', () => {
     render(
       <GraphCanvas
@@ -390,7 +394,7 @@ describe('GraphCanvas remote apply (design step 6)', () => {
         remoteAnnotationOps={[
           {
             action: 'upsert-group',
-            group: { id: 'grp', label: 'Renamed', position: { x: 400, y: 300 } },
+            group: { id: 'grp', label: 'Renamed', position: { x: 500, y: 300 } },
             members: ['n1'],
           },
         ]}
