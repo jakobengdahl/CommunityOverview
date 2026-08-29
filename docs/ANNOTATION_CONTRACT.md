@@ -512,6 +512,40 @@ annotation's current attachment target other than dragging it away. `line`
 endpoint attach/detach (`startAnchor`/`endAnchor`, drag-to-snap on the
 endpoint handle) predates this and is unrelated code, unchanged here.
 
+**Locking and bindings** (`dec-annotation-lock-semantics`). `locked` freezes
+**all** geometry change on an annotation, not only user-initiated edits — this
+is stricter than "blocks edits but not the resolution of a binding the user
+already created," which was considered and rejected as harder to state and
+easier to drift from. Concretely, both of `GraphCanvas.jsx`'s geometry-follow
+effects skip a locked annotation outright: the attachment-follow effect above
+leaves a locked, attached `text`/`label`/`icon`/`vote_dot` exactly where it
+was the moment it was locked, even while its target keeps moving, and the
+anchored-arrow-resolve effect (the `line`-endpoint counterpart, driving
+`startAnchor`/`endAnchor`) does the same for a locked, anchored arrow.
+
+Locking an attached or anchored annotation also **drops its binding**: the
+lock write (`set_annotation_lock`, `backend/service/mcp_tools.py` — locking a
+generic annotation is MCP-only, there is no GUI "Lock" action, only "Unlock")
+resolves the binding one final time — its geometry is already kept resolved
+continuously by the browser's own follow effect while unlocked, so there is
+nothing left to compute — and clears the attachment/anchor reference in the
+same write. Without this, a locked-but-still-bound annotation would silently
+claim an attachment it no longer honours: freezing geometry alone (the
+paragraph above) is not enough on its own, because the moment such an
+annotation is later *unlocked*, the follow effect would resume and snap it
+onto its target's now-different position — a jump the user did not ask for.
+Dropping the binding at lock time closes that: **unlocking does not restore
+it**, and re-attaching is a deliberate, separate user action afterward.
+
+Two related pieces of the same decision live elsewhere in this document
+rather than here, because each is a detail of the section it sits in: a
+locked group's own menu withholds every destructive action, [Layer
+order](#layer-order) above explains why the lock protects content rather than
+(a non-existent) visibility; and the multi-select delete path filters
+locked/claimed/ungrouped-node selections exactly like the keyboard
+`Delete`/`Backspace` handler that same section describes, so the two paths
+cannot drift apart the way they once did.
+
 **Validation.** `backend/core/session_annotations.py`'s generic annotation
 builder/patcher (used by `create_annotation`/`update_annotation`) rejects a
 structurally malformed `attachment` or `line` `start`/`end` before it ever

@@ -180,3 +180,64 @@ describe('GraphCanvas attachment: drag-to-attach/detach', () => {
     expect(onAnnotationChange).not.toHaveBeenCalled();
   });
 });
+
+// dec-annotation-lock-semantics point 1: `locked` freezes ALL geometry
+// change, including the follow effects that resolve a binding's geometry —
+// not only user-initiated edits. These mount with the bound target already
+// far from the overlay's stored geometry, so an unfixed effect (which
+// resolves on every `nodes` change, mount included) would visibly move it.
+describe('GraphCanvas attachment/anchor: locked annotations freeze geometry', () => {
+  beforeEach(() => {
+    store.nodes = [];
+    store.edges = [];
+    store.handlers = {};
+  });
+  afterEach(() => cleanup());
+
+  it('does not move a locked, attached label when its target node has moved', () => {
+    const target = {
+      id: 'node-1',
+      type: 'custom',
+      position: { x: 900, y: 900 },
+      width: 40,
+      height: 40,
+    };
+    const label = {
+      id: 'label-1',
+      type: 'label',
+      position: { x: 0, y: 0 },
+      data: {
+        locked: true,
+        attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 0, y: 0 } },
+      },
+    };
+    store.nodes = [target, label];
+
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+
+    expect(nodeById('label-1').position).toEqual({ x: 0, y: 0 });
+  });
+
+  it('does not move a locked, anchored arrow when its endpoint node has moved', () => {
+    const target = {
+      id: 'node-1',
+      type: 'custom',
+      position: { x: 900, y: 900 },
+      width: 40,
+      height: 40,
+    };
+    const arrow = {
+      id: 'arrow-1',
+      type: 'arrow',
+      position: { x: 0, y: 0 },
+      data: { locked: true, startAnchor: 'node-1', dx: 200, dy: 0 },
+    };
+    store.nodes = [target, arrow];
+
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+
+    expect(nodeById('arrow-1').position).toEqual({ x: 0, y: 0 });
+    expect(nodeById('arrow-1').data.dx).toBe(200);
+    expect(nodeById('arrow-1').data.dy).toBe(0);
+  });
+});
