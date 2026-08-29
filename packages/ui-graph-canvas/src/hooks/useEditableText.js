@@ -31,6 +31,9 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
   const { setNodes } = useReactFlow();
   const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
+  // The persisted flag, distinct from the remote claim above — see GroupNode's
+  // equivalent `locked` (smallfix-locked-annotation-text-still-editable-by-doubleclick).
+  const locked = Boolean(data?.locked);
 
   useEffect(() => {
     setText(data.text || '');
@@ -43,16 +46,33 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     }
   }, [isEditing]);
 
-  // Double-click entry point: only a live remote claim refuses entry; a
-  // persisted `locked` flag does not (see GenericAnnotationNode.jsx's
-  // startEditingText comment — that gap from GroupNode's rename is tracked
-  // separately, not fixed here so all three change together).
+  // A lock can arrive from MCP or a collaborator while the editor is open.
+  // Close it the moment that happens rather than leaving it open: this hook
+  // also live-syncs on every keystroke (handleTextChange below), so leaving
+  // the editor mounted would keep writing through a lock that has already
+  // taken effect everywhere else. Adjusted during render rather than in an
+  // effect — same reasoning, and the same pattern, as GroupNode's
+  // `lockedWhenLastRendered` guard on its rename input.
+  const [lockedWhenLastRendered, setLockedWhenLastRendered] = useState(locked);
+  if (locked !== lockedWhenLastRendered) {
+    setLockedWhenLastRendered(locked);
+    if (locked && isEditing) {
+      setIsEditing(false);
+      setText(data.text || '');
+    }
+  }
+
+  // Double-click entry point: a live remote claim refuses entry, and so does
+  // the persisted lock — the capability baseline says a locked object offers
+  // only unlock or copy, and an in-place text edit is not that. Matches
+  // GroupNode's rename guard (smallfix-locked-annotation-text-still-editable-by-doubleclick).
   const startEditing = (e) => {
     e?.stopPropagation();
     if (remoteLocked) {
       notifyRemoteLockedAttempt();
       return;
     }
+    if (locked) return;
     setIsEditing(true);
   };
 
@@ -62,6 +82,13 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     if (remoteLocked) {
       setText(data.text || '');
       notifyRemoteLockedAttempt();
+      return;
+    }
+    // Backstop for a lock arriving between the render-phase check above and
+    // this write — same reasoning as GroupNode's equivalent backstop on
+    // handleLabelBlur.
+    if (locked) {
+      setText(data.text || '');
       return;
     }
     const trimmed = text.trim();

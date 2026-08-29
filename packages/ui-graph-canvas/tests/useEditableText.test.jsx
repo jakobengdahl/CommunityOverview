@@ -163,4 +163,44 @@ describe('useEditableText', () => {
     expect(hoisted.setNodes).not.toHaveBeenCalled();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
+
+  // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted `data.locked` flag
+  // gates every context menu, but until now not this double-click editor —
+  // the one edit path that bypasses the menu entirely. Matches GroupNode's
+  // rename guard.
+  it('refuses to enter edit mode while locked, without treating it as a remote-claim attempt', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    const { result } = renderHook(() => useEditableText('n1', { text: 'Hello', locked: true }), {
+      wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }),
+    });
+    act(() => result.current.startEditing({ stopPropagation: () => {} }));
+    expect(result.current.isEditing).toBe(false);
+    // Unlike a live remote claim, a standing lock is silent — the menu
+    // already explains it via its Unlock button.
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
+  it('closes the editor and discards the pending edit when a lock arrives mid-edit', () => {
+    const notifyChange = vi.fn();
+    const { result, rerender } = renderHook(({ data }) => useEditableText('n1', data), {
+      initialProps: { data: { text: 'Hello' } },
+      wrapper: makeWrapper({ notifyChange, notifyRemoteLockedAttempt: vi.fn() }),
+    });
+    act(() => result.current.startEditing({ stopPropagation: () => {} }));
+    act(() => result.current.handleTextChange({ target: { value: 'typed before lock' } }));
+    expect(result.current.text).toBe('typed before lock');
+    hoisted.setNodes.mockClear();
+    notifyChange.mockClear();
+
+    // The lock arrives from another client (or MCP) while the editor is open.
+    rerender({ data: { text: 'Hello', locked: true } });
+    expect(result.current.isEditing).toBe(false);
+    expect(result.current.text).toBe('Hello');
+
+    // Backstop: even if a blur/Escape handler still fires after the
+    // render-phase close above, it must not write the abandoned draft.
+    act(() => result.current.commitText());
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
 });
