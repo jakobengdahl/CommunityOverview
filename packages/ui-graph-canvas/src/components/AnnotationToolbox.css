@@ -204,13 +204,6 @@
   background: #831843;
 }
 
-.annotation-toolbox-visual--frame {
-  width: 24px;
-  height: 18px;
-  border: 2px solid #93c5fd;
-  border-radius: 3px;
-}
-
 .annotation-toolbox-visual--vote-dot {
   width: 22px;
   height: 22px;

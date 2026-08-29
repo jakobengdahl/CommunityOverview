@@ -63,9 +63,17 @@ DEFAULT_GROUP_SIZE = {"w": 320, "h": 200}
 EMBEDDED_IMAGE_URL_PREFIXES = ("data:image/webp;base64,",)
 
 # Every v1 type except `note` and `group` — see module docstring for why
-# those two are excluded from the generic tool set.
+# those two are excluded from the generic tool set. `frame` (a plain box with
+# no fill) was a member of this set until task-annotation-merge-frame-into-
+# shape-rectangle folded it into `shape`: a `shape` with a transparent fill
+# and a coloured border now covers what a standalone `frame` used to be, and
+# `frame` is no longer a recognised annotation type at all. No migration was
+# written for annotations already stored with type `frame` (nobody used the
+# annotation features yet — see task-annotation-tolerate-unexpected-data);
+# they are simply no longer resolved by `normalize_generic_type` below, the
+# same as any other unrecognised type.
 GENERIC_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "line", "frame", "shape", "icon", "vote_dot", "image", "freehand"}
+    {"text", "label", "line", "shape", "icon", "vote_dot", "image", "freehand"}
 )
 ALL_ANNOTATION_TYPES: FrozenSet[str] = GENERIC_ANNOTATION_TYPES | {
     NOTE_TYPE,
@@ -713,7 +721,7 @@ def build_annotation(
     Builds the common envelope (``geometry``/``position``/``style``/``z``/
     ``locked``) shared by every v1 type, mirroring ``createAnnotation()``.
     Unlike ``build_note_annotation`` this does not model each type's payload
-    shape — that differs too much across line/label/shape/frame/icon/
+    shape — that differs too much across line/label/shape/icon/
     vote_dot/image/freehand for one generic builder to hand-build — so *content*
     carries it verbatim and is merged onto the annotation as-is. The
     frontend's ``createAnnotation()`` re-normalizes defensively on load

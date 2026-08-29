@@ -26,7 +26,6 @@ const ANNOTATION_TYPE_KEYS = new Set([
   'text',
   'label',
   'line',
-  'frame',
   'group',
   'shape',
   'icon',

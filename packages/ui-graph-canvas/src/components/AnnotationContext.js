@@ -35,6 +35,9 @@ export const AnnotationContext = createContext({
   attachNearby: () => {},
   labels: {
     color: 'Colour',
+    fill: 'Fill',
+    border: 'Border',
+    transparent: 'Transparent',
     delete: 'Delete',
     unlock: 'Unlock',
     duplicate: 'Duplicate',

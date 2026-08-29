@@ -57,7 +57,6 @@ _ANNOTATION_TYPES = {
     "text",
     "label",
     "line",
-    "frame",
     "shape",
     "icon",
     "vote_dot",

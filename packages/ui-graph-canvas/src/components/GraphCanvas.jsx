@@ -340,6 +340,9 @@ function GraphCanvasInner({
     addLabel: 'Add label',
     addArrow: 'Add arrow',
     annotationColor: 'Colour',
+    annotationFill: 'Fill',
+    annotationBorder: 'Border',
+    annotationTransparent: 'Transparent',
     deleteAnnotation: 'Delete',
     unlockAnnotation: 'Unlock',
     duplicateAnnotation: 'Duplicate',
@@ -405,7 +408,6 @@ function GraphCanvasInner({
     note: 'Note',
     text: 'Text',
     label: 'Label',
-    frame: 'Frame',
     shapeRectangle: 'Rectangle',
     shapeCircle: 'Circle',
     shapeTriangle: 'Triangle',
@@ -668,6 +670,9 @@ function GraphCanvasInner({
       attachNearby,
       labels: {
         color: cml.annotationColor,
+        fill: cml.annotationFill,
+        border: cml.annotationBorder,
+        transparent: cml.annotationTransparent,
         delete: cml.deleteAnnotation,
         unlock: cml.unlockAnnotation,
         duplicate: cml.duplicateAnnotation,
@@ -717,6 +722,9 @@ function GraphCanvasInner({
       notifyRemoteLockedAttempt,
       attachNearby,
       cml.annotationColor,
+      cml.annotationFill,
+      cml.annotationBorder,
+      cml.annotationTransparent,
       cml.deleteAnnotation,
       cml.unlockAnnotation,
       cml.duplicateAnnotation,
@@ -1359,7 +1367,7 @@ function GraphCanvasInner({
   );
 
   // Create a free-floating annotation (note, label, arrow, or one of the
-  // generic overlay kinds - text/frame/shape/icon) at the given flow position.
+  // generic overlay kinds - text/shape/icon) at the given flow position.
   // These are persisted in the session annotation list via the save-view
   // round-trip; onAnnotationChange schedules that save. `options.shape` picks
   // the shape variant for kind 'shape' (defaults to 'rectangle');
@@ -1397,14 +1405,6 @@ function GraphCanvasInner({
           position,
           data: { text: '', color: undefined, fontSize: undefined, attachment: options.attachment },
         };
-      } else if (kind === 'frame') {
-        newNode = {
-          id,
-          type: 'frame',
-          position,
-          data: { color: undefined },
-          style: { width: 220, height: 160 },
-        };
       } else if (kind === 'shape') {
         // A subtype whose clip-path only draws a regular figure at one ratio
         // is created at that ratio instead of the generic 160x96 box, so it
@@ -1419,7 +1419,16 @@ function GraphCanvasInner({
           // `text: ''` (not omitted) matches the `text`-kind branch above —
           // a freshly created shape has no caption yet, but the field itself
           // already exists rather than being absent until first edit.
-          data: { shape, text: '', color: undefined },
+          //
+          // `fill`/`border` left undefined (task-annotation-merge-frame-into-
+          // shape-rectangle) — GenericAnnotationNode.jsx defaults an unset
+          // fill to its previous solid grey and an unset border to
+          // transparent, so a freshly toolbox-created shape looks exactly as
+          // a plain shape always did. The retired `frame` toolbox button's
+          // look (a transparent box with a coloured border) is now reached by
+          // right-clicking a created shape and setting fill to transparent,
+          // not by a separate creation-time default.
+          data: { shape, text: '', fill: undefined, border: undefined },
           style: newShapeSize(shape),
         };
       } else if (kind === 'icon') {
@@ -1477,14 +1486,20 @@ function GraphCanvasInner({
   // annotation, from that target's own context menu — rather than the
   // create-then-drag-near two-step the toolbox's one-click creation still
   // requires. `targetId` may be a graph node or any existing annotation
-  // except `frame`/`group`/`arrow` (the same candidates `findSnapTarget`
-  // accepts for a post-creation drop via `computeDroppedAttachment`; those
-  // three are "containment/visual constructs, not attachment targets" per
-  // the contract's Attachment section — an arrow has no stable centre in the
+  // except `group`/`arrow` (the same candidates `findSnapTarget` accepts for
+  // a post-creation drop via `computeDroppedAttachment`; `group` is a
+  // "containment/visual construct, not an attachment target" per the
+  // contract's Attachment section, and an arrow has no stable centre in the
   // attachment-follow effect below, so it can never be resolved as a target)
   // — callers only ever offer this control from an eligible target's own
   // menu, but the type check here is a second, structural guarantee
   // independent of which menus happen to render it.
+  //
+  // `frame` used to be excluded here too, on the same reasoning as `group`.
+  // Now that it is folded into `shape` (task-annotation-merge-frame-into-
+  // shape-rectangle), a `shape` — whatever its fill/border — stays a valid
+  // target, the same decision `computeDroppedAttachment` makes (see its own
+  // doc comment in utils/annotations.js for the full reasoning).
   //
   // Positions the new annotation at NEARBY_ATTACH_OFFSET from the target's
   // current centre and writes `data.attachment` in exactly the shape
@@ -1506,8 +1521,7 @@ function GraphCanvasInner({
   const attachNearbyAnnotation = useCallback(
     (targetId, kind) => {
       const target = getFlowNodes().find((n) => n.id === targetId);
-      if (!target || target.type === 'frame' || target.type === 'group' || target.type === 'arrow')
-        return;
+      if (!target || target.type === 'group' || target.type === 'arrow') return;
       const center = nodeCenter(target);
       if (!center) return;
       const attachment = {
@@ -3133,7 +3147,6 @@ function GraphCanvasInner({
       label: guard(LabelNode, 'label'),
       arrow: guard(ArrowNode, 'arrow'),
       text: guard(GenericAnnotationNode, 'text'),
-      frame: guard(GenericAnnotationNode, 'frame'),
       shape: guard(GenericAnnotationNode, 'shape'),
       icon: guard(GenericAnnotationNode, 'icon'),
       vote_dot: guard(GenericAnnotationNode, 'vote_dot'),

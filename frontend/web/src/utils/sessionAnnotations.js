@@ -144,9 +144,9 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 }
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond
-// note/label/line: text, frame, shape, icon, vote_dot, image. Color lives
+// note/label/line: text, shape, icon, vote_dot, image. Color lives
 // under style.color (like label), and geometry.w/h lives in `geometry` for
-// all six of these types — createAnnotation has no dedicated `size` payload
+// all five of these types — createAnnotation has no dedicated `size` payload
 // field the way it does for note. `geometry.rotation` and `geometry.w/h` are
 // both carried on every overlay of these kinds (not only the kinds the
 // canvas currently renders as resizable) for the same reason as z/locked: a
@@ -159,7 +159,11 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // would make the next autosave diff it back to its default, silently
 // discarding a typography choice an agent or collaborator had just set (the
 // "unsized-geometry clobber" class of bug this task's own node warns about).
-const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
+// `shape` additionally carries `style.fill`/`style.border`
+// (task-annotation-merge-frame-into-shape-rectangle) instead of `style.color`
+// — each independently a colour or `'transparent'`, the setting that
+// subsumes what the retired `frame` kind was.
+const GENERIC_OVERLAY_TYPES = new Set(['text', 'shape', 'icon', 'vote_dot', 'image']);
 
 function genericAnnotationToOverlay(a) {
   const overlay = {
@@ -194,6 +198,15 @@ function genericAnnotationToOverlay(a) {
     overlay.fontSize = a.style?.fontSize;
     overlay.font = a.style?.font;
     overlay.textAlign = a.style?.textAlign;
+    // Independent fill/border (task-annotation-merge-frame-into-shape-
+    // rectangle) — `shape` no longer reads the generic `overlay.color` this
+    // function sets above (that field survives only because every other
+    // generic kind still uses it); the canvas package's GENERIC_OVERLAY_FIELDS
+    // for `shape` no longer lists `color`, so an agent-set `style.color` on a
+    // shape is simply not projected onto the live node, matching `frame`'s own
+    // retirement rather than silently resurrecting it under a new name.
+    overlay.fill = a.style?.fill;
+    overlay.border = a.style?.border;
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
@@ -219,11 +232,21 @@ function genericOverlayToAnnotation(o) {
   // `text` and `shape` (task-annotation-text-alignment-and-font) both carry
   // fontSize/font/textAlign under `style`, mirroring `text`'s pre-existing
   // fontSize convention rather than the plain `{color}` every other generic
-  // kind gets.
+  // kind gets. `shape` carries `fill`/`border` instead of `color`
+  // (task-annotation-merge-frame-into-shape-rectangle) — see
+  // genericAnnotationToOverlay's comment on the same fields.
   input.style =
-    o.kind === 'text' || o.kind === 'shape'
-      ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
-      : { color: o.color };
+    o.kind === 'shape'
+      ? {
+          fill: o.fill,
+          border: o.border,
+          fontSize: o.fontSize,
+          font: o.font,
+          textAlign: o.textAlign,
+        }
+      : o.kind === 'text'
+        ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
+        : { color: o.color };
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;

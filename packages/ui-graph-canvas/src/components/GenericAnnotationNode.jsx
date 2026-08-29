@@ -34,11 +34,15 @@ const DEFAULT_COLOR = '#94a3b8';
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 
 // The generic kinds whose `color` field is actually painted by a branch
-// below — text's text colour, frame's and icon's border, shape's and
-// vote_dot's fill. `image` carries a `color` in the model
-// (GENERIC_OVERLAY_FIELDS in utils/annotations.js) but nothing renders it,
-// so offering a recolour there would be a control with no visible effect.
-const COLORABLE_KINDS = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot']);
+// below — text's text colour, icon's border, vote_dot's fill. `image`
+// carries a `color` in the model (GENERIC_OVERLAY_FIELDS in
+// utils/annotations.js) but nothing renders it, so offering a recolour there
+// would be a control with no visible effect. `shape` used to be here too
+// (its `color` painted its fill) — task-annotation-merge-frame-into-shape-
+// rectangle replaced that single swatch with the independent `fill`/`border`
+// sections below (see FILL_BORDER_SWATCHES), so `shape` no longer uses this
+// generic single-colour editor at all.
+const COLORABLE_KINDS = new Set(['text', 'icon', 'vote_dot']);
 
 // Palette for the generic kinds' colour picker. Saturated rather than the
 // pastels NoteNode/LabelNode use, because these paint borders, glyphs and
@@ -56,6 +60,21 @@ const GENERIC_COLORS = [
   '#0f172a',
 ];
 
+// The swatch options for `shape`'s fill/border editors: every GENERIC_COLORS
+// choice, plus `'transparent'` — the setting that subsumes what the retired
+// `frame` kind was (a box with no fill). Independent for fill and border, so
+// a shape can be a solid fill with no border (a plain shape, as before), a
+// transparent fill with a coloured border (what `frame` used to draw), both,
+// or neither.
+const FILL_BORDER_SWATCHES = ['transparent', ...GENERIC_COLORS];
+
+// `shape`'s own defaults when `fill`/`border` are unset — chosen to match
+// exactly how a `shape` rendered before this task added the two fields, so an
+// existing annotation with neither stored is unaffected: a solid grey fill
+// and no border, the same look a plain `color`-only shape had.
+const DEFAULT_SHAPE_FILL = DEFAULT_COLOR;
+const DEFAULT_SHAPE_BORDER = 'transparent';
+
 // A vote dot counts votes, so its value is a non-negative integer and the
 // stepper never takes it below zero.
 const VOTE_VALUE_MIN = 0;
@@ -65,13 +84,12 @@ const VOTE_VALUE_MIN = 0;
 // enter, blur/Escape to commit, live sync at the shared 300ms text debounce —
 // see AnnotationContext's notifyChange('text') doc comment). `text`'s whole
 // purpose is holding text; `shape` covers every content.shape variant
-// (rectangle through process_arrow) so a shape can carry a caption. `frame`
-// is deliberately excluded — the contract describes it as a "visual-only
-// framing box", and the reported gap (task-annotation-doubleclick-to-edit-text)
-// names only note/label/text/the six shape variants, not frame. `icon`,
-// `vote_dot` and `image` have no free-text field to edit this way either
-// (a vote's value is a number with its own stepper, and an icon/image carry
-// no caption in the v1 content model).
+// (rectangle through process_arrow) so a shape can carry a caption — including
+// a transparent-fill one that visually stands in for the retired `frame`
+// kind, which never had a caption of its own either. `icon`, `vote_dot` and
+// `image` have no free-text field to edit this way either (a vote's value is
+// a number with its own stepper, and an icon/image carry no caption in the v1
+// content model).
 const EDITABLE_TEXT_KINDS = new Set(['text', 'shape']);
 
 // Maps each half of a `textAlign` value ('top-left' -> ['top','left']) to the
@@ -170,11 +188,11 @@ function normalizeAngle(deg) {
   return ((deg % 360) + 360) % 360;
 }
 
-// frame/shape/image are the generic kinds that carry an explicit box size
+// shape/image are the generic kinds that carry an explicit box size
 // (SIZED_GENERIC_KINDS in utils/annotations.js) and are the only ones
 // resizable in this slice; text/icon/vote_dot render at a fixed intrinsic
 // size, so resizing them has no model-space geometry to change.
-const RESIZABLE_KINDS = new Set(['frame', 'shape', 'image']);
+const RESIZABLE_KINDS = new Set(['shape', 'image']);
 const MIN_SIZE = 40;
 
 // Every `content.shape` variant the contract accepts, as the CSS that draws
@@ -287,8 +305,8 @@ const SELECTED_SHAPE_HALO = Object.freeze({
 
 /**
  * GenericAnnotationNode - a simple visual representation for the v1
- * annotation types that have no dedicated per-type editor yet (text, frame,
- * shape, icon, vote_dot, image; see docs/ANNOTATION_CONTRACT.md). These were
+ * annotation types that have no dedicated per-type editor yet (text, shape,
+ * icon, vote_dot, image; see docs/ANNOTATION_CONTRACT.md). These were
  * previously normalized by annotationModel.js but dropped by the overlay
  * translation layer, so an MCP-created annotation of one of these types never
  * rendered. Selection and move (drag) are handled generically by GraphCanvas
@@ -306,7 +324,20 @@ const SELECTED_SHAPE_HALO = Object.freeze({
 // fallback; this closes the two that dereferenced `data` directly.
 function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const kind = type;
-  const color = data?.color || DEFAULT_COLOR;
+  // `shape` no longer has a single `color` — its resizer accent instead
+  // prefers whichever of fill/border is a real colour (fill first, since it
+  // usually covers more area), falling back to DEFAULT_COLOR when both are
+  // transparent or unset, so the resize handles are never left uncoloured.
+  const shapeFill = data?.fill ?? DEFAULT_SHAPE_FILL;
+  const shapeBorder = data?.border ?? DEFAULT_SHAPE_BORDER;
+  const color =
+    kind === 'shape'
+      ? shapeFill !== 'transparent'
+        ? shapeFill
+        : shapeBorder !== 'transparent'
+          ? shapeBorder
+          : DEFAULT_COLOR
+      : data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
   const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
     useContext(AnnotationContext);
@@ -451,6 +482,32 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     }
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  // `shape`'s independent fill/border settings
+  // (task-annotation-merge-frame-into-shape-rectangle) — each is either a
+  // colour or the literal string `'transparent'`, following exactly the same
+  // wiring `changeColor` above uses for every other colourable kind.
+  const changeFill = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fill: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  const changeBorder = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, border: next } } : n))
     );
     notifyChange('style');
   };
@@ -637,6 +694,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       shape={data.shape || 'rectangle'}
       icon={data.icon}
       color={color}
+      fill={shapeFill}
+      border={shapeBorder}
       value={data.value}
       rotation={currentRotation}
       locked={locked}
@@ -647,6 +706,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
       onChangeColor={changeColor}
+      onChangeFill={changeFill}
+      onChangeBorder={changeBorder}
       onChangeValue={changeValue}
       onChangeLayer={changeLayer}
       onChangeRotation={changeRotation}
@@ -656,11 +717,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onDelete={remove}
       onUnlock={unlock}
       onDuplicate={duplicate}
-      // `frame` is excluded from the "Nearby object menu" the same way it is
-      // excluded from computeDroppedAttachment's target candidacy — the
-      // contract describes it as a "visual-only framing box", not an
-      // attachment target (docs/ANNOTATION_CONTRACT.md's Attachment section).
-      onAttachNearby={kind === 'frame' ? undefined : (nearbyKind) => attachNearby(id, nearbyKind)}
+      // Every generic kind here — `shape` included, whatever its fill/border —
+      // is a valid nearby-attach target, the same decision
+      // computeDroppedAttachment's own candidacy filter makes (see its doc
+      // comment in utils/annotations.js) now that the former `frame` kind is
+      // folded into `shape` rather than excluded as its own special case.
+      onAttachNearby={(nearbyKind) => attachNearby(id, nearbyKind)}
     />
   );
 
@@ -726,33 +788,29 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     );
   }
 
-  if (kind === 'frame') {
-    return (
-      <>
-        {/* Carries the rotation for both the resizer and the visible frame,
-            so the handles rotate with the box instead of staying
-            axis-aligned around its unrotated bounds (the ReactFlow node
-            wrapper itself deliberately stays unrotated — see the module doc
-            comment on `rotation`). */}
-        <div
-          className="graph-generic-annotation-rotate-wrap"
-          style={{ width: '100%', height: '100%', position: 'relative', ...rotation }}
-        >
-          {resizer}
-          <div
-            className={`graph-generic-annotation-node kind-frame${selectedClass}`}
-            style={{ borderColor: color, width: '100%', height: '100%' }}
-            onContextMenu={openContextMenu}
-          />
-        </div>
-        {menu}
-        {remoteBadge}
-      </>
-    );
-  }
-
   if (kind === 'shape') {
     const shape = data.shape || 'rectangle';
+    // Fill and border are independent and each is either a colour or
+    // `'transparent'` (task-annotation-merge-frame-into-shape-rectangle).
+    // `borderWidth`/`borderStyle` are always set, even at `'transparent'`, so
+    // toggling a border on/off never shifts the box's rendered size — the
+    // same reason a transparent border, not `border: none`, is what a
+    // former `frame` (fill: 'transparent', border: <colour>) renders with.
+    //
+    // Known limitation, stated plainly rather than silently shipped: a CSS
+    // `border` is drawn as an axis-aligned ring around the box and *then*
+    // clipped by `clip-path` along with everything else — for `rectangle`
+    // and `circle` (border-radius, not clip-path) that draws a correct
+    // outline, but for the four clip-path variants (triangle/rhombus/
+    // hexagon/process_arrow) only the parts of that ring that survive the
+    // clip are visible, which is not the same as a border tracing the
+    // polygon's own slanted edges. Tracing the true outline would need an
+    // SVG stroke or a second, larger clip-path per variant — out of scope for
+    // this merge; a border is still offered uniformly across variants rather
+    // than withheld from four of six, since a plain, imperfect border is
+    // strictly more useful than none.
+    const fill = data.fill ?? DEFAULT_SHAPE_FILL;
+    const border = data.border ?? DEFAULT_SHAPE_BORDER;
     return (
       <>
         <div
@@ -769,8 +827,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           onContextMenu={openContextMenu}
         >
           {/* Inside the halo (rather than a sibling of it) so the resize
-              handles rotate along with it — see the `frame` branch's
-              comment. */}
+              handles rotate along with it. */}
           {resizer}
           <div
             // No `selected` class: the shared dashed outline it carries is
@@ -779,7 +836,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             // the halo above instead — for every variant alike.
             className={`graph-generic-annotation-node kind-shape shape-${shape}`}
             style={{
-              backgroundColor: color,
+              backgroundColor: fill === 'transparent' ? 'transparent' : fill,
+              borderColor: border === 'transparent' ? 'transparent' : border,
+              borderWidth: 2,
+              borderStyle: 'solid',
               width: '100%',
               height: '100%',
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
@@ -911,18 +971,18 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 }
 
 // The right-click property editor's portal content, split out only so the
-// six kind branches above can each attach it without repeating its JSX.
+// five kind branches above can each attach it without repeating its JSX.
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
-// layer row then the "Nearby object menu" section (`onAttachNearby` is
-// undefined for `frame`, which NearbyObjectMenuSection treats as "don't
-// render" — frame is excluded from attachment-target candidacy, see
-// GenericAnnotationNode's own onAttachNearby wiring above) then duplicate
-// then Delete, matching the note/label/line/freehand menus. The
-// colour swatches show for COLORABLE_KINDS, the nine-position alignment grid,
-// font-size picker and curated font-family picker
-// (task-annotation-text-alignment-and-font) for EDITABLE_TEXT_KINDS (`text`,
-// `shape`), the shape-subtype grid only for `kind === 'shape'`, the icon-name
-// grid only for `kind === 'icon'`, and the value stepper only for
+// layer row then the "Nearby object menu" section then duplicate then
+// Delete, matching the note/label/line/freehand menus. The colour swatches
+// show for COLORABLE_KINDS; `shape` instead gets its own independent Fill and
+// Border sections (task-annotation-merge-frame-into-shape-rectangle) — each
+// a FILL_BORDER_SWATCHES grid including `'transparent'`, the setting that
+// subsumes what the retired `frame` kind was. The nine-position alignment
+// grid, font-size picker and curated font-family picker
+// (task-annotation-text-alignment-and-font) show for EDITABLE_TEXT_KINDS
+// (`text`, `shape`), the shape-subtype grid only for `kind === 'shape'`, the
+// icon-name grid only for `kind === 'icon'`, and the value stepper only for
 // `kind === 'vote_dot'`. A locked annotation gets none of them — the
 // capability baseline is "a locked object remains selectable but offers only
 // unlock or copy" — so this shows only the unlock and duplicate actions
@@ -934,6 +994,8 @@ function ContextMenuPortal({
   shape,
   icon,
   color,
+  fill,
+  border,
   value,
   rotation,
   locked,
@@ -944,6 +1006,8 @@ function ContextMenuPortal({
   onChangeShape,
   onChangeIcon,
   onChangeColor,
+  onChangeFill,
+  onChangeBorder,
   onChangeValue,
   onChangeLayer,
   onChangeRotation,
@@ -988,6 +1052,40 @@ function ContextMenuPortal({
                 style={{ backgroundColor: c }}
                 aria-label={c}
                 onClick={() => onChangeColor(c)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+      {kind === 'shape' && (
+        <>
+          <div className="context-menu-title">{labels.fill}</div>
+          <div className="context-menu-colors">
+            {FILL_BORDER_SWATCHES.map((c) => (
+              <button
+                key={`fill-${c}`}
+                type="button"
+                className={`color-button${
+                  c === 'transparent' ? ' color-button-transparent' : ''
+                }${fill === c ? ' active' : ''}`}
+                style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                aria-label={`${labels.fill} ${c === 'transparent' ? labels.transparent : c}`}
+                onClick={() => onChangeFill(c)}
+              />
+            ))}
+          </div>
+          <div className="context-menu-title">{labels.border}</div>
+          <div className="context-menu-colors">
+            {FILL_BORDER_SWATCHES.map((c) => (
+              <button
+                key={`border-${c}`}
+                type="button"
+                className={`color-button${
+                  c === 'transparent' ? ' color-button-transparent' : ''
+                }${border === c ? ' active' : ''}`}
+                style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                aria-label={`${labels.border} ${c === 'transparent' ? labels.transparent : c}`}
+                onClick={() => onChangeBorder(c)}
               />
             ))}
           </div>

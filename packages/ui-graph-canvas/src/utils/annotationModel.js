@@ -5,7 +5,6 @@ export const ANNOTATION_TYPES = Object.freeze([
   'text',
   'label',
   'line',
-  'frame',
   'group',
   'shape',
   'icon',
