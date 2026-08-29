@@ -1477,12 +1477,14 @@ function GraphCanvasInner({
   // annotation, from that target's own context menu — rather than the
   // create-then-drag-near two-step the toolbox's one-click creation still
   // requires. `targetId` may be a graph node or any existing annotation
-  // except `frame`/`group` (the same candidates `computeDroppedAttachment`
-  // accepts for a post-creation drop; those two are "containment/visual
-  // constructs, not attachment targets" per the contract's Attachment
-  // section) — callers only ever offer this control from an eligible
-  // target's own menu, but the type check here is a second, structural
-  // guarantee independent of which menus happen to render it.
+  // except `frame`/`group`/`arrow` (the same candidates `findSnapTarget`
+  // accepts for a post-creation drop via `computeDroppedAttachment`; those
+  // three are "containment/visual constructs, not attachment targets" per
+  // the contract's Attachment section — an arrow has no stable centre in the
+  // attachment-follow effect below, so it can never be resolved as a target)
+  // — callers only ever offer this control from an eligible target's own
+  // menu, but the type check here is a second, structural guarantee
+  // independent of which menus happen to render it.
   //
   // Positions the new annotation at NEARBY_ATTACH_OFFSET from the target's
   // current centre and writes `data.attachment` in exactly the shape
@@ -1504,7 +1506,8 @@ function GraphCanvasInner({
   const attachNearbyAnnotation = useCallback(
     (targetId, kind) => {
       const target = getFlowNodes().find((n) => n.id === targetId);
-      if (!target || target.type === 'frame' || target.type === 'group') return;
+      if (!target || target.type === 'frame' || target.type === 'group' || target.type === 'arrow')
+        return;
       const center = nodeCenter(target);
       if (!center) return;
       const attachment = {

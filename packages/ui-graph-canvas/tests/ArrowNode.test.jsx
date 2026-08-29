@@ -254,11 +254,14 @@ describe('ArrowNode duplicate control', () => {
 
 // task-annotation-render-direct-manipulation / task-annotation-responsive-
 // bottom-toolbox's "Nearby object menu" contract entry point: an arrow/line
-// is one of the annotation kinds that can itself be the target this menu
-// creates a new attachable annotation near (computeDroppedAttachment's own
-// target candidacy excludes only `frame`/`group`, not `arrow`).
+// can never be a valid attach target — `findSnapTarget` (the mechanism
+// `computeDroppedAttachment` and this menu both mirror) unconditionally
+// excludes `type === 'arrow'` alongside `frame`/`group`, and the
+// attachment-follow effect never builds a centre for an arrow, so an
+// attachment onto one would never resolve a position. ArrowNode's own
+// context menu therefore must not offer the section at all.
 describe('ArrowNode "Nearby object menu"', () => {
-  it("calls the context attachNearby with this arrow's id and the picked kind", () => {
+  it('does not render the "Add nearby" section on an arrow\'s own context menu', () => {
     const attachNearby = vi.fn();
     const data = { dx: 100, dy: 0 };
     hoisted.nodes = [{ id: 'a1', type: 'arrow', position: { x: 0, y: 0 }, data }];
@@ -280,7 +283,8 @@ describe('ArrowNode "Nearby object menu"', () => {
       </AnnotationContext.Provider>
     );
     openMenu();
-    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
-    expect(attachNearby).toHaveBeenCalledWith('a1', 'label');
+    expect(screen.queryByText('Add nearby')).toBeNull();
+    expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
+    expect(attachNearby).not.toHaveBeenCalled();
   });
 });

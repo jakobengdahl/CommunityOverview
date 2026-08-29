@@ -8,10 +8,55 @@ import { resolveAttachedPosition } from '../src/utils/annotations';
 // exercise real drag wiring end to end.
 const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
 
+// Mirrors ANNOTATION_TYPES (utils/annotations.js) — kept as its own literal
+// set (rather than importing that module here) so this mock factory, which
+// vitest hoists above other imports, never risks a temporal-dead-zone read.
+const OVERLAY_NODE_TYPES = new Set([
+  'note',
+  'label',
+  'arrow',
+  'text',
+  'frame',
+  'shape',
+  'icon',
+  'vote_dot',
+  'image',
+  'freehand',
+  'group',
+]);
+
 vi.mock('reactflow', () => {
+  // Renders only annotation-kind nodes through the real `nodeTypes` map
+  // GraphCanvas builds (GenericAnnotationNode, NoteNode, ArrowNode, …) —
+  // exactly like real ReactFlow does — so an annotation's OWN context menu
+  // (which every kind opens itself via a local `onContextMenu` handler,
+  // rather than through the `onNodeContextMenu` prop this file's earlier
+  // tests drive) actually mounts here. Needed for a live
+  // annotation-typed-target test: an annotation-kind node early-returns out
+  // of `onNodeContextMenu` (see GraphCanvas.jsx, "Annotation overlays render
+  // their own context menu"), so its "Add nearby" section is unreachable
+  // without this. Domain graph nodes (`custom`, schema types) are
+  // deliberately left unrendered, matching every pre-existing test in this
+  // file, which drives them only through the synthetic `onNodeContextMenu`
+  // handler below — real domain node components need far more context
+  // (schema, node colour resolvers, …) this harness does not set up, and
+  // some carry no `data` at all here, which the real component would not
+  // tolerate.
   const MockReactFlow = (props) => {
     store.handlers = props;
-    return <div data-testid="react-flow">{props.children}</div>;
+    return (
+      <div data-testid="react-flow">
+        {(props.nodes || [])
+          .filter((n) => OVERLAY_NODE_TYPES.has(n.type))
+          .map((n) => {
+            const Component = props.nodeTypes?.[n.type];
+            return Component ? (
+              <Component key={n.id} id={n.id} type={n.type} data={n.data} selected={!!n.selected} />
+            ) : null;
+          })}
+        {props.children}
+      </div>
+    );
   };
   return {
     __esModule: true,
@@ -278,6 +323,98 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
 
     const created = store.nodes.find((n) => n.type === 'text');
     expect(created.data.locked).toBeFalsy();
+  });
+
+  // The bug this whole file's earlier tests missed: every prior "Nearby
+  // object menu" test here targets a graph node (`target_type: 'node'`).
+  // Nothing exercised the OTHER half of `attachNearbyAnnotation`'s own type
+  // check — `target_type: 'annotation'` — through a real, mounted annotation
+  // context menu. That gap is exactly what let an arrow (also an annotation
+  // node type) slip through the guard: it only excluded `frame`/`group`,
+  // missing arrow's own exclusion from `findSnapTarget`. Attaching a new
+  // label to an existing icon exercises the same `target_type: 'annotation'`
+  // branch a fixed guard must still allow, right alongside arrow's own now
+  // excluded case (see ArrowNode.test.jsx's "Nearby object menu" suite).
+  it('attaches a new label to an existing icon annotation (target_type: "annotation"), and follows it', () => {
+    const onAnnotationChange = vi.fn();
+    const { rerender } = render(
+      <GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />
+    );
+
+    const icon = {
+      id: 'icon-1',
+      type: 'icon',
+      position: { x: 200, y: 200 },
+      width: 0,
+      height: 0,
+      data: { icon: 'circle' },
+    };
+    store.nodes = [icon];
+    // `store.nodes` is mutated directly (the same idiom the drag-to-attach
+    // tests above use), which does not itself trigger a React re-render —
+    // unlike those tests, this one needs the icon's OWN component actually
+    // mounted (to right-click it), so force one: `rerender` re-invokes
+    // `useNodesState()`, which reads the now-updated `store.nodes`.
+    act(() => {
+      rerender(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+    });
+
+    act(() => {
+      fireEvent.contextMenu(screen.getByTitle('circle'));
+    });
+    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
+
+    const created = store.nodes.find((n) => n.type === 'label');
+    expect(created).toBeTruthy();
+    // Same `{target_id, target_type, offset}` triple computeDroppedAttachment
+    // would produce for a drop near this same icon — `target_type` is
+    // 'annotation' here because the target is itself an annotation kind, not
+    // a graph node, per ANNOTATION_TYPES.has(target.type) in
+    // attachNearbyAnnotation.
+    expect(created.data.attachment).toEqual({
+      target_id: 'icon-1',
+      target_type: 'annotation',
+      offset: { x: 36, y: -36 },
+    });
+    expect(created.position).toEqual({ x: 236, y: 164 });
+    expect(created.data.locked).toBeFalsy();
+    expect(onAnnotationChange).toHaveBeenCalledWith('create');
+
+    // Follows the icon when it moves, via the exact same resolveAttachedPosition
+    // the drag-to-attach and graph-node-target paths both use.
+    const movedCenters = new Map([['icon-1', { x: 500, y: 500 }]]);
+    expect(resolveAttachedPosition(created, movedCenters)).toEqual({ x: 536, y: 464 });
+  });
+
+  // The reproduced bug itself, at this same live-GraphCanvas level: an arrow
+  // is an annotation node type too, so before this fix its own context menu
+  // rendered the "Add nearby" section exactly like the icon case above —
+  // creating an annotation attached to the arrow that could never follow it
+  // (arrows are skipped when the attachment-follow effect's centre lookup is
+  // built) and would silently detach on the next drag-triggered recompute
+  // (arrows are also excluded from `findSnapTarget`'s own candidacy). Fixed
+  // by excluding `arrow` from `attachNearbyAnnotation`'s guard and removing
+  // the section from `ArrowNode`'s own menu entirely.
+  it('never offers "Add nearby" on an arrow\'s own context menu', () => {
+    const { rerender } = render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+
+    const arrow = {
+      id: 'arrow-1',
+      type: 'arrow',
+      position: { x: 0, y: 0 },
+      data: { dx: 100, dy: 0 },
+    };
+    store.nodes = [arrow];
+    act(() => {
+      rerender(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    });
+
+    act(() => {
+      fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    });
+
+    expect(screen.queryByText('Add nearby')).toBeNull();
+    expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
   });
 });
 

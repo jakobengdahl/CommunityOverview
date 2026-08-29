@@ -168,30 +168,38 @@ distance of the target
 ([Attachment and detach behavior](#attachment-and-detach-behavior)). The
 "nearby object menu" (the wireframe above) now exists too, as a **"Add
 nearby"** section on the context menu of any eligible node or annotation
-(a graph node, or any annotation except `frame`/`group` — the same target
-candidacy `computeDroppedAttachment` already applies to a post-creation
-drop): picking `label`, `icon`, `vote dot` or `text` there creates that
-annotation pre-wired to attach to the object whose menu it was opened from,
-offset a small, fixed distance from its centre (well inside the drag-to-attach
-snap radius), so it is attached and following its target from its very first
-rendered frame — no separate create-then-drag-near step. It is written through
-the exact same `content.attachment` shape and resolve/follow mechanism the
-drag-to-attach path uses (`GraphCanvas.jsx`'s `attachNearbyAnnotation`,
-reusing `createAnnotation`), not a second, parallel one, so a menu-created
-attached annotation behaves identically to one created and dragged near
-afterward. `arrow`/`line` is deliberately not offered as a *creatable* kind from this
-menu: an arrow's own selected endpoints already give it a creation-adjacent
-snap-and-drag docking affordance (see [Attachment and detach
-behavior](#attachment-and-detach-behavior)), which is what this entry point
-closes for the four kinds that had no equivalent at creation time. A new
-annotation created this way is never locked, matching every other creation
-path. The menu is offered as an *anchor* from every eligible object's own
-context menu — a graph node, and every annotation kind except `frame`/`group`
-(`note`, `label`, `line`, `shape`, `icon`, `vote_dot`, `image`, `freehand`) —
-matching `computeDroppedAttachment`'s full target candidacy, not only the
-four attachable kinds. Closing what remains is tracked per type in the
-[acceptance matrix](#acceptance-matrix); it is not satisfied by documenting
-the wireframes above.
+(a graph node, or any annotation except `frame`/`group`/`arrow` — the same
+target candidacy `findSnapTarget` already applies to a post-creation drop via
+`computeDroppedAttachment`): picking `label`, `icon`, `vote dot` or `text`
+there creates that annotation pre-wired to attach to the object whose menu it
+was opened from, offset a small, fixed distance from its centre (well inside
+the drag-to-attach snap radius), so it is attached and following its target
+from its very first rendered frame — no separate create-then-drag-near step.
+It is written through the exact same `content.attachment` shape and
+resolve/follow mechanism the drag-to-attach path uses (`GraphCanvas.jsx`'s
+`attachNearbyAnnotation`, reusing `createAnnotation`), not a second, parallel
+one, so a menu-created attached annotation behaves identically to one created
+and dragged near afterward. `arrow`/`line` is deliberately not offered as a
+*creatable* kind from this menu: an arrow's own selected endpoints already
+give it a creation-adjacent snap-and-drag docking affordance (see [Attachment
+and detach behavior](#attachment-and-detach-behavior)), which is what this
+entry point closes for the four kinds that had no equivalent at creation
+time. A new annotation created this way is never locked, matching every
+other creation path. The menu is offered as an *anchor* from every eligible
+object's own context menu — a graph node, and every annotation kind except
+`frame`/`group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
+`image`, `freehand`) — matching `findSnapTarget`'s full target candidacy
+(the same exclusion set `computeDroppedAttachment` and `findSnapTarget`'s own
+arrow-to-arrow guard apply), not only the four attachable kinds. `arrow`
+itself is excluded from the anchor side too, not only the creatable-kind
+side: an arrow has no stable centre in the attachment-follow effect (an
+attached overlay's position is resolved from its target's centre, and arrows
+are skipped when that lookup is built), so an annotation attached to one
+would never move with it and would silently drop its attachment on the very
+next drag-triggered recompute. `ArrowNode`'s own context menu therefore does
+not render this section at all. Closing what remains is tracked per type in
+the [acceptance matrix](#acceptance-matrix); it is not satisfied by
+documenting the wireframes above.
 
 ### Layer order
 

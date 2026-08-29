@@ -5,7 +5,6 @@ import { useReactFlow } from 'reactflow';
 import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
 import './ArrowNode.css';
 
 /**
@@ -49,8 +48,7 @@ function ArrowNode({ id, data, selected }) {
   const contextMenuRef = useRef(null);
   const draggingRef = useRef(null);
   const { setNodes, screenToFlowPosition, getNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
-    useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live claim makes
   // this arrow's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
@@ -370,10 +368,6 @@ function ArrowNode({ id, data, selected }) {
                   labels={labels}
                   locked={data.locked}
                   onChangeLayer={changeLayer}
-                />
-                <NearbyObjectMenuSection
-                  labels={labels}
-                  onAttach={(kind) => attachNearby(id, kind)}
                 />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>
