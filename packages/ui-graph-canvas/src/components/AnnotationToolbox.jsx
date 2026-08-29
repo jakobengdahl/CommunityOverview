@@ -141,10 +141,10 @@ function renderGlyph(glyph) {
  *
  * It creates note/text/label, a shape (via the collapsed shape slot,
  * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
- * `renderIconSlot` below), vote_dot, and image (which opens a file
+ * `renderIconSlot` below), vote_dot (a plain coloured dot — task-annotation-
+ * vote-dot-simplify), and image (which opens a file
  * picker rather than adding a node directly — the host's onCreate handles
- * that distinction; see GraphCanvas's onImageIngest). vote_dot creates with a
- * fixed default value of 1 (see GraphCanvas's createAnnotation). The icon slot
+ * that distinction; see GraphCanvas's onImageIngest). The icon slot
  * creates whichever icon is currently selected, using the same vocabulary the
  * icon annotation's right-click property editor offers after creation.
  * `activeKind` (currently only meaningful for 'freehand') marks that item as

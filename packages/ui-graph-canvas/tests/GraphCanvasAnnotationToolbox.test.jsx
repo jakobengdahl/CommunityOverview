@@ -220,14 +220,17 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
   });
 
-  it('creates a vote_dot annotation via the toolbox with a default value and size', () => {
+  // task-annotation-vote-dot-simplify: no `value` any more (there is nothing
+  // to count), and no `attachment` (it is not one of ATTACHABLE_OVERLAY_KINDS
+  // — created plain and never pre-wired to a target).
+  it('creates a vote_dot annotation via the toolbox with no value, no attachment, and a fixed size', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
 
     const voteDot = findCreatedNode('vote_dot');
     expect(voteDot).toBeTruthy();
-    expect(voteDot.data.value).toBe(1);
+    expect(voteDot.data.value).toBeUndefined();
     expect(voteDot.style).toBeUndefined();
     expect(voteDot.data.size).toEqual({ w: 24, h: 24 });
     expect(voteDot.data.attachment).toBeUndefined();

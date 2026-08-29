@@ -27,7 +27,8 @@ V1 supports these annotation types:
   [Canvas rendering](#canvas-rendering) and
   [Fill and border](#fill-and-border-shape)
 - `icon` — a configured icon from the icon set
-- `vote_dot` — a colored voting dot
+- `vote_dot` — a plain colored dot (no value, not attachable — see
+  task-annotation-vote-dot-simplify)
 - `image` — an embedded, ingested image
 - `freehand` — a freehand/stylus stroke
 
@@ -50,6 +51,29 @@ reaching the canvas. It does not crash — that guarantee is exactly what
 task-annotation-tolerate-unexpected-data built, and
 `AnnotationBadData.test.jsx`/`annotationModel.test.js` pin a stored `frame`
 specifically as a regression case, not just "some unknown kind".
+
+**`vote_dot` is simplified.** task-annotation-vote-dot-simplify removed two
+things a vote dot used to carry: the `value` it counted (both the number
+rendered inside the dot and the right-click stepper that changed it) and its
+membership in the attachable kinds (it no longer binds to a node/annotation
+via `content.attachment`, is never offered from the "nearby object menu", and
+never follows a target). What remains is exactly a plain coloured dot: the
+same right-click colour picker every colourable generic kind has (see
+[Human authoring surfaces](#human-authoring-surfaces)), now drawn with a
+fixed black ring and drop shadow regardless of its fill colour
+(`GenericAnnotationNode.css`'s `.kind-vote_dot`) so it stays legible against
+any canvas background. As with `frame` above, this is authorized with no
+migration for annotations already stored with a `value` and/or `attachment`
+(the same 2026-08-25 owner direction, recorded on the task node): both
+translator legs (`GENERIC_OVERLAY_FIELDS.vote_dot` in
+`packages/ui-graph-canvas/src/utils/annotations.js`,
+`genericAnnotationToOverlay`/`genericOverlayToAnnotation` in
+`frontend/web/src/utils/sessionAnnotations.js`) and the object-model builder
+(`annotationModel.js`'s `withTypePayload`) simply no longer project either
+field onto a live node, so a stored `value`/`attachment` is inert data that
+is never read as one — not a crash risk, and not a case
+`AnnotationBadData.test.jsx` leaves to the general "unknown field" coverage
+to imply holds: it is pinned as an explicit regression case of its own.
 
 GUI authoring (creation and editing through the desktop/mobile canvas) and
 MCP/headless authoring are **both** required v1 surfaces for every type
@@ -92,7 +116,7 @@ MCP. The required entry points are:
   grouped by family (notes/text, shapes, connectors, marks, media).
 - **Nearby object menu** — a contextual menu anchored to an existing
   object (node or annotation) offering the attachable types (label/callout,
-  icon, vote dot, text/heading, arrow) pre-wired to attach to that object.
+  icon, text/heading, arrow) pre-wired to attach to that object.
 - **Mobile bottom sheet** — the touch equivalent of the toolbox: a sheet
   that slides up from the bottom, same type grouping, sized for thumb reach.
 
@@ -106,7 +130,6 @@ MCP. The required entry points are:
 │                                          │ nearby object menu│   │
 │                            (node) ───────┤  + label          │   │
 │                                          │  + icon           │   │
-│                                          │  + vote dot        │   │
 │                                          │  + text            │   │
 │                                          │  + arrow            │   │
 │                                          └──────────────────┘   │
@@ -165,9 +188,13 @@ plus reset), a colour picker for the kinds that paint one (`text`,
 `icon`, `vote_dot` — `image` carries a `color` in the model but
 renders none, so it is offered no swatches), independent Fill and Border
 swatch sections for `shape` (see [Fill and border](#fill-and-border-shape)),
-for `shape` also a subtype picker, for
-`icon` a picker grid over the full icon vocabulary, and for `vote_dot` a value
-stepper that never counts below zero; for `text` and `shape` (whose caption
+for `shape` also a subtype picker, and for
+`icon` a picker grid over the full icon vocabulary. `vote_dot` used to
+also get a value stepper here; task-annotation-vote-dot-simplify removed it
+along with the `value` field itself — a vote dot's editor is now just the
+shared colour swatches, rotation and layer sections, same as any other
+colourable kind with no kind-specific control of its own; for `text` and
+`shape` (whose caption
 is now editable — see below), the right-click editor also carries a
 nine-position text-alignment grid, a font-size picker and a curated
 font-family picker (task-annotation-text-alignment-and-font — see [Typography
@@ -181,17 +208,24 @@ also carry the shared bring-to-front/send-to-back layer row described under
 editors still do not cover: `note`/`label` still have only a text-size
 picker, not the alignment/font-family control `text`/`shape` now have, and
 cropping/replacing an `image`'s pixel content is still unsupported.
-`label`, `text`, `icon` and `vote_dot` can now also be attached to a node or
+`label`, `text` and `icon` can now also be attached to a node or
 another annotation from the GUI, by dragging the annotation within snapping
 distance of the target
-([Attachment and detach behavior](#attachment-and-detach-behavior)). The
+([Attachment and detach behavior](#attachment-and-detach-behavior)).
+`vote_dot` used to be a fourth member of this list; task-annotation-vote-dot-
+simplify retired its attachment behaviour entirely (it is not in
+`ATTACHABLE_OVERLAY_KINDS` any more — `packages/ui-graph-canvas/src/utils/
+annotations.js`) — a vote dot never snaps to or follows a target and always
+lives on its own once dropped, with no migration for one already stored with
+an `attachment` field (see [Unrecognised annotation
+data](#unrecognised-annotation-data)'s vote_dot paragraph). The
 "nearby object menu" (the wireframe above) now exists too, as a **"Add
 nearby"** section on the context menu of any eligible node or annotation
 (a graph node, or any annotation except `group`/`arrow` — the same
 target candidacy `findSnapTarget` already applies to a post-creation drop via
 `computeDroppedAttachment`; a `shape` is included regardless of its
 fill/border, including a transparent-fill one — see [Fill and
-border](#fill-and-border-shape)): picking `label`, `icon`, `vote dot` or `text`
+border](#fill-and-border-shape)): picking `label`, `icon` or `text`
 there creates that annotation pre-wired to attach to the object whose menu it
 was opened from, offset a small, fixed distance from its centre (well inside
 the drag-to-attach snap radius), so it is attached and following its target
@@ -204,15 +238,17 @@ and dragged near afterward. `arrow`/`line` is deliberately not offered as a
 *creatable* kind from this menu: an arrow's own selected endpoints already
 give it a creation-adjacent snap-and-drag docking affordance (see [Attachment
 and detach behavior](#attachment-and-detach-behavior)), which is what this
-entry point closes for the four kinds that had no equivalent at creation
+entry point closes for the three kinds that had no equivalent at creation
 time. A new annotation created this way is never locked, matching every
 other creation path. The menu is offered as an *anchor* from every eligible
 object's own context menu — a graph node, and every annotation kind except
 `group`/`arrow` (`note`, `label`, `shape`, `icon`, `vote_dot`,
 `image`, `freehand`) — matching `findSnapTarget`'s full target candidacy
 (the same exclusion set `computeDroppedAttachment` and `findSnapTarget`'s own
-arrow-to-arrow guard apply), not only the four attachable kinds. `arrow`
-itself is excluded from the anchor side too, not only the creatable-kind
+arrow-to-arrow guard apply), not only the three attachable kinds — a
+`vote_dot` may still be the *target* an unrelated label/icon/text attaches
+near, it just cannot itself be one of the kinds this menu creates any more.
+`arrow` itself is excluded from the anchor side too, not only the creatable-kind
 side: an arrow has no stable centre in the attachment-follow effect (an
 attached overlay's position is resolved from its target's centre, and arrows
 are skipped when that lookup is built), so an annotation attached to one
@@ -557,9 +593,11 @@ here. Actor-scoped conditional undo *is* implemented
 
 ## Attachment and detach behavior
 
-- `label`/`callout`, `icon`, `vote_dot` and `text`/heading annotations may
+- `label`/`callout`, `icon` and `text`/heading annotations may
   attach to a node via `content.attachment = { target_id, target_type,
-  anchor, offset }`.
+  anchor, offset }`. (`vote_dot` used to be a fourth member of this list;
+  task-annotation-vote-dot-simplify retired it — a vote dot is now a plain
+  coloured dot that always lives on its own.)
 - `line` endpoints (`start`/`end`) may each independently attach to a node
   or to another annotation, or stay free-floating at a fixed model-space
   point.
@@ -574,7 +612,7 @@ here. Actor-scoped conditional undo *is* implemented
   see [Fill and border](#fill-and-border-shape) for why a `shape`, whatever
   its fill/border, does not.)
 
-**GUI attach/detach.** `label`, `text`, `icon` and `vote_dot` can now be
+**GUI attach/detach.** `label`, `text` and `icon` can now be
 (re)attached and detached from the canvas, not only via a raw
 `content.attachment` payload: dropping one of these overlays within
 `ATTACH_SNAP_RADIUS` (90px, unscaled) of a node's or another attachable
@@ -610,7 +648,7 @@ is stricter than "blocks edits but not the resolution of a binding the user
 already created," which was considered and rejected as harder to state and
 easier to drift from. Concretely, both of `GraphCanvas.jsx`'s geometry-follow
 effects skip a locked annotation outright: the attachment-follow effect above
-leaves a locked, attached `text`/`label`/`icon`/`vote_dot` exactly where it
+leaves a locked, attached `text`/`label`/`icon` exactly where it
 was the moment it was locked, even while its target keeps moving, and the
 anchored-arrow-resolve effect (the `line`-endpoint counterpart, driving
 `startAnchor`/`endAnchor`) does the same for a locked, anchored arrow.
@@ -965,10 +1003,9 @@ now exist for every generic kind; image paste/upload now has a GUI path too
 (toolbox file picker, clipboard paste, OS file drop); the bottom
 toolbox/mobile sheet now also creates `icon` and `vote_dot` (each with a
 fixed default), and `icon`'s right-click editor has its own picker grid over
-the full vocabulary described below. Recoloring any generic kind and
-changing a `vote_dot`'s value after creation are still reachable only
-through the MCP tools, which is the gap the acceptance matrix tracks, not
-the intended end state.
+the full vocabulary described below. Recoloring any generic kind is still
+reachable only through the MCP tools, which is the gap the acceptance matrix
+tracks, not the intended end state.
 
 Each `shape` variant draws its own geometry (`SHAPE_STYLES` in
 `GenericAnnotationNode.jsx`).
@@ -996,7 +1033,8 @@ effect of typing rather than of a deliberate resize gesture — inset-only
 means `shape`'s width/height semantics, and everything resize/aspect-lock
 does with them, are untouched by this. `icon`,
 `vote_dot` and `image` are excluded too — none carries a free-text field in
-the v1 content model (a vote's `value` is a number with its own stepper).
+the v1 content model (`vote_dot` carries no content field of its own at all
+— task-annotation-vote-dot-simplify made it a plain coloured dot).
 
 ### Fill and border (`shape`)
 
@@ -1253,7 +1291,7 @@ rule](#downstream-closure-rule).
 | `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) — and no duplicate action either, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⬜ |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, independent Fill and Border swatch sections (each a colour or `"transparent"` — task-annotation-merge-frame-into-shape-rectangle, see [Fill and border](#fill-and-border-shape); unset fill defaults to `#94a3b8` same as `text` above, unset border defaults to transparent — this is also where the retired `frame` kind's GUI cell merged into, since a transparent-fill, coloured-border shape is what `frame` used to be, with the border-rendering limitation for the four clip-path variants noted there), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`, `style.fill`/`style.border`) | ✅ | ✅ | ✅ | ⬜ |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Icon); right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour (same `#94a3b8` default as `text` above), layer and duplicate | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
-| `vote_dot` | ✅ toolbox create (fixed default value of 1), move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate and a value stepper (right-click), and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Vote dot) | ✅ generic tool set | ✅ | ✅ | ✅ | ⬜ |
+| `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
 | cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |

@@ -365,7 +365,7 @@ class TestCreateAnnotation:
         assert result["success"] is False
         assert result["error"] == "invalid_content"
 
-    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon"])
     def test_attachment_round_trips_for_every_attachable_type(
         self, annotation_tools, ann_type
     ):
@@ -897,7 +897,7 @@ class TestUpdateAnnotation:
         stored = session.state["annotations"][0]
         assert stored["attachment"]["target_id"] == "node-1"
 
-    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon"])
     def test_update_annotation_attaches_a_previously_unattached_annotation(
         self, annotation_tools, ann_type
     ):

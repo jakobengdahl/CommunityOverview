@@ -281,9 +281,14 @@ describe('GenericAnnotationNode', () => {
     }
   );
 
-  it('renders a vote dot with its value', () => {
+  // task-annotation-vote-dot-simplify: a vote dot is a plain coloured dot
+  // with no rendered value any more, even when `data.value` is still set
+  // (a stale field from before this change — see the "vote_dot value
+  // stepper" describe block below for the full removal).
+  it('renders a vote dot as a plain dot, never its (possibly stale) value', () => {
     render(<GenericAnnotationNode type="vote_dot" data={{ value: 3 }} />);
-    expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.queryByText('3')).toBeNull();
+    expect(document.querySelector('.kind-vote_dot').textContent).toBe('');
   });
 
   it('renders an image by URL', () => {
@@ -542,8 +547,8 @@ describe('GenericAnnotationNode property editor', () => {
   });
 
   it('deletes the annotation via the context menu delete button', () => {
-    render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
-    fireEvent.contextMenu(screen.getByText('1'));
+    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
     fireEvent.click(screen.getByText(/Delete/));
     const call = hoisted.setNodes.mock.calls.at(-1);
     expect(call[0]([{ id: 'v1' }, { id: 'other' }])).toEqual([{ id: 'other' }]);
@@ -551,17 +556,17 @@ describe('GenericAnnotationNode property editor', () => {
 
   it('notifies the annotation context after a rotation change', () => {
     const notifyChange = vi.fn();
-    render(
+    const { container } = render(
       <AnnotationContext.Provider
         value={{
           notifyChange,
           labels: { rotateReset: 'Reset rotation', delete: 'Delete', rotation: 'Rotation' },
         }}
       >
-        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{}} />
       </AnnotationContext.Provider>
     );
-    fireEvent.contextMenu(screen.getByText('1'));
+    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
@@ -574,7 +579,7 @@ describe('GenericAnnotationNode property editor', () => {
     it.each([
       ['text', (c) => c.querySelector('.kind-text'), { text: 'x' }],
       ['icon', (c) => c.querySelector('.kind-icon'), { icon: 'circle' }],
-      ['vote_dot', (c) => c.querySelector('.kind-vote_dot'), { value: 1 }],
+      ['vote_dot', (c) => c.querySelector('.kind-vote_dot'), {}],
     ])('offers colour swatches for a %s annotation', (kind, find, data) => {
       const { container } = render(<GenericAnnotationNode id="a1" type={kind} data={data} />);
       fireEvent.contextMenu(find(container));
@@ -670,33 +675,22 @@ describe('GenericAnnotationNode property editor', () => {
     });
   });
 
-  // task-annotation-render-direct-manipulation remaining_scope: "No way to
-  // change a `vote_dot`'s value after creation" — it was MCP-only.
-  describe('vote_dot value stepper', () => {
-    it('raises and lowers the value', () => {
-      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 2 }} />);
-      fireEvent.contextMenu(screen.getByText('2'));
-      fireEvent.click(screen.getByLabelText('Increase value'));
-      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(3);
-      fireEvent.click(screen.getByLabelText('Decrease value'));
-      expect(applyLatestUpdate({ id: 'v1', data: { value: 2 } }).data.value).toBe(1);
-    });
-
-    it('never counts below zero', () => {
-      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 0 }} />);
-      fireEvent.contextMenu(screen.getByText('0'));
-      fireEvent.click(screen.getByLabelText('Decrease value'));
-      expect(applyLatestUpdate({ id: 'v1', data: { value: 0 } }).data.value).toBe(0);
-    });
-
-    it('treats a vote dot created without a value as zero', () => {
-      const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+  // task-annotation-vote-dot-simplify removed the value stepper entirely — a
+  // vote dot is now a plain coloured dot with no value to raise or lower.
+  // Pinned as an explicit regression: without this, a reintroduced stepper
+  // control would slip back in unnoticed.
+  describe('vote_dot has no value stepper', () => {
+    it('offers no value stepper, even for a stale stored value', () => {
+      const { container } = render(
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 2 }} />
+      );
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
-      fireEvent.click(screen.getByLabelText('Increase value'));
-      expect(applyLatestUpdate({ id: 'v1', data: {} }).data.value).toBe(1);
+      expect(screen.queryByLabelText('Increase value')).toBeNull();
+      expect(screen.queryByLabelText('Decrease value')).toBeNull();
+      expect(screen.queryByText('Value')).toBeNull();
     });
 
-    it('offers no value stepper on a kind that has no value', () => {
+    it('offers no value stepper on a kind that never had one either', () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
       expect(screen.queryByLabelText('Increase value')).toBeNull();
@@ -713,8 +707,8 @@ describe('GenericAnnotationNode property editor', () => {
         { id: 'v1', type: 'vote_dot', zIndex: 0 },
         { id: 'other', type: 'note', zIndex: 1 },
       ];
-      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
-      fireEvent.contextMenu(screen.getByText('1'));
+      const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
       fireEvent.click(screen.getByLabelText('Bring to front'));
       const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
       expect(updated[0].zIndex).toBe(2);
@@ -728,7 +722,7 @@ describe('GenericAnnotationNode property editor', () => {
         { id: 'other', type: 'note', zIndex: 1 },
       ];
       const notifyRemoteLockedAttempt = vi.fn();
-      render(
+      const { container } = render(
         <AnnotationContext.Provider
           value={{
             notifyChange: vi.fn(),
@@ -739,13 +733,13 @@ describe('GenericAnnotationNode property editor', () => {
           <GenericAnnotationNode
             id="v1"
             type="vote_dot"
-            data={{ value: 1, remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+            data={{ remoteSelection: { color: '#f00', displayName: 'Ada' } }}
           />
         </AnnotationContext.Provider>
       );
       // A remote claim refuses the context menu outright, so the row is never
       // reachable — the attempt is surfaced rather than silently ignored.
-      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
       expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
       expect(hoisted.setNodes).not.toHaveBeenCalled();
     });
@@ -756,30 +750,32 @@ describe('GenericAnnotationNode property editor', () => {
         { id: 'other', type: 'note', zIndex: 1 },
       ];
       const notifyChange = vi.fn();
-      render(
+      const { container } = render(
         <AnnotationContext.Provider
           value={{ notifyChange, labels: { layer: 'Layer', layerFront: 'Bring to front' } }}
         >
-          <GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />
+          <GenericAnnotationNode id="v1" type="vote_dot" data={{}} />
         </AnnotationContext.Provider>
       );
-      fireEvent.contextMenu(screen.getByText('1'));
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
       fireEvent.click(screen.getByLabelText('Bring to front'));
       expect(hoisted.setNodes).not.toHaveBeenCalled();
       expect(notifyChange).not.toHaveBeenCalled();
     });
 
     it('offers no layer controls on a locked annotation', () => {
-      render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1, locked: true }} />);
-      fireEvent.contextMenu(screen.getByText('1'));
+      const { container } = render(
+        <GenericAnnotationNode id="v1" type="vote_dot" data={{ locked: true }} />
+      );
+      fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
       expect(screen.queryByLabelText('Bring to front')).toBeNull();
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
     });
   });
 
   it('closes the context menu on Escape', async () => {
-    render(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: 1 }} />);
-    fireEvent.contextMenu(screen.getByText('1'));
+    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
     expect(screen.getByLabelText('Reset rotation')).toBeInTheDocument();
     // The dismiss listeners are wired up on a setTimeout(0) (so the very
     // contextmenu event that opened the menu doesn't immediately close it);
@@ -1401,14 +1397,10 @@ describe('text/shape typography', () => {
   );
 
   it.each(['icon', 'vote_dot', 'image'])('shows no typography controls for %s', (kind) => {
-    const data = kind === 'icon' ? { icon: 'flag' } : kind === 'vote_dot' ? { value: 1 } : {};
+    const data = kind === 'icon' ? { icon: 'flag' } : {};
     const { container } = render(<GenericAnnotationNode type={kind} data={data} />);
     const target =
-      kind === 'icon'
-        ? screen.getByTitle('flag')
-        : kind === 'vote_dot'
-          ? screen.getByText('1')
-          : container.querySelector(`.kind-${kind}`);
+      kind === 'icon' ? screen.getByTitle('flag') : container.querySelector(`.kind-${kind}`);
     fireEvent.contextMenu(target);
     expect(document.querySelector('.context-menu-align')).toBeNull();
     expect(document.querySelector('.context-menu-fonts')).toBeNull();
@@ -1517,7 +1509,6 @@ describe('GenericAnnotationNode "Nearby object menu"', () => {
     nearbyMenu: 'Add nearby',
     nearbyLabel: 'Label',
     nearbyIcon: 'Icon',
-    nearbyVoteDot: 'Vote dot',
     nearbyText: 'Text',
   };
 

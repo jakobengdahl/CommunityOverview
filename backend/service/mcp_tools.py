@@ -2573,7 +2573,8 @@ def register_mcp_tools(
           - line: {"to": {"x": .., "y": ..}, "endArrow": true}
           - shape: {"shape": "rectangle", "text": "optional caption"}
           - icon: {"icon": "flag"}
-          - vote_dot: {"value": 3}
+          - vote_dot: a plain coloured dot — no type-specific content field of
+            its own; use `style.color` to set its colour, same as `icon`
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -3359,8 +3360,8 @@ def register_mcp_tools(
         the generic types `create_annotation` manages (not `note`/`group`).
 
         Locking freezes ALL geometry change, including a binding's own
-        follow behaviour — so locking an attached (`text`/`label`/`icon`/
-        `vote_dot`) or anchored (`line`) annotation drops that binding in the
+        follow behaviour — so locking an attached (`text`/`label`/`icon`)
+        or anchored (`line`) annotation drops that binding in the
         same write: its current, already-resolved position is kept, but the
         attachment/anchor reference itself is cleared. Unlocking does not
         restore it; re-attach manually if that is what you want.

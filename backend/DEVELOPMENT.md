@@ -1067,9 +1067,11 @@ folded into `shape`. Omitting either leaves it at its default (a solid grey
 fill, no border), the same look a plain `shape` always had; no migration was
 written for annotations already stored with type `frame` (see
 docs/ANNOTATION_CONTRACT.md's "Unrecognised annotation data").
-`text`/`label`/`icon`/`vote_dot` accept a
+`text`/`label`/`icon` accept a
 `content.attachment = {target_id, target_type, anchor, offset}` binding them
-to a node, and a `line`'s `content.start`/`content.end` may each carry a
+to a node (`vote_dot` used to be in this list; task-annotation-vote-dot-simplify
+retired its attachment behaviour — it is now a plain coloured dot that always
+lives on its own), and a `line`'s `content.start`/`content.end` may each carry a
 `point` (`{x, y}`) and/or an `attachment`
 (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"); a
 structurally malformed attachment or endpoint (missing/empty `target_id`, a

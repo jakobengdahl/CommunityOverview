@@ -438,7 +438,6 @@ describe('FreehandAnnotationNode "Nearby object menu"', () => {
             nearbyMenu: 'Add nearby',
             nearbyLabel: 'Label',
             nearbyIcon: 'Icon',
-            nearbyVoteDot: 'Vote dot',
             nearbyText: 'Text',
           },
         }}
@@ -447,7 +446,7 @@ describe('FreehandAnnotationNode "Nearby object menu"', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.graph-freehand-node'));
-    fireEvent.click(screen.getByRole('button', { name: '+ Vote dot' }));
-    expect(attachNearby).toHaveBeenCalledWith('f1', 'vote_dot');
+    fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
+    expect(attachNearby).toHaveBeenCalledWith('f1', 'icon');
   });
 });

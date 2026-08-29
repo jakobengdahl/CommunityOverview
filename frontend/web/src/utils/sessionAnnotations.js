@@ -210,9 +210,6 @@ function genericAnnotationToOverlay(a) {
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
-  } else if (a.type === 'vote_dot') {
-    overlay.value = a.value ?? null;
-    overlay.attachment = a.attachment;
   } else if (a.type === 'image') {
     overlay.image = a.image || {};
     overlay.alt = a.alt || '';
@@ -255,9 +252,6 @@ function genericOverlayToAnnotation(o) {
     input.text = o.text || '';
   } else if (o.kind === 'icon') {
     input.icon = o.icon || 'circle';
-    input.attachment = o.attachment;
-  } else if (o.kind === 'vote_dot') {
-    input.value = o.value ?? null;
     input.attachment = o.attachment;
   } else if (o.kind === 'image') {
     input.image = o.image || {};
