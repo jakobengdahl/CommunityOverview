@@ -1054,3 +1054,129 @@ describe('PaneContextMenu', () => {
     expect(menuRef.current).toBe(document.querySelector('.pane-context-menu'));
   });
 });
+
+describe('root menu viewport-edge clamping (c3174865-f36e-4eb2-befa-cb10784babf0)', () => {
+  // Simulates a rendered menu that overflows the viewport by a fixed amount on
+  // each axis, the same technique the Submenu flip test above uses — the exact
+  // pixel size of the menu doesn't matter, only how far its edges sit past the
+  // viewport bounds.
+  function mockOverflow(overflowX, overflowY) {
+    const original = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 100,
+      top: 0,
+      left: 0,
+      right: window.innerWidth + overflowX,
+      bottom: window.innerHeight + overflowY,
+      toJSON() {},
+    });
+    return () => {
+      Element.prototype.getBoundingClientRect = original;
+    };
+  }
+
+  const node = { id: 'n1', data: { nodeType: 'Actor' } };
+  const edge = { id: 'e1', label: 'RELATES_TO', data: {} };
+
+  it('leaves NodeContextMenu at the raw descriptor position when it fits the viewport', () => {
+    render(
+      <NodeContextMenu menu={{ x: 12, y: 34, node }} labels={labels} onClose={vi.fn()} />
+    );
+    const el = document.querySelector('.node-context-menu');
+    expect(el.style.left).toBe('12px');
+    expect(el.style.top).toBe('34px');
+  });
+
+  it('clamps NodeContextMenu back inside the viewport when it would overflow right/bottom', () => {
+    const restore = mockOverflow(50, 30);
+    try {
+      render(
+        <NodeContextMenu menu={{ x: 900, y: 700, node }} labels={labels} onClose={vi.fn()} />
+      );
+      const el = document.querySelector('.node-context-menu');
+      expect(el.style.left).toBe('850px');
+      expect(el.style.top).toBe('670px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('clamps MultiNodeContextMenu back inside the viewport when it would overflow', () => {
+    const restore = mockOverflow(40, 20);
+    try {
+      const nodes = [{ id: 'a', data: { nodeType: 'Actor' } }];
+      render(
+        <MultiNodeContextMenu menu={{ x: 900, y: 700, nodes }} labels={labels} onClose={vi.fn()} />
+      );
+      const el = document.querySelector('.multi-node-context-menu');
+      expect(el.style.left).toBe('860px');
+      expect(el.style.top).toBe('680px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('clamps EdgeContextMenu back inside the viewport when it would overflow', () => {
+    const restore = mockOverflow(60, 10);
+    try {
+      render(
+        <EdgeContextMenu
+          menu={{ x: 900, y: 700, edge }}
+          labels={labels}
+          relationshipTypes={[]}
+          onClose={vi.fn()}
+        />
+      );
+      const el = document.querySelector('.edge-context-menu');
+      expect(el.style.left).toBe('840px');
+      expect(el.style.top).toBe('690px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('clamps PaneContextMenu back inside the viewport when it would overflow', () => {
+    const restore = mockOverflow(25, 15);
+    try {
+      render(
+        <PaneContextMenu
+          menu={{ x: 900, y: 700, flowPosition: { x: 0, y: 0 } }}
+          labels={labels}
+          createAnnotation={vi.fn()}
+        />
+      );
+      const el = document.querySelector('.pane-context-menu');
+      expect(el.style.left).toBe('875px');
+      expect(el.style.top).toBe('685px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('never clamps to a negative coordinate when the overflow exceeds the raw position', () => {
+    const restore = mockOverflow(500, 500);
+    try {
+      render(<NodeContextMenu menu={{ x: 10, y: 10, node }} labels={labels} onClose={vi.fn()} />);
+      const el = document.querySelector('.node-context-menu');
+      expect(el.style.left).toBe('0px');
+      expect(el.style.top).toBe('0px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('only adjusts the axis that actually overflows', () => {
+    const restore = mockOverflow(45, 0);
+    try {
+      render(<NodeContextMenu menu={{ x: 900, y: 200, node }} labels={labels} onClose={vi.fn()} />);
+      const el = document.querySelector('.node-context-menu');
+      expect(el.style.left).toBe('855px');
+      expect(el.style.top).toBe('200px');
+    } finally {
+      restore();
+    }
+  });
+});
