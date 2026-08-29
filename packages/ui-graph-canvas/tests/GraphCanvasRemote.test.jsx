@@ -342,4 +342,68 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     });
     expect(introducedDanglingParent).toBe(false);
   });
+
+  // Regression test for the delete->undo round trip: removeGroupKeepChildren
+  // (GroupNode.jsx) un-parents a group's members on delete by ADDING the
+  // group's origin to each member's position (parent-relative -> absolute).
+  // Undoing that delete replays it as a remote upsert-group op that re-parents
+  // the members. Before this fix it did so without SUBTRACTING the group's
+  // origin back out, so every member reappeared shifted by exactly the
+  // group's (x, y) - and nothing ever corrected it, so the shift was what the
+  // next autosave persisted. A group at (400, 300) with a member whose
+  // parent-relative position was (50, 20) - i.e. (450, 320) once un-parented -
+  // must land back at exactly (50, 20) once the group is restored.
+  it('un-displaces a member restored by a remote upsert-group after a delete round trip', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[
+          {
+            action: 'upsert-group',
+            group: { id: 'grp', label: 'Team', position: { x: 400, y: 300 } },
+            members: ['n1'],
+          },
+        ]}
+      />
+    );
+    // What the canvas holds right after removeGroupKeepChildren ran: the
+    // member has no parent and its position is already absolute.
+    const seed = [{ id: 'n1', type: 'custom', position: { x: 450, y: 320 } }];
+    const result = findResult(seed, (r) => r.find((n) => n.id === 'n1')?.parentId === 'grp');
+    const restored = result.find((n) => n.id === 'n1');
+    expect(restored.parentId).toBe('grp');
+    // Position-preserving: back to the parent-relative coordinates it held
+    // before the delete, not still the displaced absolute ones.
+    expect(restored.position).toEqual({ x: 50, y: 20 });
+  });
+
+  // A redundant upsert-group (e.g. a label-only edit) that renames the same
+  // members must not re-subtract the group's origin from a member that is
+  // already parented here - that would displace it in the opposite direction
+  // on every subsequent no-op update.
+  it('leaves an already-adopted member position untouched on a redundant upsert-group', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[
+          {
+            action: 'upsert-group',
+            group: { id: 'grp', label: 'Renamed', position: { x: 400, y: 300 } },
+            members: ['n1'],
+          },
+        ]}
+      />
+    );
+    const seed = [
+      { id: 'grp', type: 'group', position: { x: 400, y: 300 } },
+      { id: 'n1', type: 'custom', parentId: 'grp', position: { x: 50, y: 20 } },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'grp')?.data?.label === 'Renamed'
+    );
+    expect(result.find((n) => n.id === 'n1').position).toEqual({ x: 50, y: 20 });
+  });
 });
