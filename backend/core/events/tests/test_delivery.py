@@ -104,7 +104,7 @@ class TestDeliveryWorker:
             # The domain itself looks ok, but DNS resolves to 127.0.0.1
             worker.enqueue(event, "http://malicious.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
@@ -133,7 +133,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://internal.corp/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             # Exactly one result — no RETRYING callbacks, no second attempt
             assert len(results) == 1
@@ -194,7 +194,7 @@ class TestDeliveryWorker:
             worker.enqueue(event, "https://example.com/hook")
 
             # Wait for delivery
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
@@ -271,11 +271,12 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "https://example.com/hook")
 
-            # Wait for retries
-            time.sleep(1.0)
+            # Wait for retries to exhaust and land on a terminal DROPPED result.
+            dropped_results = _wait_for(
+                lambda: [r for r in results if r.status == DeliveryStatus.DROPPED]
+            )
 
             # Should end with DROPPED status
-            dropped_results = [r for r in results if r.status == DeliveryStatus.DROPPED]
             assert len(dropped_results) == 1
         finally:
             worker.stop(wait=True)
@@ -303,7 +304,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "https://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
@@ -330,10 +331,10 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "https://example.com/hook")
 
-            time.sleep(0.5)
-
-            # Check the call arguments
-            assert mock_client.post.called
+            # Wait for the worker thread to have actually made the call — a fixed
+            # sleep races with CI load and can fire the assertion before the
+            # background thread has posted, leaving call_args as None.
+            assert _wait_for(lambda: mock_client.post.called)
             call_kwargs = mock_client.post.call_args.kwargs
 
             # Check URL
@@ -387,7 +388,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             # Must be dropped immediately — no retry, no follow-through to the internal address
             assert len(results) == 1
@@ -427,7 +428,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
@@ -467,7 +468,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
@@ -508,7 +509,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.SUCCESS
@@ -550,7 +551,7 @@ class TestDeliveryWorker:
             event = create_test_event()
             worker.enqueue(event, "http://example.com/hook")
 
-            time.sleep(0.5)
+            _wait_for(lambda: len(results) >= 1)
 
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
