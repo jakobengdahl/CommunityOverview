@@ -289,9 +289,10 @@ was folded into Shape), or any combination of the two. A Shape's menu also has a
 picker to swap its variant (circle, triangle, and so on) after it's been placed. An
 **Icon** annotation starts with a generic default glyph — right-click it to open a picker
 grid covering the full icon vocabulary and choose the one you actually want. A **voting
-dot**'s menu has a value stepper, so you can raise or lower the count after it's been
-placed. Icon and voting-dot annotations also support the same attach behaviour as labels
-once placed: drag one near a node or another annotation to attach it.
+dot** is a plain coloured dot — right-click it for the same colour picker as the other
+kinds; it has no value to set and does not attach to a node or another annotation the
+way Icon does. Icon annotations do support that same attach behaviour as labels once
+placed: drag one near a node or another annotation to attach it.
 
 Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
 images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
@@ -321,12 +322,13 @@ Duplicate action — its substance is the graph nodes it groups, not its own con
 copying the box alone would not be a real duplicate.
 
 Right-click a node, or any annotation except a group box, and its menu has an
-**Add nearby** section with four buttons: **Label**, **Icon**, **Vote dot**, **Text**.
+**Add nearby** section with three buttons: **Label**, **Icon**, **Text**. (**Vote
+dot** is not offered here — it doesn't attach to anything, see above.)
 A transparent-fill shape is included here too — its menu offers "Add nearby" the
 same as any other shape.
 Choosing one creates that annotation already attached to whatever you right-clicked —
 positioned right next to it and following it if it moves — without the create-then-drag-near
-two steps that were previously the only way to attach a new label, icon, voting dot or piece
+two steps that were previously the only way to attach a new label, icon or piece
 of text. Detach it afterward the same way as any attached annotation: drag it away from its
 target. Arrows are not offered here, since dragging either of a newly placed arrow's
 endpoints already snaps it onto a nearby target the moment you draw it.
