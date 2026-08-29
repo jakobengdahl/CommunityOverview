@@ -175,7 +175,12 @@ describe('ArrowNode default colour', () => {
   // FreehandAnnotationNode's picker (FreehandAnnotationNode.jsx:298).
   it('marks the swatch matching the current colour as active, and no other', () => {
     render(
-      <ArrowNode id="a1" type="arrow" data={{ dx: 100, dy: 0, color: '#FDE047' }} selected={false} />
+      <ArrowNode
+        id="a1"
+        type="arrow"
+        data={{ dx: 100, dy: 0, color: '#FDE047' }}
+        selected={false}
+      />
     );
     openMenu();
 
