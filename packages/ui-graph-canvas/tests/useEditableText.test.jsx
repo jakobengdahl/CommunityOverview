@@ -170,10 +170,9 @@ describe('useEditableText', () => {
   // rename guard.
   it('refuses to enter edit mode while locked, without treating it as a remote-claim attempt', () => {
     const notifyRemoteLockedAttempt = vi.fn();
-    const { result } = renderHook(
-      () => useEditableText('n1', { text: 'Hello', locked: true }),
-      { wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }) }
-    );
+    const { result } = renderHook(() => useEditableText('n1', { text: 'Hello', locked: true }), {
+      wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }),
+    });
     act(() => result.current.startEditing({ stopPropagation: () => {} }));
     expect(result.current.isEditing).toBe(false);
     // Unlike a live remote claim, a standing lock is silent — the menu
