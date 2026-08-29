@@ -308,4 +308,38 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(result.find((n) => n.id === 'a').parentId).toBe('grp');
     expect(result.find((n) => n.id === 'b').parentId).toBeUndefined();
   });
+
+  // Regression test: a membership op naming a group this client does not have
+  // (not yet arrived, or filtered out of this client's view) used to set
+  // parentId to that missing id anyway. Real ReactFlow throws
+  // `Parent node <id> not found` from inside its own store update for that
+  // shape - outside every React error boundary - crashing the whole canvas
+  // (see GroupMembershipMissingParentCrash.test.jsx, which proves that with
+  // real, unmocked reactflow). The handler must leave the node list
+  // unchanged instead of introducing that dangling parentId.
+  it('drops a membership op naming a group not present on this client', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[{ action: 'membership', groupId: 'grp-missing', members: ['a'] }]}
+      />
+    );
+    const seed = [{ id: 'a', type: 'custom', position: { x: 0, y: 0 } }];
+    // Check every updater this render triggered, not just the first that
+    // "succeeds" (several effects call setNodes) - the invariant under test
+    // is that NONE of them ever introduces a parentId naming an absent node,
+    // which is exactly the shape that crashes real ReactFlow.
+    const introducedDanglingParent = hoisted.setNodes.mock.calls.some((call) => {
+      if (typeof call[0] !== 'function') return false;
+      let result;
+      try {
+        result = call[0](seed.map((n) => ({ ...n })));
+      } catch {
+        return false;
+      }
+      return Array.isArray(result) && result.some((n) => n.parentId === 'grp-missing');
+    });
+    expect(introducedDanglingParent).toBe(false);
+  });
 });

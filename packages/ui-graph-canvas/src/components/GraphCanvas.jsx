@@ -2819,17 +2819,30 @@ function GraphCanvasInner({
             .filter((n) => n.id !== op.id)
         );
       } else if (op.action === 'membership' && op.groupId) {
+        // The store requires a group annotation to exist before it will accept a
+        // membership change for it (session_manager.set_group_members), so a
+        // same-client race between creation and membership cannot happen; what
+        // reaches here naming a group this client doesn't have is a client that
+        // hasn't caught up yet, or one that filtered the group out of its view
+        // on purpose. Either way there is no node to reparent onto, and setting
+        // parentId to a missing id throws from inside ReactFlow's own store
+        // update - outside every React error boundary - and takes down the
+        // whole canvas. Drop the op rather than queue it: a client that filtered
+        // the group out would never resolve a queued entry, and the group's own
+        // upsert (when it does arrive) carries its full current membership, so
+        // nothing is lost by not replaying this one.
         const members = new Set(op.members || []);
-        setNodes((nds) =>
-          reorderNodesForParentChild(
+        setNodes((nds) => {
+          if (!nds.some((n) => n.id === op.groupId)) return nds;
+          return reorderNodesForParentChild(
             nds.map((n) => {
               if (n.type === 'group') return n;
               if (members.has(n.id)) return { ...n, parentId: op.groupId };
               if (n.parentId === op.groupId) return { ...n, parentId: undefined };
               return n;
             })
-          )
-        );
+          );
+        });
       }
     }
     onRemoteAnnotationsApplied?.();
