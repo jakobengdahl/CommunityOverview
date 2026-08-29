@@ -314,6 +314,21 @@ describe('GroupNode locked context menu', () => {
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
   });
 
+  // smallfix-groupnode-colour-swatch-no-active-marker: the swatch grid had no
+  // indication of the group's current colour at all, the same gap PR #510
+  // fixed for the sibling annotation menus (see ArrowNode.test.jsx's "marks
+  // the swatch matching the current colour as active" case).
+  it('marks the swatch matching the current colour as active, and no other', () => {
+    renderGroup({ label: 'G', color: '#F97316' });
+    fireEvent.contextMenu(screen.getByText('G'));
+
+    const buttons = [...document.querySelectorAll('.color-button')];
+    const active = buttons.find((b) => b.style.backgroundColor === 'rgb(249, 115, 22)');
+    const inactive = buttons.find((b) => b.style.backgroundColor === 'rgb(100, 108, 255)');
+    expect(active.className).toContain('active');
+    expect(inactive.className).not.toContain('active');
+  });
+
   it('refuses to open the rename input while the group is locked', () => {
     const { notifyChange } = renderGroup(lockedData);
     fireEvent.doubleClick(screen.getByText('G'));
