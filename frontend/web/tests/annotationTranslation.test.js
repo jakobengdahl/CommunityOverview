@@ -542,13 +542,15 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips a vote_dot annotation', () => {
+  // task-annotation-vote-dot-simplify: a vote dot is a plain coloured dot —
+  // `color` is the only annotation-specific field either direction still
+  // carries for it (`value` no longer exists).
+  it('round-trips a vote_dot annotation (colour only, no value)', () => {
     const overlays = [
       {
         id: 'vote-1',
         kind: 'vote_dot',
         position: { x: 9, y: 9 },
-        value: 3,
         color: '#FB923C',
         size: { w: 24, h: 24 },
         z: 0,
@@ -557,8 +559,28 @@ describe('generic annotation overlay translation', () => {
       },
     ];
     const server = overlaysToAnnotations(overlays);
-    expect(server[0].value).toBe(3);
+    expect(server[0].style).toMatchObject({ color: '#FB923C' });
     expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  // Explicit regression: a vote_dot stored before this change may still
+  // carry `value` and/or `attachment` (no migration was written). Neither
+  // leg of this translation may resurrect either field on a live overlay.
+  it('drops a stale value and attachment on a stored vote_dot annotation', () => {
+    const server = [
+      {
+        id: 'vote-legacy',
+        type: 'vote_dot',
+        position: { x: 9, y: 9 },
+        value: 3,
+        attachment: { target_id: 'node-1', target_type: 'node' },
+        style: { color: '#FB923C' },
+      },
+    ];
+    const [overlay] = annotationsToOverlays(server);
+    expect(overlay.value).toBeUndefined();
+    expect(overlay.attachment).toBeUndefined();
+    expect(overlay.color).toBe('#FB923C');
   });
 
   it('round-trips an image annotation (URL content, alt, and colour)', () => {

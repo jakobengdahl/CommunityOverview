@@ -43,7 +43,6 @@ const labels = {
   annotationNearbyMenu: 'Add nearby',
   annotationNearbyLabel: 'Label',
   annotationNearbyIcon: 'Icon',
-  annotationNearbyVoteDot: 'Vote dot',
   annotationNearbyText: 'Text',
 };
 
@@ -230,7 +229,7 @@ describe('NodeContextMenu', () => {
       expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
     });
 
-    it('offers exactly the four attachable kinds — label, icon, vote dot, text — not arrow', () => {
+    it('offers exactly the three attachable kinds — label, icon, text — not arrow or vote dot', () => {
       render(
         <NodeContextMenu
           menu={{ x: 0, y: 0, node }}
@@ -241,9 +240,12 @@ describe('NodeContextMenu', () => {
       );
       expect(screen.getByRole('button', { name: '+ Label' })).toBeTruthy();
       expect(screen.getByRole('button', { name: '+ Icon' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: '+ Vote dot' })).toBeTruthy();
       expect(screen.getByRole('button', { name: '+ Text' })).toBeTruthy();
       expect(screen.queryByRole('button', { name: '+ Arrow' })).toBeNull();
+      // vote_dot is not attachable any more (task-annotation-vote-dot-simplify)
+      // and is not offered here, though it remains a valid *target* for the
+      // three kinds that are — see the "target candidacy" test below.
+      expect(screen.queryByRole('button', { name: '+ Vote dot' })).toBeNull();
     });
 
     it('calls onAttachNearby with the target node id and the picked kind, then closes', () => {
@@ -257,8 +259,8 @@ describe('NodeContextMenu', () => {
           onClose={onClose}
         />
       );
-      fireEvent.click(screen.getByRole('button', { name: '+ Vote dot' }));
-      expect(onAttachNearby).toHaveBeenCalledWith('n1', 'vote_dot');
+      fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
+      expect(onAttachNearby).toHaveBeenCalledWith('n1', 'icon');
       expect(onClose).toHaveBeenCalled();
     });
   });
@@ -1239,7 +1241,6 @@ describe('NearbyObjectMenuSection', () => {
     nearbyMenu: 'Add nearby',
     nearbyLabel: 'Label',
     nearbyIcon: 'Icon',
-    nearbyVoteDot: 'Vote dot',
     nearbyText: 'Text',
   };
 
@@ -1250,10 +1251,11 @@ describe('NearbyObjectMenuSection', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders the four kinds and calls onAttach with the picked kind', () => {
+  it('renders the three kinds and calls onAttach with the picked kind', () => {
     const onAttach = vi.fn();
     render(<NearbyObjectMenuSection labels={shortLabels} onAttach={onAttach} />);
     expect(screen.getByText('Add nearby')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '+ Vote dot' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
     expect(onAttach).toHaveBeenCalledWith('icon');
   });

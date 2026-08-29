@@ -90,10 +90,13 @@ vi.mock('reactflow', () => {
 
 const nodeById = (id) => store.nodes.find((n) => n.id === id);
 
-// task-annotation-render-direct-manipulation: dragging a label/text/icon/
-// vote_dot near a node (re)attaches it; dragging one outside every snap zone
+// task-annotation-render-direct-manipulation: dragging a label/text/icon
+// near a node (re)attaches it; dragging one outside every snap zone
 // detaches it and keeps the dropped position (docs/ANNOTATION_CONTRACT.md's
-// "Attachment and detach behavior"). The follow-while-attached side of this
+// "Attachment and detach behavior"). `vote_dot` used to be a fourth member
+// of this list; task-annotation-vote-dot-simplify retired it — see this
+// describe block's own dedicated "never attaches or re-attaches a dropped
+// vote_dot" test below. The follow-while-attached side of this
 // (an attached overlay tracking its target's movement) is covered at the
 // pure-function level by resolveAttachedPosition in overlaySerialization.test.js,
 // the same split the pre-existing arrow-anchor effect uses.
@@ -168,25 +171,61 @@ describe('GraphCanvas attachment: drag-to-attach/detach', () => {
       height: 0,
     };
     const near = { id: 'node-near', type: 'custom', position: { x: 0, y: 0 }, width: 0, height: 0 };
-    const dot = {
-      id: 'dot-1',
-      type: 'vote_dot',
+    const icon = {
+      id: 'icon-1',
+      type: 'icon',
       position: { x: 5, y: 5 },
       data: {
         attachment: { target_id: 'node-far', target_type: 'node', offset: { x: 505, y: 505 } },
       },
     };
-    store.nodes = [far, near, dot];
+    store.nodes = [far, near, icon];
+
+    act(() => {
+      store.handlers.onNodeDragStop?.({}, icon, [icon]);
+    });
+
+    expect(nodeById('icon-1').data.attachment).toEqual({
+      target_id: 'node-near',
+      target_type: 'node',
+      offset: { x: 5, y: 5 },
+    });
+  });
+
+  // Explicit regression for task-annotation-vote-dot-simplify: dropping a
+  // vote_dot near a node used to (re)attach it exactly like the icon case
+  // above (`vote_dot` was a member of ATTACHABLE_OVERLAY_KINDS). It no longer
+  // is, so this same drag-stop handler must leave a vote_dot's geometry and
+  // any stored `attachment` completely alone — not cleared, not re-targeted,
+  // just ignored — whether the drop lands near a target or not.
+  it('never attaches or re-attaches a dropped vote_dot, even one carrying a stale attachment', () => {
+    const onAnnotationChange = vi.fn();
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+
+    const near = { id: 'node-near', type: 'custom', position: { x: 0, y: 0 }, width: 0, height: 0 };
+    const staleAttachment = {
+      target_id: 'node-far',
+      target_type: 'node',
+      offset: { x: 505, y: 505 },
+    };
+    const dot = {
+      id: 'dot-1',
+      type: 'vote_dot',
+      position: { x: 5, y: 5 },
+      data: { attachment: staleAttachment },
+    };
+    store.nodes = [near, dot];
 
     act(() => {
       store.handlers.onNodeDragStop?.({}, dot, [dot]);
     });
 
-    expect(nodeById('dot-1').data.attachment).toEqual({
-      target_id: 'node-near',
-      target_type: 'node',
-      offset: { x: 5, y: 5 },
-    });
+    // Dropped right on top of `near` — an icon/label here would have just
+    // (re)attached to it (see the test above). A vote_dot does neither: its
+    // stale attachment survives untouched rather than being cleared or
+    // pointed at the new nearby target.
+    expect(nodeById('dot-1').data.attachment).toEqual(staleAttachment);
+    expect(onAnnotationChange).not.toHaveBeenCalled();
   });
 
   it('does not attach an attachable overlay that is part of a multi-node drag', () => {
@@ -229,7 +268,7 @@ describe('GraphCanvas attachment: drag-to-attach/detach', () => {
 // task-annotation-render-direct-manipulation / task-annotation-responsive-
 // bottom-toolbox's "Nearby object menu" contract entry point
 // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a new
-// label/icon/vote_dot/text pre-wired to attach to an existing node/annotation
+// label/icon/text pre-wired to attach to an existing node/annotation
 // from that target's own context menu, rather than requiring create-then-
 // drag-near. Exercised through the real GraphCanvas node-context-menu render
 // tree (only the `reactflow` package itself is mocked above), the same way
@@ -268,16 +307,16 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
   // is set, so its centre (nodeCenter) is this same point.
   const targetNodeProp = [{ id: 'node-1', type: 'Actor', _savedPosition: { x: 100, y: 100 } }];
 
-  it('creates a vote_dot pre-wired with the exact same attachment shape drag-to-attach produces', () => {
+  it('creates an icon pre-wired with the exact same attachment shape drag-to-attach produces', () => {
     const onAnnotationChange = vi.fn();
     render(
       <GraphCanvas nodes={targetNodeProp} edges={[]} onAnnotationChange={onAnnotationChange} />
     );
 
     openNodeMenu('node-1');
-    fireEvent.click(screen.getByRole('button', { name: '+ Vote dot' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
 
-    const created = store.nodes.find((n) => n.type === 'vote_dot');
+    const created = store.nodes.find((n) => n.type === 'icon');
     expect(created).toBeTruthy();
     // Same `{target_id, target_type, offset}` triple computeDroppedAttachment
     // produces for a post-creation drop — not a second, parallel shape.
@@ -289,6 +328,16 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
     // Placed at the target's centre (100, 100) plus that same offset.
     expect(created.position).toEqual({ x: 136, y: 64 });
     expect(onAnnotationChange).toHaveBeenCalledWith('create');
+  });
+
+  // Explicit regression for task-annotation-vote-dot-simplify: vote_dot is
+  // no longer one of the kinds this menu can create pre-wired to a target.
+  it('does not offer "+ Vote dot" from the nearby object menu', () => {
+    render(<GraphCanvas nodes={targetNodeProp} edges={[]} onAnnotationChange={vi.fn()} />);
+
+    openNodeMenu('node-1');
+
+    expect(screen.queryByRole('button', { name: '+ Vote dot' })).toBeNull();
   });
 
   it('follows its target when the target moves, via the exact same resolveAttachedPosition the drag-to-attach path uses', () => {
@@ -475,5 +524,49 @@ describe('GraphCanvas attachment/anchor: locked annotations freeze geometry', ()
     expect(nodeById('arrow-1').position).toEqual({ x: 0, y: 0 });
     expect(nodeById('arrow-1').data.dx).toBe(200);
     expect(nodeById('arrow-1').data.dy).toBe(0);
+  });
+});
+
+// Explicit regression for task-annotation-vote-dot-simplify: the "keep an
+// attached overlay glued to its target" follow effect
+// (GraphCanvas.jsx) is gated on ATTACHABLE_OVERLAY_KINDS, which no longer
+// includes `vote_dot`. A vote_dot carrying a stale, stored `attachment` (no
+// migration was written) must not be resolved against it — unlike the
+// locked-label case above, this one is not even locked, so if the guard
+// were keyed on anything other than the kind itself, this would be the case
+// that slips through and silently starts following again.
+describe('GraphCanvas attachment: a vote_dot never follows a stale attachment', () => {
+  beforeEach(() => {
+    store.nodes = [];
+    store.edges = [];
+    store.handlers = {};
+  });
+  afterEach(() => cleanup());
+
+  it('does not move an unlocked vote_dot toward a target named by its stale attachment', () => {
+    const target = {
+      id: 'node-1',
+      type: 'custom',
+      position: { x: 900, y: 900 },
+      width: 40,
+      height: 40,
+    };
+    const dot = {
+      id: 'dot-1',
+      type: 'vote_dot',
+      position: { x: 0, y: 0 },
+      data: {
+        attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 0, y: 0 } },
+      },
+    };
+    store.nodes = [target, dot];
+
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+
+    // An attached label/icon at this same offset would have resolved to the
+    // target's centre by now; the vote_dot must stay exactly where it was
+    // declared, not throw, and not crash the canvas.
+    expect(nodeById('dot-1').position).toEqual({ x: 0, y: 0 });
+    expect(screen.getByTestId('react-flow')).toBeInTheDocument();
   });
 });

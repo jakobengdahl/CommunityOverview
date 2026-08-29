@@ -232,6 +232,20 @@ class TestBuildAnnotationContentValidation:
         )
         assert annotation["attachment"] == "not-even-an-object"
 
+    def test_vote_dot_attachment_is_no_longer_validated(self):
+        """`vote_dot` used to be in ATTACHABLE_ANNOTATION_TYPES; task-
+        annotation-vote-dot-simplify removed it (a vote dot is now a plain
+        coloured dot that always lives on its own — see
+        docs/ANNOTATION_CONTRACT.md's vote_dot paragraphs). A malformed
+        `attachment` — the exact shape `test_malformed_attachment_is_rejected`
+        above still rejects for `icon` — is no longer rejected for `vote_dot`;
+        it is stored verbatim as ordinary free-form content, the same as any
+        field this layer does not specifically type-constrain."""
+        annotation = build_annotation(
+            type="vote_dot", x=0, y=0, content={"attachment": {"target_id": ""}}
+        )
+        assert annotation["attachment"] == {"target_id": ""}
+
     def test_line_endpoints_with_attachment_round_trip(self):
         content = {
             "to": {"x": 100, "y": 0},

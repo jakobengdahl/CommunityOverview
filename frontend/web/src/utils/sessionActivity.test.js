@@ -687,7 +687,7 @@ describe('describeActivity', () => {
       });
     }
 
-    it.each(['text', 'label', 'icon', 'vote_dot'])(
+    it.each(['text', 'label', 'icon'])(
       'does not report an attachment gaining target_type on a dragged %s as "attached"',
       (type) => {
         // normalizeAttachment fills target_type:'node'; the backend makes it
@@ -1188,10 +1188,11 @@ describe('describeActivity × i18n', () => {
     { before: { type: 'note', shape: 'rectangle' }, after: { type: 'note', shape: 'ellipse' } },
     { before: { type: 'note', locked: false }, after: { type: 'note', locked: true } },
     { before: { type: 'note', locked: true }, after: { type: 'note', locked: false } },
-    // `label`, not `note`: only label/text/icon/vote_dot carry an attachment
-    // through the overlay translators, so a note is never attached or
-    // detached and using one here would assert a transition that cannot
-    // happen.
+    // `label`, not `note`: only label/text/icon carry an attachment
+    // through the overlay translators (`vote_dot` used to be a fourth —
+    // task-annotation-vote-dot-simplify retired it), so a note is never
+    // attached or detached and using one here would assert a transition
+    // that cannot happen.
     { before: { type: 'label' }, after: { type: 'label', attachment: { target_id: 'n1' } } },
     { before: { type: 'label', attachment: { target_id: 'n1' } }, after: { type: 'label' } },
     {

@@ -109,10 +109,7 @@
       "type": "vote_dot",
       "x": 90,
       "y": 100,
-      "fields": {
-        "value": 3,
-        "attachment": { "target_id": "node-5", "target_type": "node" }
-      }
+      "fields": {}
     },
     {
       "id": "image-1",

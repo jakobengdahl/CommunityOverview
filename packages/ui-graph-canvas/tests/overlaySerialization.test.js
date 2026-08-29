@@ -455,20 +455,48 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips a vote_dot overlay, preserving a value of 0', () => {
+  // task-annotation-vote-dot-simplify: a vote dot is a plain coloured dot —
+  // `color` is the only field either translator direction still carries for
+  // it. Confirms the field that DOES remain still round-trips correctly,
+  // now that `value` no longer does (see the two regression tests below).
+  it('round-trips a vote_dot overlay, carrying only colour', () => {
     const overlay = {
       id: 'vote-1',
       kind: 'vote_dot',
       position: { x: 9, y: 9 },
-      value: 0,
       color: '#FB923C',
       z: 0,
       locked: false,
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ value: 0, color: '#FB923C', locked: false, rotation: 0 });
+    expect(node.data).toEqual({ color: '#FB923C', locked: false, rotation: 0 });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // Explicit regression for task-annotation-vote-dot-simplify: a stored
+  // vote_dot from before this change may still carry `value` and/or
+  // `attachment`. Neither is a member of GENERIC_OVERLAY_FIELDS.vote_dot any
+  // more, so overlayToFlowNode must not project either onto the live node —
+  // pinned here rather than left to the general "unknown field" tolerance to
+  // imply it holds, since this translator leg is exactly the kind of place a
+  // sibling leg's fix has failed to reach before in this codebase.
+  it('drops a stale value and attachment when hydrating a vote_dot overlay', () => {
+    const overlay = {
+      id: 'vote-legacy',
+      kind: 'vote_dot',
+      position: { x: 9, y: 9 },
+      value: 3,
+      attachment: { target_id: 'node-9', target_type: 'node', offset: { x: 1, y: 1 } },
+      color: '#FB923C',
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toEqual({ color: '#FB923C', locked: false, rotation: 0 });
+    expect(node.data.value).toBeUndefined();
+    expect(node.data.attachment).toBeUndefined();
   });
 
   it('round-trips an image overlay (URL content, alt, and colour)', () => {
@@ -563,12 +591,11 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips an attachment on a vote_dot overlay', () => {
+  it('does not round-trip an attachment on a vote_dot overlay (not attachable any more)', () => {
     const overlay = {
       id: 'vote-2',
       kind: 'vote_dot',
       position: { x: 1, y: 1 },
-      value: 5,
       color: '#fff',
       attachment: { target_id: 'node-3', target_type: 'node', offset: { x: -8, y: -8 } },
       z: 0,
@@ -576,7 +603,10 @@ describe('generic annotation overlay serialization', () => {
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(flowNodeToOverlay(node)).toEqual(overlay);
+    expect(node.data.attachment).toBeUndefined();
+    const roundTripped = flowNodeToOverlay(node);
+    expect(roundTripped.attachment).toBeUndefined();
+    expect(roundTripped).toEqual({ ...overlay, attachment: undefined });
   });
 
   // 61d5cc7b / smallfix-annotation-unsized-generic-geometry-clobber: icon,
@@ -596,7 +626,6 @@ describe('generic annotation overlay serialization', () => {
         position: { x: 1, y: 1 },
         text: kind === 'text' ? 'hi' : undefined,
         icon: kind === 'icon' ? 'flag' : undefined,
-        value: kind === 'vote_dot' ? 3 : undefined,
         color: '#fff',
         size: { w: 32, h: 32 },
         z: 0,
@@ -773,7 +802,10 @@ describe('isArrowHeld', () => {
 
 describe('ATTACHABLE_OVERLAY_KINDS', () => {
   it('names exactly the node-attachable generic kinds', () => {
-    expect(ATTACHABLE_OVERLAY_KINDS).toEqual(new Set(['text', 'label', 'icon', 'vote_dot']));
+    // vote_dot used to be a member of this set; task-annotation-vote-dot-
+    // simplify removed it — a vote dot is now a plain coloured dot that
+    // never snaps to or follows a target.
+    expect(ATTACHABLE_OVERLAY_KINDS).toEqual(new Set(['text', 'label', 'icon']));
   });
 });
 

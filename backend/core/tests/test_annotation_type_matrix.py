@@ -459,14 +459,17 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
         assert bad["error"] == "invalid_content"
         _assert_only_confirmed_ids_present()
 
-        # vote_dot: valid create, then invalid_content (malformed attachment).
+        # vote_dot: valid create, then invalid_content (a reserved content
+        # key — vote_dot is a plain coloured dot with no type-specific
+        # content field left to validate, since task-annotation-vote-dot-
+        # simplify retired both its `value` and its attachment behaviour;
+        # see ATTACHABLE_ANNOTATION_TYPES in session_annotations.py).
         ok = tools_map["create_annotation"](
             session_id=session.id,
             type="vote_dot",
             x=0,
             y=0,
             annotation_id="vote-dot-1",
-            content={"value": 3},
         )
         assert ok["success"] is True
         confirmed_ids.append("vote-dot-1")
@@ -478,7 +481,7 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
             x=0,
             y=0,
             annotation_id="vote-dot-bad",
-            content={"attachment": {"target_id": ""}},
+            content={"locked": True},
         )
         assert bad["success"] is False
         assert bad["error"] == "invalid_content"

@@ -110,13 +110,15 @@ describe('shape caption round-trip', () => {
   });
 });
 
-// task-annotation-render-direct-manipulation: label/text/icon/vote_dot
-// attachments now round-trip between the server annotation document and the
-// canvas overlay shape, not only through the JS annotation model.
+// task-annotation-render-direct-manipulation: label/text/icon attachments
+// round-trip between the server annotation document and the canvas overlay
+// shape, not only through the JS annotation model. `vote_dot` used to be a
+// fourth member of this list; task-annotation-vote-dot-simplify retired its
+// attachment behaviour — see the dedicated test below for what it does now.
 describe('attachment round-trip through the server annotation document', () => {
   const attachment = { target_id: 'node-1', target_type: 'node', offset: { x: 4, y: -6 } };
 
-  it.each(['label', 'text', 'icon', 'vote_dot'])(
+  it.each(['label', 'text', 'icon'])(
     'carries an attachment through legacyMetadataToAnnotationDocument -> annotationDocumentToLegacyMetadata for %s',
     (kind) => {
       const overlay = {
@@ -125,7 +127,6 @@ describe('attachment round-trip through the server annotation document', () => {
         position: { x: 0, y: 0 },
         text: kind === 'text' || kind === 'label' ? 'hi' : undefined,
         icon: kind === 'icon' ? 'flag' : undefined,
-        value: kind === 'vote_dot' ? 1 : undefined,
         attachment,
       };
       const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
@@ -144,6 +145,28 @@ describe('attachment round-trip through the server annotation document', () => {
     });
     expect(document.annotations[0].attachment).toBeUndefined();
   });
+
+  // Explicit regression for task-annotation-vote-dot-simplify: a vote_dot
+  // overlay carrying a stale `attachment` (from before this change — no
+  // migration was written) must not have it resurface on either leg of this
+  // round trip.
+  it('drops a vote_dot attachment on both legs of the round trip, not just one', () => {
+    const overlay = {
+      id: 'vote-dot-1',
+      kind: 'vote_dot',
+      position: { x: 0, y: 0 },
+      color: '#3b82f6',
+      attachment,
+    };
+    const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+    const stored = document.annotations.find((a) => a.id === overlay.id);
+    expect(stored.attachment).toBeUndefined();
+
+    const metadata = annotationDocumentToLegacyMetadata(document);
+    const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+    expect(roundTripped.attachment).toBeUndefined();
+    expect(roundTripped.color).toBe('#3b82f6');
+  });
 });
 
 // smallfix-annotation-unsized-generic-geometry-clobber: icon/vote_dot/text
@@ -159,7 +182,6 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
     text: kind === 'text' ? 'hi' : undefined,
     shape: kind === 'shape' ? 'circle' : undefined,
     icon: kind === 'icon' ? 'flag' : undefined,
-    value: kind === 'vote_dot' ? 1 : undefined,
     image: kind === 'image' ? { url: 'https://example.test/x.png' } : undefined,
     size: { w: 32, h: 41 },
   });

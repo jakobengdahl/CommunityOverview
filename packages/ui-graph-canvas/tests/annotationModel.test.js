@@ -144,7 +144,7 @@ describe('annotationModel contract v1', () => {
     expect(shorthand.start.attachment).toEqual(expected);
   });
 
-  it.each(['text', 'label', 'icon', 'vote_dot'])(
+  it.each(['text', 'label', 'icon'])(
     'normalizes a %s attachment to a node with target_id/target_type/anchor/offset',
     (type) => {
       const annotation = createAnnotation({
@@ -161,7 +161,7 @@ describe('annotationModel contract v1', () => {
     }
   );
 
-  it.each(['text', 'label', 'icon', 'vote_dot'])(
+  it.each(['text', 'label', 'icon'])(
     'drops a %s attachment with no target id rather than storing a dangling reference',
     (type) => {
       const annotation = createAnnotation({ id: `${type}-2`, type, attachment: { anchor: 'top' } });
@@ -169,7 +169,39 @@ describe('annotationModel contract v1', () => {
     }
   );
 
-  it('accepts targetId/nodeId/target_type as attachment aliases for label/icon/vote_dot', () => {
+  // task-annotation-vote-dot-simplify: unlike text/label/icon above,
+  // `vote_dot` no longer normalizes an `attachment` at all — its
+  // withTypePayload returns no payload fields beyond the shared envelope, so
+  // a well-formed attachment is dropped exactly the same as a malformed one
+  // (a stale field from before this change, since nobody used the
+  // annotation feature yet — no migration was written for it).
+  it('drops a vote_dot attachment even when well-formed, since it is no longer an attachable kind', () => {
+    const annotation = createAnnotation({
+      id: 'vote-dot-1',
+      type: 'vote_dot',
+      attachment: { target_id: 'node-9', anchor: 'bottom', offset: { x: 4, y: -2 } },
+    });
+    expect(annotation.attachment).toBeUndefined();
+  });
+
+  it('drops a vote_dot value, and still carries its colour, through a full normalize round trip', () => {
+    const doc = normalizeAnnotationDocument({
+      annotations: [
+        {
+          id: 'vote-dot-2',
+          type: 'vote_dot',
+          position: { x: 1, y: 2 },
+          value: 7,
+          style: { color: '#22c55e' },
+        },
+      ],
+    });
+    const [annotation] = doc.annotations;
+    expect(annotation.value).toBeUndefined();
+    expect(annotation.style.color).toBe('#22c55e');
+  });
+
+  it('accepts targetId/nodeId/target_type as attachment aliases for label/icon', () => {
     expect(
       createAnnotation({ id: 'label-alias', type: 'label', attachment: { nodeId: 42 } }).attachment
         .target_id
