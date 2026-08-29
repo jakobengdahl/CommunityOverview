@@ -12,10 +12,8 @@
    `:last-of-type` can only ever pick out one of several sibling segments. */
 
 /* The property editor's colour swatch grid (`.graph-annotation-context-menu
-   .color-button`, shared with NoteNode/LabelNode) has no shared "currently
-   selected" treatment — only this editor marks one active, mirroring the
-   `.size-button.active`/`.shape-picker-button.active` convention those
-   already use. */
-.graph-annotation-context-menu .color-button.active {
-  border-color: white;
-}
+   .color-button`) is shared by every annotation kind's colour row — this
+   editor was first to mark the current colour with `.active`, and the shared
+   rule for it now lives with the rest of `.color-button` in NoteNode.css,
+   alongside ArrowNode/LabelNode/NoteNode/GenericAnnotationNode which all
+   apply the same class. */

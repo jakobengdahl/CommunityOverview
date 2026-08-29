@@ -192,6 +192,27 @@ describe('NoteNode locked context menu', () => {
   });
 });
 
+// smallfix-annotation-colour-swatch-no-active-marker: the swatch grid had no
+// indication of the note's current colour at all, unlike
+// FreehandAnnotationNode's picker (FreehandAnnotationNode.jsx:298).
+describe('NoteNode colour swatches', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.resizerProps.length = 0;
+  });
+
+  it('marks the swatch matching the current colour as active, and no other', () => {
+    render(<NoteNode id="n1" data={{ color: '#86EFAC' }} selected={false} />);
+    fireEvent.contextMenu(screen.getByText('Note'));
+
+    const buttons = [...document.querySelectorAll('.color-button')];
+    const active = buttons.find((b) => b.style.backgroundColor === 'rgb(134, 239, 172)');
+    const inactive = buttons.find((b) => b.style.backgroundColor === 'rgb(254, 240, 138)');
+    expect(active.className).toContain('active');
+    expect(inactive.className).not.toContain('active');
+  });
+});
+
 // task-shared-editable-text-hook: NoteNode's double-click/blur/Escape/live-sync
 // text editing now runs through the shared useEditableText hook
 // (packages/ui-graph-canvas/src/hooks/useEditableText.js) rather than its own
