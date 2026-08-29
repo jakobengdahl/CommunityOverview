@@ -395,3 +395,52 @@
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+
+/* "Nearby object menu" section (docs/ANNOTATION_CONTRACT.md "Human
+   authoring surfaces") — the label/icon/vote-dot/text row every context
+   menu offers it from (NodeContextMenu plus the note/label/arrow/freehand/
+   generic annotation menus). Wraps rather than a fixed 4-column grid, since
+   NodeContextMenu's own min-width is narrower than these annotation menus'.
+   NodeContextMenu (`.node-context-menu`) needs its own title rule too — it
+   uses GraphCanvas.css's plain `.graph-context-menu`, which has no
+   `.context-menu-title` styling of its own the way the annotation menus'
+   `.graph-annotation-context-menu` already does above — and its own
+   `width: auto` override, since GraphCanvas.css's `.graph-context-menu
+   button` rule otherwise forces every button here to `width: 100%`,
+   stacking what this row means to lay out side by side. */
+.graph-annotation-context-menu .context-menu-nearby,
+.node-context-menu .context-menu-nearby {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.node-context-menu .context-menu-title {
+  font-size: 12px;
+  color: #999;
+  margin: 4px 12px 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #444;
+}
+
+.graph-annotation-context-menu .context-menu-nearby-button,
+.node-context-menu .context-menu-nearby-button {
+  flex: 1 1 auto;
+  width: auto;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .context-menu-nearby-button:hover,
+.node-context-menu .context-menu-nearby-button:hover {
+  border-color: #666;
+  background: #333;
+}

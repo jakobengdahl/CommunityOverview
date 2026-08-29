@@ -113,6 +113,10 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
     expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
+    // No regression from the "Nearby object menu" creation-time attachment
+    // entry point: today's plain one-click toolbox creation (no target
+    // anchor involved) must still produce an unattached annotation.
+    expect(text.data.attachment).toBeUndefined();
   });
 
   it('creates a frame annotation via the toolbox with a default box size', () => {
@@ -190,6 +194,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
+    // No regression: plain one-click creation with no nearby target produces
+    // an unattached icon, same as before the "Nearby object menu" entry point.
+    expect(icon.data.attachment).toBeUndefined();
   });
 
   it('creates the icon selected in the toolbox icon slot', () => {
@@ -216,6 +223,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(voteDot.data.value).toBe(1);
     expect(voteDot.style).toBeUndefined();
     expect(voteDot.data.size).toEqual({ w: 24, h: 24 });
+    expect(voteDot.data.attachment).toBeUndefined();
   });
 
   it('creates a label annotation via the toolbox', () => {
@@ -225,6 +233,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     const label = findCreatedNode('label');
     expect(label).toBeTruthy();
+    expect(label.data.attachment).toBeUndefined();
   });
 
   it('honours a host-provided label override for i18n', () => {

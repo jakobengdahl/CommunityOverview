@@ -251,3 +251,36 @@ describe('ArrowNode duplicate control', () => {
     expect(updated.find((n) => n.id === 'a1').data.locked).toBe(true);
   });
 });
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox's "Nearby object menu" contract entry point: an arrow/line
+// is one of the annotation kinds that can itself be the target this menu
+// creates a new attachable annotation near (computeDroppedAttachment's own
+// target candidacy excludes only `frame`/`group`, not `arrow`).
+describe('ArrowNode "Nearby object menu"', () => {
+  it("calls the context attachNearby with this arrow's id and the picked kind", () => {
+    const attachNearby = vi.fn();
+    const data = { dx: 100, dy: 0 };
+    hoisted.nodes = [{ id: 'a1', type: 'arrow', position: { x: 0, y: 0 }, data }];
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby,
+          labels: {
+            nearbyMenu: 'Add nearby',
+            nearbyLabel: 'Label',
+            nearbyIcon: 'Icon',
+            nearbyVoteDot: 'Vote dot',
+            nearbyText: 'Text',
+          },
+        }}
+      >
+        <ArrowNode id="a1" type="arrow" data={data} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    openMenu();
+    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
+    expect(attachNearby).toHaveBeenCalledWith('a1', 'label');
+  });
+});

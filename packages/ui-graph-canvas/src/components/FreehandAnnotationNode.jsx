@@ -12,6 +12,7 @@ import {
 import { isRemoteLocked, isAnnotationDraggable } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { NearbyObjectMenuSection } from './ContextMenus';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -85,7 +86,8 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const smoothing = data?.smoothing ?? 0;
   const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+    useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
@@ -353,6 +355,10 @@ function FreehandAnnotationNode({ id, data, selected }) {
                   labels={labels}
                   locked={data.locked}
                   onChangeLayer={changeLayer}
+                />
+                <NearbyObjectMenuSection
+                  labels={labels}
+                  onAttach={(kind) => attachNearby(id, kind)}
                 />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button type="button" className="context-menu-delete" onClick={remove}>
