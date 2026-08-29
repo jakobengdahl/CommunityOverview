@@ -410,4 +410,92 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     );
     expect(result.find((n) => n.id === 'n1').position).toEqual({ x: 50, y: 20 });
   });
+
+  // Regression test for the mirror-image gap left by PR #506: that PR fixed
+  // the JOIN case in this same handler (the round-trip test above) but the
+  // LEAVE branch - a member dropped from the group's membership, e.g. because
+  // a label/color edit was bundled with a membership shrink in the same
+  // autosave - still cleared parentId without converting the member's
+  // parent-relative position back to absolute. The op's group position
+  // deliberately differs from the seeded one (mirroring a group being
+  // dragged in the same autosave that shrank it) so this proves the fix uses
+  // the PRE-upsert group origin, not the one the op is about to apply.
+  it('un-displaces a member dropped by a remote upsert-group that shrinks membership', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[
+          {
+            action: 'upsert-group',
+            group: { id: 'grp', label: 'Team', position: { x: 500, y: 300 } },
+            members: ['n2'],
+          },
+        ]}
+      />
+    );
+    const seed = [
+      { id: 'grp', type: 'group', position: { x: 400, y: 300 } },
+      { id: 'n1', type: 'custom', parentId: 'grp', position: { x: 50, y: 20 } },
+      { id: 'n2', type: 'custom', parentId: 'grp', position: { x: 10, y: 10 } },
+    ];
+    const result = findResult(seed, (r) => r.find((n) => n.id === 'grp')?.data?.label === 'Team');
+    const dropped = result.find((n) => n.id === 'n1');
+    expect(dropped.parentId).toBeUndefined();
+    // 400+50, 300+20 - the PRIOR group origin (400, 300), not the new one
+    // (500, 300) the same op carries for the group that stayed.
+    expect(dropped.position).toEqual({ x: 450, y: 320 });
+    // The member that stayed is untouched by the leave-branch conversion.
+    expect(result.find((n) => n.id === 'n2').parentId).toBe('grp');
+  });
+
+  // Regression test: unlike the two upsert-group cases above, a remote
+  // group_membership_changed op did no position conversion in either
+  // direction at all - masked in the normal in-app drag gesture because the
+  // sender's own computeGroupPlacement already fixed the position and a
+  // separate position-sync op carried it, but any membership change that
+  // arrives without a paired position op (e.g. an MCP-driven membership
+  // update) would displace the member exactly like the restore bug PR #506
+  // fixed. This covers the JOIN direction.
+  it('un-displaces a member joining via a remote group_membership_changed op', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[{ action: 'membership', groupId: 'grp', members: ['a'] }]}
+      />
+    );
+    const seed = [
+      { id: 'grp', type: 'group', position: { x: 400, y: 300 } },
+      { id: 'a', type: 'custom', position: { x: 450, y: 320 } },
+    ];
+    const result = findResult(seed, (r) => r.find((n) => n.id === 'a')?.parentId === 'grp');
+    const joined = result.find((n) => n.id === 'a');
+    expect(joined.parentId).toBe('grp');
+    expect(joined.position).toEqual({ x: 50, y: 20 });
+  });
+
+  // Same gap, LEAVE direction: a member removed from op.members while still
+  // parented to the group must have its parent-relative position converted
+  // back to absolute when parentId is cleared.
+  it('un-displaces a member leaving via a remote group_membership_changed op', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteAnnotationOps={[{ action: 'membership', groupId: 'grp', members: [] }]}
+      />
+    );
+    const seed = [
+      { id: 'grp', type: 'group', position: { x: 400, y: 300 } },
+      { id: 'a', type: 'custom', parentId: 'grp', position: { x: 50, y: 20 } },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.some((n) => n.id === 'a') && r.find((n) => n.id === 'a').parentId === undefined
+    );
+    const left = result.find((n) => n.id === 'a');
+    expect(left.parentId).toBeUndefined();
+    expect(left.position).toEqual({ x: 450, y: 320 });
+  });
 });

@@ -2860,7 +2860,28 @@ function GraphCanvasInner({
                   extent: undefined,
                 };
               }
-              if (n.parentId === g.id) return { ...n, parentId: undefined };
+              if (n.parentId === g.id) {
+                // The inverse of the join case just above: a member dropped
+                // from the group (present here, absent from `members`) keeps
+                // its parent-relative position but loses its parentId, so it
+                // must be converted back to absolute — the same transform
+                // removeGroupKeepChildren (GroupNode.jsx) applies on delete.
+                // Use the group's position from BEFORE this upsert (priorById),
+                // since the member's stored position is relative to that
+                // origin, not to a position bundled into the same op (e.g. the
+                // group being dragged in the same autosave that shrank it).
+                const priorGroup = priorById.get(g.id);
+                const groupPos = priorGroup?.position || groupNode.position;
+                return {
+                  ...n,
+                  parentId: undefined,
+                  position: {
+                    x: n.position.x + (groupPos.x || 0),
+                    y: n.position.y + (groupPos.y || 0),
+                  },
+                  extent: undefined,
+                };
+              }
               return n;
             })
           );
@@ -2886,12 +2907,48 @@ function GraphCanvasInner({
         // nothing is lost by not replaying this one.
         const members = new Set(op.members || []);
         setNodes((nds) => {
-          if (!nds.some((n) => n.id === op.groupId)) return nds;
+          const groupNode = nds.find((n) => n.id === op.groupId);
+          if (!groupNode) return nds;
+          // Unlike upsert-group, this op never touches the group's own
+          // properties — only membership — so there is no before/after
+          // group-position split to worry about: `groupNode` here is the
+          // right origin for both directions of the conversion below, the
+          // same computeGroupPlacement pattern the local drag path and the
+          // upsert-group branch above both use.
+          const priorById = new Map(nds.map((n) => [n.id, n]));
           return reorderNodesForParentChild(
             nds.map((n) => {
               if (n.type === 'group') return n;
-              if (members.has(n.id)) return { ...n, parentId: op.groupId };
-              if (n.parentId === op.groupId) return { ...n, parentId: undefined };
+              if (members.has(n.id)) {
+                if (n.parentId === op.groupId) return n;
+                const priorParent = n.parentId ? priorById.get(n.parentId) : null;
+                const absPos = priorParent
+                  ? {
+                      x: n.position.x + (priorParent.position?.x || 0),
+                      y: n.position.y + (priorParent.position?.y || 0),
+                    }
+                  : n.position;
+                return {
+                  ...n,
+                  parentId: op.groupId,
+                  position: {
+                    x: absPos.x - groupNode.position.x,
+                    y: absPos.y - groupNode.position.y,
+                  },
+                  extent: undefined,
+                };
+              }
+              if (n.parentId === op.groupId) {
+                return {
+                  ...n,
+                  parentId: undefined,
+                  position: {
+                    x: n.position.x + groupNode.position.x,
+                    y: n.position.y + groupNode.position.y,
+                  },
+                  extent: undefined,
+                };
+              }
               return n;
             })
           );
