@@ -55,7 +55,7 @@ const ANNOTATIONS_TO_RESTORE = [
   { id: 'label-1', kind: 'label', position: { x: 20, y: 20 }, text: 'a label' },
   // Generic v1 annotation type (docs/ANNOTATION_CONTRACT.md), rendered through
   // GenericAnnotationNode rather than dedicated per-type UX.
-  { id: 'frame-1', kind: 'frame', position: { x: 30, y: 30 }, color: '#fff' },
+  { id: 'shape-1', kind: 'shape', position: { x: 30, y: 30 }, shape: 'rectangle' },
 ];
 
 const manualNodeIds = () => new Set(store.nodes.map((n) => n.id));
@@ -64,7 +64,7 @@ const expectOverlaysPresent = () => {
   expect(ids.has('g1')).toBe(true);
   expect(ids.has('note-1')).toBe(true);
   expect(ids.has('label-1')).toBe(true);
-  expect(ids.has('frame-1')).toBe(true);
+  expect(ids.has('shape-1')).toBe(true);
 };
 
 describe('GraphCanvas preserves groups and annotations across an in-place node edit', () => {
@@ -136,6 +136,6 @@ describe('GraphCanvas preserves groups and annotations across an in-place node e
     expect(ids.has('g1')).toBe(false);
     expect(ids.has('note-1')).toBe(false);
     expect(ids.has('label-1')).toBe(false);
-    expect(ids.has('frame-1')).toBe(false);
+    expect(ids.has('shape-1')).toBe(false);
   });
 });

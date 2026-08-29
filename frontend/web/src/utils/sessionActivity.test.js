@@ -345,7 +345,6 @@ describe('describeActivity', () => {
       { name: 'text', ann: serverAnnotation('text', { text: 'hi' }) },
       { name: 'icon', ann: serverAnnotation('icon', { icon: 'star' }) },
       { name: 'vote_dot', ann: serverAnnotation('vote_dot') },
-      { name: 'frame', ann: serverAnnotation('frame') },
       { name: 'note', ann: serverAnnotation('note', { text: 'hi' }) },
     ];
 
@@ -462,7 +461,7 @@ describe('describeActivity', () => {
     it('still reports an agent resizing a dimension down to zero', () => {
       // build_annotation_patch accepts w=0; only MCP can reach this, since the
       // canvas resizer has a minimum.
-      const before = serverAnnotation('frame');
+      const before = serverAnnotation('shape');
       before.geometry = { x: 10, y: 20, w: 800, h: 400, rotation: 0 };
       const after = { ...before, geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
@@ -735,10 +734,10 @@ describe('describeActivity', () => {
     });
 
     it('still reports an agent resizing a kind whose overlay carries its size', () => {
-      // A frame's overlay preserves w/h, so 0 -> 160x96 there can only be an
+      // A shape's overlay preserves w/h, so 0 -> 160x96 there can only be an
       // agent resize. A guard keyed on the value rather than the round trip
       // swallowed exactly this.
-      const before = serverAnn('frame');
+      const before = serverAnn('shape');
       const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_resized'

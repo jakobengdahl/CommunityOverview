@@ -30,7 +30,6 @@ class TestTypeResolution:
             "text",
             "label",
             "line",
-            "frame",
             "shape",
             "icon",
             "vote_dot",
@@ -91,7 +90,7 @@ class TestBuildAnnotation:
         assert "id" not in annotation
 
     def test_w_h_populate_geometry_and_size(self):
-        annotation = build_annotation(type="frame", x=0, y=0, w=200, h=100)
+        annotation = build_annotation(type="shape", x=0, y=0, w=200, h=100)
         assert annotation["geometry"]["w"] == 200
         assert annotation["geometry"]["h"] == 100
         assert annotation["size"] == {"w": 200, "h": 100}
@@ -225,11 +224,11 @@ class TestBuildAnnotationContentValidation:
             )
 
     def test_attachment_on_a_non_attachable_type_is_not_validated(self):
-        """`frame`/`shape`/`group` never attach (docs/ANNOTATION_CONTRACT.md);
-        an `attachment`-named field on one of them is just an ordinary
+        """`shape`/`group` never attach (docs/ANNOTATION_CONTRACT.md); an
+        `attachment`-named field on one of them is just an ordinary
         free-form content field, not a payload this layer interprets."""
         annotation = build_annotation(
-            type="frame", x=0, y=0, content={"attachment": "not-even-an-object"}
+            type="shape", x=0, y=0, content={"attachment": "not-even-an-object"}
         )
         assert annotation["attachment"] == "not-even-an-object"
 

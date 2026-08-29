@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   ANNOTATION_SCHEMA_VERSION,
   ANNOTATION_SHAPES,
@@ -365,5 +365,31 @@ describe('annotationModel contract v1', () => {
       applyAnnotationOperation(doc, { type: 'update', id: 'missing', patch: { text: 'x' } })
     ).toThrow(/Annotation not found/);
     expect(doc.annotations[0].text).toBe('safe');
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` was a real,
+  // recognised type until this task retired it in favour of `shape` with a
+  // transparent fill. A session written before this task can still hold a
+  // stored `frame`-kind annotation, and it must degrade quietly — skipped,
+  // not thrown — the same guarantee task-annotation-tolerate-unexpected-data
+  // built for any other kind this version does not recognise. Explicit
+  // rather than assumed: `createAnnotation` throwing for an unknown type is
+  // exactly what makes this work, so this pins that `frame` actually takes
+  // that path rather than having quietly been left in TYPE_SET.
+  it('skips a stored `frame` annotation (retired into `shape`) rather than throwing', () => {
+    expect(() => createAnnotation({ id: 'f-1', type: 'frame' })).toThrow(
+      /Unsupported annotation type: frame/
+    );
+    const onSkipped = vi.fn();
+    const doc = normalizeAnnotationDocument(
+      [
+        { id: 'f-1', type: 'frame', position: { x: 0, y: 0 } },
+        { id: 'note-1', type: 'note', text: 'survives' },
+      ],
+      { onSkipped }
+    );
+    expect(doc.annotations.map((a) => a.id)).toEqual(['note-1']);
+    expect(onSkipped).toHaveBeenCalledTimes(1);
+    expect(onSkipped.mock.calls[0][0]).toMatchObject({ id: 'f-1', type: 'frame' });
   });
 });

@@ -1243,7 +1243,7 @@ describe('NearbyObjectMenuSection', () => {
     nearbyText: 'Text',
   };
 
-  it('renders nothing when onAttach is absent (e.g. a `frame` annotation, excluded from attachment-target candidacy)', () => {
+  it('renders nothing when onAttach is absent', () => {
     const { container } = render(
       <NearbyObjectMenuSection labels={shortLabels} onAttach={undefined} />
     );

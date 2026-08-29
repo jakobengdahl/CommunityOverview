@@ -256,7 +256,9 @@ describe('ArrowNode duplicate control', () => {
 // bottom-toolbox's "Nearby object menu" contract entry point: an arrow/line
 // can never be a valid attach target — `findSnapTarget` (the mechanism
 // `computeDroppedAttachment` and this menu both mirror) unconditionally
-// excludes `type === 'arrow'` alongside `frame`/`group`, and the
+// excludes `type === 'arrow'` alongside `group` (the retired `frame` kind
+// used to be excluded here too — task-annotation-merge-frame-into-shape-
+// rectangle folded it into `shape`, which is not excluded), and the
 // attachment-follow effect never builds a centre for an arrow, so an
 // attachment onto one would never resolve a position. ArrowNode's own
 // context menu therefore must not offer the section at all.
