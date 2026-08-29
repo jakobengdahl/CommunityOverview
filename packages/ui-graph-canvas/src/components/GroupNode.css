@@ -88,13 +88,23 @@
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  border: 2px solid transparent;
+  /* A resting border, not just transparent, so a dark swatch stays
+     distinguishable against this menu's own dark background (#2a2a2a above)
+     instead of nearly disappearing until hovered — matches
+     .graph-annotation-context-menu .color-button (NoteNode.css). */
+  border: 2px solid rgba(255, 255, 255, 0.3);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .graph-group-context-menu .color-button:hover {
   transform: scale(1.1);
+  border-color: white;
+}
+
+/* Marks which swatch is the group's current colour, mirroring
+   .graph-annotation-context-menu .color-button.active (NoteNode.css). */
+.graph-group-context-menu .color-button.active {
   border-color: white;
 }
 

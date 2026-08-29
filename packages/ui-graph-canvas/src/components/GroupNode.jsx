@@ -316,12 +316,12 @@ function GroupNode({ id, data, selected }) {
               <>
                 <div className="context-menu-title">Group Color</div>
                 <div className="context-menu-colors">
-                  {colors.map((color) => (
+                  {colors.map((c) => (
                     <button
-                      key={color}
-                      className="color-button"
-                      style={{ backgroundColor: color }}
-                      onClick={() => handleChangeColor(color)}
+                      key={c}
+                      className={`color-button${(data.color || '#646cff') === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      onClick={() => handleChangeColor(c)}
                     />
                   ))}
                 </div>
