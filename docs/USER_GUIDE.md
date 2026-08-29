@@ -712,11 +712,11 @@ change the schema — editing the metamodel is not part of the open-source core.
 
 #### Language
 
-Switch between **English** and **Svenska**. The change takes effect immediately and
-applies to all UI labels and chat placeholders.
+The UI is temporarily English-only; the language switcher is not shown in
+Settings while this is in effect.
 
 The AI assistant always responds in the language you write in, regardless of the
-UI language setting.
+UI language.
 
 #### Admin
 

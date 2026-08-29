@@ -41,7 +41,7 @@ This system helps organizations avoid overlapping investments by making visible:
 
 *Operations & deployment*
 - **Runs without LLM keys:** Graph API and MCP server work without any API key; AI chat is simply hidden
-- **Multi-language:** English and Swedish UI, selectable via URL, startup flag, or schema config
+- **Multi-language architecture:** English and Swedish translations, with a `?lang`/startup-flag/schema-config switching mechanism; the UI is currently locked to English (see below)
 - **Authentication:** Basic Auth for all endpoints or MCP-only (for Cloud Run + IAP setups)
 - **Profile system:** Run with different metadata models, AI prompts, and seed data per deployment profile
 - **Data management:** Example datasets with easy loading from local files or URLs
@@ -232,6 +232,10 @@ export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
 # Start with data from a URL
 ./start-dev.sh --data https://example.github.io/data/graph.json
 ```
+
+> **Note:** `--lang sv` / `?lang=sv` currently has no effect — the UI is
+> temporarily locked to English (see [docs/USER_GUIDE.md](./docs/USER_GUIDE.md#language)).
+> The Swedish translations and the switching mechanism are unchanged underneath.
 
 The script will:
 - Check for and set up active graph data (copies example data on first run)
