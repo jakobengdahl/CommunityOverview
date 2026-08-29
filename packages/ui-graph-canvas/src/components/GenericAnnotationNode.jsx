@@ -18,6 +18,7 @@ import {
   isAnnotationDraggable,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { useEditableText } from '../hooks/useEditableText';
 import './GenericAnnotationNode.css';
 
@@ -504,6 +505,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   };
 
   const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
 
   const changeRotation = (deg) => {
     if (remoteLocked) {
@@ -528,10 +530,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('delete');
   };
 
-  // The only action a locked annotation's context menu offers (besides the
-  // capability baseline's "copy", which has no GUI action yet at all) —
-  // everything else (colour/rotation/shape/font-size/delete) stays out of
-  // reach while `locked` is set, matching resize/drag already refusing it.
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate —
+  // colour/rotation/shape/font-size/delete stay out of reach while `locked`
+  // is set, matching resize/drag already refusing it.
   const unlock = () => {
     if (remoteLocked) {
       setContextMenu(null);
@@ -651,6 +653,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onChangeFont={changeFont}
       onDelete={remove}
       onUnlock={unlock}
+      onDuplicate={duplicate}
     />
   );
 
@@ -903,8 +906,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // The right-click property editor's portal content, split out only so the
 // six kind branches above can each attach it without repeating its JSX.
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
-// layer row last before Delete, matching the note/label/line/freehand
-// menus. The
+// layer row then duplicate then Delete, matching the note/label/line/
+// freehand menus. The
 // colour swatches show for COLORABLE_KINDS, the nine-position alignment grid,
 // font-size picker and curated font-family picker
 // (task-annotation-text-alignment-and-font) for EDITABLE_TEXT_KINDS (`text`,
@@ -912,7 +915,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // grid only for `kind === 'icon'`, and the value stepper only for
 // `kind === 'vote_dot'`. A locked annotation gets none of them — the
 // capability baseline is "a locked object remains selectable but offers only
-// unlock or copy" — so this shows only the unlock action instead.
+// unlock or copy" — so this shows only the unlock and duplicate actions
+// instead.
 function ContextMenuPortal({
   menuRef,
   position,
@@ -938,6 +942,7 @@ function ContextMenuPortal({
   onChangeFont,
   onDelete,
   onUnlock,
+  onDuplicate,
 }) {
   if (locked) {
     return createPortal(
@@ -949,6 +954,7 @@ function ContextMenuPortal({
         <button type="button" className="context-menu-unlock" onClick={onUnlock}>
           🔓 {labels.unlock}
         </button>
+        <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       </div>,
       document.body
     );
@@ -1135,6 +1141,7 @@ function ContextMenuPortal({
         </button>
       </div>
       <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
+      <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}
       </button>

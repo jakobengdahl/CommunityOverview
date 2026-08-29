@@ -3,10 +3,10 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import LabelNode from '../src/components/LabelNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
 
 vi.mock('reactflow', () => ({
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
 
 // task-annotation-render-direct-manipulation: a right-click rotation control
@@ -228,16 +228,20 @@ describe('LabelNode colour defaults', () => {
 describe('LabelNode locked context menu', () => {
   beforeEach(() => hoisted.setNodes.mockClear());
 
-  it('shows only an unlock action for a locked label, hiding colour/size/rotation/delete', () => {
+  it('shows unlock and duplicate for a locked label, hiding colour/size/rotation/delete', () => {
     render(
       <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', labelPlaceholder: 'Label' } }}
+        value={{
+          notifyChange: vi.fn(),
+          labels: { unlock: 'Unlock', duplicate: 'Duplicate', labelPlaceholder: 'Label' },
+        }}
       >
         <LabelNode id="l1" data={{ locked: true }} selected={false} />
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByText('Label'));
     expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
     expect(screen.queryByText(/Delete/)).toBeNull();
   });
@@ -264,6 +268,60 @@ describe('LabelNode locked context menu', () => {
     render(<LabelNode id="l1" data={{ locked: false }} selected={false} />);
     fireEvent.contextMenu(screen.getByText('Label'));
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox: duplication was MCP-only (`duplicate_annotation`) with no
+// GUI action anywhere. See annotationDuplicateWiring.test.jsx for the
+// shared-hook wiring pinned across every kind; this pins LabelNode's own.
+describe('LabelNode duplicate control', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it('creates a new, offset label and leaves the original untouched', () => {
+    const source = {
+      id: 'l1',
+      type: 'label',
+      position: { x: 5, y: 5 },
+      data: { text: 'a label', color: '#e6edf3' },
+    };
+    hoisted.nodes = [source];
+    render(<LabelNode id="l1" data={source.data} selected={false} />);
+    fireEvent.contextMenu(screen.getByText('a label'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    expect(updated).toHaveLength(2);
+    const [original, copy] = updated;
+    expect(original).toBe(source);
+    expect(copy.id).not.toBe('l1');
+    expect(copy.data.text).toBe('a label');
+    expect(copy.position).not.toEqual(source.position);
+    expect(copy.data.locked).toBe(false);
+  });
+
+  it('duplicates a locked label into an unlocked copy, and leaves the source locked', () => {
+    const source = { id: 'l1', type: 'label', position: { x: 0, y: 0 }, data: { locked: true } };
+    hoisted.nodes = [source];
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          labels: { unlock: 'Unlock', duplicate: 'Duplicate', labelPlaceholder: 'Label' },
+        }}
+      >
+        <LabelNode id="l1" data={source.data} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('Label'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'l1');
+    expect(copy.data.locked).toBe(false);
+    expect(updated.find((n) => n.id === 'l1').data.locked).toBe(true);
   });
 });

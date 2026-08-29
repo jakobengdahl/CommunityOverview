@@ -9,6 +9,7 @@ import {
   isAnnotationDraggable,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { useEditableText } from '../hooks/useEditableText';
 import './LabelNode.css';
 
@@ -31,6 +32,7 @@ function LabelNode({ id, data, selected }) {
   // this label's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
   const locked = Boolean(data?.locked);
   // A single-line `<input>` commits on Enter too, unlike NoteNode/
   // GenericAnnotationNode's `<textarea>` which leaves Enter alone to insert
@@ -103,10 +105,11 @@ function LabelNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
-  // The only action a locked label's context menu offers (besides the
-  // capability baseline's "copy", which has no GUI action yet at all) —
-  // everything else (colour/size/rotation/delete) stays out of reach while
-  // `locked` is set, matching resize/drag already refusing it.
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate (rendered via
+  // AnnotationDuplicateControl below, in both the locked and unlocked
+  // branches) — colour/size/rotation/delete stay out of reach while `locked`
+  // is set, matching resize/drag already refusing it.
   const unlock = () => {
     if (remoteLocked) {
       setContextMenu(null);
@@ -181,14 +184,17 @@ function LabelNode({ id, data, selected }) {
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
-              // The only action a locked label's context menu offers
-              // (besides the capability baseline's "copy", which has no GUI
-              // action yet at all) — everything else stays out of reach
-              // while `locked` is set, matching resize/drag already refusing
-              // it.
-              <button type="button" className="context-menu-unlock" onClick={unlock}>
-                🔓 {labels.unlock}
-              </button>
+              // The capability baseline's two actions for a locked object:
+              // unlock, and duplicate (a duplicate never mutates the locked
+              // source, so locking does not withhold it) — everything else
+              // stays out of reach while `locked` is set, matching
+              // resize/drag already refusing it.
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
             ) : (
               <>
                 <div className="context-menu-title">{labels.color}</div>
@@ -247,6 +253,7 @@ function LabelNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

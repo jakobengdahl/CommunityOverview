@@ -11,6 +11,7 @@ import {
 } from '../utils/freehandPath';
 import { isRemoteLocked, isAnnotationDraggable } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -87,6 +88,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
   const { setNodes } = useReactFlow();
   // Another client's live selection claim (task-annotation-shared-session-
   // realtime): dragging is already refused centrally via `draggable`
@@ -150,11 +152,11 @@ function FreehandAnnotationNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
-  // The only action a locked stroke's context menu offers (besides the
-  // capability baseline's "copy", which has no GUI action yet at all) —
-  // everything else (colour/width/smoothing/opacity/delete) stays out of
-  // reach while `locked` is set, matching NoteNode/LabelNode/
-  // GenericAnnotationNode's context menus.
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate —
+  // colour/width/smoothing/opacity/delete stay out of reach while `locked`
+  // is set, matching NoteNode/LabelNode/GenericAnnotationNode's context
+  // menus.
   const unlock = () => {
     if (remoteLocked) {
       setContextMenu(null);
@@ -283,14 +285,16 @@ function FreehandAnnotationNode({ id, data, selected }) {
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
-              // The only action a locked stroke's context menu offers
-              // (besides the capability baseline's "copy", which has no GUI
-              // action yet at all) — everything else stays out of reach
+              // The capability baseline's two actions for a locked object:
+              // unlock, and duplicate — everything else stays out of reach
               // while `locked` is set, matching the pattern established in
               // NoteNode/LabelNode/GenericAnnotationNode.
-              <button type="button" className="context-menu-unlock" onClick={unlock}>
-                🔓 {labels.unlock}
-              </button>
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
             ) : (
               <>
                 <div className="context-menu-title">{labels.freehandColor}</div>
@@ -350,6 +354,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button type="button" className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

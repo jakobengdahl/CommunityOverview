@@ -768,11 +768,16 @@ describe('GenericAnnotationNode locked context menu', () => {
   });
 
   it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
-    'shows only an unlock action for a locked %s, hiding rotation/shape/delete',
+    'shows unlock and duplicate for a locked %s, hiding rotation/shape/delete',
     (kind) => {
       const data = { locked: true, text: 'x', icon: 'flag', image: {}, value: 1 };
       const { container } = render(
-        <AnnotationContext.Provider value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock' } }}>
+        <AnnotationContext.Provider
+          value={{
+            notifyChange: vi.fn(),
+            labels: { unlock: 'Unlock', duplicate: 'Duplicate' },
+          }}
+        >
           <GenericAnnotationNode id="n1" type={kind} data={data} selected />
         </AnnotationContext.Provider>
       );
@@ -782,6 +787,7 @@ describe('GenericAnnotationNode locked context menu', () => {
           : container.querySelector(`.kind-${kind}`);
       fireEvent.contextMenu(root);
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
+      expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
       expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
       expect(screen.queryByLabelText('circle')).toBeNull();
       expect(screen.queryByText(/Delete/)).toBeNull();
@@ -807,6 +813,7 @@ describe('GenericAnnotationNode locked context menu', () => {
     render(<GenericAnnotationNode id="f1" type="frame" data={{ locked: false }} selected />);
     fireEvent.contextMenu(document.querySelector('.kind-frame'));
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
   });
 
@@ -815,6 +822,76 @@ describe('GenericAnnotationNode locked context menu', () => {
   it('keeps resize handles hidden for a locked, selected frame', () => {
     render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox: duplication was MCP-only (`duplicate_annotation`) with no
+// GUI action anywhere. See annotationDuplicateWiring.test.jsx for the
+// shared-hook wiring pinned across every kind; this pins the six generic
+// kinds' own (GenericAnnotationNode.test.jsx's own convention, same as
+// "layer controls" above).
+describe('GenericAnnotationNode duplicate control', () => {
+  beforeEach(() => {
+    hoisted.setNodes.mockClear();
+    hoisted.nodes = [];
+  });
+
+  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+    'duplicates a %s into a new, offset, unlocked copy and leaves the original untouched',
+    (kind) => {
+      const data = { text: 'x', icon: 'flag', color: '#94a3b8', value: 1 };
+      const source = { id: 'n1', type: kind, position: { x: 10, y: 10 }, data };
+      hoisted.nodes = [source];
+      const { container } = render(<GenericAnnotationNode id="n1" type={kind} data={data} />);
+      const root =
+        kind === 'shape'
+          ? screen.getByTestId('shape-halo')
+          : container.querySelector(`.kind-${kind}`);
+      fireEvent.contextMenu(root);
+      fireEvent.click(screen.getByText(/Duplicate/));
+      const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+      expect(updated).toHaveLength(2);
+      const [original, copy] = updated;
+      expect(original).toBe(source);
+      expect(copy.id).not.toBe('n1');
+      expect(copy.type).toBe(kind);
+      expect(copy.position).not.toEqual(source.position);
+      expect(copy.data.locked).toBe(false);
+    }
+  );
+
+  it('duplicates a locked annotation into an unlocked copy, and leaves the source locked', () => {
+    const data = { locked: true, text: 'x' };
+    const source = { id: 'f1', type: 'frame', position: { x: 0, y: 0 }, data };
+    hoisted.nodes = [source];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', duplicate: 'Duplicate' } }}
+      >
+        <GenericAnnotationNode id="f1" type="frame" data={data} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'f1');
+    expect(copy.data.locked).toBe(false);
+    expect(updated.find((n) => n.id === 'f1').data.locked).toBe(true);
+  });
+
+  it('publishes the duplicate as a create', () => {
+    const notifyChange = vi.fn();
+    const data = { text: 'x' };
+    hoisted.nodes = [{ id: 'n1', type: 'text', position: { x: 0, y: 0 }, data }];
+    render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { duplicate: 'Duplicate' } }}>
+        <GenericAnnotationNode id="n1" type="text" data={data} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(document.querySelector('.kind-text'));
+    fireEvent.click(screen.getByText(/Duplicate/));
+    expect(notifyChange).toHaveBeenCalledWith('create');
   });
 });
 

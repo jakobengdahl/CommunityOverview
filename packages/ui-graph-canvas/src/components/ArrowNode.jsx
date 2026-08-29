@@ -4,6 +4,7 @@ import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
 import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import './ArrowNode.css';
 
 /**
@@ -52,6 +53,7 @@ function ArrowNode({ id, data, selected }) {
   // this arrow's lease exclusive (task-annotation-shared-session-realtime).
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -118,13 +120,12 @@ function ArrowNode({ id, data, selected }) {
     notifyChange('delete');
   };
 
-  // The only action a locked line's context menu offers (besides the
-  // capability baseline's "copy", which has no GUI action yet at all) —
-  // matching NoteNode/LabelNode/GenericAnnotationNode/FreehandAnnotationNode,
-  // which have had this branch all along. Until this existed a locked line
-  // was the one annotation kind whose menu still recoloured, toggled
-  // arrowheads and deleted, and the one with no way to unlock from the GUI
-  // at all.
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate — matching
+  // NoteNode/LabelNode/GenericAnnotationNode/FreehandAnnotationNode, which
+  // have had this branch all along. Until this existed a locked line was the
+  // one annotation kind whose menu still recoloured, toggled arrowheads and
+  // deleted, and the one with no way to unlock from the GUI at all.
   const unlock = () => {
     if (remoteLocked) {
       setContextMenu(null);
@@ -336,9 +337,12 @@ function ArrowNode({ id, data, selected }) {
             style={{ left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
-              <button type="button" className="context-menu-unlock" onClick={unlock}>
-                🔓 {labels.unlock}
-              </button>
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
             ) : (
               <>
                 <div className="context-menu-title">{labels.color}</div>
@@ -365,6 +369,7 @@ function ArrowNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
                 </button>

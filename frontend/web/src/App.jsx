@@ -2414,6 +2414,7 @@ function App() {
             annotationColor: t('context_menu.annotation_color'),
             deleteAnnotation: t('context_menu.delete'),
             unlockAnnotation: t('context_menu.annotation_unlock'),
+            duplicateAnnotation: t('context_menu.annotation_duplicate'),
             notePlaceholder: t('context_menu.note_placeholder'),
             labelPlaceholder: t('context_menu.label_placeholder'),
             annotationTextSize: t('context_menu.annotation_text_size'),
