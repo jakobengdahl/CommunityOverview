@@ -25,7 +25,9 @@ import ReactFlow, { ReactFlowProvider } from 'reactflow';
 // ever reaching ReactFlow.
 describe('a node with a parentId naming a missing group (real reactflow)', () => {
   it('crashes ReactFlow - reproducing the bug this fix guards against', () => {
-    const nodes = [{ id: 'n1', position: { x: 0, y: 0 }, data: { label: 'N1' }, parentId: 'grp-missing' }];
+    const nodes = [
+      { id: 'n1', position: { x: 0, y: 0 }, data: { label: 'N1' }, parentId: 'grp-missing' },
+    ];
     let caught = null;
     try {
       render(
