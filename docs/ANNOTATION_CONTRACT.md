@@ -591,6 +591,88 @@ a genuine, still-open product decision, tracked on
 here. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
+### Two-client conflict matrix
+
+PR #443 covers the mid-drag "claim lands mid-gesture" race and the per-kind
+mutation guards (every generic annotation component refuses a local mutation
+while `isRemoteLocked(data)` is true); PR #451 covers server-side claim
+enforcement for one client at a time. Neither documents what actually happens
+when **two real clients** touch the **same** annotation at close to the same
+moment. This section does, backed by two-real-client tests against the actual
+`SessionManager.apply_ops` path — not just a call into the `ClaimMap` helper
+in isolation — in `backend/core/tests/test_session_manager.py`'s
+`TestConflictMatrixTwoClients`.
+
+**The mechanism the matrix rests on.** Two facts, each already documented
+elsewhere in this file, combine into a property that is not obvious from
+either alone:
+
+1. The browser always re-sends the **whole** annotation object on every
+   publish — text, geometry, style and all — never a per-field delta
+   (`sessionSyncClient.js`'s `diffState`/`syncState`; already noted above for
+   images, but it is true of every field on every kind).
+2. `SessionStore.apply_state_op`'s `annotation_updated` handler applies an
+   incoming write as `target.update(incoming)` — a shallow, **top-level**
+   merge of whatever keys `incoming` happens to carry.
+
+Combined: an `annotation_updated` op is not "patch this one field" so much as
+"replace every top-level key my own local copy currently holds" — and a
+client's local copy is only ever as fresh as the last remote op it has
+actually received. Two clients editing genuinely *different* fields of the
+same annotation therefore do **not** safely merge the way the mechanism might
+suggest at a glance: whichever op lands second overwrites every top-level key
+its sender's local copy held at commit time, including one the *other* client
+changed in the meantime and this client hasn't caught up on yet. This is
+whole-annotation last-write-wins, not field-level last-write-wins — a real,
+verified property, not a guess, and surprising enough relative to "merges
+rather than replaces" (this file's own words for the same code, describing a
+different scenario — a single client's own successive writes, where it is
+true) that it is called out here explicitly rather than left to be inferred.
+**This is a documented finding of this slice, not a bug fixed by it**: fixing
+it would mean moving to per-field patches, a bigger design change out of this
+slice's scope — see this section's closing paragraph.
+
+**The matrix.** Rows are what two clients (A writes first; B is the second
+writer, arriving after A) attempt on the same annotation — same mutation
+category on both sides (e.g. both edit text) or a different one (e.g. A edits
+text, B edits geometry); columns are whether a live selection claim is held by
+A when B's op arrives. Verified for `shape` as the representative generic kind
+(`TestConflictMatrixTwoClients`);
+the claim check itself (`_claimed_annotation_target`,
+`session_manager.py`) is keyed only on annotation `id`, never on `type`, so
+the claimed columns hold identically for every v1 kind — the per-kind audit
+below confirms this for the other five generic kinds plus `note`.
+
+| A's edit | B's edit (no claim held by A) | Outcome, no claim | B's edit (A holds the claim) | Outcome, A claims |
+|---|---|---|---|---|
+| text | text (same field) | Accepted — B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_claim_second_writer_wins`) | text | 409 `ClaimConflict`; A's edit stands (`TestClaimEnforcement.test_non_holder_update_is_rejected`) |
+| text | geometry (different field) | Accepted, but B's write silently **clobbers A's text** back to whatever B's stale local copy held — the documented finding above (`test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit`) | geometry | 409 `ClaimConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a claimed annotation (`test_claim_blocks_a_different_field_edit_too_not_only_same_field`) |
+| (any) | style | Accepted, same whole-document LWW as the text/text row — an unrelated style write can clobber a concurrent edit the same way | style | 409 `ClaimConflict` (`test_non_holder_style_edit_is_rejected_while_claimed`) |
+| (any) | lock toggle | Accepted, same mechanism — `locked` is an ordinary field on an `annotation_updated` op, not a separate op type | lock toggle | 409 `ClaimConflict` (`test_non_holder_lock_toggle_is_rejected_while_claimed`) — a non-holder cannot lock out from under the claim holder either |
+| (any) | delete | Accepted — the annotation is gone; no field survives to clobber | delete | 409 `ClaimConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_claimed`, mirroring the existing `note` case) |
+
+Reading the matrix: the **claimed** column is the safe one for every row —
+holding the claim protects every field of the annotation, not merely the one
+the holder itself is editing, because the check is per-annotation-id, not
+per-field. The **unclaimed** column is whole-document last-write-wins for
+every row, including the different-field (text/geometry) row where that is
+easy to mis-read as a safe merge. In practice that unclaimed race is narrow — a
+remote op is folded into a connected client's own baseline as soon as its SSE
+delivery arrives (typically well under the round trip a human drag/keystroke
+takes), so the window is bounded by network latency, not by anything in this
+document's control — but it is real, not eliminated, and this section exists
+so nobody has to rediscover it under a poor network to learn it.
+
+**What this does not change.** No code changed to produce this section —
+only tests and documentation. The clobber case is a property of the existing
+whole-annotation-resend/shallow-merge design (both already shipped, both
+individually reasonable), not a regression this slice introduces or should
+quietly patch. Closing it for real would mean per-field patch ops instead of
+whole-annotation resends — a bigger design change, and a decision for the
+project owner, not something to guess at inside a documentation-and-test
+slice. It is recorded here, and in this PR's body, as a finding rather than
+fixed.
+
 ## Attachment and detach behavior
 
 - `label`/`callout`, `icon` and `text`/heading annotations may
@@ -1294,7 +1376,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ⬜ |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⬜ no formal pass yet |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)) | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered, including a whole-document-last-write-wins finding for concurrent different-field edits when neither side holds the claim; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | — |
 
 ## Downstream closure rule
 
