@@ -207,6 +207,19 @@ describe('LabelNode colour defaults', () => {
     expect(active.className).toContain('active');
     expect(inactive.className).not.toContain('active');
   });
+
+  // The neutral fallback (DEFAULT_LABEL_COLOR) is deliberately not one of the
+  // selectable LABEL_COLORS swatches (see the 'uses a neutral fallback
+  // colour' test above), so a never-recoloured label has no swatch that
+  // matches its current colour -- correctly, none should show as active.
+  it('marks no swatch as active when the label still uses the neutral fallback colour', () => {
+    render(<LabelNode id="l1" data={{ text: 'Label text' }} selected={false} />);
+    fireEvent.contextMenu(screen.getByText('Label text'));
+
+    const buttons = [...document.querySelectorAll('.color-button')];
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((b) => !b.className.includes('active'))).toBe(true);
+  });
 });
 
 // smallfix-annotation-context-menus-ignore-lock: the accepted capability
