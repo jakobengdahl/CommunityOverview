@@ -59,7 +59,19 @@ export const VOTE_DOT_INTRINSIC_SIZE = { w: 24, h: 24 };
 // (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
 // attaches per-endpoint (`start`/`end`) instead, via its own mechanism
 // (startAnchor/endAnchor below), not this field.
-export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_dot']);
+//
+// `vote_dot` used to be a member of this set. task-annotation-vote-dot-
+// simplify removed it: a vote dot is now a plain coloured dot with no
+// attachment behaviour of its own — it never snaps to or follows a target,
+// and lives entirely on its own once dropped. No migration was written for a
+// vote_dot already stored with an `attachment` field (nobody used the
+// annotation feature yet — the same 2026-08-25 owner direction
+// task-annotation-tolerate-unexpected-data's docstring cites); it is simply
+// never read as one, since every reader of this set (GraphCanvas.jsx's
+// drop-to-attach and attachment-follow effects, `computeDroppedAttachment`'s
+// callers) is keyed on membership here, not on whether the field happens to
+// be present.
+export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
 
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
@@ -87,7 +99,15 @@ const GENERIC_OVERLAY_FIELDS = {
   // kind's empty-string default rather than an absent field.
   shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font'],
   icon: ['icon', 'color', 'attachment'],
-  vote_dot: ['value', 'color', 'attachment'],
+  // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
+  // no `value` (the number it used to render and the stepper that changed
+  // it are both gone) and no `attachment` (it is not in
+  // ATTACHABLE_OVERLAY_KINDS above any more, so it never snaps to or follows
+  // a target). A stored vote_dot carrying either field from before this
+  // change simply never has it projected onto the live node — see this
+  // object's own doc comment above for why that is enough, with no
+  // migration, to make old data render correctly.
+  vote_dot: ['color'],
   image: ['image', 'alt', 'color'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
@@ -562,7 +582,7 @@ export function resolveAnchoredArrow(arrow, centers) {
 }
 
 // Distance (px, unscaled) within which a dropped attachable overlay
-// (label/text/icon/vote_dot) snaps onto — and stays attached to — a node or
+// (label/text/icon) snaps onto — and stays attached to — a node or
 // another annotation's centre. Looser than SNAP_RADIUS (an arrow endpoint,
 // a precise point) because "attach this label to that node" is a coarser
 // gesture aimed at "near this object", not a pixel-precise line endpoint.
@@ -571,7 +591,7 @@ export const ATTACH_SNAP_RADIUS = 90;
 // Fixed offset (px, model space) from a target's centre that the "Nearby
 // object menu" creation entry point (docs/ANNOTATION_CONTRACT.md "Human
 // authoring surfaces") places a newly created, pre-wired label/icon/
-// vote_dot/text at. Diagonal (not simply "above" or "below") so the new
+// text at. Diagonal (not simply "above" or "below") so the new
 // annotation doesn't sit exactly on top of the target's own centre, and its
 // magnitude (~51px) is deliberately well inside ATTACH_SNAP_RADIUS so the
 // annotation is attached from its very first rendered frame rather than
@@ -580,8 +600,8 @@ export const ATTACH_SNAP_RADIUS = 90;
 // "don't land exactly on top of the source" nudge.
 export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
 
-// Compute the attachment a dropped attachable overlay (label/text/icon/
-// vote_dot) should carry after being released at `position`: attaches to the
+// Compute the attachment a dropped attachable overlay (label/text/icon)
+// should carry after being released at `position`: attaches to the
 // nearest node/annotation centre within ATTACH_SNAP_RADIUS, storing the drop
 // point's offset from that centre so the overlay keeps exactly where it was
 // dropped (the contract's "free fine adjustment") instead of jumping onto the

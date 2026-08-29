@@ -201,10 +201,13 @@ function withTypePayload(annotation, type, geometry) {
     };
   }
   if (type === 'vote_dot') {
-    return {
-      value: annotation.value ?? null,
-      attachment: normalizeAttachment(annotation.attachment),
-    };
+    // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
+    // no payload fields of its own beyond the shared envelope (colour lives
+    // in `style`, handled generically by `createAnnotation` above). A stored
+    // `value` or `attachment` from before this change is dropped here —
+    // deliberately, with no migration (nobody used the annotation feature
+    // yet) — rather than carried forward unread.
+    return {};
   }
   if (type === 'image') {
     return {

@@ -27,10 +27,11 @@ const DEFAULT_COLOR = '#94a3b8';
 
 // A right-click property editor exists for every rotatable generic kind:
 // each has at least its rotation and its layer to edit, plus — per kind —
-// `shape`'s subtype, `icon`'s configured name, `vote_dot`'s value and, for
-// the kinds that paint one, a colour. (`shape`, `icon` and `vote_dot` are
-// all already members of ROTATABLE_OVERLAY_KINDS, so this is exactly that
-// set.)
+// `shape`'s subtype, `icon`'s configured name and, for the kinds that paint
+// one, a colour. `vote_dot` is a plain coloured dot (task-annotation-vote-
+// dot-simplify): it no longer has a value to edit, only its colour. (`shape`,
+// `icon` and `vote_dot` are all already members of ROTATABLE_OVERLAY_KINDS,
+// so this is exactly that set.)
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 
 // The generic kinds whose `color` field is actually painted by a branch
@@ -75,10 +76,6 @@ const FILL_BORDER_SWATCHES = ['transparent', ...GENERIC_COLORS];
 const DEFAULT_SHAPE_FILL = DEFAULT_COLOR;
 const DEFAULT_SHAPE_BORDER = 'transparent';
 
-// A vote dot counts votes, so its value is a non-negative integer and the
-// stepper never takes it below zero.
-const VOTE_VALUE_MIN = 0;
-
 // The generic kinds that get inline double-click-to-edit text, following the
 // exact pattern NoteNode/LabelNode already established (double-click to
 // enter, blur/Escape to commit, live sync at the shared 300ms text debounce —
@@ -87,9 +84,9 @@ const VOTE_VALUE_MIN = 0;
 // (rectangle through process_arrow) so a shape can carry a caption — including
 // a transparent-fill one that visually stands in for the retired `frame`
 // kind, which never had a caption of its own either. `icon`, `vote_dot` and
-// `image` have no free-text field to edit this way either (a vote's value is
-// a number with its own stepper, and an icon/image carry no caption in the v1
-// content model).
+// `image` have no free-text field to edit this way either — none carries a
+// caption in the v1 content model, and `vote_dot` is a plain coloured dot
+// with no content field of its own at all (task-annotation-vote-dot-simplify).
 const EDITABLE_TEXT_KINDS = new Set(['text', 'shape']);
 
 // Maps each half of a `textAlign` value ('top-left' -> ['top','left']) to the
@@ -313,7 +310,7 @@ const SELECTED_SHAPE_HALO = Object.freeze({
  * for every annotation type; this component adds the visual selection
  * outline, for the sized kinds, model-space resize via ReactFlow's
  * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
- * property editor (colour, shape subtype, icon name, vote value, rotation
+ * property editor (colour, shape subtype, icon name, rotation
  * and layer order), and — for EDITABLE_TEXT_KINDS (`text`, `shape`) —
  * double-click-to-edit inline text, following NoteNode/LabelNode's own
  * pattern exactly, plus nine-position text alignment, font size and a
@@ -551,18 +548,6 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
-  const changeValue = (next) => {
-    if (remoteLocked) {
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    const clamped = Math.max(VOTE_VALUE_MIN, Math.round(next));
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, value: clamped } } : n))
-    );
-    notifyChange('style');
-  };
-
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
 
@@ -696,7 +681,6 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       color={color}
       fill={shapeFill}
       border={shapeBorder}
-      value={data.value}
       rotation={currentRotation}
       locked={locked}
       labels={labels}
@@ -708,7 +692,6 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onChangeColor={changeColor}
       onChangeFill={changeFill}
       onChangeBorder={changeBorder}
-      onChangeValue={changeValue}
       onChangeLayer={changeLayer}
       onChangeRotation={changeRotation}
       onChangeTextAlign={changeTextAlign}
@@ -906,18 +889,16 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   }
 
   if (kind === 'vote_dot') {
+    // A plain coloured dot (task-annotation-vote-dot-simplify): no rendered
+    // value, whatever a stored annotation's `value` field happens to hold —
+    // there is no content field here for it to read.
     return (
       <>
         <div
           className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
           style={{ backgroundColor: color, ...rotation }}
           onContextMenu={openContextMenu}
-        >
-          {/* Coerced: a stored value that is not a primitive (an object from
-              some earlier shape of this field) is not a valid React child and
-              would throw where a wrong-looking dot would do. */}
-          {typeof data.value === 'number' || typeof data.value === 'string' ? data.value : ''}
-        </div>
+        />
         {menu}
         {remoteBadge}
       </>
@@ -982,8 +963,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 // grid, font-size picker and curated font-family picker
 // (task-annotation-text-alignment-and-font) show for EDITABLE_TEXT_KINDS
 // (`text`, `shape`), the shape-subtype grid only for `kind === 'shape'`, the
-// icon-name grid only for `kind === 'icon'`, and the value stepper only for
-// `kind === 'vote_dot'`. A locked annotation gets none of them — the
+// icon-name grid only for `kind === 'icon'`. `vote_dot` is a plain coloured
+// dot (task-annotation-vote-dot-simplify) — it gets only the shared colour
+// swatches, rotation and layer sections, no kind-specific section of its
+// own. A locked annotation gets none of them — the
 // capability baseline is "a locked object remains selectable but offers only
 // unlock or copy" — so this shows only the unlock and duplicate actions
 // instead.
@@ -996,7 +979,6 @@ function ContextMenuPortal({
   color,
   fill,
   border,
-  value,
   rotation,
   locked,
   labels,
@@ -1008,7 +990,6 @@ function ContextMenuPortal({
   onChangeColor,
   onChangeFill,
   onChangeBorder,
-  onChangeValue,
   onChangeLayer,
   onChangeRotation,
   onChangeTextAlign,
@@ -1195,30 +1176,6 @@ function ContextMenuPortal({
                 {resolveAnnotationIcon(name).text}
               </button>
             ))}
-          </div>
-        </>
-      )}
-      {kind === 'vote_dot' && (
-        <>
-          <div className="context-menu-title">{labels.voteValue}</div>
-          <div className="context-menu-vote-value">
-            <button
-              type="button"
-              className="vote-value-button"
-              aria-label={labels.voteValueDecrease}
-              onClick={() => onChangeValue((value ?? 0) - 1)}
-            >
-              −
-            </button>
-            <span className="vote-value-current">{value ?? 0}</span>
-            <button
-              type="button"
-              className="vote-value-button"
-              aria-label={labels.voteValueIncrease}
-              onClick={() => onChangeValue((value ?? 0) + 1)}
-            >
-              +
-            </button>
           </div>
         </>
       )}

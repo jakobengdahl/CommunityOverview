@@ -328,17 +328,20 @@ function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
   );
 }
 
-// The four attachable kinds the "Nearby object menu" contract entry point
+// The three attachable kinds the "Nearby object menu" contract entry point
 // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces") offers from an
 // existing node/annotation's own context menu. `arrow`/`line` is
 // deliberately not offered here: arrow's own drag-to-attach editing already
 // gives it a creation-adjacent docking preview via its selected endpoints,
 // so this stays scoped to the one-click kinds that had no creation-time
-// affordance at all.
+// affordance at all. `vote_dot` used to be a member of this list — task-
+// annotation-vote-dot-simplify removed it along with the rest of its
+// attachment behaviour (see ATTACHABLE_OVERLAY_KINDS in utils/annotations.js):
+// a vote dot is now a plain coloured dot with nothing to pre-wire an
+// attachment to.
 const NEARBY_ATTACH_KINDS = [
   { kind: 'label', labelKey: 'nearbyLabel' },
   { kind: 'icon', labelKey: 'nearbyIcon' },
-  { kind: 'vote_dot', labelKey: 'nearbyVoteDot' },
   { kind: 'text', labelKey: 'nearbyText' },
 ];
 
@@ -350,7 +353,7 @@ const NEARBY_ATTACH_KINDS = [
  * caller already knows which target id this menu is anchored to.
  *
  * `labels` uses the short `nearbyMenu`/`nearbyLabel`/`nearbyIcon`/
- * `nearbyVoteDot`/`nearbyText` keys — the same short-key convention
+ * `nearbyText` keys — the same short-key convention
  * AnnotationContext's own `labels` object already uses for every other
  * annotation-menu string (e.g. `color` for `cml.annotationColor`). A caller
  * holding the flat `cml` object instead (NodeContextMenu, which is not an
@@ -573,7 +576,6 @@ export function NodeContextMenu({
               nearbyMenu: cml.annotationNearbyMenu,
               nearbyLabel: cml.annotationNearbyLabel,
               nearbyIcon: cml.annotationNearbyIcon,
-              nearbyVoteDot: cml.annotationNearbyVoteDot,
               nearbyText: cml.annotationNearbyText,
             }}
             onAttach={(kind) => {

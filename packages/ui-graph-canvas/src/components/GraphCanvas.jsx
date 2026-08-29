@@ -384,13 +384,9 @@ function GraphCanvasInner({
     annotationLayer: 'Layer',
     annotationLayerFront: 'Bring to front',
     annotationLayerBack: 'Send to back',
-    annotationVoteValue: 'Value',
-    annotationVoteValueDecrease: 'Decrease value',
-    annotationVoteValueIncrease: 'Increase value',
     annotationNearbyMenu: 'Add nearby',
     annotationNearbyLabel: 'Label',
     annotationNearbyIcon: 'Icon',
-    annotationNearbyVoteDot: 'Vote dot',
     annotationNearbyText: 'Text',
     ...contextMenuLabels,
   };
@@ -706,14 +702,10 @@ function GraphCanvasInner({
         layer: cml.annotationLayer,
         layerFront: cml.annotationLayerFront,
         layerBack: cml.annotationLayerBack,
-        voteValue: cml.annotationVoteValue,
-        voteValueDecrease: cml.annotationVoteValueDecrease,
-        voteValueIncrease: cml.annotationVoteValueIncrease,
         brokenAnnotation: cml.annotationBroken,
         nearbyMenu: cml.annotationNearbyMenu,
         nearbyLabel: cml.annotationNearbyLabel,
         nearbyIcon: cml.annotationNearbyIcon,
-        nearbyVoteDot: cml.annotationNearbyVoteDot,
         nearbyText: cml.annotationNearbyText,
       },
     }),
@@ -758,14 +750,10 @@ function GraphCanvasInner({
       cml.annotationLayer,
       cml.annotationLayerFront,
       cml.annotationLayerBack,
-      cml.annotationVoteValue,
-      cml.annotationVoteValueDecrease,
-      cml.annotationVoteValueIncrease,
       cml.annotationBroken,
       cml.annotationNearbyMenu,
       cml.annotationNearbyLabel,
       cml.annotationNearbyIcon,
-      cml.annotationNearbyVoteDot,
       cml.annotationNearbyText,
       reportAnnotationRenderError,
     ]
@@ -1372,7 +1360,7 @@ function GraphCanvasInner({
   // round-trip; onAnnotationChange schedules that save. `options.shape` picks
   // the shape variant for kind 'shape' (defaults to 'rectangle');
   // `options.icon` picks the icon for kind 'icon' (defaults to circle).
-  // `options.attachment` (label/text/icon/vote_dot only — the "Nearby object
+  // `options.attachment` (label/text/icon only — the "Nearby object
   // menu" creation entry point below) is written straight onto
   // `data.attachment`, the exact same `{target_id, target_type, offset}`
   // shape and field `computeDroppedAttachment`/`resolveAttachedPosition`
@@ -1453,16 +1441,18 @@ function GraphCanvasInner({
           },
         };
       } else if (kind === 'vote_dot') {
-        // Same fixed-intrinsic-size treatment as icon, above.
+        // A plain coloured dot (task-annotation-vote-dot-simplify): no
+        // `value` (there is nothing to count any more) and no `attachment`
+        // (it is not one of ATTACHABLE_OVERLAY_KINDS, so it is never
+        // pre-wired to a target the way label/icon/text are above). Same
+        // fixed-intrinsic-size treatment as icon otherwise.
         newNode = {
           id,
           type: 'vote_dot',
           position,
           data: {
-            value: 1,
             color: undefined,
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
-            attachment: options.attachment,
           },
         };
       } else {
@@ -1482,7 +1472,7 @@ function GraphCanvasInner({
 
   // The "Nearby object menu" creation entry point
   // (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a new
-  // label/icon/vote_dot/text pre-wired to attach to an existing node or
+  // label/icon/text pre-wired to attach to an existing node or
   // annotation, from that target's own context menu — rather than the
   // create-then-drag-near two-step the toolbox's one-click creation still
   // requires. `targetId` may be a graph node or any existing annotation
@@ -1844,8 +1834,9 @@ function GraphCanvasInner({
       // Get latest node positions directly from ReactFlow's internal store
       const currentNodes = getFlowNodes();
 
-      // Attach/detach a dropped label/text/icon/vote_dot (the contract's
-      // node-attachable types): within ATTACH_SNAP_RADIUS of a node or
+      // Attach/detach a dropped label/text/icon (the contract's
+      // node-attachable types — `vote_dot` was one until task-annotation-
+      // vote-dot-simplify removed it): within ATTACH_SNAP_RADIUS of a node or
       // another annotation's centre it (re)attaches and starts following that
       // target (see the "keep attached overlays glued to their target" effect
       // below); dropped outside every snap zone it detaches and keeps the
@@ -2837,7 +2828,7 @@ function GraphCanvasInner({
     if (geometryChanged) onAnnotationChangeRef.current?.('geometry');
   }, [nodes, setNodes]);
 
-  // Keep an attached label/text/icon/vote_dot glued to its attachment
+  // Keep an attached label/text/icon glued to its attachment
   // target's centre (plus the offset captured when it (re)attached) as the
   // target moves — the same follow contract as the arrow anchor effect above,
   // but for the generic `content.attachment` binding instead of an arrow

@@ -358,19 +358,21 @@
 }
 
 /* Shared by every annotation context menu (note, label, arrow, freehand and
-   the generic kinds) — the layer row AnnotationLayerControls renders and the
-   vote-dot value stepper, both styled on the rotate row's pattern above so
-   the menu reads as one control set rather than several. */
-.graph-annotation-context-menu .context-menu-layer,
-.graph-annotation-context-menu .context-menu-vote-value {
+   the generic kinds) — the layer row AnnotationLayerControls renders,
+   styled on the rotate row's pattern above so the menu reads as one control
+   set rather than several. (A vote-dot value stepper used to share this
+   pattern too; task-annotation-vote-dot-simplify removed it along with the
+   value it edited — the rules for `.context-menu-vote-value`/
+   `.vote-value-button`/`.vote-value-current` are retired with it, since
+   nothing renders those classes any more.) */
+.graph-annotation-context-menu .context-menu-layer {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 8px;
 }
 
-.graph-annotation-context-menu .layer-button,
-.graph-annotation-context-menu .vote-value-button {
+.graph-annotation-context-menu .layer-button {
   flex: 1;
   background: transparent;
   border: 1px solid #444;
@@ -382,22 +384,13 @@
   transition: all 0.2s;
 }
 
-.graph-annotation-context-menu .layer-button:hover,
-.graph-annotation-context-menu .vote-value-button:hover {
+.graph-annotation-context-menu .layer-button:hover {
   border-color: #666;
   background: #333;
 }
 
-.graph-annotation-context-menu .vote-value-current {
-  flex: 1.4;
-  text-align: center;
-  color: #e6edf3;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
 /* "Nearby object menu" section (docs/ANNOTATION_CONTRACT.md "Human
-   authoring surfaces") — the label/icon/vote-dot/text row every context
+   authoring surfaces") — the label/icon/text row every context
    menu offers it from (NodeContextMenu plus the note/label/arrow/freehand/
    generic annotation menus). Wraps rather than a fixed 4-column grid, since
    NodeContextMenu's own min-width is narrower than these annotation menus'.

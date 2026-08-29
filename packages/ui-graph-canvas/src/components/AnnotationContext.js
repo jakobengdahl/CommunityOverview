@@ -24,10 +24,12 @@ import { createContext } from 'react';
  *
  * `attachNearby(targetId, kind)` is the "Nearby object menu" creation entry
  * point (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a
- * new label/icon/vote_dot/text pre-wired to attach to `targetId` (this
+ * new label/icon/text pre-wired to attach to `targetId` (this
  * annotation, or the graph node/annotation a caller anchors the control to),
  * using the exact same `content.attachment` shape and resolve/follow
- * mechanism the post-creation drag-to-attach path uses.
+ * mechanism the post-creation drag-to-attach path uses. `vote_dot` is not
+ * offered here (task-annotation-vote-dot-simplify): it is no longer an
+ * attachable kind.
  */
 export const AnnotationContext = createContext({
   notifyChange: () => {},
@@ -70,13 +72,9 @@ export const AnnotationContext = createContext({
     layer: 'Layer',
     layerFront: 'Bring to front',
     layerBack: 'Send to back',
-    voteValue: 'Value',
-    voteValueDecrease: 'Decrease value',
-    voteValueIncrease: 'Increase value',
     nearbyMenu: 'Add nearby',
     nearbyLabel: 'Label',
     nearbyIcon: 'Icon',
-    nearbyVoteDot: 'Vote dot',
     nearbyText: 'Text',
   },
 });

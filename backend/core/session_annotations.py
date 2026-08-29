@@ -119,9 +119,17 @@ ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
 # The generic types whose `content.attachment` may bind them to a node
 # (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
 # attaches per-endpoint (`start`/`end`) instead, validated separately.
-ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "icon", "vote_dot"}
-)
+#
+# `vote_dot` was a member of this set until task-annotation-vote-dot-simplify
+# retired its attachment behaviour: a vote dot is now a plain coloured dot
+# that always lives on its own. An `attachment` a caller still sends in a
+# vote_dot's `content` is no longer structurally validated as one (it is
+# simply free-form, unvalidated content, like any field this module does not
+# specifically type-constrain) — the canvas never reads it as an attachment
+# either way (see ATTACHABLE_OVERLAY_KINDS in
+# packages/ui-graph-canvas/src/utils/annotations.js). No migration was
+# written for a vote_dot already stored with one.
+ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"})
 
 
 def _attachment_error(value: Any, *, field: str) -> Optional[str]:
