@@ -117,6 +117,34 @@ function useMergedContainerRef(externalRef) {
 }
 
 /**
+ * Keep a root-level context menu on-screen: after it renders at the raw
+ * click/long-press coordinates, clamp it back inside the viewport if it
+ * would overflow the right or bottom edge (e.g. right-clicking a node near
+ * the bottom-right corner). Mirrors the Submenu panel's own
+ * getBoundingClientRect + before-paint correction below — but Submenu is
+ * positioned relative to its trigger and flips to the opposite side via a
+ * CSS class, while a root menu is positioned in raw viewport coordinates, so
+ * here the fix is to adjust those coordinates directly instead. A layout
+ * effect (not passive) so the correction lands before the browser paints the
+ * newly (re)opened menu, the same guarantee Submenu's flip relies on.
+ */
+function useClampedMenuPosition(containerRef, menu) {
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!menu || !container) return;
+    const rect = container.getBoundingClientRect();
+    const overflowX = rect.right - window.innerWidth;
+    const overflowY = rect.bottom - window.innerHeight;
+    if (overflowX > 0) {
+      container.style.left = `${Math.max(0, menu.x - overflowX)}px`;
+    }
+    if (overflowY > 0) {
+      container.style.top = `${Math.max(0, menu.y - overflowY)}px`;
+    }
+  }, [menu, containerRef]);
+}
+
+/**
  * Build a URL from a template string, substituting {field} or [field] tokens
  * with URI-encoded values from the node's data object. Returns null if the
  * template is not a valid http/https URL after substitution.
@@ -249,7 +277,7 @@ function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
         ref={triggerRef}
         type="button"
         data-menu-item="root"
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
         aria-label={ariaLabel || label}
         className="context-submenu-trigger"
@@ -323,6 +351,7 @@ export function NodeContextMenu({
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
   useMenuOpenFocus(containerRef, menu);
+  useClampedMenuPosition(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -525,6 +554,7 @@ export function MultiNodeContextMenu({
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
   useMenuOpenFocus(containerRef, menu);
+  useClampedMenuPosition(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -682,6 +712,7 @@ export function EdgeContextMenu({
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
   useMenuOpenFocus(containerRef, menu);
+  useClampedMenuPosition(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
@@ -809,6 +840,7 @@ export function EdgeContextMenu({
 export function PaneContextMenu({ menu, labels: cml, menuRef, createAnnotation }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(menuRef);
   useMenuOpenFocus(containerRef, menu);
+  useClampedMenuPosition(containerRef, menu);
   const handleRootKeyDown = useRootMenuKeyNav(containerRef);
 
   if (!menu) return null;
