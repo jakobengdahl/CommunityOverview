@@ -14,14 +14,16 @@ import './AnnotationToolbox.css';
 // movement) from ever reaching the drag path.
 const DRAG_THRESHOLD_PX = 6;
 
-// The toolbox items that precede the shape slot. `frame` stays a distinct,
-// separate item here — collapsing it into the shape kind would change what
-// the shape slot even contains, so it is out of scope for this collapse.
+// The toolbox items that precede the shape slot. `frame` used to be a
+// distinct, separate item here (a plain box with no fill); it is now folded
+// into the shape kind (task-annotation-merge-frame-into-shape-rectangle) —
+// creating a shape and setting its fill to transparent, with a coloured
+// border, covers what the standalone `frame` button used to make in one
+// click. There is no longer a dedicated toolbox entry for it.
 const TOOLBOX_ITEMS_LEADING = [
   { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
   { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
   { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
-  { kind: 'frame', glyph: { kind: 'toolbox-glyph', name: 'frame' }, labelKey: 'frame' },
 ];
 
 // Every `content.shape` variant the model accepts (SHAPE_STYLES in
@@ -137,7 +139,7 @@ function renderGlyph(glyph) {
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label/frame, a shape (via the collapsed shape slot,
+ * It creates note/text/label, a shape (via the collapsed shape slot,
  * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
  * `renderIconSlot` below), vote_dot, and image (which opens a file
  * picker rather than adding a node directly — the host's onCreate handles
@@ -380,7 +382,6 @@ function AnnotationToolbox({
     note: 'Note',
     text: 'Text',
     label: 'Label',
-    frame: 'Frame',
     shapeRectangle: 'Rectangle',
     shapeCircle: 'Circle',
     shapeTriangle: 'Triangle',
@@ -404,7 +405,6 @@ function AnnotationToolbox({
     noteHint: 'Add a sticky note',
     textHint: 'Add a block of text',
     labelHint: 'Add a label or callout',
-    frameHint: 'Add a frame to group things visually',
     shapeRectangleHint: 'Add a rectangle',
     shapeCircleHint: 'Add a circle',
     shapeTriangleHint: 'Add a triangle',

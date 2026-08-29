@@ -158,7 +158,7 @@ class TestCreateStickyNote:
         assert result["note"]["x"] == 5
 
     def test_non_note_annotation_id_is_rejected_not_overwritten(self, note_tools):
-        """create/upsert must not clobber a line/frame/group sharing the id."""
+        """create/upsert must not clobber a line/shape/group sharing the id."""
         tools_map, manager = note_tools
         session = manager.create_session()
         manager.upsert_annotation(

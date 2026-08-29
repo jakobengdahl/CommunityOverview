@@ -6,16 +6,26 @@
  * logic, so they are tracked apart from these overlays.
  */
 
-// text/frame/shape/icon/vote_dot/image/freehand are the rest of the v1
+// text/shape/icon/vote_dot/image/freehand are the rest of the v1
 // annotation model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/
-// arrow/group. text/frame/shape/icon/vote_dot/image render through
+// arrow/group. text/shape/icon/vote_dot/image render through
 // GenericAnnotationNode — a simple, non-interactive visual representation
 // rather than dedicated per-type UX like NoteNode. freehand renders through
 // its own FreehandAnnotationNode (an SVG path, like ArrowNode) but still
 // shares this generic envelope-field handling.
+//
+// `frame` used to be a member of this set: a plain box with no fill, drawn
+// by the exact same generic machinery as `shape`. task-annotation-merge-
+// frame-into-shape-rectangle folded it into `shape` as one merged kind with
+// independent fill/border settings (each transparent-or-coloured) — a
+// `shape` with `fill: 'transparent'` now covers what `frame` used to draw.
+// `frame` is no longer a recognised annotation kind at all; a stored `frame`
+// annotation from before this change is dropped while normalising
+// (annotationModel.js's `createAnnotation` throws for an unknown type, and
+// `normalizeAnnotationDocument` skips rather than propagates that — see its
+// doc comment) and never reaches this file.
 export const GENERIC_OVERLAY_TYPES = new Set([
   'text',
-  'frame',
   'shape',
   'icon',
   'vote_dot',
@@ -63,14 +73,19 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_
 // annotation with none of them keeps rendering exactly as it did before this
 // task — the same "omitted field = default" contract `color`/`rotation`
 // already follow.
+//
+// `shape` carries `fill`/`border` instead of a single `color`
+// (task-annotation-merge-frame-into-shape-rectangle): each is independently
+// either a colour or the literal string `'transparent'`, so a shape can be a
+// solid fill with no border (the old plain-shape look), a transparent fill
+// with a coloured border (what `frame` used to draw), both, or neither.
 const GENERIC_OVERLAY_FIELDS = {
   text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment'],
-  frame: ['color'],
   // `text` here is a `shape`'s optional caption
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'color', 'text', 'fontSize', 'textAlign', 'font'],
+  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font'],
   icon: ['icon', 'color', 'attachment'],
   vote_dot: ['value', 'color', 'attachment'],
   image: ['image', 'alt', 'color'],
@@ -92,17 +107,14 @@ const GENERIC_OVERLAY_FIELDS = {
   ],
 };
 
-// Generic overlay kinds that carry an explicit box size (frame/shape/image);
+// Generic overlay kinds that carry an explicit box size (shape/image);
 // icon/vote_dot/text render at a fixed intrinsic size instead.
-const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
+const SIZED_GENERIC_KINDS = new Set(['shape', 'image']);
 
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
-// shapes (process arrow included, as a shape variant); `frame` is drawn too,
-// because the MCP tools accept a rotation for every generic type they take,
-// with no per-type validation, and a frame is one box like a shape — silently
-// discarding a rotation the server stored and reports back is worse than
-// honouring it.
+// shapes (process arrow included, as a shape variant, and — since the merge —
+// a shape with a transparent fill, which covers what `frame` used to be).
 //
 // `line` and `freehand` are the real exclusions: their geometry lives in
 // endpoints and sampled points rather than in a box, so rotation there is a
@@ -116,7 +128,6 @@ export const ROTATABLE_OVERLAY_KINDS = new Set([
   'icon',
   'vote_dot',
   'image',
-  'frame',
 ]);
 
 // Inline style that draws an annotation's geometry.rotation, or an empty
@@ -576,12 +587,26 @@ export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
 // dropped (the contract's "free fine adjustment") instead of jumping onto the
 // centre. Returns null when nothing is close enough — the caller detaches
 // (contract: "snap to the node edge ... and detach outside the snap zone").
-// `frame` and `group` are excluded from candidacy: the contract's Attachment
-// section is explicit that they are "containment/visual constructs, not
-// attachment targets" — nothing attaches to a frame or a group, the same way
-// nothing attaches to another line/arrow (findSnapTarget's own exclusion).
+// `group` is excluded from candidacy: the contract's Attachment section is
+// explicit that a group is a "containment/visual construct, not an
+// attachment target" — nothing attaches to a group, the same way nothing
+// attaches to another line/arrow (findSnapTarget's own exclusion).
+//
+// `frame` used to be excluded here too, on the same reasoning. Now that it is
+// folded into `shape` (task-annotation-merge-frame-into-shape-rectangle),
+// this is a deliberate decision, not an oversight: a `shape` — whatever its
+// fill/border, including a transparent-fill one that looks exactly like the
+// old `frame` — stays a valid attach target, the same as any other shape.
+// Eligibility here is keyed on `node.type` everywhere else in this file
+// (arrow, group); making one configuration of `shape`'s own style fields
+// silently opt it out of attachment would be a new, content-dependent kind of
+// exclusion this codebase does not otherwise have, and a surprising one: two
+// visually-similar transparent-fill shapes would attach differently depending
+// on an internal field the user has no reason to remember they set. Keeping
+// `shape` uniformly attachable is the smaller, more predictable change, and
+// the more consistent one now that `frame` is no longer a distinct type.
 export function computeDroppedAttachment(position, nodes, excludeId) {
-  const candidates = nodes.filter((n) => n.type !== 'frame' && n.type !== 'group');
+  const candidates = nodes.filter((n) => n.type !== 'group');
   const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
   if (!targetId) return null;
   const target = candidates.find((n) => n.id === targetId);

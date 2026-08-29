@@ -82,6 +82,16 @@ const MALFORMED = [
   { id: 'x8', kind: 'icon', position: { x: 0, y: 0 }, icon: 42 },
   { id: 'x9', kind: 'image', position: { x: 0, y: 0 } },
   { id: 'x10', kind: 'arrow', position: { x: 0, y: 0 } },
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` was a real,
+  // recognised kind until this task retired it in favour of `shape` with a
+  // transparent fill. A session written before this task can still hold a
+  // `frame`-kind annotation, and the merge owes it exactly the same
+  // guarantee as any other now-unrecognised kind — it must degrade quietly,
+  // not take the canvas down. This is the explicit regression test for that:
+  // without it, this whole array would still pass just as well with `frame`
+  // silently reinstated, since 'wormhole' above already exercises "unknown
+  // kind" in general.
+  { id: 'x11', kind: 'frame', position: { x: 0, y: 0 }, color: '#94a3b8' },
   null,
   undefined,
   { kind: 'note', position: { x: 0, y: 0 } },
@@ -188,7 +198,6 @@ describe('the registered node types are the ones that are guarded', () => {
     'label',
     'arrow',
     'text',
-    'frame',
     'shape',
     'icon',
     'vote_dot',

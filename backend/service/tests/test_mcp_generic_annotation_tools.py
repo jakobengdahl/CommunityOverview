@@ -5,7 +5,7 @@ registered in ``backend/service/mcp_tools.py``.
 
 These extend the note-only MCP annotation access added in the sticky-note
 tool set (see ``test_mcp_sticky_note_tools.py``) to the rest of the v1 model
-(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``/
+(``text``/``label``/``line``/``shape``/``icon``/``vote_dot``/
 ``freehand``); ``note``, ``group`` and ``image`` stay out of scope for
 *creation* through these tools — each has its own dedicated tool set instead
 (see ``backend/core/session_annotations.py``'s module docstring,
@@ -111,7 +111,7 @@ class TestListAnnotations:
 class TestCreateAnnotation:
     @pytest.mark.parametrize(
         "ann_type",
-        ["text", "label", "line", "frame", "shape", "icon", "vote_dot"],
+        ["text", "label", "line", "shape", "icon", "vote_dot"],
     )
     def test_creates_each_generic_type(self, annotation_tools, ann_type):
         tools_map, manager = annotation_tools
@@ -1385,7 +1385,7 @@ class TestFreehandOverGenericTools:
         self, annotation_tools
     ):
         """A `freehand` stroke's shape is entirely in its `points`; unlike
-        `frame`/`shape`/`image` it carries no box the renderer scales to. A
+        `shape`/`image` it carries no box the renderer scales to. A
         w/h patch is therefore accepted and echoed back by the server while
         changing nothing a viewer sees — documented under Canvas rendering in
         docs/ANNOTATION_CONTRACT.md.

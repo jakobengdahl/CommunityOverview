@@ -46,7 +46,6 @@ describe('annotation type matrix (cross-language fixture) — JS model', () => {
         'text',
         'label',
         'line',
-        'frame',
         'group',
         'shape',
         'icon',

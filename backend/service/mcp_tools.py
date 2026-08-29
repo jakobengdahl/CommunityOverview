@@ -1913,7 +1913,7 @@ def register_mcp_tools(
     # Positions/sizes are model-space, matching the layout tools above, and
     # writes share their optimistic-concurrency contract (`expected_revision`
     # / `revision_conflict`). Only the `note` annotation type is exposed here;
-    # the rest of the v1 types (line, frame, shape, ...) have their own
+    # the rest of the v1 types (line, shape, ...) have their own
     # generic tool set below ("Generic Annotations"); `group` has its own
     # dedicated tool set too (create_group_annotation/update_group_members).
 
@@ -2400,7 +2400,7 @@ def register_mcp_tools(
     # ==================== Generic Annotations ====================
     #
     # These tools extend note-only MCP annotation access to the rest of the
-    # v1 model: text, label, line/arrow, frame, shape, icon, vote_dot, image.
+    # v1 model: text, label, line/arrow, shape, icon, vote_dot, image.
     # `note` keeps its dedicated tool set above (list_sticky_notes / ...);
     # `group` (node-membership boxes) keeps its own dedicated tool set below
     # (create_group_annotation / update_group_members) — folding it into a
@@ -2551,7 +2551,7 @@ def register_mcp_tools(
         Create an annotation, or replace one by id (create/upsert).
 
         Covers every v1 annotation type except `note`, `group` and `image`:
-        `text`, `label`, `line` (`arrow` accepted as an alias), `frame`,
+        `text`, `label`, `line` (`arrow` accepted as an alias),
         `shape`, `icon`, `vote_dot`, `freehand`. Use `create_sticky_note` for notes,
         `create_group_annotation` for groups, and `create_image_annotation`
         for images (an image's pixel content must be ingested server-side, so
@@ -2574,7 +2574,6 @@ def register_mcp_tools(
           - shape: {"shape": "rectangle", "text": "optional caption"}
           - icon: {"icon": "flag"}
           - vote_dot: {"value": 3}
-        `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
 
         `locked=True` combined with an attached/anchored binding (an
         attachable type's `attachment`, or a `line`'s `start`/`end`
@@ -2599,20 +2598,30 @@ def register_mcp_tools(
         each falls back independently to what the canvas already rendered
         before this existed, so omitting them changes nothing.
 
+        `shape` reads its fill and border out of `style` too —
+        `style.fill`/`style.border`, each either a CSS colour string or the
+        literal string "transparent" (independent of each other, e.g.
+        {"style": {"fill": "transparent", "border": "#94a3b8"}} for a
+        transparent-bodied box with a coloured outline — what the retired
+        `frame` type used to be, before it was folded into `shape`). Omitting
+        either leaves it at its default (a solid grey fill, no border), the
+        same look a plain `shape` always had.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
-            type: One of text/label/line/frame/shape/icon/vote_dot/freehand
+            type: One of text/label/line/shape/icon/vote_dot/freehand
                 ("arrow" accepted as an alias for "line"; "image" is
                 rejected — use create_image_annotation).
             x: Model-space x of the annotation's anchor/top-left corner.
             y: Model-space y of the annotation's anchor/top-left corner.
             w: Optional width in model-space px (no type-specific default;
-                frame/shape usually need one, line/icon usually don't).
+                shape usually needs one, line/icon usually don't).
             h: Optional height in model-space px.
             rotation: Optional rotation in degrees.
             content: Optional type-specific payload fields (see above).
-            style: Optional style dict (fill/stroke/color/opacity; for
-                text/shape also fontSize/font/textAlign — see above).
+            style: Optional style dict (color/opacity; for
+                text/shape also fontSize/font/textAlign, and for shape also
+                fill/border — see above).
             z: Optional layer order (higher draws on top). Defaults to 0.
             locked: Whether the annotation starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the

@@ -26,13 +26,13 @@ function applyLatestUpdate(node) {
 }
 
 // A simple, generic visual representation for the v1 annotation types that
-// have no dedicated per-type editor yet (text, frame, shape, icon, vote_dot,
+// have no dedicated per-type editor yet (text, shape, icon, vote_dot,
 // image) — see docs/ANNOTATION_CONTRACT.md. These render so annotations
 // created via MCP/session state are visible on the canvas instead of being
 // store/MCP-only. ReactFlow supplies the node's registered type (e.g. "text")
 // as the `type` prop, matching how GraphCanvas's nodeTypes map wires this
-// component up for each of the six kinds. Selection outline and, for the
-// sized kinds (frame/shape/image), model-space resize via NodeResizer are
+// component up for each of the five kinds. Selection outline and, for the
+// sized kinds (shape/image), model-space resize via NodeResizer are
 // this component's direct-manipulation surface; per-type property editors
 // stay out of scope for v1.
 describe('GenericAnnotationNode', () => {
@@ -47,18 +47,28 @@ describe('GenericAnnotationNode', () => {
     expect(screen.getByText('Hello canvas')).toBeInTheDocument();
   });
 
-  it('renders a frame as a bordered box', () => {
-    const { container } = render(
-      <GenericAnnotationNode type="frame" data={{ color: '#4ADE80' }} />
-    );
-    expect(container.querySelector('.kind-frame')).toBeTruthy();
-  });
-
   it('renders a shape, distinguishing circle from rectangle by class', () => {
     const { container } = render(
-      <GenericAnnotationNode type="shape" data={{ shape: 'circle', color: '#60A5FA' }} />
+      <GenericAnnotationNode type="shape" data={{ shape: 'circle', fill: '#60A5FA' }} />
     );
     expect(container.querySelector('.shape-circle')).toBeTruthy();
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: a transparent fill with
+  // a coloured border is what the retired `frame` kind used to draw — a
+  // shape configured this way must render with no visible background and a
+  // real border colour, not the old frame's dashed CSS class.
+  it('renders a shape styled to look like the retired frame (transparent fill, coloured border)', () => {
+    const { container } = render(
+      <GenericAnnotationNode
+        type="shape"
+        data={{ shape: 'rectangle', fill: 'transparent', border: '#94a3b8' }}
+      />
+    );
+    const el = container.querySelector('.kind-shape');
+    expect(el.style.backgroundColor).toBe('transparent');
+    expect(el.style.borderColor).toBe('rgb(148, 163, 184)');
+    expect(container.querySelector('.kind-frame')).toBeNull();
   });
 
   // The regression this pins: triangle, rhombus, hexagon and process_arrow
@@ -245,21 +255,6 @@ describe('GenericAnnotationNode', () => {
     );
   });
 
-  // A frame is one box like a shape, and the MCP tools accept a rotation for
-  // it with no per-type validation, so a stored rotation is drawn rather than
-  // silently discarded while list_annotations keeps reporting it.
-  //
-  // smallfix-annotation-rotated-resize-handles: the rotation now lives on the
-  // wrapper that also carries the resize handles (rather than on `.kind-frame`
-  // itself), so the handles rotate along with the box instead of staying
-  // axis-aligned around its unrotated bounds.
-  it('draws a rotation on a frame, on the wrapper that also carries its resizer', () => {
-    const { container } = render(<GenericAnnotationNode type="frame" data={{ rotation: 45 }} />);
-    const wrap = container.querySelector('.graph-generic-annotation-rotate-wrap');
-    expect(wrap.style.transform).toBe('rotate(45deg)');
-    expect(wrap.querySelector('.kind-frame')).toBeTruthy();
-  });
-
   it('rotates an image annotation, on the wrapper that also carries its resizer', () => {
     const { container } = render(
       <GenericAnnotationNode
@@ -272,7 +267,7 @@ describe('GenericAnnotationNode', () => {
     expect(wrap.contains(screen.getByAltText('diagram'))).toBe(true);
   });
 
-  it.each(['frame', 'shape', 'image'])(
+  it.each(['shape', 'image'])(
     'rotates the resize handles along with a rotated, selected %s',
     (type) => {
       const data = { rotation: 30, shape: 'circle', image: { url: 'https://example.com/a.png' } };
@@ -318,14 +313,11 @@ describe('GenericAnnotationNode', () => {
     expect(container.querySelector('.selected')).toBeTruthy();
   });
 
-  it.each(['frame', 'shape', 'image'])(
-    'shows resize handles for a selected, unlocked %s',
-    (type) => {
-      render(<GenericAnnotationNode type={type} data={{}} selected />);
-      const props = hoisted.resizerProps.at(-1);
-      expect(props.isVisible).toBe(true);
-    }
-  );
+  it.each(['shape', 'image'])('shows resize handles for a selected, unlocked %s', (type) => {
+    render(<GenericAnnotationNode type={type} data={{}} selected />);
+    const props = hoisted.resizerProps.at(-1);
+    expect(props.isVisible).toBe(true);
+  });
 
   it.each(['text', 'icon', 'vote_dot'])(
     'renders no resizer for %s (fixed intrinsic size)',
@@ -336,7 +328,7 @@ describe('GenericAnnotationNode', () => {
   );
 
   it('hides resize handles for a locked annotation even when selected', () => {
-    render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
+    render(<GenericAnnotationNode type="shape" data={{ locked: true }} selected />);
     const props = hoisted.resizerProps.at(-1);
     expect(props.isVisible).toBe(false);
   });
@@ -347,7 +339,7 @@ describe('GenericAnnotationNode', () => {
   it('hides resize handles while another client holds the selection claim', () => {
     render(
       <GenericAnnotationNode
-        type="frame"
+        type="shape"
         data={{ remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
         selected
       />
@@ -366,7 +358,7 @@ describe('GenericAnnotationNode', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
-        <GenericAnnotationNode type="frame" data={{}} selected />
+        <GenericAnnotationNode type="shape" data={{}} selected />
       </AnnotationContext.Provider>
     );
     const props = hoisted.resizerProps.at(-1);
@@ -374,16 +366,16 @@ describe('GenericAnnotationNode', () => {
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
 
-  // smallfix-annotation-rotated-resize-handles: a rotated frame/shape/image
+  // smallfix-annotation-rotated-resize-handles: a rotated shape/image
   // must grow along its own axes, not the canvas's - see
   // resolveRotatedResizeGeometry.test.js for the underlying math.
-  it('remaps a resize gesture on a rotated frame through its rotation', () => {
-    render(<GenericAnnotationNode id="f1" type="frame" data={{ rotation: 90 }} selected />);
+  it('remaps a resize gesture on a rotated shape through its rotation', () => {
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ rotation: 90 }} selected />);
     const props = hoisted.resizerProps.at(-1);
     props.onResizeStart(null, { x: 0, y: 0, width: 100, height: 50 });
     props.onResizeEnd(null, { x: 0, y: 0, width: 150, height: 80 });
     const updated = applyLatestUpdate({
-      id: 'f1',
+      id: 's1',
       position: { x: 0, y: 0 },
       style: { width: 100, height: 50 },
     });
@@ -396,12 +388,12 @@ describe('GenericAnnotationNode', () => {
   // At rotation 0 the correction is the identity, so an unrotated resize
   // keeps behaving exactly as it did before this fix.
   it('leaves an unrotated resize gesture unchanged', () => {
-    render(<GenericAnnotationNode id="f1" type="frame" data={{}} selected />);
+    render(<GenericAnnotationNode id="s1" type="shape" data={{}} selected />);
     const props = hoisted.resizerProps.at(-1);
     props.onResizeStart(null, { x: 5, y: 5, width: 100, height: 50 });
     props.onResizeEnd(null, { x: 5, y: 5, width: 160, height: 90 });
     const updated = applyLatestUpdate({
-      id: 'f1',
+      id: 's1',
       position: { x: 5, y: 5 },
       style: { width: 100, height: 50 },
     });
@@ -441,8 +433,8 @@ describe('GenericAnnotationNode property editor', () => {
   });
 
   it('does not show a shape picker for a non-shape kind', () => {
-    const { container } = render(<GenericAnnotationNode id="f1" type="frame" data={{}} />);
-    fireEvent.contextMenu(container.querySelector('.kind-frame'));
+    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
     expect(screen.queryByLabelText('circle')).toBeNull();
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
@@ -474,8 +466,8 @@ describe('GenericAnnotationNode property editor', () => {
   });
 
   it('does not show an icon picker for a non-icon kind', () => {
-    const { container } = render(<GenericAnnotationNode id="f1" type="frame" data={{}} />);
-    fireEvent.contextMenu(container.querySelector('.kind-frame'));
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
     expect(screen.queryByLabelText('flag')).toBeNull();
   });
 
@@ -525,7 +517,7 @@ describe('GenericAnnotationNode property editor', () => {
     expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
   });
 
-  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+  it.each(['text', 'shape', 'icon', 'vote_dot', 'image'])(
     'rotates right by 15° and normalizes into [0, 360) for a %s',
     (kind) => {
       const data = { rotation: 350, text: 'x', icon: 'flag', image: {} };
@@ -581,18 +573,11 @@ describe('GenericAnnotationNode property editor', () => {
   describe('colour editor', () => {
     it.each([
       ['text', (c) => c.querySelector('.kind-text'), { text: 'x' }],
-      ['frame', (c) => c.querySelector('.kind-frame'), {}],
       ['icon', (c) => c.querySelector('.kind-icon'), { icon: 'circle' }],
       ['vote_dot', (c) => c.querySelector('.kind-vote_dot'), { value: 1 }],
     ])('offers colour swatches for a %s annotation', (kind, find, data) => {
       const { container } = render(<GenericAnnotationNode id="a1" type={kind} data={data} />);
       fireEvent.contextMenu(find(container));
-      expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
-    });
-
-    it('offers colour swatches for a shape annotation', () => {
-      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
-      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
       expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
     });
 
@@ -605,21 +590,68 @@ describe('GenericAnnotationNode property editor', () => {
       expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
     });
 
-    it("changes a shape's colour from the picker", () => {
+    // task-annotation-merge-frame-into-shape-rectangle: `shape` no longer
+    // uses the single generic colour swatch section above — it gets its own
+    // independent Fill and Border sections instead, each including a
+    // 'transparent' option (the setting that subsumes what the retired
+    // `frame` kind was).
+    it('offers independent Fill and Border swatch sections (including transparent) for a shape annotation, not the generic colour section', () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
-      fireEvent.click(screen.getByLabelText('#22c55e'));
-      expect(applyLatestUpdate({ id: 's1', data: { shape: 'circle' } }).data.color).toBe('#22c55e');
+      expect(screen.getByLabelText('Fill #ef4444')).toBeInTheDocument();
+      expect(screen.getByLabelText('Border #ef4444')).toBeInTheDocument();
+      expect(screen.getByLabelText('Fill Transparent')).toBeInTheDocument();
+      expect(screen.getByLabelText('Border Transparent')).toBeInTheDocument();
     });
 
-    it('marks the current colour as the active swatch', () => {
-      render(<GenericAnnotationNode id="s1" type="shape" data={{ color: '#3b82f6' }} />);
+    it("changes a shape's fill from the fill picker, independently of its border", () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
-      expect(screen.getByLabelText('#3b82f6').className).toContain('active');
-      expect(screen.getByLabelText('#ef4444').className).not.toContain('active');
+      fireEvent.click(screen.getByLabelText('Fill #22c55e'));
+      const updated = applyLatestUpdate({ id: 's1', data: { shape: 'circle' } });
+      expect(updated.data.fill).toBe('#22c55e');
+      expect(updated.data.border).toBeUndefined();
     });
 
-    it('refuses a recolour while another client holds the claim', () => {
+    it("changes a shape's border from the border picker, independently of its fill", () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      fireEvent.click(screen.getByLabelText('Border #3b82f6'));
+      const updated = applyLatestUpdate({ id: 's1', data: { shape: 'circle' } });
+      expect(updated.data.border).toBe('#3b82f6');
+      expect(updated.data.fill).toBeUndefined();
+    });
+
+    it('can set a shape to a transparent fill with a coloured border — the retired frame look', () => {
+      render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} />);
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      fireEvent.click(screen.getByLabelText('Fill Transparent'));
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      fireEvent.click(screen.getByLabelText('Border #94a3b8'));
+      const updated = applyLatestUpdate({
+        id: 's1',
+        data: { shape: 'rectangle', fill: 'transparent' },
+      });
+      expect(updated.data.fill).toBe('transparent');
+      expect(updated.data.border).toBe('#94a3b8');
+    });
+
+    it('marks the current fill and border as the active swatches, independently', () => {
+      render(
+        <GenericAnnotationNode
+          id="s1"
+          type="shape"
+          data={{ fill: '#3b82f6', border: 'transparent' }}
+        />
+      );
+      fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      expect(screen.getByLabelText('Fill #3b82f6').className).toContain('active');
+      expect(screen.getByLabelText('Fill #ef4444').className).not.toContain('active');
+      expect(screen.getByLabelText('Border Transparent').className).toContain('active');
+      expect(screen.getByLabelText('Border #3b82f6').className).not.toContain('active');
+    });
+
+    it('refuses a fill/border change while another client holds the claim', () => {
       const notifyRemoteLockedAttempt = vi.fn();
       render(
         <AnnotationContext.Provider
@@ -767,7 +799,7 @@ describe('GenericAnnotationNode locked context menu', () => {
     hoisted.setNodes.mockClear();
   });
 
-  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+  it.each(['text', 'shape', 'icon', 'vote_dot', 'image'])(
     'shows unlock and duplicate for a locked %s, hiding rotation/shape/delete',
     (kind) => {
       const data = { locked: true, text: 'x', icon: 'flag', image: {}, value: 1 };
@@ -798,20 +830,20 @@ describe('GenericAnnotationNode locked context menu', () => {
     const notifyChange = vi.fn();
     render(
       <AnnotationContext.Provider value={{ notifyChange, labels: { unlock: 'Unlock' } }}>
-        <GenericAnnotationNode id="f1" type="frame" data={{ locked: true }} selected />
+        <GenericAnnotationNode id="s1" type="shape" data={{ locked: true }} selected />
       </AnnotationContext.Provider>
     );
-    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    fireEvent.contextMenu(document.querySelector('.kind-shape'));
     fireEvent.click(screen.getByText(/Unlock/));
-    const updated = applyLatestUpdate({ id: 'f1', data: { locked: true }, draggable: false });
+    const updated = applyLatestUpdate({ id: 's1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);
     expect(updated.draggable).toBe(true);
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
   it('still shows the full property editor when unlocked', () => {
-    render(<GenericAnnotationNode id="f1" type="frame" data={{ locked: false }} selected />);
-    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    render(<GenericAnnotationNode id="s1" type="shape" data={{ locked: false }} selected />);
+    fireEvent.contextMenu(document.querySelector('.kind-shape'));
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
     expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
     expect(screen.getByText(/Delete/)).toBeInTheDocument();
@@ -819,8 +851,8 @@ describe('GenericAnnotationNode locked context menu', () => {
 
   // Resize/drag already refuse a locked annotation; the resizer must stay
   // hidden even if the (restricted) context menu is open at the same time.
-  it('keeps resize handles hidden for a locked, selected frame', () => {
-    render(<GenericAnnotationNode type="frame" data={{ locked: true }} selected />);
+  it('keeps resize handles hidden for a locked, selected shape', () => {
+    render(<GenericAnnotationNode type="shape" data={{ locked: true }} selected />);
     expect(hoisted.resizerProps.at(-1).isVisible).toBe(false);
   });
 });
@@ -837,7 +869,7 @@ describe('GenericAnnotationNode duplicate control', () => {
     hoisted.nodes = [];
   });
 
-  it.each(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image'])(
+  it.each(['text', 'shape', 'icon', 'vote_dot', 'image'])(
     'duplicates a %s into a new, offset, unlocked copy and leaves the original untouched',
     (kind) => {
       const data = { text: 'x', icon: 'flag', color: '#94a3b8', value: 1 };
@@ -866,21 +898,21 @@ describe('GenericAnnotationNode duplicate control', () => {
     // Mirrors overlayToFlowNode's top-level `draggable: false` on a locked
     // node — the stale field the duplicate bug this test guards against used
     // to inherit verbatim from `...source`.
-    const source = { id: 'f1', type: 'frame', position: { x: 0, y: 0 }, data, draggable: false };
+    const source = { id: 's1', type: 'shape', position: { x: 0, y: 0 }, data, draggable: false };
     hoisted.nodes = [source];
     render(
       <AnnotationContext.Provider
         value={{ notifyChange: vi.fn(), labels: { unlock: 'Unlock', duplicate: 'Duplicate' } }}
       >
-        <GenericAnnotationNode id="f1" type="frame" data={data} selected />
+        <GenericAnnotationNode id="s1" type="shape" data={data} selected />
       </AnnotationContext.Provider>
     );
-    fireEvent.contextMenu(document.querySelector('.kind-frame'));
+    fireEvent.contextMenu(document.querySelector('.kind-shape'));
     fireEvent.click(screen.getByText(/Duplicate/));
     const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
-    const copy = updated.find((n) => n.id !== 'f1');
+    const copy = updated.find((n) => n.id !== 's1');
     expect(copy.data.locked).toBe(false);
-    expect(updated.find((n) => n.id === 'f1').data.locked).toBe(true);
+    expect(updated.find((n) => n.id === 's1').data.locked).toBe(true);
     // Regression: an unlocked `data.locked` copy must actually be draggable,
     // not "phantom-locked" by a stale top-level `draggable` inherited from
     // the locked source.
@@ -1040,7 +1072,7 @@ describe('GenericAnnotationNode inline text editing', () => {
     expect(container.querySelector('.graph-generic-annotation-shape-text')).toBeNull();
   });
 
-  it.each(['icon', 'vote_dot', 'image', 'frame'])(
+  it.each(['icon', 'vote_dot', 'image'])(
     'does not open a text editor on double-click for %s (no free-text field to edit)',
     (kind) => {
       const { container } = render(
@@ -1368,7 +1400,7 @@ describe('text/shape typography', () => {
     }
   );
 
-  it.each(['frame', 'icon', 'vote_dot', 'image'])('shows no typography controls for %s', (kind) => {
+  it.each(['icon', 'vote_dot', 'image'])('shows no typography controls for %s', (kind) => {
     const data = kind === 'icon' ? { icon: 'flag' } : kind === 'vote_dot' ? { value: 1 } : {};
     const { container } = render(<GenericAnnotationNode type={kind} data={data} />);
     const target =
@@ -1473,11 +1505,13 @@ describe('text/shape typography', () => {
 
 // task-annotation-render-direct-manipulation / task-annotation-responsive-
 // bottom-toolbox's "Nearby object menu" contract entry point: every generic
-// kind except `frame` can itself be the target this menu creates a new
-// attachable annotation near — `frame` is excluded the same way it is
-// excluded from computeDroppedAttachment's own target candidacy (the
-// contract's Attachment section: a "visual-only framing box", not an
-// attachment target).
+// kind rendered by this component — `shape` included, whatever its
+// fill/border — can itself be the target this menu creates a new attachable
+// annotation near. `frame` used to be excluded here the same way it was
+// excluded from computeDroppedAttachment's own target candidacy; now that it
+// is folded into `shape` (task-annotation-merge-frame-into-shape-rectangle),
+// that exclusion is gone too — see GenericAnnotationNode's own
+// `onAttachNearby` wiring for the reasoning.
 describe('GenericAnnotationNode "Nearby object menu"', () => {
   const nearbyLabels = {
     nearbyMenu: 'Add nearby',
@@ -1501,16 +1535,27 @@ describe('GenericAnnotationNode "Nearby object menu"', () => {
     expect(attachNearby).toHaveBeenCalledWith('i1', 'label');
   });
 
-  it("omits the section from a `frame`'s menu — frame is not an attachment target", () => {
-    const { container } = render(
+  // Deliberate decision (task-annotation-merge-frame-into-shape-rectangle):
+  // the retired `frame` kind used to be excluded from this menu; a `shape`
+  // stays included regardless of its fill/border, including a
+  // transparent-fill one that looks exactly like the old frame.
+  it("includes the section on a shape's menu, even with a transparent fill and a coloured border", () => {
+    const attachNearby = vi.fn();
+    render(
       <AnnotationContext.Provider
-        value={{ notifyChange: vi.fn(), attachNearby: vi.fn(), labels: nearbyLabels }}
+        value={{ notifyChange: vi.fn(), attachNearby, labels: nearbyLabels }}
       >
-        <GenericAnnotationNode id="f1" type="frame" data={{}} />
+        <GenericAnnotationNode
+          id="s1"
+          type="shape"
+          data={{ shape: 'rectangle', fill: 'transparent', border: '#94a3b8' }}
+        />
       </AnnotationContext.Provider>
     );
-    fireEvent.contextMenu(container.querySelector('.kind-frame'));
-    expect(screen.queryByText('Add nearby')).toBeNull();
+    fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    expect(screen.getByText('Add nearby')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
+    expect(attachNearby).toHaveBeenCalledWith('s1', 'label');
   });
 
   it("omits the section from a locked annotation's menu (capability baseline: only unlock/copy)", () => {

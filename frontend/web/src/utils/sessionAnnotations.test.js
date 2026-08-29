@@ -148,8 +148,8 @@ describe('attachment round-trip through the server annotation document', () => {
 
 // smallfix-annotation-unsized-generic-geometry-clobber: icon/vote_dot/text
 // used to lose their geometry.w/h on this round trip and get re-materialised
-// at createAnnotation's 160x96 default by the next autosave. frame/shape/
-// image already carried size through; this locks in that all six generic
+// at createAnnotation's 160x96 default by the next autosave. shape/image
+// already carried size through; this locks in that all five generic
 // kinds now behave the same way.
 describe('geometry w/h round-trip for generic overlay kinds', () => {
   const overlayFor = (kind) => ({
@@ -164,7 +164,7 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
     size: { w: 32, h: 41 },
   });
 
-  it.each(['icon', 'vote_dot', 'text', 'frame', 'shape', 'image'])(
+  it.each(['icon', 'vote_dot', 'text', 'shape', 'image'])(
     'preserves an explicit non-default size for %s through overlay -> document -> overlay',
     (kind) => {
       const overlay = overlayFor(kind);

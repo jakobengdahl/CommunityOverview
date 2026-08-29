@@ -74,7 +74,8 @@ function layerOf(node) {
  * so while that annotation is at or below 0 — the default, since every
  * annotation is created there — the result is negative and does place the
  * annotation behind the graph's own nodes and edges. That is intended and
- * useful, and it is how a `frame` gets behind the nodes it frames. It is not
+ * useful, and it is how a `shape` with a transparent fill (standing in for
+ * the retired `frame` kind) gets behind the nodes it frames. It is not
  * a guarantee: once every annotation has been pushed above 0 the result
  * lands at 0 or higher, level with or in front of the graph.
  *

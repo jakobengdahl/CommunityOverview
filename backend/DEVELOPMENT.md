@@ -1019,7 +1019,7 @@ convention for the same fields; `locked` defaults to `False`.
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation` extend MCP annotation access to the rest of the v1
-model: `text`, `label`, `line` (`arrow` accepted as a legacy alias), `frame`,
+model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
 `shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
 creating one (see the image annotation tool below). They share the
 sticky-note tools' session/revision contract — model-space coordinates,
@@ -1058,7 +1058,15 @@ files to ship; omitted/absent means the app's own default font), and
 `style.textAlign` (one of the nine box positions `top-left` through
 `bottom-right`). Each falls back independently to how the canvas already
 rendered before these existed, so omitting any of them changes nothing for an
-existing annotation.
+existing annotation. `shape` also reads `style.fill`/`style.border`
+(task-annotation-merge-frame-into-shape-rectangle): each independently a CSS
+colour string or the literal `"transparent"`, e.g. `{"style": {"fill":
+"transparent", "border": "#94a3b8"}}` for a transparent-bodied box with a
+coloured outline — what the retired `frame` type used to be, before it was
+folded into `shape`. Omitting either leaves it at its default (a solid grey
+fill, no border), the same look a plain `shape` always had; no migration was
+written for annotations already stored with type `frame` (see
+docs/ANNOTATION_CONTRACT.md's "Unrecognised annotation data").
 `text`/`label`/`icon`/`vote_dot` accept a
 `content.attachment = {target_id, target_type, anchor, offset}` binding them
 to a node, and a `line`'s `content.start`/`content.end` may each carry a
@@ -1074,7 +1082,7 @@ and reports back whatever is written (`note` is not one of them: it has its
 own `rotation`/`z`/`locked` arguments on `create_sticky_note`/
 `update_sticky_note` instead, reported back by `list_sticky_notes` — see
 docs/ANNOTATION_CONTRACT.md's `note` row). The canvas *draws* a rotation for
-text, label, note, image, icon, vote dot, shape and frame only: whatever is
+text, label, note, image, icon, vote dot and shape only: whatever is
 stored for a `line` or a `freehand` stroke is never rendered (a tracked gap in
 docs/ANNOTATION_CONTRACT.md's acceptance matrix), so do not read a stored
 rotation on those two as something a viewer can see.

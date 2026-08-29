@@ -16,7 +16,6 @@ const OVERLAY_NODE_TYPES = new Set([
   'label',
   'arrow',
   'text',
-  'frame',
   'shape',
   'icon',
   'vote_dot',

@@ -119,14 +119,21 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(text.data.attachment).toBeUndefined();
   });
 
-  it('creates a frame annotation via the toolbox with a default box size', () => {
+  // task-annotation-merge-frame-into-shape-rectangle: a toolbox-created shape
+  // leaves fill/border unset so GenericAnnotationNode's own defaults apply (a
+  // solid fill, no border) — the same "plain shape" look a shape always had.
+  // The retired `frame` toolbox button's look (transparent fill, coloured
+  // border) is reached afterwards via the right-click editor, not a separate
+  // creation-time default.
+  it('creates a rectangle shape via the toolbox with fill/border left unset', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^frame$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
-    const frame = findCreatedNode('frame');
-    expect(frame).toBeTruthy();
-    expect(frame.style).toEqual({ width: 220, height: 160 });
+    const shape = findCreatedNode('shape');
+    expect(shape).toBeTruthy();
+    expect(shape.data.fill).toBeUndefined();
+    expect(shape.data.border).toBeUndefined();
   });
 
   it.each([

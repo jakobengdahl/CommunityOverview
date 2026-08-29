@@ -262,15 +262,25 @@ describe('overlay serialization', () => {
 });
 
 // The v1 annotation model (docs/ANNOTATION_CONTRACT.md) also defines text,
-// frame, shape, icon, vote_dot and image. These were previously store/MCP-only:
+// shape, icon, vote_dot and image. These were previously store/MCP-only:
 // the canvas normalized them (annotationModel.js) but silently dropped them
 // here, so an MCP-created shape or image never appeared on screen. These
 // round-trips lock in a simple, generic visual representation for each.
 describe('generic annotation overlay serialization', () => {
-  it('registers text/frame/shape/icon/vote_dot/image as overlay types', () => {
-    for (const kind of ['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']) {
+  it('registers text/shape/icon/vote_dot/image as overlay types', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
       expect(OVERLAY_TYPES.has(kind)).toBe(true);
     }
+  });
+
+  // `frame` used to be a registered overlay type — a plain box with no fill.
+  // task-annotation-merge-frame-into-shape-rectangle folded it into `shape`;
+  // it is no longer recognised at all, so a stored `frame` annotation is
+  // dropped upstream, while normalising the document (annotationModel.js),
+  // never reaching this translator — see AnnotationBadData.test.jsx for the
+  // end-to-end "does not crash" coverage of exactly that stored shape.
+  it('no longer registers frame as an overlay type', () => {
+    expect(OVERLAY_TYPES.has('frame')).toBe(false);
   });
 
   it('round-trips a text overlay (colour/font size)', () => {
@@ -295,47 +305,50 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips a frame overlay with an explicit size', () => {
-    const overlay = {
-      id: 'frame-1',
-      kind: 'frame',
-      position: { x: 0, y: 0 },
-      color: '#4ADE80',
-      size: { w: 300, h: 200 },
-      z: 0,
-      locked: false,
-      rotation: 0,
-    };
-    const node = overlayToFlowNode(overlay);
-    expect(node).toMatchObject({
-      id: 'frame-1',
-      type: 'frame',
-      style: { width: 300, height: 200 },
-      data: { color: '#4ADE80' },
-    });
-    expect(flowNodeToOverlay(node)).toEqual(overlay);
-  });
-
-  it('defaults a frame to 160x96 when size is missing', () => {
-    const node = overlayToFlowNode({ id: 'f', kind: 'frame', position: { x: 0, y: 0 } });
-    expect(node.style).toEqual({ width: 160, height: 96 });
-  });
-
-  it('round-trips a shape overlay (shape name, colour, size)', () => {
+  it('round-trips a shape overlay (shape name, fill, border, size)', () => {
     const overlay = {
       id: 'shape-1',
       kind: 'shape',
       position: { x: 5, y: 5 },
       shape: 'circle',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 120, h: 120 },
       z: 2,
       locked: false,
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ shape: 'circle', color: '#60A5FA', locked: false, rotation: 0 });
+    expect(node.data).toEqual({
+      shape: 'circle',
+      fill: '#60A5FA',
+      border: 'transparent',
+      locked: false,
+      rotation: 0,
+    });
     expect(node.zIndex).toBe(2);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: fill and border are
+  // independent settings — a shape can have a transparent fill with a
+  // coloured border, the setting that subsumes what the retired `frame` kind
+  // used to draw.
+  it('round-trips a shape overlay with a transparent fill and a coloured border', () => {
+    const overlay = {
+      id: 'shape-frame-like',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'rectangle',
+      fill: 'transparent',
+      border: '#94a3b8',
+      size: { w: 220, h: 160 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toMatchObject({ fill: 'transparent', border: '#94a3b8' });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -349,7 +362,8 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 0, y: 0 },
       shape: 'rectangle',
       text: 'Step 1',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 160, h: 96 },
       z: 0,
       locked: false,
@@ -391,7 +405,8 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 0, y: 0 },
       shape: 'hexagon',
       text: 'Step 2',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       fontSize: 18,
       textAlign: 'top-left',
       font: 'monospace',
@@ -411,7 +426,8 @@ describe('generic annotation overlay serialization', () => {
       kind: 'shape',
       position: { x: 0, y: 0 },
       shape: 'process_arrow',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 160, h: 96 },
       z: 0,
       locked: false,
@@ -787,27 +803,51 @@ describe('computeDroppedAttachment', () => {
     });
   });
 
-  // Contract: "frame and group are containment/visual constructs, not
-  // attachment targets" — dropping near one must not attach to it, even when
-  // it is the nearest candidate.
-  it('never attaches to a frame or a group, even when nothing else is nearby', () => {
-    const withFrameAndGroup = [
-      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+  // Contract: "group is a containment/visual construct, not an attachment
+  // target" — dropping near one must not attach to it, even when it is the
+  // nearest candidate.
+  it('never attaches to a group, even when nothing else is nearby', () => {
+    const withGroup = [
       { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
       { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
     ];
-    expect(computeDroppedAttachment({ x: 100, y: 100 }, withFrameAndGroup, 'self')).toBeNull();
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, withGroup, 'self')).toBeNull();
   });
 
-  it('skips a nearby frame to attach to a real node within the same radius', () => {
+  it('skips a nearby group to attach to a real node within the same radius', () => {
     const mixed = [
-      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
       { id: 'node-1', type: 'custom', position: { x: 105, y: 105 }, width: 0, height: 0 },
       { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
     ];
     expect(computeDroppedAttachment({ x: 100, y: 100 }, mixed, 'self')).toMatchObject({
       target_id: 'node-1',
     });
+  });
+
+  // Deliberate decision (task-annotation-merge-frame-into-shape-rectangle):
+  // `frame` used to be excluded from attach candidacy the same way `group`
+  // still is. Now that it is folded into `shape`, a shape stays a valid
+  // attach target regardless of its fill/border — including a
+  // transparent-fill one that looks exactly like the retired `frame` — since
+  // eligibility here is keyed on `node.type`, not on a shape's own style
+  // fields (see computeDroppedAttachment's doc comment in annotations.js for
+  // the full reasoning).
+  it('still attaches to a shape annotation, even one styled to look like the retired frame', () => {
+    const withTransparentShape = [
+      {
+        id: 'shape-1',
+        type: 'shape',
+        position: { x: 100, y: 100 },
+        width: 0,
+        height: 0,
+        data: { shape: 'rectangle', fill: 'transparent', border: '#94a3b8' },
+      },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(
+      computeDroppedAttachment({ x: 100, y: 100 }, withTransparentShape, 'self')
+    ).toMatchObject({ target_id: 'shape-1' });
   });
 
   it('returns null outside the snap radius (detach)', () => {
