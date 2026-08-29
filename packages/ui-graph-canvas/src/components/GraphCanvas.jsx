@@ -513,6 +513,12 @@ function GraphCanvasInner({
   }
   const paneMenuRef = useRef(null);
   const reactFlowWrapper = useRef(null);
+  // Last createGroupSignal value actually acted on. The host never resets
+  // createGroupSignal back to 0 the way it does saveViewSignal (small-fix:
+  // createGroupSignal never reset), so the create-group effect below cannot
+  // rely on `> 0` alone once a group has ever been created. See that effect
+  // for the full reasoning.
+  const handledCreateGroupSignalRef = useRef(0);
   // Hidden <input type="file"> the toolbox's image item clicks; the model-space
   // position to ingest the file at is stashed here between that click and the
   // input's change event (there is no click position to carry through a native
@@ -2520,9 +2526,27 @@ function GraphCanvasInner({
     freehandActive,
   ]);
 
-  // Create group when signal changes (triggered from toolbar)
+  // Create group when signal changes (triggered from toolbar). Unlike
+  // saveViewSignal, the host never resets createGroupSignal back to 0 after
+  // handling it, so a plain `> 0` guard stays true forever once the first
+  // group has been created — and this effect re-runs on every render where
+  // handleAddGroup changes identity, not only when createGroupSignal itself
+  // changes. That's safe today only because handleAddGroup's own deps
+  // (screenToFlowPosition, setNodes, onCreateGroup) happen to stay
+  // referentially stable; if any of them ever lost memoization, every such
+  // re-render would create a spurious group. Latching the last signal value
+  // actually handled makes this robust without depending on host
+  // cooperation. The latch updates only inside the branch that calls
+  // handleAddGroup — not on every observed signal change — so a signal that
+  // arrives while a focus view is active is still honoured once focus exits,
+  // same as before this fix.
   useEffect(() => {
-    if (createGroupSignal > 0 && !activeFocusRootId) {
+    if (
+      createGroupSignal > 0 &&
+      createGroupSignal !== handledCreateGroupSignalRef.current &&
+      !activeFocusRootId
+    ) {
+      handledCreateGroupSignalRef.current = createGroupSignal;
       handleAddGroup();
     }
   }, [createGroupSignal, handleAddGroup, activeFocusRootId]);
