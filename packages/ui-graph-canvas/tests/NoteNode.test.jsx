@@ -274,7 +274,7 @@ describe('NoteNode inline text editing', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
 
-  // task-locked-annotation-doubleclick-guard: the persisted lock gates every
+  // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted lock gates every
   // context menu already; the double-click editor was the one path around it.
   it('refuses to enter edit mode while locked', () => {
     render(<NoteNode id="n1" data={{ text: 'Hello', locked: true }} selected={false} />);

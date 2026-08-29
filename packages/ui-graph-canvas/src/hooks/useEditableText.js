@@ -32,7 +32,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
   const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
   const remoteLocked = isRemoteLocked(data);
   // The persisted flag, distinct from the remote claim above — see GroupNode's
-  // equivalent `locked` (task-locked-annotation-doubleclick-guard).
+  // equivalent `locked` (smallfix-locked-annotation-text-still-editable-by-doubleclick).
   const locked = Boolean(data?.locked);
 
   useEffect(() => {
@@ -65,7 +65,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
   // Double-click entry point: a live remote claim refuses entry, and so does
   // the persisted lock — the capability baseline says a locked object offers
   // only unlock or copy, and an in-place text edit is not that. Matches
-  // GroupNode's rename guard (task-locked-annotation-doubleclick-guard).
+  // GroupNode's rename guard (smallfix-locked-annotation-text-still-editable-by-doubleclick).
   const startEditing = (e) => {
     e?.stopPropagation();
     if (remoteLocked) {

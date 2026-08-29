@@ -880,7 +880,7 @@ describe('GenericAnnotationNode inline text editing', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
 
-  // task-locked-annotation-doubleclick-guard: the persisted lock gates every
+  // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted lock gates every
   // context menu already (see "GenericAnnotationNode locked context menu"
   // above); the double-click editor was the one path around it, for both the
   // `text` kind and a `shape`'s caption below.
@@ -931,7 +931,7 @@ describe('GenericAnnotationNode inline text editing', () => {
     expect(notifyChange).toHaveBeenCalledWith('text');
   });
 
-  // task-locked-annotation-doubleclick-guard: the second of the two entry
+  // smallfix-locked-annotation-text-still-editable-by-doubleclick: the second of the two entry
   // points that shared this gap (see the `text`-kind version above).
   it("refuses to enter edit mode on a locked shape's caption", () => {
     render(

@@ -164,7 +164,7 @@ describe('useEditableText', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
 
-  // task-locked-annotation-doubleclick-guard: the persisted `data.locked` flag
+  // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted `data.locked` flag
   // gates every context menu, but until now not this double-click editor —
   // the one edit path that bypasses the menu entirely. Matches GroupNode's
   // rename guard.
