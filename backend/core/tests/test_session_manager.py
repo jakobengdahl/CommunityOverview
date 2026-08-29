@@ -67,6 +67,54 @@ async def _drain(sub):
     return out
 
 
+def _kind_annotation(kind: str, ann_id: str, *, variant: str = "a") -> dict:
+    """A minimal, valid v1 annotation dict of *kind* for a raw op.
+
+    Accepts the six v1 annotation kinds beyond note/label/group —
+    ``text``/``shape``/``icon``/``vote_dot``/``image``/``freehand`` —
+    task-annotation-shared-session-realtime's remaining_scope per-kind
+    reconnect/catch-up/duplicate-suppression/lock-ownership audit
+    (``TestPerKindReconnectCatchUpAndLocks`` below). ``frame`` is excluded: it
+    no longer exists as a separate kind (merged into ``shape``, PR #521); note/
+    label/group are excluded too — ``GraphCanvasRemote.test.jsx`` already
+    covers those three at the canvas-application layer.
+
+    Per-kind payload fields live at the annotation's own top level for a raw
+    op (mirroring what ``build_annotation``'s ``content`` merges onto the
+    annotation, and what the browser's own translators read/write — see
+    ``GENERIC_OVERLAY_FIELDS`` in ``packages/ui-graph-canvas/src/utils/
+    annotations.js``), not nested under a ``content`` key — matching every
+    existing raw-op test in this module (e.g. a note's top-level ``text``).
+
+    ``variant`` gives a second, distinguishable value for the same kind and
+    id, for cross-write conflict tests that need to tell "the first write"
+    and "the second write" apart in the stored result.
+    """
+    if kind == "image":
+        # image is exempt from _kind_annotation's variant knob: an ingested
+        # image's pixel content is the one field session_store's
+        # `_require_ingested_image` actually checks, so varying anything
+        # else is enough to distinguish two writes without touching it.
+        ann = _image_annotation(ann_id, data_bytes=64)
+        ann["alt"] = "a" if variant == "a" else "b"
+        return ann
+    ann: dict = {"id": ann_id, "type": kind}
+    if kind == "text":
+        ann["text"] = "hi" if variant == "a" else "bye"
+    elif kind == "shape":
+        ann["shape"] = "rectangle"
+        ann["text"] = "hi" if variant == "a" else "bye"
+    elif kind == "icon":
+        ann["icon"] = "flag" if variant == "a" else "star"
+    elif kind == "vote_dot":
+        ann["color"] = "#ef4444" if variant == "a" else "#22c55e"
+    elif kind == "freehand":
+        ann["points"] = [{"x": 0, "y": 0}, {"x": 10, "y": 10 if variant == "a" else 20}]
+    else:
+        raise ValueError(f"unhandled kind for _kind_annotation: {kind!r}")
+    return ann
+
+
 class TestApplyOps:
     async def test_ordered_apply_and_broadcast(self):
         mgr = _manager()
@@ -652,6 +700,465 @@ class TestClaimEnforcement:
             {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
         )
         assert result["annotation"]["text"] == "agent wrote anyway"
+
+
+class TestConflictMatrixTwoClients:
+    """Two-*real*-client conflict matrix for docs/ANNOTATION_CONTRACT.md's new
+    "Two-client conflict matrix" section (task-annotation-shared-session-
+    realtime remaining_scope item 1: document + test what happens when two
+    clients edit the same annotation at close to the same time, broken out by
+    same-field vs different-field edits, claim-holder vs non-holder, and
+    mutation category).
+
+    Every test here drives ``SessionManager.apply_ops`` with two distinct
+    ``client_id``s against the same session — the real batch-apply/claim-
+    check/persist path a browser goes through — not just a call into the
+    ``ClaimMap`` helper directly the way a narrower unit test would.
+    ``TestClaimEnforcement`` above already proves the claim-conflict half of
+    this for ``note``; this class adds the cross-field-clobber half the prior
+    slice's tests never exercised, plus one representative case per other
+    mutation category (style, lock) two clients can race on.
+    """
+
+    async def _seeded_shape(self, mgr, ann_id="shape-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {
+                        "id": ann_id,
+                        "type": "shape",
+                        "shape": "rectangle",
+                        "text": "orig",
+                        "geometry": {"x": 0, "y": 0, "w": 160, "h": 96},
+                        "style": {"fill": "#94a3b8"},
+                    },
+                }
+            ],
+        )
+        return s
+
+    # --- Same-field, no claim held: whole-annotation resend is last-write-wins ---
+    async def test_same_field_text_edits_without_a_claim_second_writer_wins(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "B's edit",
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "B's edit"
+
+    # --- Different-field, no claim held: a documented finding, not a designed
+    # guarantee — see the new ANNOTATION_CONTRACT.md section this test backs.
+    # apply_state_op's `annotation_updated` handler does target.update(incoming)
+    # (session_store.py), and the browser always resends the WHOLE annotation
+    # object on every publish (sessionSyncClient.js's diffState/syncState), not
+    # a per-field delta — so a client whose own local copy has not yet caught
+    # up on a concurrent peer's text edit clobbers that edit as a side effect
+    # of publishing its own, unrelated geometry change, because its outgoing
+    # "geometry update" is really a whole-annotation resend carrying its own
+    # (stale) copy of every other field too.
+    async def test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit(
+        self,
+    ):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        # A publishes a text-only change...
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        # ...but B's outgoing "geometry" op is really its own whole local copy
+        # of the annotation, captured before B's client received A's update
+        # (in-flight SSE, or B simply committed a fraction of a second sooner
+        # than A's edit reached it) — so it still carries the pre-edit "orig"
+        # text alongside its own new geometry.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "orig",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+        # A's text edit is gone — clobbered by B's stale resend, not merged
+        # around it. This is the whole-document-LWW property documented in
+        # ANNOTATION_CONTRACT.md's "Two-client conflict matrix" section.
+        assert stored["text"] == "orig"
+
+    # --- A claim blocks a DIFFERENT-field edit too, not only a same-field one:
+    # the claim check is on the annotation id, not on which fields an op
+    # touches, so it also closes the clobber case above whenever the second
+    # writer is the one refused rather than racing in silently.
+    async def test_claim_blocks_a_different_field_edit_too_not_only_same_field(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["shape-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        with pytest.raises(ClaimConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                        },
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "shape-1"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        # Refused, so neither the geometry write nor any clobber of A's text
+        # took effect — this is the safe cell of the matrix: holding the claim
+        # protects every field, not only the one the holder itself is editing.
+        assert stored["text"] == "A's edit"
+        assert stored["geometry"] == {"x": 0, "y": 0, "w": 160, "h": 96}
+
+    # --- style category, claimed: a non-holder's style-only write is refused
+    # the same way a text or geometry write is (the check has no per-category
+    # special case).
+    async def test_non_holder_style_edit_is_rejected_while_claimed(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "style": {"fill": "#ef4444"},
+                        },
+                    }
+                ],
+            )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["style"] == {"fill": "#94a3b8"}
+
+    # --- lock category, claimed: a non-holder's lock toggle is an
+    # annotation_updated like any other write, so it is refused too — "locked"
+    # is not a separate op type with its own bypass.
+    async def test_non_holder_lock_toggle_is_rejected_while_claimed(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "locked": True,
+                        },
+                    }
+                ],
+            )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored.get("locked") is not True
+
+    # --- delete category, claimed, on a generic (non-note) kind: mirrors
+    # test_non_holder_delete_is_rejected above (which uses `note`) to confirm
+    # the same rule for a GENERIC_OVERLAY_TYPES kind.
+    async def test_non_holder_delete_of_a_shape_is_rejected_while_claimed(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [{"op": "annotation_deleted", "annotation_id": "shape-1"}],
+            )
+        assert any(a["id"] == "shape-1" for a in s.state["annotations"])
+
+
+class TestPerKindReconnectCatchUpAndLocks:
+    """Per-kind reconnect/catch-up, duplicate-op-suppression and lock-
+    ownership audit (task-annotation-shared-session-realtime remaining_scope
+    item 2) for the six v1 kinds beyond note/label/group — GraphCanvasRemote.
+    test.jsx already covers those three at the canvas-application layer, and
+    ``TestClaimEnforcement``/``TestCatchUp`` above already cover this
+    protocol layer for ``note`` specifically.
+
+    ``_claimed_annotation_target`` and ``SessionStore.apply_state_op`` are
+    keyed only on an annotation's ``id``, never on its ``type``/``kind`` (see
+    ``session_manager.py``), so in principle every one of these should already
+    hold uniformly — but that is exactly the kind of claim a per-kind test
+    audit exists to verify rather than assume, since the type-agnostic
+    ``sessionSyncClient.test.js`` coverage cannot see a kind-specific gap one
+    layer up (the canvas-side application logic GraphCanvasRemote.test.jsx
+    covers separately). No gap was found for any of the six: every test below
+    passes against the existing implementation.
+    """
+
+    # --- (a) reconnect / catch-up: a create made while a second client is
+    # "disconnected" (never subscribed, so it never saw the op live) is
+    # returned intact by catch_up once it asks for everything since its last
+    # known seq — the same mechanism TestCatchUp proves for plain node ops. ---
+    async def test_catch_up_returns_a_missed_create_for_text(self):
+        await self._assert_catch_up_returns_a_missed_create("text")
+
+    async def test_catch_up_returns_a_missed_create_for_shape(self):
+        await self._assert_catch_up_returns_a_missed_create("shape")
+
+    async def test_catch_up_returns_a_missed_create_for_icon(self):
+        await self._assert_catch_up_returns_a_missed_create("icon")
+
+    async def test_catch_up_returns_a_missed_create_for_vote_dot(self):
+        await self._assert_catch_up_returns_a_missed_create("vote_dot")
+
+    async def test_catch_up_returns_a_missed_create_for_image(self):
+        await self._assert_catch_up_returns_a_missed_create("image")
+
+    async def test_catch_up_returns_a_missed_create_for_freehand(self):
+        await self._assert_catch_up_returns_a_missed_create("freehand")
+
+    async def _assert_catch_up_returns_a_missed_create(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        since_seq = s.seq
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        cu = mgr.catch_up(s.id, since_seq)
+        assert cu["type"] == "catch_up"
+        # Ring-buffer entries (session_store.py's `applied` dict) are the flat
+        # op result shape — `entry["op"]` is the op-type string and
+        # `entry["annotation"]` the resulting annotation — not a nested
+        # `{"op": {...}}` envelope; matches the existing
+        # `[op["seq"] for op in cu["ops"]]` read in TestCatchUp above.
+        matches = [
+            entry
+            for entry in cu["ops"]
+            if entry.get("op") == "annotation_created"
+            and entry.get("annotation", {}).get("id") == "ann-1"
+        ]
+        assert len(matches) == 1
+        assert matches[0]["annotation"]["type"] == kind
+
+    # --- (b) duplicate-op suppression: a retried/re-delivered create with the
+    # same id is an idempotent upsert, never a second appended annotation —
+    # this is what makes a lost-response client retry, or the "delivered
+    # twice around the catch-up boundary" case R15 in sessionSyncClient.js
+    # documents, safe regardless of kind. ---
+    async def test_a_resent_create_is_idempotent_for_text(self):
+        await self._assert_resent_create_is_idempotent("text")
+
+    async def test_a_resent_create_is_idempotent_for_shape(self):
+        await self._assert_resent_create_is_idempotent("shape")
+
+    async def test_a_resent_create_is_idempotent_for_icon(self):
+        await self._assert_resent_create_is_idempotent("icon")
+
+    async def test_a_resent_create_is_idempotent_for_vote_dot(self):
+        await self._assert_resent_create_is_idempotent("vote_dot")
+
+    async def test_a_resent_create_is_idempotent_for_image(self):
+        await self._assert_resent_create_is_idempotent("image")
+
+    async def test_a_resent_create_is_idempotent_for_freehand(self):
+        await self._assert_resent_create_is_idempotent("freehand")
+
+    async def _assert_resent_create_is_idempotent(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        op = {"op": "annotation_created", "annotation": _kind_annotation(kind, "ann-1")}
+        await mgr.apply_ops(s.id, "c1", 0, [op])
+        # The exact same op, resent (a retried batch after a lost response).
+        await mgr.apply_ops(s.id, "c1", 0, [dict(op)])
+        matching = [a for a in s.state["annotations"] if a["id"] == "ann-1"]
+        assert len(matching) == 1
+
+    # --- (c) lock ownership: another client's live claim blocks a write to
+    # this kind identically to every other kind. ---
+    async def test_non_holder_update_is_rejected_for_text(self):
+        await self._assert_non_holder_update_is_rejected("text")
+
+    async def test_non_holder_update_is_rejected_for_shape(self):
+        await self._assert_non_holder_update_is_rejected("shape")
+
+    async def test_non_holder_update_is_rejected_for_icon(self):
+        await self._assert_non_holder_update_is_rejected("icon")
+
+    async def test_non_holder_update_is_rejected_for_vote_dot(self):
+        await self._assert_non_holder_update_is_rejected("vote_dot")
+
+    async def test_non_holder_update_is_rejected_for_image(self):
+        await self._assert_non_holder_update_is_rejected("image")
+
+    async def test_non_holder_update_is_rejected_for_freehand(self):
+        await self._assert_non_holder_update_is_rejected("freehand")
+
+    async def _assert_non_holder_update_is_rejected(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["ann-1"]}]
+        )
+        with pytest.raises(ClaimConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": _kind_annotation(kind, "ann-1", variant="b"),
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "ann-1"
+        assert exc_info.value.held_by == "c1"
+
+    async def test_non_holder_delete_is_rejected_for_text(self):
+        await self._assert_non_holder_delete_is_rejected("text")
+
+    async def test_non_holder_delete_is_rejected_for_shape(self):
+        await self._assert_non_holder_delete_is_rejected("shape")
+
+    async def test_non_holder_delete_is_rejected_for_icon(self):
+        await self._assert_non_holder_delete_is_rejected("icon")
+
+    async def test_non_holder_delete_is_rejected_for_vote_dot(self):
+        await self._assert_non_holder_delete_is_rejected("vote_dot")
+
+    async def test_non_holder_delete_is_rejected_for_image(self):
+        await self._assert_non_holder_delete_is_rejected("image")
+
+    async def test_non_holder_delete_is_rejected_for_freehand(self):
+        await self._assert_non_holder_delete_is_rejected("freehand")
+
+    async def _assert_non_holder_delete_is_rejected(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["ann-1"]}]
+        )
+        with pytest.raises(ClaimConflict):
+            await mgr.apply_ops(
+                s.id, "c2", 0, [{"op": "annotation_deleted", "annotation_id": "ann-1"}]
+            )
+        assert any(a["id"] == "ann-1" for a in s.state["annotations"])
 
 
 class TestCatchUp:
