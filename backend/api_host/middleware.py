@@ -252,7 +252,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # bypassed; the CRUD/ops endpoints are reached by fetch and stay guarded.
         if (
             request.url.path.endswith("/stream")
-            and "/api/sessions/" in request.url.path
+            and request.url.path.startswith(f"{config.api_prefix}/sessions/")
         ):
             return await call_next(request)
 

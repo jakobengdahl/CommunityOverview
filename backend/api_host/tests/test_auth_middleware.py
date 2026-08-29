@@ -229,6 +229,18 @@ class TestAuthEnabledTakesPrecedence:
         finally:
             os.unlink(path)
 
+    def test_shared_session_stream_substring_bypass_prevention(self):
+        """Ensures that embedding the bypass path as a substring in an unauthorized route
+        does not bypass authentication."""
+        client, path = self._make_client(auth_enabled=True, auth_password="secret")
+        try:
+            resp = client.get(
+                "/admin/api/sessions/hack/stream", params={"client_id": "c1"}
+            )
+            assert resp.status_code == 401
+        finally:
+            os.unlink(path)
+
     def test_shared_session_ops_still_guarded(self):
         """Only the stream is bypassed — the fetch-reachable ops endpoint (which
         can send an Authorization header) still requires auth."""
