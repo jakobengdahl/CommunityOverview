@@ -6,6 +6,14 @@ import {
   annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
 } from '../src/utils/sessionAnnotations';
+// Reaches past the package's public entry point (which does not export these)
+// straight at the ReactFlow-node translators, so this test can build the same
+// GraphCanvas-shaped snapshot useSharedSession.js/App.jsx actually produce —
+// see the cross-layer test below.
+import {
+  overlayToFlowNode,
+  flowNodeToOverlay,
+} from '../../../packages/ui-graph-canvas/src/utils/annotations';
 
 // The canvas emits overlay descriptors (note/label/arrow) via onSaveView; App
 // stores them in the server annotation model and restores them on load. These
@@ -170,6 +178,57 @@ describe('annotation overlay translation', () => {
     expect(roundTripped[0].start).toBeUndefined();
     expect(roundTripped[0].end).toBeUndefined();
     expect(roundTripped).toEqual(overlays);
+  });
+
+  // Regression for the review finding on smallfix-line-endpoint-attachment-
+  // dropped-by-translator: this translator fix alone was not enough. The
+  // realtime sync baseline (useSharedSession.js's serverStateToMirror) runs
+  // this file's round trip directly, but the live snapshot actually synced
+  // (App.jsx's persistSessionSnapshot, fed by GraphCanvas's onSaveView) goes
+  // through packages/ui-graph-canvas's overlayToFlowNode/flowNodeToOverlay
+  // first. Before that layer also carried start/end through, the baseline had
+  // the attachment and the first real browser snapshot did not — a mismatch
+  // sessionSyncClient.js's whole-object comparison read as a real edit,
+  // producing a full-object annotation_updated op that
+  // backend/core/session_store.py's shallow `target.update(incoming)` merge
+  // used to silently delete the attachment on the very first time the
+  // session opened in a browser. Both translators must agree, or autosave
+  // ships this regression again.
+  it('produces the same annotation for an attached line whether built via the sync baseline or a live GraphCanvas round trip', () => {
+    const server = [
+      {
+        id: 'line-attached',
+        type: 'line',
+        position: { x: 0, y: 0 },
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        start: {
+          point: { x: 0, y: 0 },
+          attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: -5 } },
+        },
+        end: { point: { x: 160, y: 0 } },
+        startArrow: false,
+        endArrow: true,
+      },
+    ];
+
+    // Baseline mirror: exactly useSharedSession.js's serverStateToMirror.
+    const baselineMirror = overlaysToAnnotations(annotationsToOverlays(server));
+
+    // GraphCanvas-shaped snapshot: hydrate to overlays (as on session load),
+    // build a ReactFlow node per overlay (GraphCanvas hydration), serialize
+    // each back to an overlay (GraphCanvas's onSaveView), then run the same
+    // overlaysToAnnotations leg persistSessionSnapshot runs on viewData.annotations.
+    const hydratedOverlays = annotationsToOverlays(server);
+    const canvasOverlays = hydratedOverlays.map((o) => flowNodeToOverlay(overlayToFlowNode(o)));
+    const graphCanvasSnapshot = overlaysToAnnotations(canvasOverlays);
+
+    expect(graphCanvasSnapshot).toEqual(baselineMirror);
+    expect(graphCanvasSnapshot[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
   });
 
   it('round-trips a freehand stroke via absolute model-space points', () => {

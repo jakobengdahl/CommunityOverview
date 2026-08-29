@@ -410,6 +410,18 @@ export function overlayToFlowNode(overlay) {
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
+  // `start`/`end` carry a line endpoint's *attachment* (docs/ANNOTATION_
+  // CONTRACT.md — bind to a node or another annotation), a distinct concept
+  // from the startAnchor/endAnchor GUI snap above. This is data passthrough
+  // only, so a live GraphCanvas snapshot matches sessionAnnotations.js's
+  // round trip (smallfix-line-endpoint-attachment-dropped-by-translator) —
+  // it does not add rendering/dragging behaviour for how an attached
+  // endpoint should follow its target; that stays a separate, bigger task.
+  // Carried only when the attachment is actually present, same as
+  // sessionAnnotations.js, so a plain arrow overlay does not grow a
+  // spurious `start`/`end` field.
+  if (overlay.start?.attachment) data.start = overlay.start;
+  if (overlay.end?.attachment) data.end = overlay.end;
   return { ...base, data, draggable: !locked && !isArrowAnchored(data), zIndex };
 }
 
@@ -473,6 +485,9 @@ export function flowNodeToOverlay(node) {
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;
+  // Mirrors overlayToFlowNode's start/end passthrough above; see its comment.
+  if (node.data?.start?.attachment) out.start = node.data.start;
+  if (node.data?.end?.attachment) out.end = node.data.end;
   return out;
 }
 
