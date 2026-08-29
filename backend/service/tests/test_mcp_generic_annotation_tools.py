@@ -438,6 +438,111 @@ class TestCreateAnnotation:
         assert result["error"] == "invalid_content"
         assert session.state["annotations"] == []
 
+    def test_locked_true_with_attachment_drops_the_binding_on_fresh_create(
+        self, annotation_tools
+    ):
+        # dec-annotation-lock-semantics point 2: create_annotation's own
+        # `locked` parameter must not let a caller bypass the same binding
+        # drop set_annotation_lock enforces — a fresh create combining
+        # locked=True with an attached content must never store both.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=10,
+            y=10,
+            locked=True,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is True
+        assert result["annotation"]["content"].get("attachment") is None
+        # The position the caller asked for is kept — only the binding goes.
+        assert result["annotation"]["x"] == 10
+        assert result["annotation"]["y"] == 10
+
+    def test_locked_true_with_line_endpoint_attachments_drops_both_on_fresh_create(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            locked=True,
+            content={
+                "start": {"attachment": {"target_id": "node-a", "target_type": "node"}},
+                "end": {"attachment": {"target_id": "node-b", "target_type": "node"}},
+            },
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is True
+        assert result["annotation"]["content"].get("start") is None
+        assert result["annotation"]["content"].get("end") is None
+
+    def test_locked_false_with_attachment_keeps_the_binding(self, annotation_tools):
+        # Control: an unlocked create must keep its attachment untouched —
+        # the drop is conditional on locked=True, not unconditional.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=0,
+            y=0,
+            locked=False,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is False
+        assert result["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+    def test_upsert_replace_flipping_locked_true_drops_an_existing_binding(
+        self, annotation_tools
+    ):
+        # The second reachable path from the graph task: an upsert-replace
+        # (same annotation_id) that flips an existing unlocked+attached
+        # annotation's locked to True while resending the same attachment.
+        # This goes through session_manager.upsert_annotation, not
+        # update_annotation/set_annotation_lock, so it must be covered here
+        # rather than relying on TestSetAnnotationLock's coverage.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-1",
+            locked=False,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+        assert created["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+        replaced = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-1",
+            locked=True,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert replaced["success"] is True
+        assert replaced["annotation"]["locked"] is True
+        assert replaced["annotation"]["content"].get("attachment") is None
+        assert len(session.state["annotations"]) == 1
+
     def test_upserts_by_matching_id_and_same_type(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

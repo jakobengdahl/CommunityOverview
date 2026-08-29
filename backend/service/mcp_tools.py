@@ -2433,6 +2433,15 @@ def register_mcp_tools(
         binding reference itself needs to go. Unlocking does not restore it;
         the contract is deliberate that a user re-attaches by hand. Returns
         an empty dict when *existing* carries no binding to drop.
+
+        Shared by `set_annotation_lock` (patching a stored annotation) and
+        `create_annotation` (applied to the freshly built annotation dict
+        before it is stored, so a caller cannot smuggle `locked=True` plus an
+        attached `content` past the same rule through a fresh create or an
+        upsert-replace — see docs/ANNOTATION_CONTRACT.md's "Locking and
+        bindings"). Both call sites pass a dict with the payload fields
+        already merged onto the top level (`_apply_content`'s shape), so the
+        same field-presence checks apply either way.
         """
         ann_type = annotation_type_of(existing)
         content: Dict[str, Any] = {}
@@ -2558,6 +2567,16 @@ def register_mcp_tools(
           - vote_dot: {"value": 3}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
 
+        `locked=True` combined with an attached/anchored `content` (an
+        attachable type's `attachment`, or a `line`'s `start`/`end`
+        attachment) never stores both together — the binding is dropped in
+        the same write, the same rule `set_annotation_lock` enforces when
+        locking an already-stored annotation (dec-annotation-lock-semantics
+        point 2; see docs/ANNOTATION_CONTRACT.md's "Locking and bindings").
+        This applies to a fresh create and to an upsert-replace alike,
+        including replacing an existing unlocked, attached annotation with
+        `locked=True` and the same attachment resent in `content`.
+
         `text` and `shape` also read typography out of `style` (not
         `content`): `style.fontSize` (px), `style.font` (one of the curated
         family names GENERIC_FONT_FAMILIES in
@@ -2677,6 +2696,17 @@ def register_mcp_tools(
             )
         except ValueError as exc:
             return {"success": False, "error": "invalid_content", "message": str(exc)}
+        # dec-annotation-lock-semantics point 2: a fresh create or an
+        # upsert-replace (annotation_id matching an existing annotation) that
+        # sets locked=True must not store a binding alongside it either —
+        # this tool's upsert replaces the whole annotation via
+        # session_manager.upsert_annotation rather than going through
+        # update_annotation/set_annotation_lock, so it would otherwise bypass
+        # the same drop entirely (both for a fresh attached+locked create, and
+        # for flipping an existing unlocked+attached annotation's locked to
+        # True while resending the same attached content).
+        if annotation.get("locked"):
+            annotation.update(_lock_detach_content(annotation))
         try:
             result = session_manager.upsert_annotation(
                 session_id,

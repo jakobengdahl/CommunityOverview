@@ -537,6 +537,17 @@ onto its target's now-different position — a jump the user did not ask for.
 Dropping the binding at lock time closes that: **unlocking does not restore
 it**, and re-attaching is a deliberate, separate user action afterward.
 
+The same rule applies at `create_annotation` (`backend/service/mcp_tools.py`),
+not only at `set_annotation_lock`: that tool's `locked` parameter lets a
+caller set `locked=True` in the same call as an attached/anchored `content`,
+for a fresh create or for an upsert-replace (`annotation_id` matching an
+existing annotation — the whole annotation is replaced there, not patched
+through `update_annotation`/`set_annotation_lock`, so it does not otherwise
+pass through this rule at all). Both paths share the same
+`_lock_detach_content` helper `set_annotation_lock` uses, applied to the
+freshly built annotation before it is stored, so `create_annotation` can
+never persist `locked=True` alongside a binding either.
+
 Two related pieces of the same decision live elsewhere in this document
 rather than here, because each is a detail of the section it sits in: a
 locked group's own menu withholds every destructive action, [Layer
