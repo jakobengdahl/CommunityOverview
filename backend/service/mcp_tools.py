@@ -48,6 +48,7 @@ from backend.core.session_annotations import (
     is_note,
     project_note,
     ALL_ANNOTATION_TYPES,
+    ATTACHABLE_ANNOTATION_TYPES,
     GENERIC_ANNOTATION_TYPES,
     IMAGE_TYPE,
     annotation_type_of,
@@ -2417,6 +2418,37 @@ def register_mcp_tools(
                 return annotation if is_generic_annotation(annotation) else None
         return None
 
+    def _lock_detach_content(existing: Dict[str, Any]) -> Dict[str, Any]:
+        """The `content` fields that drop an attached/anchored annotation's
+        binding at the moment it is locked (dec-annotation-lock-semantics
+        point 2). `locked` now freezes geometry outright (the two canvas
+        effects in GraphCanvas.jsx that resolve a binding's geometry skip a
+        locked annotation entirely), so a binding left in place would claim an
+        attachment the annotation no longer honours — a locked attached label
+        that silently drifts from what it labels once its target moves later,
+        or a locked anchored arrow that snaps back onto a now-distant target
+        the instant it is unlocked. The annotation's stored geometry is kept
+        resolved continuously by the browser's own follow effects while it is
+        unlocked, so there is nothing left to (re)compute here — only the
+        binding reference itself needs to go. Unlocking does not restore it;
+        the contract is deliberate that a user re-attaches by hand. Returns
+        an empty dict when *existing* carries no binding to drop.
+        """
+        ann_type = annotation_type_of(existing)
+        content: Dict[str, Any] = {}
+        if ann_type in ATTACHABLE_ANNOTATION_TYPES and existing.get("attachment"):
+            content["attachment"] = None
+        if ann_type == "line":
+            if existing.get("startAnchor"):
+                content["startAnchor"] = None
+            if existing.get("endAnchor"):
+                content["endAnchor"] = None
+            for key in ("start", "end"):
+                endpoint = existing.get(key)
+                if isinstance(endpoint, dict) and endpoint.get("attachment"):
+                    content[key] = None
+        return content
+
     @register_tool
     def list_annotations(
         session_id: str, types: Optional[List[str]] = None
@@ -3260,6 +3292,13 @@ def register_mcp_tools(
         still edit or unlock a locked annotation deliberately. Only acts on
         the generic types `create_annotation` manages (not `note`/`group`).
 
+        Locking freezes ALL geometry change, including a binding's own
+        follow behaviour — so locking an attached (`text`/`label`/`icon`/
+        `vote_dot`) or anchored (`line`) annotation drops that binding in the
+        same write: its current, already-resolved position is kept, but the
+        attachment/anchor reference itself is cleared. Unlocking does not
+        restore it; re-attach manually if that is what you want.
+
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
             annotation_id: The annotation's stable id.
@@ -3301,7 +3340,11 @@ def register_mcp_tools(
                 "error": "not_found",
                 "message": f"No annotation with id {annotation_id!r} in this session's generic annotation set.",
             }
-        patch = build_annotation_patch(existing, locked=locked)
+        # Locking drops an attached/anchored annotation's binding in the same
+        # write (dec-annotation-lock-semantics point 2) — unlocking does not
+        # bring it back, per that decision.
+        detach_content = _lock_detach_content(existing) if locked else None
+        patch = build_annotation_patch(existing, locked=locked, content=detach_content)
         try:
             result = session_manager.update_annotation(
                 session_id,

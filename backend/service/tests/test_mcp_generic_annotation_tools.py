@@ -897,6 +897,98 @@ class TestSetAnnotationLock:
         assert result["success"] is False
         assert result["error"] == "not_found"
 
+    def test_locking_an_attached_label_drops_its_binding(self, annotation_tools):
+        # dec-annotation-lock-semantics point 2: locking an attached/anchored
+        # annotation resolves its binding one final time (its geometry is
+        # already kept resolved by the browser's own follow effect while
+        # unlocked) and drops the binding reference itself, so a locked
+        # label never claims an attachment it no longer honours.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=10,
+            y=10,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+        ann_id = created["annotation"]["id"]
+        assert created["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        assert locked["annotation"]["locked"] is True
+        assert locked["annotation"]["content"].get("attachment") is None
+        # The label's own position is untouched by the lock — only the
+        # binding reference is cleared.
+        assert locked["annotation"]["x"] == 10
+        assert locked["annotation"]["y"] == 10
+
+    def test_locking_an_anchored_line_drops_both_endpoint_bindings(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            content={
+                "start": {"attachment": {"target_id": "node-a", "target_type": "node"}},
+                "end": {"attachment": {"target_id": "node-b", "target_type": "node"}},
+            },
+        )
+        ann_id = created["annotation"]["id"]
+
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        assert locked["annotation"]["locked"] is True
+        assert locked["annotation"]["content"].get("start") is None
+        assert locked["annotation"]["content"].get("end") is None
+
+    def test_locking_leaves_an_unbound_annotation_untouched(self, annotation_tools):
+        # No attachment/anchor to drop: the lock patch must not invent one.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+
+        locked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        assert locked["annotation"]["locked"] is True
+        assert "attachment" not in locked["annotation"]["content"]
+
+    def test_unlocking_does_not_restore_a_dropped_binding(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=0,
+            y=0,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+        ann_id = created["annotation"]["id"]
+        tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        unlocked = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=False
+        )
+
+        assert unlocked["annotation"]["locked"] is False
+        assert unlocked["annotation"]["content"].get("attachment") is None
+
 
 class TestDuplicateAnnotation:
     def test_duplicates_with_offset_and_new_id(self, annotation_tools):

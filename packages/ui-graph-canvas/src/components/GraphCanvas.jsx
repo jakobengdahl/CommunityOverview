@@ -2657,6 +2657,13 @@ function GraphCanvasInner({
   // arrow is not held and becomes draggable again (so a deleted target can't
   // strand it). resolveAnchoredArrow returns null when geometry already matches,
   // keeping this idempotent and loop-free despite depending on `nodes`.
+  //
+  // `locked` freezes ALL geometry change (dec-annotation-lock-semantics point
+  // 1), not only user-initiated edits — including this resolve. A locked
+  // arrow's endpoints stay exactly where they were the moment it was locked,
+  // even while its anchored target keeps moving; locking already drops the
+  // anchor itself (set_annotation_lock, backend/service/mcp_tools.py), so
+  // there is nothing left claiming a binding this effect isn't honouring.
   useEffect(() => {
     const centers = new Map();
     const existing = new Set();
@@ -2676,7 +2683,7 @@ function GraphCanvasInner({
     for (const n of nodes) {
       if (n.type !== 'arrow') continue;
       if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
-      const resolved = resolveAnchoredArrow(n, centers);
+      const resolved = n.data?.locked ? null : resolveAnchoredArrow(n, centers);
       // Folds in the same remote-claim exclusivity the selection-claim effect
       // applies, so this effect (which runs on every `nodes` change, far more
       // often) never resets `draggable` back to true out from under a claim
@@ -2723,6 +2730,11 @@ function GraphCanvasInner({
   // once the target is absent, so a removed/hidden target leaves the overlay
   // at its last resolved position rather than resetting it (contract:
   // "detaches and keeps its last resolved model-space geometry").
+  //
+  // `locked` freezes ALL geometry change (dec-annotation-lock-semantics point
+  // 1), so a locked attached overlay is skipped here too, exactly like the
+  // arrow anchor effect above — locking already dropped the attachment
+  // itself (set_annotation_lock, backend/service/mcp_tools.py).
   useEffect(() => {
     const centers = new Map();
     let hasAttached = false;
@@ -2730,12 +2742,19 @@ function GraphCanvasInner({
       if (n.type === 'arrow') continue;
       const c = nodeCenter(n);
       if (c) centers.set(n.id, c);
-      if (ATTACHABLE_OVERLAY_KINDS.has(n.type) && n.data?.attachment) hasAttached = true;
+      if (ATTACHABLE_OVERLAY_KINDS.has(n.type) && n.data?.attachment && !n.data?.locked)
+        hasAttached = true;
     }
     if (!hasAttached) return;
     const updates = new Map();
     for (const n of nodes) {
-      if (!ATTACHABLE_OVERLAY_KINDS.has(n.type) || !n.data?.attachment || n.dragging) continue;
+      if (
+        !ATTACHABLE_OVERLAY_KINDS.has(n.type) ||
+        !n.data?.attachment ||
+        n.data?.locked ||
+        n.dragging
+      )
+        continue;
       const nextPosition = resolveAttachedPosition(n, centers);
       if (nextPosition) updates.set(n.id, nextPosition);
     }
