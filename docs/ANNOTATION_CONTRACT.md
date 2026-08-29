@@ -542,6 +542,25 @@ onto its target's now-different position — a jump the user did not ask for.
 Dropping the binding at lock time closes that: **unlocking does not restore
 it**, and re-attaching is a deliberate, separate user action afterward.
 
+The same rule applies at `create_annotation` (`backend/service/mcp_tools.py`),
+not only at `set_annotation_lock`: that tool's `locked` parameter lets a
+caller set `locked=True` in the same call as an attached/anchored `content`,
+for a fresh create or for an upsert-replace (`annotation_id` matching an
+existing annotation — the write goes through `session_manager.upsert_annotation`
+there, not through `update_annotation`/`set_annotation_lock`, so it does not
+otherwise pass through this rule at all). That write is a *partial* merge,
+not a full replace: the store (`backend/core/session_store.py`) applies it as
+a shallow `existing.update(annotation)` onto the previously stored record, so
+any field this call omits survives from before — including a binding field an
+upsert-replace call did not think to resend just to flip `locked`. Both paths
+share the same `_lock_detach_content` helper `set_annotation_lock` uses; for a
+fresh create there is no prior state, so it is applied to the freshly built
+annotation, but for an upsert-replace it is applied to a merged view (the
+existing stored annotation overlaid by this call's own fields) so an omitted
+binding field is looked up from the stored annotation rather than reading as
+absent. Either way, `create_annotation` can never persist `locked=True`
+alongside a binding.
+
 Two related pieces of the same decision live elsewhere in this document
 rather than here, because each is a detail of the section it sits in: a
 locked group's own menu withholds every destructive action, [Layer

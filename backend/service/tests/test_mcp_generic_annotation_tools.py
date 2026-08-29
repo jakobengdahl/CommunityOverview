@@ -438,6 +438,171 @@ class TestCreateAnnotation:
         assert result["error"] == "invalid_content"
         assert session.state["annotations"] == []
 
+    def test_locked_true_with_attachment_drops_the_binding_on_fresh_create(
+        self, annotation_tools
+    ):
+        # dec-annotation-lock-semantics point 2: create_annotation's own
+        # `locked` parameter must not let a caller bypass the same binding
+        # drop set_annotation_lock enforces — a fresh create combining
+        # locked=True with an attached content must never store both.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=10,
+            y=10,
+            locked=True,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is True
+        assert result["annotation"]["content"].get("attachment") is None
+        # The position the caller asked for is kept — only the binding goes.
+        assert result["annotation"]["x"] == 10
+        assert result["annotation"]["y"] == 10
+
+    def test_locked_true_with_line_endpoint_attachments_drops_both_on_fresh_create(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="line",
+            x=0,
+            y=0,
+            locked=True,
+            content={
+                "start": {"attachment": {"target_id": "node-a", "target_type": "node"}},
+                "end": {"attachment": {"target_id": "node-b", "target_type": "node"}},
+            },
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is True
+        assert result["annotation"]["content"].get("start") is None
+        assert result["annotation"]["content"].get("end") is None
+
+    def test_locked_false_with_attachment_keeps_the_binding(self, annotation_tools):
+        # Control: an unlocked create must keep its attachment untouched —
+        # the drop is conditional on locked=True, not unconditional.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id,
+            type="label",
+            x=0,
+            y=0,
+            locked=False,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["locked"] is False
+        assert result["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+    def test_upsert_replace_flipping_locked_true_drops_an_existing_binding(
+        self, annotation_tools
+    ):
+        # The second reachable path from the graph task: an upsert-replace
+        # (same annotation_id) that flips an existing unlocked+attached
+        # annotation's locked to True while RESENDING the same attachment in
+        # `content`. This goes through session_manager.upsert_annotation, not
+        # update_annotation/set_annotation_lock, so it must be covered here
+        # rather than relying on TestSetAnnotationLock's coverage.
+        #
+        # Note this case alone does not exercise the merge-aware detach path:
+        # because `content` restates the attachment, it lands on the freshly
+        # built annotation dict too, so a naive detach against that dict
+        # alone (ignoring the existing stored annotation) already happens to
+        # find it and drop it. It is kept here as a control (a caller *can*
+        # resend the binding and have it dropped) — the gap this masked
+        # (omitted `content`) is covered separately by
+        # test_upsert_replace_flipping_locked_true_drops_binding_when_content_omitted
+        # below.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-1",
+            locked=False,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+        assert created["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+        replaced = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-1",
+            locked=True,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+
+        assert replaced["success"] is True
+        assert replaced["annotation"]["locked"] is True
+        assert replaced["annotation"]["content"].get("attachment") is None
+        assert len(session.state["annotations"]) == 1
+
+    def test_upsert_replace_flipping_locked_true_drops_binding_when_content_omitted(
+        self, annotation_tools
+    ):
+        # The actual gap an independent review found in the fix above: the
+        # natural minimal "just lock this" call omits `content` entirely
+        # rather than resending the existing attachment. create_annotation's
+        # upsert-replace write (session_manager.upsert_annotation) is a
+        # shallow per-key merge onto the previously stored record
+        # (session_store.py's `existing.update(annotation)`), so a binding
+        # field this call never mentions is not "unchanged" from the merge's
+        # point of view — it is simply absent from the incoming dict and so
+        # survives untouched from the old stored annotation. Detecting the
+        # drop against only the freshly built (contentless) dict would find
+        # nothing and silently leave the annotation locked AND still bound —
+        # exactly the state dec-annotation-lock-semantics point 2 forbids.
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-2",
+            locked=False,
+            content={"attachment": {"target_id": "node-1", "target_type": "node"}},
+        )
+        assert created["annotation"]["content"]["attachment"]["target_id"] == "node-1"
+
+        # No `content` at all — just flipping the lock flag.
+        replaced = tools_map["create_annotation"](
+            session_id=session.id,
+            type="icon",
+            x=5,
+            y=5,
+            annotation_id="icon-2",
+            locked=True,
+        )
+
+        assert replaced["success"] is True
+        assert replaced["annotation"]["locked"] is True
+        assert replaced["annotation"]["content"].get("attachment") is None
+        assert len(session.state["annotations"]) == 1
+
+        # Confirm the drop actually landed in the stored/merged state, not
+        # only in the tool's response shape.
+        stored = next(
+            a for a in session.state["annotations"] if a.get("id") == "icon-2"
+        )
+        assert stored.get("attachment") is None
+
     def test_upserts_by_matching_id_and_same_type(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()

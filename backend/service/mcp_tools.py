@@ -2433,6 +2433,24 @@ def register_mcp_tools(
         binding reference itself needs to go. Unlocking does not restore it;
         the contract is deliberate that a user re-attaches by hand. Returns
         an empty dict when *existing* carries no binding to drop.
+
+        Shared by `set_annotation_lock` (patching a stored annotation) and
+        `create_annotation` (applied before the annotation is stored, so a
+        caller cannot smuggle `locked=True` plus an attached `content` past
+        the same rule through a fresh create or an upsert-replace — see
+        docs/ANNOTATION_CONTRACT.md's "Locking and bindings"). Both call
+        sites pass a dict with the payload fields already merged onto the
+        top level (`_apply_content`'s shape), but what dict that is differs:
+        `set_annotation_lock` always has the real stored annotation to read.
+        `create_annotation`'s fresh-create case has no prior stored state,
+        so the freshly built dict *is* the whole picture there — but its
+        upsert-replace case must pass a merged view (the existing stored
+        annotation overlaid by this call's own fields), not the freshly
+        built dict alone, or a binding field this call's `content` omits
+        would read as absent instead of falling back to the value the
+        underlying shallow-merge write (session_store.py's
+        `existing.update(annotation)`) would otherwise carry forward
+        untouched.
         """
         ann_type = annotation_type_of(existing)
         content: Dict[str, Any] = {}
@@ -2558,6 +2576,18 @@ def register_mcp_tools(
           - vote_dot: {"value": 3}
         `frame` typically needs no `content` — its box is `x`/`y`/`w`/`h`.
 
+        `locked=True` combined with an attached/anchored binding (an
+        attachable type's `attachment`, or a `line`'s `start`/`end`
+        attachment) never stores both together — the binding is dropped in
+        the same write, the same rule `set_annotation_lock` enforces when
+        locking an already-stored annotation (dec-annotation-lock-semantics
+        point 2; see docs/ANNOTATION_CONTRACT.md's "Locking and bindings").
+        This applies to a fresh create and to an upsert-replace alike,
+        including replacing an existing unlocked, attached annotation with
+        `locked=True` and the binding either resent verbatim in `content` or
+        left out of `content` entirely — the previously stored binding is
+        looked up and dropped either way, not only a resent one.
+
         `text` and `shape` also read typography out of `style` (not
         `content`): `style.fontSize` (px), `style.font` (one of the curated
         family names GENERIC_FONT_FAMILIES in
@@ -2634,6 +2664,7 @@ def register_mcp_tools(
                     "image annotation through the generic tools."
                 ),
             }
+        existing_annotation = None
         if annotation_id is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
@@ -2677,6 +2708,32 @@ def register_mcp_tools(
             )
         except ValueError as exc:
             return {"success": False, "error": "invalid_content", "message": str(exc)}
+        # dec-annotation-lock-semantics point 2: a fresh create or an
+        # upsert-replace (annotation_id matching an existing annotation) that
+        # sets locked=True must not store a binding alongside it either —
+        # session_manager.upsert_annotation's actual write
+        # (session_store.py's `existing.update(annotation)`) is a shallow
+        # per-key merge onto the previously stored record, not a full
+        # replace, so any binding field this call's `content` omits survives
+        # untouched from the old stored annotation. Detecting the binding to
+        # drop on `annotation` alone (the freshly built dict) is therefore
+        # only correct for a fresh create, where there is no prior stored
+        # state — a caller flipping `locked` to True on an existing
+        # attached annotation while omitting `content` (the natural
+        # "just lock it" call) would otherwise leave the old binding in
+        # place under the shallow merge, reproducing the bypass this whole
+        # rule exists to prevent. For an upsert-replace we instead detect
+        # against a merged view — the existing stored annotation overlaid by
+        # whatever this call is about to write — so an omitted binding field
+        # falls back to the stored value instead of reading as absent, and
+        # any field this call does supply still takes precedence.
+        if annotation.get("locked"):
+            if existing_annotation is not None:
+                merged_view = dict(existing_annotation)
+                merged_view.update(annotation)
+                annotation.update(_lock_detach_content(merged_view))
+            else:
+                annotation.update(_lock_detach_content(annotation))
         try:
             result = session_manager.upsert_annotation(
                 session_id,
