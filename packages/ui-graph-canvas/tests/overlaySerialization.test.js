@@ -171,6 +171,65 @@ describe('overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // smallfix-line-endpoint-attachment-dropped-by-translator: this layer used
+  // to drop a line endpoint's `start`/`end` attachment entirely (unlike
+  // startAnchor/endAnchor above, which is a different, GUI-only snap
+  // concept). A live GraphCanvas snapshot (built through overlayToFlowNode ->
+  // flowNodeToOverlay) is what actually gets autosaved, so a translator that
+  // preserved the attachment on the sessionAnnotations.js leg but not here
+  // still let the browser silently strip it on the first snapshot after
+  // load. This is passthrough only — it does not add any rendering/dragging
+  // behaviour for how an attached endpoint follows its target.
+  it("round-trips a line endpoint's attachment through the flow node", () => {
+    const overlay = {
+      id: 'arrow-attached',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      start: {
+        point: { x: 0, y: 0 },
+        attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: -5 } },
+      },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.start).toEqual(overlay.start);
+    expect(node.data.end).toBeUndefined();
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('does not add a start/end field to a plain, unattached arrow flow node', () => {
+    const overlay = {
+      id: 'arrow-plain-2',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 100,
+      dy: 0,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      // Mirrors the bare-point shape createAnnotation always produces
+      // server-side — no `attachment` key — which must not surface here.
+      start: { point: { x: 0, y: 0 } },
+      end: { point: { x: 100, y: 0 } },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.start).toBeUndefined();
+    expect(node.data.end).toBeUndefined();
+    const roundTripped = flowNodeToOverlay(node);
+    expect(roundTripped.start).toBeUndefined();
+    expect(roundTripped.end).toBeUndefined();
+  });
+
   it('leaves a free (unanchored) arrow draggable', () => {
     const node = overlayToFlowNode({
       id: 'arrow-3',

@@ -6,6 +6,14 @@ import {
   annotationDocumentToLegacyMetadata,
   legacyMetadataToAnnotationDocument,
 } from '../src/utils/sessionAnnotations';
+// Reaches past the package's public entry point (which does not export these)
+// straight at the ReactFlow-node translators, so this test can build the same
+// GraphCanvas-shaped snapshot useSharedSession.js/App.jsx actually produce —
+// see the cross-layer test below.
+import {
+  overlayToFlowNode,
+  flowNodeToOverlay,
+} from '../../../packages/ui-graph-canvas/src/utils/annotations';
 
 // The canvas emits overlay descriptors (note/label/arrow) via onSaveView; App
 // stores them in the server annotation model and restores them on load. These
@@ -98,6 +106,129 @@ describe('annotation overlay translation', () => {
     expect(server[0].endArrow).toBe(false);
     expect(server[0].startAnchor).toBe('node-a');
     expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  // smallfix-line-endpoint-attachment-dropped-by-translator: docs/ANNOTATION_
+  // CONTRACT.md makes a line's start/end endpoint attachment (attach to a
+  // node or another annotation) a first-class v1 field, validated server-side
+  // (backend/core/session_annotations.py's _line_endpoint_error). This
+  // translator used to read only from/to/startAnchor/endAnchor and never
+  // start/end, so the attachment was rebuilt as a bare point on the very
+  // first browser round trip, silently discarding what an MCP agent set.
+  it("preserves a line endpoint's attachment across the full round trip", () => {
+    const server = [
+      {
+        id: 'line-attached',
+        type: 'line',
+        position: { x: 0, y: 0 },
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        start: {
+          point: { x: 0, y: 0 },
+          attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: -5 } },
+        },
+        end: { point: { x: 160, y: 0 } },
+        startArrow: false,
+        endArrow: true,
+      },
+    ];
+    const overlays = annotationsToOverlays(server);
+    expect(overlays[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
+    // The unattached end endpoint stays a bare point and must not spuriously
+    // pick up an `end` field on the overlay.
+    expect(overlays[0].end).toBeUndefined();
+
+    const roundTripped = overlaysToAnnotations(overlays);
+    expect(roundTripped[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
+    expect(roundTripped[0].end.attachment).toBeUndefined();
+  });
+
+  // A line with no attachment on either endpoint must round-trip identically
+  // to before this fix — the overlay must not grow a spurious start/end
+  // field just because createAnnotation always produces at least `{point}`
+  // internally.
+  it('does not add a start/end field to a plain, unattached line overlay', () => {
+    const overlays = [
+      {
+        id: 'arrow-plain',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 100,
+        dy: 0,
+        color: '#fff',
+        startArrow: false,
+        endArrow: true,
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].start.attachment).toBeUndefined();
+    expect(server[0].end.attachment).toBeUndefined();
+    const roundTripped = annotationsToOverlays(server);
+    expect(roundTripped[0].start).toBeUndefined();
+    expect(roundTripped[0].end).toBeUndefined();
+    expect(roundTripped).toEqual(overlays);
+  });
+
+  // Regression for the review finding on smallfix-line-endpoint-attachment-
+  // dropped-by-translator: this translator fix alone was not enough. The
+  // realtime sync baseline (useSharedSession.js's serverStateToMirror) runs
+  // this file's round trip directly, but the live snapshot actually synced
+  // (App.jsx's persistSessionSnapshot, fed by GraphCanvas's onSaveView) goes
+  // through packages/ui-graph-canvas's overlayToFlowNode/flowNodeToOverlay
+  // first. Before that layer also carried start/end through, the baseline had
+  // the attachment and the first real browser snapshot did not — a mismatch
+  // sessionSyncClient.js's whole-object comparison read as a real edit,
+  // producing a full-object annotation_updated op that
+  // backend/core/session_store.py's shallow `target.update(incoming)` merge
+  // used to silently delete the attachment on the very first time the
+  // session opened in a browser. Both translators must agree, or autosave
+  // ships this regression again.
+  it('produces the same annotation for an attached line whether built via the sync baseline or a live GraphCanvas round trip', () => {
+    const server = [
+      {
+        id: 'line-attached',
+        type: 'line',
+        position: { x: 0, y: 0 },
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        start: {
+          point: { x: 0, y: 0 },
+          attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 5, y: -5 } },
+        },
+        end: { point: { x: 160, y: 0 } },
+        startArrow: false,
+        endArrow: true,
+      },
+    ];
+
+    // Baseline mirror: exactly useSharedSession.js's serverStateToMirror.
+    const baselineMirror = overlaysToAnnotations(annotationsToOverlays(server));
+
+    // GraphCanvas-shaped snapshot: hydrate to overlays (as on session load),
+    // build a ReactFlow node per overlay (GraphCanvas hydration), serialize
+    // each back to an overlay (GraphCanvas's onSaveView), then run the same
+    // overlaysToAnnotations leg persistSessionSnapshot runs on viewData.annotations.
+    const hydratedOverlays = annotationsToOverlays(server);
+    const canvasOverlays = hydratedOverlays.map((o) => flowNodeToOverlay(overlayToFlowNode(o)));
+    const graphCanvasSnapshot = overlaysToAnnotations(canvasOverlays);
+
+    expect(graphCanvasSnapshot).toEqual(baselineMirror);
+    expect(graphCanvasSnapshot[0].start.attachment).toMatchObject({
+      target_id: 'node-1',
+      target_type: 'node',
+      offset: { x: 5, y: -5 },
+    });
   });
 
   it('round-trips a freehand stroke via absolute model-space points', () => {
