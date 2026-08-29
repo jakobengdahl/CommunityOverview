@@ -258,7 +258,7 @@ function NoteNode({ id, data = {}, selected }) {
                   {NOTE_COLORS.map((c) => (
                     <button
                       key={c}
-                      className="color-button"
+                      className={`color-button${color === c ? ' active' : ''}`}
                       style={{ backgroundColor: c }}
                       onClick={() => changeColor(c)}
                     />

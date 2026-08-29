@@ -169,4 +169,25 @@ describe('ArrowNode default colour', () => {
     );
     expect(swatches).toContain('rgb(230, 237, 243)');
   });
+
+  // smallfix-annotation-colour-swatch-no-active-marker: the swatch grid had
+  // no indication of the line's current colour at all, unlike
+  // FreehandAnnotationNode's picker (FreehandAnnotationNode.jsx:298).
+  it('marks the swatch matching the current colour as active, and no other', () => {
+    render(
+      <ArrowNode
+        id="a1"
+        type="arrow"
+        data={{ dx: 100, dy: 0, color: '#FDE047' }}
+        selected={false}
+      />
+    );
+    openMenu();
+
+    const buttons = [...document.querySelectorAll('.color-button')];
+    const active = buttons.find((b) => b.style.backgroundColor === 'rgb(253, 224, 71)');
+    const inactive = buttons.find((b) => b.style.backgroundColor === 'rgb(230, 237, 243)');
+    expect(active.className).toContain('active');
+    expect(inactive.className).not.toContain('active');
+  });
 });
