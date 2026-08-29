@@ -273,6 +273,36 @@ describe('NoteNode inline text editing', () => {
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
+
+  // task-locked-annotation-doubleclick-guard: the persisted lock gates every
+  // context menu already; the double-click editor was the one path around it.
+  it('refuses to enter edit mode while locked', () => {
+    render(<NoteNode id="n1" data={{ text: 'Hello', locked: true }} selected={false} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('closes the editor and discards the pending edit when a lock arrives mid-edit', () => {
+    const notifyChange = vi.fn();
+    const { rerender } = render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { notePlaceholder: 'Note' } }}>
+        <NoteNode id="n1" data={{ text: 'Hello' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'typed before lock' } });
+    hoisted.setNodes.mockClear();
+    notifyChange.mockClear();
+    rerender(
+      <AnnotationContext.Provider value={{ notifyChange, labels: { notePlaceholder: 'Note' } }}>
+        <NoteNode id="n1" data={{ text: 'Hello', locked: true }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
 });
 
 // The layer row is shared by every annotation context menu

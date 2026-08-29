@@ -880,6 +880,38 @@ describe('GenericAnnotationNode inline text editing', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
 
+  // task-locked-annotation-doubleclick-guard: the persisted lock gates every
+  // context menu already (see "GenericAnnotationNode locked context menu"
+  // above); the double-click editor was the one path around it, for both the
+  // `text` kind and a `shape`'s caption below.
+  it('refuses to enter edit mode while locked', () => {
+    render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello', locked: true }} />);
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('closes the editor and discards the pending edit when a lock arrives mid-edit', () => {
+    const notifyChange = vi.fn();
+    const { rerender } = render(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello' }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'typed before lock' } });
+    hoisted.setNodes.mockClear();
+    notifyChange.mockClear();
+    rerender(
+      <AnnotationContext.Provider value={{ notifyChange, labels: {} }}>
+        <GenericAnnotationNode id="t1" type="text" data={{ text: 'Hello', locked: true }} />
+      </AnnotationContext.Provider>
+    );
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Hello')).toBeInTheDocument();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
   it('enters edit mode on double-click for a shape annotation', () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'triangle' }} />);
     fireEvent.doubleClick(screen.getByTestId('shape-halo'));
@@ -897,6 +929,20 @@ describe('GenericAnnotationNode inline text editing', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Step 1' } });
     expect(applyLatestUpdate({ id: 's1', data: { shape: 'rectangle' } }).data.text).toBe('Step 1');
     expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+
+  // task-locked-annotation-doubleclick-guard: the second of the two entry
+  // points that shared this gap (see the `text`-kind version above).
+  it("refuses to enter edit mode on a locked shape's caption", () => {
+    render(
+      <GenericAnnotationNode
+        id="s1"
+        type="shape"
+        data={{ shape: 'rectangle', text: 'Step 1', locked: true }}
+      />
+    );
+    fireEvent.doubleClick(screen.getByTestId('shape-halo'));
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
 
   it('shows a previously stored caption without entering edit mode', () => {
