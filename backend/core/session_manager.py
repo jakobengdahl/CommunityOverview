@@ -77,6 +77,21 @@ _DEFAULT_MAX_OP_BATCH_BYTES = 256 * 1024
 _DEFAULT_LOOKUP_BUCKET_CAPACITY = 60.0
 _DEFAULT_LOOKUP_REFILL_PER_SEC = 2.0
 
+# Stable marker distinct from any real browser `graph_client_id`, used only for
+# the *broadcast* attribution of an undo's replayed inverse op — see
+# `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py for the identical trap this
+# mirrors. `undo_last_action` replays the inverse op under the requesting
+# actor's own `client_id` for every check leading up to the replay (rate
+# limit, claim conflict, `find_latest_undoable`'s actor scoping); if that same
+# real `client_id` were also used to attribute the op handed to
+# `_apply_op_sync`, the undoing browser's own SSE subscription would receive
+# an op carrying its own client_id, and sessionSyncClient.js's "echo of our
+# own op" check (the same one genuine self-authored echoes correctly rely on)
+# would drop it before it ever reached the canvas — even though the undo
+# genuinely changed server-side state and every *other* client sees it. A
+# distinct marker for this one attribution is required, not optional.
+_UNDO_REPLAY_CLIENT_ID = "undo-replay"
+
 
 class SessionNotFound(Exception):
     pass
@@ -1445,6 +1460,13 @@ class SessionManager:
         resurrect it) — undoing that delete replays an ``annotation_created``
         for the same id, so that memory is cleared first here, or the store
         would otherwise refuse to recreate it.
+
+        The replay's *broadcast* attribution uses ``_UNDO_REPLAY_CLIENT_ID``,
+        not ``client_id`` — see that constant's docstring for why. Every check
+        above this (rate limit, claim conflict, actor-scoped
+        ``find_latest_undoable``) still uses the real ``client_id``; only the
+        inverse op handed to ``_apply_op_sync`` is re-attributed, right before
+        it is applied.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1492,12 +1514,18 @@ class SessionManager:
                     session._deleted_annotation_ids.remove(ann_id)
                 except ValueError:
                     pass
-        inverse_op["client_id"] = client_id
+        # Attribution for the broadcast only — see _UNDO_REPLAY_CLIENT_ID's
+        # docstring. Every check above (claim conflict included) has already
+        # used the real client_id; only the op that goes to _apply_op_sync
+        # (and therefore the SSE event's client_id) is re-attributed here, so
+        # the requesting browser's own subscription does not drop it as a
+        # self-echo.
+        inverse_op["client_id"] = _UNDO_REPLAY_CLIENT_ID
 
         applied = self._apply_op_sync(
             session,
             session_id,
-            client_id,
+            _UNDO_REPLAY_CLIENT_ID,
             inverse_op,
             record_activity=False,
             trusted_replay=True,

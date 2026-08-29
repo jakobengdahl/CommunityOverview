@@ -374,6 +374,31 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps).toHaveBeenCalledWith([imageOp], { clientId: 'human-image-ingest' });
   });
 
+  // Regression for the undo self-echo-drop fix
+  // (smallfix-undo-inverse-op-dropped-as-own-echo): the browser that presses
+  // Undo is the same browser whose fetch() reached the undo endpoint
+  // (backend/core/session_manager.py's undo_last_action), but the server
+  // broadcasts the replayed inverse op under a dedicated marker client id
+  // (_UNDO_REPLAY_CLIENT_ID = "undo-replay"), not the undoing browser's own
+  // client_id — mirroring the image-ingest fix just above, for the identical
+  // reason: emitting it under the undoing browser's own client_id would make
+  // this echo indistinguishable from a self-authored op and the guard above
+  // would drop it, so the user who pressed Undo would be told "Action
+  // undone" while their own canvas silently never changed (even though the
+  // undo succeeded server-side and every other client saw it correctly).
+  it('applies an undo-replay op even though the receiving client is the one that requested the undo, because the op carries a dedicated server client id', async () => {
+    const onRemoteOps = vi.fn();
+    const { client } = makeClient({ clientId: 'client-me', handlers: { onRemoteOps } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    const inverseOp = { op: 'annotation_created', annotation: { id: 'note-1', type: 'note' } };
+    // The undoing browser is 'client-me' — the same id whose fetch() reached
+    // the undo endpoint — but the broadcast is attributed to the server's
+    // marker, not to 'client-me'.
+    es.emit({ type: 'op', client_id: 'undo-replay', op: inverseOp, seq: 1 });
+    expect(onRemoteOps).toHaveBeenCalledWith([inverseOp], { clientId: 'undo-replay' });
+  });
+
   // foldLocalOp is App.jsx's other half of the image-ingest fix: applied
   // directly, ahead of the SSE echo above, so the sync baseline reflects the
   // new annotation immediately (see foldLocalOp's own docstring for why a
