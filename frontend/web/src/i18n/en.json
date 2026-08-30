@@ -576,7 +576,11 @@
     "icon_hint": "Add an icon",
     "vote_dot_hint": "Add a voting dot",
     "image_hint": "Add an image from a file",
-    "freehand_hint": "Draw a freehand stroke"
+    "freehand_hint": "Draw a freehand stroke",
+    "select": "Select",
+    "eraser": "Eraser",
+    "select_hint": "Select and move objects",
+    "eraser_hint": "Drag over objects to erase them"
   },
   "common": {
     "saving": "Saving...",

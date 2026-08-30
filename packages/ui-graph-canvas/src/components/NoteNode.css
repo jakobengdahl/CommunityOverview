@@ -261,8 +261,19 @@
   border-color: #60a5fa;
 }
 
+/* Column direction is load-bearing, not cosmetic. TEXT_ALIGN_STYLES (see its
+   doc comment in utils/annotations.js) defines `justifyContent` as the
+   VERTICAL position and `alignItems` as the horizontal one — which is only
+   true for a column-direction container, the direction the annotation's own
+   text box uses. Rendering the preview in the default `row` direction swapped
+   the two axes, so every off-diagonal cell previewed its own transpose: the
+   top-centre button showed its dot at middle-left, and picking it looked like
+   it had set the wrong alignment. Row-major TEXT_ALIGN_VALUES already puts
+   the buttons in the right grid cells; this is what makes each button's dot
+   match the position that button actually applies. */
 .graph-annotation-context-menu .align-picker-dot {
   display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
 }

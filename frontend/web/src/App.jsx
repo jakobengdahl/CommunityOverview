@@ -2651,6 +2651,10 @@ function App() {
             voteDotHint: t('annotation_toolbox.vote_dot_hint'),
             imageHint: t('annotation_toolbox.image_hint'),
             freehandHint: t('annotation_toolbox.freehand_hint'),
+            select: t('annotation_toolbox.select'),
+            eraser: t('annotation_toolbox.eraser'),
+            selectHint: t('annotation_toolbox.select_hint'),
+            eraserHint: t('annotation_toolbox.eraser_hint'),
           }}
           annotationToolboxPortalContainer={isMobile ? mobileAnnotationContainer : null}
           annotationEditSheetPortalContainer={isMobile ? mobileAnnotationEditContainer : null}

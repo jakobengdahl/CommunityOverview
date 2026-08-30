@@ -12,6 +12,17 @@ import { GraphCanvas } from '../src/index';
 // a second mock shape, since this file needs exactly the same access.
 const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
 
+// Creating from the toolbox is a two-step gesture (task-annotation-tool-modes):
+// the toolbox arms a tool, and the next tap on empty canvas is where the object
+// goes. The mock captures every prop GraphCanvas passes to `<ReactFlow>`, so
+// the pane tap is driven through the captured `onPaneClick` rather than a DOM
+// event on an element this mock never renders.
+function placeOnPane(x = 120, y = 90) {
+  act(() => {
+    store.handlers.onPaneClick?.({ clientX: x, clientY: y });
+  });
+}
+
 vi.mock('reactflow', () => {
   const MockReactFlow = (props) => {
     store.handlers = { ...store.handlers, ...props };
@@ -226,6 +237,7 @@ describe('GraphCanvas: keyboard creation lands selected and focused, ready to ed
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     const created = store.nodes.find((n) => n.type === 'note' && n.id !== 'already-selected');
     expect(created?.selected).toBe(true);
@@ -283,6 +295,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     expect(document.activeElement).toBe(target);
   });
@@ -303,6 +316,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
       const target = mountFocusTarget('note-1735500000000');
 
       fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+      placeOnPane();
 
       expect(document.activeElement).not.toBe(target);
       // The invariant is "focus never left the sheet", not merely "focus
@@ -320,6 +334,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     expect(document.activeElement).toBe(target);
   });

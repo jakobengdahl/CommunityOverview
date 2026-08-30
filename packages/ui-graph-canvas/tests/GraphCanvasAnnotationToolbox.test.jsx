@@ -13,15 +13,25 @@ function selectShapeVariant(name) {
   fireEvent.click(within(picker).getByRole('button', { name }));
 }
 
+// Creating from the toolbox is a two-step gesture (task-annotation-tool-modes):
+// the toolbox arms a tool, and the next tap on empty canvas is where the object
+// goes. Clicking a toolbox item on its own no longer creates anything, which is
+// the point — it used to drop every object at the viewport centre, so placing
+// several meant dragging each one out of the pile the last had made.
+function placeOnPane(x = 120, y = 90) {
+  fireEvent.click(screen.getByTestId('pane'), { clientX: x, clientY: y });
+}
+
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown }) => (
+  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown, onPaneClick }) => (
     <div data-testid="react-flow" className="react-flow">
       <div
         data-testid="pane"
         onMouseDown={(event) => onPaneMouseDown?.(event)}
         onContextMenu={(event) => onPaneContextMenu?.(event)}
+        onClick={(event) => onPaneClick?.(event)}
       />
       {children}
     </div>
@@ -99,6 +109,12 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
 
+    // Arming alone must not create anything — that is the regression this
+    // guards, since the old contract created on the toolbox click itself.
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+
+    placeOnPane();
+
     expect(onAnnotationChange).toHaveBeenCalled();
     const note = findCreatedNode('note');
     expect(note).toBeTruthy();
@@ -109,6 +125,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^text$/i }));
+
+    placeOnPane();
+
 
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
@@ -134,6 +153,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
+    placeOnPane();
+
+
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
     expect(shape.data.fill).toBeUndefined();
@@ -150,6 +172,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    placeOnPane();
+
 
     const shape = findCreatedNode('shape');
     expect(shape.zIndex).toBe(-1);
@@ -170,6 +195,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     selectShapeVariant(new RegExp(`^${shape}$`, 'i'));
     fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${shape}$`, 'i') }));
 
+    placeOnPane();
+
+
     const node = findCreatedNode('shape');
     expect(node.data.shape).toBe(shape);
     expect(node.style).toEqual(expected);
@@ -179,6 +207,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    placeOnPane();
+
 
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
@@ -190,6 +221,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     selectShapeVariant(/^circle$/i);
     fireEvent.click(screen.getByRole('button', { name: /^circle$/i }));
+
+    placeOnPane();
+
 
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
@@ -204,6 +238,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
+    placeOnPane();
+
+
     const shape = findCreatedNode('shape');
     expect(shape.data.text).toBe('');
   });
@@ -212,6 +249,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
+
+    placeOnPane();
+
 
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
@@ -233,6 +273,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(within(picker).getByRole('button', { name: /^star$/i }));
     fireEvent.click(screen.getByRole('button', { name: /^icon: star$/i }));
 
+    placeOnPane();
+
+
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
     expect(icon.data.icon).toBe('star');
@@ -247,6 +290,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
 
+    placeOnPane();
+
+
     const voteDot = findCreatedNode('vote_dot');
     expect(voteDot).toBeTruthy();
     expect(voteDot.data.value).toBeUndefined();
@@ -259,6 +305,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
+
+    placeOnPane();
+
 
     const label = findCreatedNode('label');
     expect(label).toBeTruthy();

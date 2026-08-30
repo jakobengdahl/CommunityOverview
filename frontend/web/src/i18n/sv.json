@@ -576,7 +576,11 @@
     "icon_hint": "Lägg till en ikon",
     "vote_dot_hint": "Lägg till en röstprick",
     "image_hint": "Lägg till en bild från en fil",
-    "freehand_hint": "Rita ett frihandsstreck"
+    "freehand_hint": "Rita ett frihandsstreck",
+    "select": "Markera",
+    "eraser": "Suddgummi",
+    "select_hint": "Markera och flytta objekt",
+    "eraser_hint": "Dra över objekt för att sudda dem"
   },
   "common": {
     "saving": "Sparar...",

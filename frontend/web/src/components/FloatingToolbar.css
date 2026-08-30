@@ -106,36 +106,27 @@
   color: inherit;
 }
 
+/* The floating (left) rail stays a two-column grid of bare icons on every
+   pointer type (task-annotation-toolbox-icons-only). It used to collapse to
+   one captioned row per node type without hover, which is what turned a
+   compact 2xN icon rail into a tall single column of text — on a phone that
+   is most of the canvas height, and the rail scrolls rather than fits. The
+   captions were there to replace an unavailable hover tooltip; the long-press
+   tooltip below (FloatingToolbar.jsx's own touch handling) covers that need
+   without spending the canvas area. Cells only grow to a 44px touch target.
+   The sheet variant is deliberately NOT included: it is a dedicated
+   full-width surface inside MobileShell's BottomSheet where a caption costs
+   nothing, and it keeps its labels. */
 @media (hover: none) {
-  .floating-toolbar {
-    grid-template-columns: 1fr;
-  }
-
   .floating-toolbar-item {
-    width: auto;
+    min-width: 44px;
     min-height: 44px;
-    justify-content: flex-start;
-    padding: 0 10px;
   }
-
-  .floating-toolbar-item-label {
-    display: inline;
-  }
-}
-
-.app.is-touch .floating-toolbar {
-  grid-template-columns: 1fr;
 }
 
 .app.is-touch .floating-toolbar-item {
-  width: auto;
+  min-width: 44px;
   min-height: 44px;
-  justify-content: flex-start;
-  padding: 0 10px;
-}
-
-.app.is-touch .floating-toolbar-item-label {
-  display: inline;
 }
 
 /* Sheet variant: content hosted inside MobileShell's BottomSheet rather than

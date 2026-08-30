@@ -110,25 +110,35 @@
    rhombus, hexagon and process arrow) lives in SHAPE_STYLES in
    GenericAnnotationNode.jsx so one source defines every variant. */
 
+/* The glyph alone, with no badge behind it (task-annotation-icon-no-chrome).
+   The circular border + opaque fill this used to draw read as a button rather
+   than as a mark placed on the canvas, and it hid whatever the icon sat on
+   top of. What the badge was actually buying was legibility against an
+   arbitrary background, so that job moves to a drop shadow: a light halo plus
+   a tight dark shadow keeps the glyph readable over both a dark canvas and a
+   pale note, without occluding anything. `filter` (not `box-shadow`) because
+   the shadow has to follow the glyph's own outline — a box shadow would
+   re-introduce the rectangle the badge removal exists to get rid of. */
 .graph-generic-annotation-node.kind-icon {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
-  border: 2px solid #94a3b8;
-  background: #1a1a1a;
+  border: none;
+  background: transparent;
   color: #e6edf3;
-  font-size: 18px;
+  font-size: 24px;
   line-height: 1;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.95)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
 }
 
 /* An icon name the set has no glyph for falls back to a two-character
    abbreviation of the name, which needs the smaller uppercased treatment a
-   glyph does not - two letters at 18px overflow the 32px badge. */
+   glyph does not - two letters at the glyph size overflow the 32px box. */
 .graph-generic-annotation-node.kind-icon.kind-icon-abbreviated {
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 700;
   text-transform: uppercase;
 }
 

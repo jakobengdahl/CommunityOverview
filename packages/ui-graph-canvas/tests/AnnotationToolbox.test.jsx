@@ -238,33 +238,38 @@ describe('AnnotationToolbox', () => {
     expect([...captions].every((c) => c.textContent.trim())).toBe(true);
   });
 
-  it('captions the items on a coarse pointer, which compact alone does not cover', () => {
-    // `compact` is a viewport-WIDTH signal, so it would caption a mouse user
-    // with a narrow window and miss a coarse-pointer user on a wide screen.
-    // The captions therefore hang off `touch`, which the host derives from
-    // its own coarse-pointer flag, and off the hover-capability query.
+  it('never captions the items, so the row stays one line on any pointer', () => {
+    // Inverted from what this test used to assert (task-annotation-toolbox-
+    // icons-only). The visible caption existed because a coarse pointer has
+    // no hover to reveal a tooltip — but widening every cell to fit a word
+    // is what wrapped the row onto a second line, and a two-row toolbox costs
+    // canvas height exactly where a phone has least of it. The glyph carries
+    // the meaning, the aria-label carries the name (asserted by the test
+    // below), and the tooltip still covers hover-capable pointers.
     render(<AnnotationToolbox onCreate={vi.fn()} touch />);
     expect(screen.getByTestId('annotation-toolbox').className).toContain(
       'annotation-toolbox--touch'
     );
 
     const css = readStylesheet();
+    // The sheet variant keeps its caption — it is a dedicated full-width
+    // surface inside the mobile BottomSheet, where a caption costs no canvas.
     expect(css).toMatch(
-      /\.annotation-toolbox--touch \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
+      /\.annotation-toolbox--sheet \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
     );
-    // Take the media block's own body by balanced braces before asserting
-    // anything about it. A regex that merely starts at the @media and runs
-    // forward — even a lazy one — sails past the closing brace and satisfies
-    // itself on the --touch rule further down, which lets the hover-query
-    // caption be deleted with the suite still green. That is the bug this
-    // very test was added to prevent, so it has to not have it.
-    const hoverBlock = css.match(/@media \(hover: none\) \{((?:[^{}]|\{[^{}]*\})*)\}/);
-    expect(hoverBlock).toBeTruthy();
-    expect(hoverBlock[1]).toMatch(/\.annotation-toolbox-item-label \{[^}]*display:\s*inline/);
-    // compact must NOT caption: it is width, not pointer.
-    expect(css).not.toMatch(
-      /\.annotation-toolbox--compact \.annotation-toolbox-item-label \{[^}]*display:\s*inline/
+    // No OTHER variant may reveal it. Asserted by removing the sheet rule and
+    // checking what is left, rather than by a per-selector negative: that way
+    // a caption reintroduced under some future variant name still fails here.
+    const withoutSheetRule = css.replace(
+      /\.annotation-toolbox--sheet \.annotation-toolbox-item-label \{[^}]*\}/g,
+      ''
     );
+    expect(withoutSheetRule).not.toMatch(
+      /\.annotation-toolbox-item-label \{[^}]*display:\s*inline/
+    );
+    // The row must not be allowed to wrap; that is the outcome the caption
+    // removal exists to guarantee.
+    expect(css).toMatch(/\.annotation-toolbox-items \{[^}]*flex-wrap:\s*nowrap/);
   });
 
   it('keeps the name as the accessible label while the tooltip carries the description', () => {
@@ -340,7 +345,10 @@ describe('AnnotationToolbox', () => {
     expect(note.querySelector('.annotation-toolbox-visual--note')).toBeTruthy();
     expect(note.querySelector('.annotation-toolbox-item-glyph').textContent).not.toContain('🗒');
 
-    for (const name of ['text', 'label', 'vote-dot', 'image', 'freehand']) {
+    // 'select' and 'eraser' are the two mode tools (task-annotation-tool-modes)
+    // and draw from the same pseudo-element glyph system as everything else,
+    // rather than reaching for an emoji that renders differently per platform.
+    for (const name of ['text', 'label', 'vote-dot', 'image', 'freehand', 'select', 'eraser']) {
       expect(document.querySelector(`.annotation-toolbox-visual--${name}`)).toBeTruthy();
     }
     expect(document.querySelector('.annotation-toolbox-icon-glyph')).toBeTruthy();
@@ -348,7 +356,11 @@ describe('AnnotationToolbox', () => {
     const css = readStylesheet();
     expect(css).toMatch(/\.annotation-toolbox-visual--note \{[^}]*background:\s*#fde047/);
     expect(css).toMatch(/\.annotation-toolbox-visual--note::before \{[^}]*bottom:\s*0/);
-    expect(css).toMatch(/\.annotation-toolbox-icon-glyph \{[^}]*border:\s*2px solid #38bdf8/);
+    // The icon slot draws the bare glyph (task-annotation-icon-no-chrome):
+    // the circular ring/fill it used to carry is gone, here and on the canvas
+    // annotation itself, so the preview matches what actually gets drawn.
+    expect(css).toMatch(/\.annotation-toolbox-icon-glyph \{[^}]*border:\s*none/);
+    expect(css).toMatch(/\.annotation-toolbox-icon-glyph \{[^}]*background:\s*transparent/);
   });
 
   it('applies the compact modifier class for narrow/touch viewports', () => {
