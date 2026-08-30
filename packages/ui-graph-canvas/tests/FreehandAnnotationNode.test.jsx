@@ -193,9 +193,9 @@ describe('FreehandAnnotationNode property editor', () => {
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
-  // task-annotation-shared-session-realtime: an exclusive lease refuses even
-  // opening the property editor while another client holds the claim.
-  it('refuses to open the property editor while another client holds the selection claim, notifying instead', () => {
+  // task-annotation-exclusive-edit-leases: an exclusive edit lease refuses
+  // even opening the property editor while another client holds it.
+  it('refuses to open the property editor while another client holds the edit lease, notifying instead', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     const { container } = render(
       <AnnotationContext.Provider
@@ -205,7 +205,7 @@ describe('FreehandAnnotationNode property editor', () => {
           id="f1"
           data={{
             points: straightPoints,
-            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+            remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
       </AnnotationContext.Provider>
@@ -280,7 +280,7 @@ describe('FreehandAnnotationNode locked context menu', () => {
     expect(notifyChange).toHaveBeenCalledWith('style');
   });
 
-  it('refuses to open the locked context menu while another client holds the selection claim, notifying instead', () => {
+  it('refuses to open the locked context menu while another client holds the edit lease, notifying instead', () => {
     const notifyChange = vi.fn();
     const notifyRemoteLockedAttempt = vi.fn();
     render(
@@ -292,7 +292,7 @@ describe('FreehandAnnotationNode locked context menu', () => {
           data={{
             points: straightPoints,
             locked: true,
-            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+            remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
       </AnnotationContext.Provider>

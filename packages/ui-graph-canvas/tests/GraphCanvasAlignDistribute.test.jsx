@@ -159,7 +159,7 @@ describe('GraphCanvas multi-select Align/Distribute', () => {
     const g1 = graphNode('g1', 300, 0);
     const n1 = noteNode('n1', 100, 200);
     const locked = noteNode('locked1', 400, 400, { locked: true });
-    const remote = noteNode('remote1', 500, 500, { remoteSelection: { clientId: 'other' } });
+    const remote = noteNode('remote1', 500, 500, { remoteLease: { clientId: 'other' } });
     store.nodes = [g1, n1, locked, remote];
 
     openMultiMenu(store.nodes);

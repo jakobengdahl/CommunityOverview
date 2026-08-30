@@ -91,11 +91,34 @@ describe('ArrowNode locked context menu', () => {
     expect(document.querySelectorAll('.color-button')).toHaveLength(7);
   });
 
-  it('surfaces the attempt instead of unlocking while another client holds the claim', () => {
+  it('surfaces the attempt instead of opening the menu while another client holds the edit lease', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     render(
       <AnnotationContext.Provider
         value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+      >
+        <ArrowNode
+          id="a1"
+          type="arrow"
+          data={{ ...lockedData, remoteLease: { color: '#f00', displayName: 'Ada' } }}
+          selected={false}
+        />
+      </AnnotationContext.Provider>
+    );
+    openMenu();
+    expect(screen.queryByText(/Unlock/)).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('a mere remoteSelection (no edit lease) does not block opening the menu', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt: vi.fn(),
+          labels: { unlock: 'Unlock' },
+        }}
       >
         <ArrowNode
           id="a1"
@@ -106,9 +129,7 @@ describe('ArrowNode locked context menu', () => {
       </AnnotationContext.Provider>
     );
     openMenu();
-    fireEvent.click(screen.getByText(/Unlock/));
-    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
-    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(screen.getByText(/Unlock/)).toBeInTheDocument();
   });
 });
 

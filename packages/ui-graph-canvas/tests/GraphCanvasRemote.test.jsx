@@ -179,7 +179,31 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     });
   });
 
-  it('stamps a live remote claim onto an annotation node and refuses local dragging (task-annotation-shared-session-realtime)', () => {
+  it('stamps a live remote edit lease onto an annotation node and refuses local dragging (task-annotation-exclusive-edit-leases)', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteLeases={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    const seed = [
+      { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {}, draggable: true },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteLease?.displayName === 'Ada'
+    );
+    const note = result.find((n) => n.id === 'note-1');
+    expect(note.data.remoteLease).toEqual({
+      clientId: 'c2',
+      color: '#e6194b',
+      displayName: 'Ada',
+    });
+    expect(note.draggable).toBe(false);
+  });
+
+  it('a mere remote selection claim (no edit lease) never blocks local dragging (task-annotation-exclusive-edit-leases)', () => {
     render(
       <GraphCanvas
         nodes={[]}
@@ -200,7 +224,7 @@ describe('GraphCanvas remote apply (design step 6)', () => {
       color: '#e6194b',
       displayName: 'Ada',
     });
-    expect(note.draggable).toBe(false);
+    expect(note.draggable).toBe(true);
   });
 
   it('leaves a graph ("custom") node untouched by the annotation remote-claim effect', () => {
@@ -234,44 +258,44 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     }
   });
 
-  it('restores dragging once a remote claim is released', () => {
+  it('restores dragging once a remote edit lease is released', () => {
     const { rerender } = render(
       <GraphCanvas
         nodes={[]}
         edges={[]}
-        remoteSelections={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        remoteLeases={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
       />
     );
     hoisted.setNodes.mockClear();
-    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
     const seed = [
       {
         id: 'note-1',
         type: 'note',
         position: { x: 0, y: 0 },
-        data: { remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
+        data: { remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
         draggable: false,
       },
     ];
     const result = findResult(
       seed,
-      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteSelection == null
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteLease == null
     );
     const note = result.find((n) => n.id === 'note-1');
-    expect(note.data.remoteSelection).toBeNull();
+    expect(note.data.remoteLease).toBeNull();
     expect(note.draggable).toBe(true);
   });
 
-  it('keeps an anchored arrow non-draggable even once its remote claim clears (isArrowAnchored still applies)', () => {
+  it('keeps an anchored arrow non-draggable even once its remote edit lease clears (isArrowAnchored still applies)', () => {
     const { rerender } = render(
       <GraphCanvas
         nodes={[]}
         edges={[]}
-        remoteSelections={{ 'arrow-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        remoteLeases={{ 'arrow-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
       />
     );
     hoisted.setNodes.mockClear();
-    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
     const seed = [
       {
         id: 'arrow-1',
@@ -279,14 +303,14 @@ describe('GraphCanvas remote apply (design step 6)', () => {
         position: { x: 0, y: 0 },
         data: {
           startAnchor: 'graph-node-a',
-          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
         },
         draggable: false,
       },
     ];
     const result = findResult(
       seed,
-      (r) => r.find((n) => n.id === 'arrow-1')?.data?.remoteSelection == null
+      (r) => r.find((n) => n.id === 'arrow-1')?.data?.remoteLease == null
     );
     expect(result.find((n) => n.id === 'arrow-1').draggable).toBe(false);
   });
@@ -576,17 +600,17 @@ describe('GraphCanvas remote apply — per-kind audit (task-annotation-shared-se
       expect(secondResult?.filter((n) => n.id === `ann-${kind}`)).toHaveLength(1);
     });
 
-    // Lock ownership: a live remote claim on this kind is stamped and blocks
-    // local dragging identically to how the note/arrow cases above already
-    // prove it — this is the same GraphCanvas remote-claim effect
+    // Lock ownership: a live remote edit lease on this kind is stamped and
+    // blocks local dragging identically to how the note/arrow cases above
+    // already prove it — this is the same GraphCanvas remote-lease effect
     // (ANNOTATION_TYPES.has(n.type)), keyed on type membership rather than a
     // per-kind branch, so every ANNOTATION_TYPES member should behave alike.
-    it(`stamps a live remote claim onto a '${kind}' annotation and refuses local dragging`, () => {
+    it(`stamps a live remote edit lease onto a '${kind}' annotation and refuses local dragging`, () => {
       render(
         <GraphCanvas
           nodes={[]}
           edges={[]}
-          remoteSelections={{
+          remoteLeases={{
             [`ann-${kind}`]: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
@@ -596,10 +620,10 @@ describe('GraphCanvas remote apply — per-kind audit (task-annotation-shared-se
       ];
       const result = findResult(
         seed,
-        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteSelection?.displayName === 'Ada'
+        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteLease?.displayName === 'Ada'
       );
       const node = result.find((n) => n.id === `ann-${kind}`);
-      expect(node.data.remoteSelection).toEqual({
+      expect(node.data.remoteLease).toEqual({
         clientId: 'c2',
         color: '#e6194b',
         displayName: 'Ada',
@@ -607,33 +631,33 @@ describe('GraphCanvas remote apply — per-kind audit (task-annotation-shared-se
       expect(node.draggable).toBe(false);
     });
 
-    it(`restores dragging for a '${kind}' annotation once its remote claim clears`, () => {
+    it(`restores dragging for a '${kind}' annotation once its remote edit lease clears`, () => {
       const { rerender } = render(
         <GraphCanvas
           nodes={[]}
           edges={[]}
-          remoteSelections={{
+          remoteLeases={{
             [`ann-${kind}`]: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
       );
       hoisted.setNodes.mockClear();
-      rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+      rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
       const seed = [
         {
           id: `ann-${kind}`,
           type: kind,
           position: { x: 0, y: 0 },
-          data: { remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
+          data: { remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
           draggable: false,
         },
       ];
       const result = findResult(
         seed,
-        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteSelection == null
+        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteLease == null
       );
       const node = result.find((n) => n.id === `ann-${kind}`);
-      expect(node.data.remoteSelection).toBeNull();
+      expect(node.data.remoteLease).toBeNull();
       expect(node.draggable).toBe(true);
     });
 
