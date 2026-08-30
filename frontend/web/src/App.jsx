@@ -1498,11 +1498,19 @@ function App() {
         // wrong, since applyRemoteOp/foldLocalOp act on the current graph
         // store and the current sync client, not on `targetId` specifically.
         if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
-        await applyIngestedImageOptimistically({
+        const carriedAnnotation = await applyIngestedImageOptimistically({
           annotation: result?.annotation,
           applyRemoteOp,
           foldLocalOp: (op) => syncRef.current?.foldLocalOp(op),
         });
+        // A 200 whose body carries no usable annotation is a failure, not a
+        // delivery. Marking it delivered here is how "I picked a file and
+        // nothing happened — no image, no error" used to arise: the canvas
+        // never changed and nothing said why. Throw into the same catch every
+        // other failure already uses, so it reports identically.
+        if (!carriedAnnotation) {
+          throw new Error(t('canvas.image_ingest_failed'));
+        }
         delivered = true;
         sessionStore.touchSession(targetId);
         setSessionsVersion((v) => v + 1);

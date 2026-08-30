@@ -18,9 +18,23 @@
 // (SessionSyncClient's own internal echo-fold guard) — folding it again here
 // with this same, now possibly-stale creation-time content would risk
 // reverting a move/resize made in the gap since.
+// Returns whether the response actually carried an annotation to deliver.
+// `false` means the round trip completed but produced nothing this browser can
+// render — a 200 with a missing or malformed `annotation`. That case used to
+// return here silently while the caller went on to mark the ingest delivered,
+// so a user who picked a file got no image AND no error: the canvas simply
+// never changed. It is a failure and the caller must say so.
+//
+// A `true` return says only "there was an annotation and it was handed to
+// applyRemoteOp", NOT "this call is what rendered it". `applied` being falsy
+// is an ordinary, healthy outcome — it means the confirming SSE echo won the
+// race and already applied the same op — which is why it gates `foldLocalOp`
+// (see below) and not the return value. Reporting a lost race as an error
+// would fire on a perfectly successful upload.
 export async function applyIngestedImageOptimistically({ annotation, applyRemoteOp, foldLocalOp }) {
-  if (!annotation?.id) return;
+  if (!annotation?.id) return false;
   const op = { op: 'annotation_created', annotation };
   const applied = await applyRemoteOp(op);
   if (applied) foldLocalOp?.(op);
+  return true;
 }
