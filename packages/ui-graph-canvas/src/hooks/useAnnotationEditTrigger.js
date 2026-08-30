@@ -73,14 +73,39 @@ export function useAnnotationEditTrigger({ contextMenu, setContextMenu, menuRef 
   const openedViaButtonRef = useRef(false);
   const prevRef = useRef({ open: false, sheet: false });
 
-  // The host's sheet container can disappear out from under an open
-  // sheet-mode menu (the surface closed elsewhere — switching mobile nav
-  // tabs, the BottomSheet's own close control) without this component ever
-  // hearing about it directly. Close the local menu state too, so a stale
-  // `contextMenu.sheet === true` never tries to portal into a now-null node
-  // on the next render (React's `createPortal` requires a real DOM node).
+  // Whether a real, non-null `editSheet.container` has been observed during
+  // the CURRENT sheet-mode open cycle. Reset in `openEditMenu` below, right
+  // before each fresh `requestOpen()`.
+  //
+  // This exists because `editSheet.container` is legitimately, transiently
+  // null for one whole render at the START of every open cycle, not just
+  // when the sheet closes: `requestOpen()` flips the host's surface state,
+  // which mounts the sheet's (empty) container `<div>` with a callback ref
+  // (MobileShell's `onAnnotationEditSheetContainerChange` →
+  // `setMobileAnnotationEditContainer` in App.jsx). React invokes that
+  // callback ref during the commit phase, and the `setState` inside it
+  // schedules a SEPARATE render/commit — so the render that first sets
+  // `contextMenu = {sheet: true}` still sees `editSheet.container === null`
+  // (the container prop hasn't propagated back down from App.jsx yet), and
+  // its passive effects (this one included) flush before that second commit
+  // (the one where `container` is finally truthy) ever happens. Without this
+  // flag, the guard below can't tell "hasn't arrived yet" apart from "was
+  // showing and then genuinely disappeared" (the surface closed elsewhere —
+  // switching mobile nav tabs, the BottomSheet's own close control), and
+  // fires on the former, closing the sheet before the container it was
+  // waiting for even arrives.
+  const containerSeenThisCycleRef = useRef(false);
+
   useEffect(() => {
-    if (contextMenu?.sheet && !editSheet.container) setContextMenu(null);
+    if (!contextMenu?.sheet) return undefined;
+    if (editSheet.container) {
+      containerSeenThisCycleRef.current = true;
+      return undefined;
+    }
+    // Only close for a container that was seen and then went missing again
+    // — never while still waiting for it to arrive for the first time.
+    if (containerSeenThisCycleRef.current) setContextMenu(null);
+    return undefined;
   }, [editSheet.container, contextMenu, setContextMenu]);
 
   useEffect(() => {
@@ -116,6 +141,9 @@ export function useAnnotationEditTrigger({ contextMenu, setContextMenu, menuRef 
       event.stopPropagation();
       openedViaButtonRef.current = true;
       if (editSheet.capable) {
+        // A fresh open cycle: the container from any previous cycle (this
+        // node's last edit, or another node's) is no longer relevant.
+        containerSeenThisCycleRef.current = false;
         editSheet.requestOpen?.();
         setContextMenu({ sheet: true });
       } else {
