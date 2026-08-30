@@ -90,9 +90,10 @@ export function annotationsToGroups(annotations) {
       // The same envelope fields every overlay kind's translator already
       // carries. A group could always be locked over MCP, but the flag stopped
       // here, so the canvas never saw it and the next save diffed it back to
-      // its default. `z` is carried for the same reason; group paint order is
-      // array order (reorderNodesForParentChild), so nothing reads it yet —
-      // preserving the value is not the same as offering a control for it.
+      // its default. `z` is carried for the same reason and is now also read:
+      // reorderNodesForParentChild sorts the groups bucket by `data.z`
+      // ascending, so group paint order is z among groups, array order among
+      // everything else.
       z: a.z ?? 0,
       locked: Boolean(a.locked),
     });

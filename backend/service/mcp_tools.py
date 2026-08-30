@@ -3799,12 +3799,11 @@ def register_mcp_tools(
                 group with. Omit to leave current membership alone on an
                 upsert, or create an empty group. Use `update_group_members`
                 afterward for ongoing add/remove.
-            z: Optional layer order. Defaults to 0. Stored and reported
-                back, but not drawn for a group: the canvas paints groups as
-                backdrops behind their members in node-array order, so a
-                group's `z` does not change what covers what. Set it if you
-                want the value preserved; do not expect it to reorder
-                anything.
+            z: Optional layer order. Defaults to 0. Determines paint order
+                relative to OTHER groups only (higher z paints on top of
+                lower z among group backdrops) — it never affects a group's
+                members, which always paint above every group backdrop
+                regardless of z.
             locked: Whether the group starts locked against edits. The canvas
                 honours it: a locked group refuses recolour, rename, resize,
                 drag and delete, and offers only unlock. A group's menu has
