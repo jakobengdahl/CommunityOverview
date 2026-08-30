@@ -231,6 +231,14 @@ function genericAnnotationToOverlay(a) {
     // retirement rather than silently resurrecting it under a new name.
     overlay.fill = a.style?.fill;
     overlay.border = a.style?.border;
+    // Mirroring (task-annotation-drag-to-draw), carried under `style` like the
+    // rest of a shape's presentation. It is the ONLY way to aim a directional
+    // variant — a triangle or a process arrow — because drawing it is what
+    // sets it and there is no flip control anywhere else. Dropping it here
+    // meant a shape came back from a reload pointing the other way, and a
+    // collaborator never saw the aiming at all.
+    overlay.flipX = Boolean(a.style?.flipX) || undefined;
+    overlay.flipY = Boolean(a.style?.flipY) || undefined;
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
     overlay.attachment = a.attachment;
@@ -267,6 +275,8 @@ function genericOverlayToAnnotation(o) {
           font: o.font,
           textAlign: o.textAlign,
           opacity: o.opacity,
+          flipX: o.flipX,
+          flipY: o.flipY,
         }
       : o.kind === 'text'
         ? {

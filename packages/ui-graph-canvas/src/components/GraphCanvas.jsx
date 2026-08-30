@@ -19,7 +19,7 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
+import GenericAnnotationNode, { newShapeSize, regularShapeSize } from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
@@ -100,6 +100,22 @@ const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // copy — not the node's fallback — was the value every drawn stroke actually
 // got. Two constants for one default is what let the invisible near-white
 // survive a fix aimed at the fallback.
+// A stylus's inverted tip. Chromium reports it as its own pointer type; other
+// stacks report a normal `pen` and flag the eraser in the button bits (button
+// 5 / buttons bit 0x20, per the Pointer Events spec). Shared by the erase
+// gesture and the placement gesture — placement has to exclude EXACTLY what
+// erase accepts, or on the button-bits stacks (the Surface pen case this
+// exists for) flipping the pen over would erase along the stroke and commit a
+// new object on release.
+function isEraserTipEvent(event) {
+  if (event.pointerType === 'eraser') return true;
+  return event.pointerType === 'pen' && (event.button === 5 || (event.buttons & 32) !== 0);
+}
+
+// How far the pointer must travel before the eraser will act again. See
+// eraseAt: without it a sweep cascades down a stack of objects at one spot.
+const ERASE_RESTEP_PX = 8;
+
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
@@ -528,6 +544,8 @@ function GraphCanvasInner({
     freehand: 'Freehand',
     select: 'Select',
     eraser: 'Eraser',
+    voteDotPickerOpen: 'Choose a vote dot colour',
+    voteDotPicker: 'Vote dot colours',
     ...annotationToolboxLabels,
   };
 
@@ -708,6 +726,7 @@ function GraphCanvasInner({
   const placementPreviewRef = useRef(null);
   const createAnnotationRef = useRef(null);
   const erasingPointerIdRef = useRef(null);
+  const lastErasePointRef = useRef(null);
   const erasedThisStrokeRef = useRef(new Set());
   const latestNodesRef = useRef([]);
   // The mobile annotate sheet unmounts the toolbox on close (its portal
@@ -865,6 +884,12 @@ function GraphCanvasInner({
     },
     [onEndEditing]
   );
+  // Reached from the erase gesture's pointer handlers, which must not
+  // re-subscribe when these callbacks' identities change.
+  const beginEditingRef = useRef(beginEditing);
+  beginEditingRef.current = beginEditing;
+  const endEditingRef = useRef(endEditing);
+  endEditingRef.current = endEditing;
 
   // An annotation that could not be drawn is reported once per session rather
   // than once per annotation: a graph carrying several of the same broken
@@ -1906,8 +1931,21 @@ function GraphCanvasInner({
         // that way.
         const shape = options.shape || 'rectangle';
         // An explicit box from a drag-to-draw gesture wins over the subtype's
-        // default size, and the mirror flags come with it.
-        const drawnBox = options.box;
+        // default size, and the mirror flags come with it — but a subtype with
+        // a regular ratio is re-proportioned to it first.
+        //
+        // This is load-bearing, not tidiness. The resizer locks
+        // `keepAspectRatio` to whatever ratio the node MEASURES at drag start
+        // (GenericAnnotationNode's own comment says so), which is only safe
+        // because every creation path used to size from `regularShapeSize`.
+        // Drag-to-draw is a new creation path: writing the swept box verbatim
+        // would start a circle/triangle/hexagon at an arbitrary ratio and the
+        // aspect lock would then cement the distortion — reintroducing exactly
+        // the squashed-shape bug that code exists to prevent. The drag still
+        // decides the SIZE; the subtype decides the proportion.
+        const drawnBox = options.box
+          ? (regularShapeSize(shape, options.box.width) ?? options.box)
+          : null;
         newNode = {
           id,
           type: 'shape',
@@ -2156,14 +2194,20 @@ function GraphCanvasInner({
       if (kind === 'image') {
         pendingImagePositionRef.current = viewportCenterPosition();
         imageFileInputRef.current?.click();
+        // Return to plain selection rather than leaving whatever was armed
+        // before still armed: after picking a file the user's next tap on the
+        // canvas would otherwise place a shape they had forgotten was live.
+        setFreehandActive(false);
+        setActiveTool({ kind: 'select' });
         return;
       }
       if (kind === 'freehand') {
-        setFreehandActive((active) => {
-          const next = !active;
-          setActiveTool(next ? { kind: 'freehand', options: undefined } : { kind: 'select' });
-          return next;
-        });
+        // Sequenced, not nested: a state updater must be pure, and StrictMode
+        // double-invokes them. `activeTool` is the authority on what is armed,
+        // so freehand's own flag is derived from it here.
+        const next = activeToolRef.current?.kind !== 'freehand';
+        setFreehandActive(next);
+        setActiveTool(next ? { kind: 'freehand', options: undefined } : { kind: 'select' });
         return;
       }
       // Arming anything else always leaves freehand: two drawing modes armed
@@ -3279,11 +3323,8 @@ function GraphCanvasInner({
     // the button bits (button 5 / buttons bit 0x20, per the Pointer Events
     // spec). Accepting both is what makes the Surface pen's back end work
     // rather than only the one platform that takes the first route.
-    const isEraserTip = (event) =>
-      event.pointerType === 'eraser' ||
-      (event.pointerType === 'pen' && (event.button === 5 || (event.buttons & 32) !== 0));
-
-    const wantsErase = (event) => isEraserTip(event) || activeToolRef.current?.kind === 'eraser';
+    const wantsErase = (event) =>
+      isEraserTipEvent(event) || activeToolRef.current?.kind === 'eraser';
 
     // Resolve what sits under the pointer through the DOM rather than through
     // ReactFlow's own hit-testing: the eraser has to work against whatever is
@@ -3305,25 +3346,49 @@ function GraphCanvasInner({
     };
 
     const eraseAt = (clientX, clientY) => {
+      // One object per position. Without this, erasing a small annotation that
+      // sits on top of a graph node hides that node on the very next pixel of
+      // movement — the per-object key alone does not prevent cascading down a
+      // stack at a single spot, because whatever is underneath is a new key.
+      const last = lastErasePointRef.current;
+      if (last && Math.hypot(clientX - last.x, clientY - last.y) < ERASE_RESTEP_PX) return;
+
       const target = resolveTarget(clientX, clientY);
-      const key = `${target?.kind}:${target?.id}`;
-      if (!target || erasedThisStrokeRef.current.has(key)) return;
-      erasedThisStrokeRef.current.add(key);
+      if (!target) return;
+      const key = `${target.kind}:${target.id}`;
+      if (erasedThisStrokeRef.current.has(key)) return;
 
       if (target.kind === 'edge') {
+        erasedThisStrokeRef.current.add(key);
+        lastErasePointRef.current = { x: clientX, y: clientY };
         onHideEdge?.(target.id);
         return;
       }
 
       const node = latestNodesRef.current.find((n) => n.id === target.id);
       if (!node) return;
-      if (ANNOTATION_TYPES.has(node.type)) {
+      // A group is deliberately NOT erasable. Removing one is not a filter:
+      // its children have to be un-parented and their parent-relative
+      // positions converted back to absolute (GroupNode's
+      // removeGroupKeepChildren). Deleting it here would leave children
+      // pointing at a parent that no longer exists. `deleteSelectedNodes`
+      // excludes groups for the same reason (it gates on OVERLAY_TYPES, not
+      // ANNOTATION_TYPES) — and a group's large empty interior is exactly the
+      // kind of thing a sweeping eraser lands on by accident.
+      if (node.type === 'group') return;
+
+      erasedThisStrokeRef.current.add(key);
+      lastErasePointRef.current = { x: clientX, y: clientY };
+
+      if (OVERLAY_TYPES.has(node.type)) {
         // Same guards the bulk delete applies: an annotation another client
         // is editing, or one the user locked on purpose, is not erasable by
         // sweeping a pointer over it.
         if (isRemoteLocked(node.data) || node.data?.locked) return;
         setNodes((nds) => nds.filter((n) => n.id !== target.id));
         onAnnotationChangeRef.current?.('delete');
+        // The same edit-lease handshake every other annotation delete performs.
+        beginEditingRef.current?.([target.id]).then(() => endEditingRef.current?.([target.id]));
         return;
       }
       onHide?.(target.id);
@@ -3333,6 +3398,18 @@ function GraphCanvasInner({
       if (!wantsErase(event) || erasingPointerIdRef.current !== null) return;
       erasingPointerIdRef.current = event.pointerId;
       erasedThisStrokeRef.current.clear();
+      lastErasePointRef.current = null;
+      // Capture the pointer so `pointerup` is delivered here even when the
+      // sweep ends outside the wrapper (over browser chrome, or off-window).
+      // Without it that release is lost, `erasingPointerIdRef` stays set, and
+      // the guard above then rejects every later erase for the life of the
+      // component — the eraser silently dies.
+      try {
+        wrapper.setPointerCapture(event.pointerId);
+      } catch {
+        // Capture is a convenience, not a requirement: the window-level
+        // release listeners below are the backstop.
+      }
       // Claim the gesture before ReactFlow can start a pan or a marquee with
       // it. Without this the canvas pans away underneath the stroke.
       event.preventDefault();
@@ -3348,8 +3425,14 @@ function GraphCanvasInner({
 
     const endStroke = (event) => {
       if (event.pointerId !== erasingPointerIdRef.current) return;
+      try {
+        wrapper.releasePointerCapture(event.pointerId);
+      } catch {
+        // Already released, or never captured.
+      }
       erasingPointerIdRef.current = null;
       erasedThisStrokeRef.current.clear();
+      lastErasePointRef.current = null;
     };
 
     // Capture phase so the gesture is claimed before ReactFlow's own pane
@@ -3359,11 +3442,21 @@ function GraphCanvasInner({
     wrapper.addEventListener('pointermove', handlePointerMove, true);
     wrapper.addEventListener('pointerup', endStroke, true);
     wrapper.addEventListener('pointercancel', endStroke, true);
+    // Belt to the pointer-capture braces: a release the wrapper never sees at
+    // all still ends the stroke.
+    window.addEventListener('pointerup', endStroke, true);
+    window.addEventListener('pointercancel', endStroke, true);
     return () => {
       wrapper.removeEventListener('pointerdown', handlePointerDown, true);
       wrapper.removeEventListener('pointermove', handlePointerMove, true);
       wrapper.removeEventListener('pointerup', endStroke, true);
       wrapper.removeEventListener('pointercancel', endStroke, true);
+      window.removeEventListener('pointerup', endStroke, true);
+      window.removeEventListener('pointercancel', endStroke, true);
+      // Never leave the gesture latched across a teardown.
+      erasingPointerIdRef.current = null;
+      erasedThisStrokeRef.current.clear();
+      lastErasePointRef.current = null;
     };
     // No `nodes` dependency on purpose — see erasingPointerIdRef above.
   }, [setNodes, onHide, onHideEdge]);
@@ -3391,6 +3484,9 @@ function GraphCanvasInner({
     // nothing to apply; those place at the press point and ignore the rest.
     const SIZABLE = new Set(['shape', 'note']);
     const MIN_DRAG_PX = 6;
+    // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
+    // be smaller than the resizer would allow it to be dragged to.
+    const MIN_DRAWN_SIZE = 40;
 
     const armedPlacement = () => {
       const tool = activeToolRef.current;
@@ -3404,8 +3500,20 @@ function GraphCanvasInner({
       const tool = armedPlacement();
       if (!tool) return;
       if (event.pointerType === 'mouse' && event.button !== 0) return;
-      // A stylus's eraser tip erases whatever is armed — never draws.
-      if (event.pointerType === 'eraser') return;
+      // A stylus's eraser tip erases whatever is armed — never draws. This has
+      // to reject exactly what the erase gesture accepts, including the
+      // button-bits form, or on those stacks one flip of the pen would erase
+      // along the stroke AND commit an object on release.
+      if (isEraserTipEvent(event)) return;
+      // A second pointer is the start of a pinch, not a second placement.
+      // Abandoning rather than hijacking is what keeps two-finger zoom usable
+      // while a tool is armed — which matters because these tools are sticky,
+      // so "armed" is the resting state, not a moment.
+      if (placementRef.current) {
+        placementRef.current = null;
+        hidePreview();
+        return;
+      }
       // Only a press on empty canvas starts a placement. Landing on an
       // existing node (or on a control) has to keep meaning what it already
       // means — selecting, dragging, pressing a button — or an armed tool
@@ -3423,6 +3531,11 @@ function GraphCanvasInner({
       event.stopPropagation();
     };
 
+    const hidePreview = () => {
+      const previewEl = placementPreviewRef.current;
+      if (previewEl) previewEl.style.display = 'none';
+    };
+
     const updatePreview = (event) => {
       const placement = placementRef.current;
       const previewEl = placementPreviewRef.current;
@@ -3437,11 +3550,6 @@ function GraphCanvasInner({
       previewEl.style.top = `${top - rect.top}px`;
       previewEl.style.width = `${width}px`;
       previewEl.style.height = `${height}px`;
-    };
-
-    const hidePreview = () => {
-      const previewEl = placementPreviewRef.current;
-      if (previewEl) previewEl.style.display = 'none';
     };
 
     const handlePointerMove = (event) => {
@@ -3481,14 +3589,26 @@ function GraphCanvasInner({
       // process arrow is the whole reason to drag in that direction.
       const a = screenToFlowPositionRef.current({ x: startX, y: startY });
       const b = screenToFlowPositionRef.current({ x: event.clientX, y: event.clientY });
+      // Clamped to the resizer's own minimum. `MIN_DRAG_PX` is satisfied by
+      // EITHER axis, so a purely horizontal drag would otherwise produce a
+      // zero-height annotation: invisible, and almost impossible to select
+      // again in order to fix.
       const box = {
-        width: Math.round(Math.abs(b.x - a.x)),
-        height: Math.round(Math.abs(b.y - a.y)),
+        width: Math.max(MIN_DRAWN_SIZE, Math.round(Math.abs(b.x - a.x))),
+        height: Math.max(MIN_DRAWN_SIZE, Math.round(Math.abs(b.y - a.y))),
       };
       createAnnotationRef.current(
         tool.kind,
         { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) },
-        { ...tool.options, box, flipX: dx < 0, flipY: dy < 0 }
+        {
+          ...tool.options,
+          box,
+          // Thresholded, not a raw sign test: a long downward drag with a
+          // couple of pixels of leftward jitter would otherwise silently
+          // mirror the shape and aim a process arrow the wrong way.
+          flipX: dx < -MIN_DRAG_PX,
+          flipY: dy < -MIN_DRAG_PX,
+        }
       );
     };
 
@@ -4436,7 +4556,10 @@ function GraphCanvasInner({
             // it must NOT be the resting state: d3-zoom needs the browser to
             // keep delivering multi-touch for pinch, so the default is left
             // alone otherwise.
-            touchAction: freehandActive || eraserActive || placementArmed ? 'none' : undefined,
+            // Not keyed on `placementArmed`: `none` would kill pinch-zoom for as
+            // long as a sticky tool is armed. Drawing gestures still need it,
+            // and those are genuinely momentary modes.
+            touchAction: freehandActive || eraserActive ? 'none' : undefined,
           }}
         >
           <ReactFlow
@@ -4480,9 +4603,15 @@ function GraphCanvasInner({
             // click entirely: ReactFlow's pane treats a press in selection
             // mode as the start of a marquee and never reports the click, so
             // an armed tool created nothing at all with a mouse.
-            panOnDrag={
-              freehandActive || eraserActive || placementArmed ? false : isTouchMode ? true : [0, 2]
-            }
+            // `placementArmed` deliberately does NOT disable panning or zooming.
+            // Placement tools are sticky, so armed is the resting state —
+            // killing pan and pinch for its whole duration would mean
+            // disarming just to move the viewport between placements. The
+            // placement gesture claims only its own primary pointer and
+            // abandons as soon as a second one arrives, which leaves pinch to
+            // ReactFlow. Marquee selection IS suppressed: it is what swallowed
+            // the press before this gesture existed.
+            panOnDrag={freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2]}
             selectionOnDrag={
               freehandActive || eraserActive || placementArmed ? false : !isTouchMode
             }

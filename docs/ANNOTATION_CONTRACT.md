@@ -121,8 +121,24 @@ MCP. The required entry points are:
   selection/drag/marquee) and `eraser` are tools in the same row, and
   Escape returns to `select`. Drag-to-create from the toolbox is unchanged
   and still places a single object without arming anything. `freehand`
-  remains the one deliberately one-shot tool: it disarms itself after a
-  single stroke.
+  is sticky too: it used to disarm itself after one stroke, which meant
+  lifting the pen and pressing again panned the canvas instead of drawing the
+  next line, with nothing on screen saying the tool had gone.
+- **Keyboard activation still creates.** Arming is a pointer contract — the
+  gesture that completes it is a pointerdown/pointerup on the pane — so a
+  keyboard activation (Enter/Space, `event.detail === 0`) creates at the
+  viewport centre instead of arming. Routing it through arming would leave a
+  keyboard user with a live tool and no way to place anything, removing the
+  only keyboard route to a standalone annotation.
+- **Drag to draw.** For the kinds with a real box (`shape`, `note`) the press
+  fixes one corner and the drag sizes the other, with a live preview. A
+  subtype with a regular ratio is re-proportioned to it (`regularShapeSize`),
+  because `NodeResizer`'s `keepAspectRatio` locks whatever ratio the node
+  measures at drag start — writing a swept box verbatim would cement a
+  distorted figure. Dragging left or up sets `flipX`/`flipY`, which is the
+  only way to aim a directional variant; both are carried under `style` on
+  the wire and mirror the drawn figure only, never its caption or its resize
+  handles.
 - **Eraser** — dragging over an annotation deletes it; dragging over a graph
   node or edge HIDES it. The eraser must never delete graph data: a
   dragged-over node is far too easy to hit for the destructive reading to be

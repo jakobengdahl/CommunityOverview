@@ -928,7 +928,11 @@ body.graph-suppress-selection * {
 }
 
 .react-flow__node textarea,
-.react-flow__node input {
+.react-flow__node input,
+/* A note's committed text is a scrollable region too, not just its editor.
+   Exempting only the form controls meant a long note could no longer be
+   scrolled by finger or stylus — the text was there and unreachable. */
+.react-flow__node .graph-note-text {
   touch-action: auto;
 }
 

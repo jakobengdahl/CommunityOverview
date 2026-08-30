@@ -358,10 +358,19 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const selectedClass = selected ? ' selected' : '';
   // Rotation is applied to the rendered element, not to the ReactFlow node
   // wrapper, so drag hit-testing keeps using the unrotated bounding box.
-  const rotation = rotationStyle(kind, data?.rotation, {
-    flipX: Boolean(data?.flipX),
-    flipY: Boolean(data?.flipY),
-  });
+  const rotation = rotationStyle(kind, data?.rotation);
+  // Mirroring is applied to the DRAWN shape alone, never to the halo.
+  // The halo also carries the caption and the resize handles: mirroring it
+  // rendered the text backwards (live, while typing) and swapped the handles'
+  // visual sides while NodeResizer kept computing unmirrored geometry, so
+  // grabbing the visually-left handle resized from the right and the pointer
+  // detached from it. It would also have put a flip into the transform that
+  // `resolveRotatedResizeGeometry` reasons about without knowing it was there.
+  // Only the figure itself needs to turn around.
+  const shapeFlip =
+    data?.flipX || data?.flipY
+      ? { transform: `scale(${data?.flipX ? -1 : 1}, ${data?.flipY ? -1 : 1})` }
+      : null;
 
   // Typography for EDITABLE_TEXT_KINDS (`text`, `shape`) —
   // task-annotation-text-alignment-and-font. Computed unconditionally (not
@@ -919,6 +928,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               width: '100%',
               height: '100%',
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
+              ...shapeFlip,
               ...opacityStyle,
             }}
           />
@@ -972,7 +982,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       <>
         <div
           className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
-          style={{ borderColor: color, ...rotation, ...opacityStyle }}
+          // The glyph itself carries the colour now. It used to be painted as
+          // `borderColor` on the circular badge — and removing that badge
+          // (task-annotation-icon-no-chrome) left the Colour group in the
+          // property bar writing `data.color` with no visible effect at all:
+          // a swatch advertising a colour the annotation never showed.
+          style={{ color, ...rotation, ...opacityStyle }}
           title={data.icon}
           onContextMenu={openContextMenu}
         >

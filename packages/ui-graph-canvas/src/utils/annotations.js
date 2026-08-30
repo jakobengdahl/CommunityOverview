@@ -178,20 +178,10 @@ export const ROTATABLE_OVERLAY_KINDS = new Set([
 // style when this kind is not rotatable or has no rotation. Applied to the
 // rendered element rather than to the ReactFlow node wrapper, so drag and
 // resize keep working against the unrotated bounding box.
-export function rotationStyle(kind, rotation, { flipX = false, flipY = false } = {}) {
+export function rotationStyle(kind, rotation) {
   if (!ROTATABLE_OVERLAY_KINDS.has(kind)) return {};
-  const angle = Number.isFinite(rotation) ? rotation : 0;
-  if (angle === 0 && !flipX && !flipY) return {};
-  // Mirroring is composed into the same transform rather than applied
-  // separately, so the two cannot fight over `transform` on one element.
-  // Scale is written first so it is applied LAST (CSS transforms read
-  // right-to-left): the shape is rotated, then mirrored about the canvas
-  // axes — which is what "I dragged to the left, so point it left" means,
-  // independently of any rotation the user set afterwards.
-  const parts = [];
-  if (flipX || flipY) parts.push(`scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})`);
-  if (angle !== 0) parts.push(`rotate(${angle}deg)`);
-  return { transform: parts.join(' '), transformOrigin: 'center center' };
+  if (!Number.isFinite(rotation) || rotation === 0) return {};
+  return { transform: `rotate(${rotation}deg)`, transformOrigin: 'center center' };
 }
 
 // Recompute a resized annotation's geometry so a rotated note/frame/shape/

@@ -28,14 +28,54 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
 
   // Closing returns focus to the trigger that opened the panel, so a keyboard
   // user is not dropped back at the top of the bar after every group.
+  //
+  // Guarded on the focus actually being INSIDE this group. Groups are
+  // siblings and switching between them closes A in the same commit that
+  // opens B; React flushes sibling effects in tree order, so an unguarded
+  // restore had A's close pull focus back onto A's trigger after B had
+  // already taken it — opening a group moved focus to the previous one.
+  // Restoring only when this group still owns the focus keeps the behaviour
+  // for the case it exists for (closing the group you were in) and makes it
+  // a no-op for the case it broke.
   const wasOpenRef = useRef(false);
+  const groupRef = useRef(null);
+  // Whether focus was last seen INSIDE this group. Tracked with `focusin`
+  // while open rather than read from `document.activeElement` at close time:
+  // by the time the close effect runs the panel is already unmounted, so its
+  // focused child is gone and `activeElement` has fallen back to <body> —
+  // the check would answer "no" in exactly the case it exists for.
+  const heldFocusRef = useRef(false);
   useEffect(() => {
-    if (wasOpenRef.current && !open) triggerRef.current?.focus();
+    if (!open) return undefined;
+    const el = groupRef.current;
+    if (!el) return undefined;
+    const onFocusIn = () => {
+      heldFocusRef.current = true;
+    };
+    // A focus landing anywhere else means this group no longer owns it —
+    // which is what happens when the user opens a sibling group, and is
+    // precisely the case that must NOT pull focus back here.
+    const onDocumentFocusIn = (event) => {
+      if (!el.contains(event.target)) heldFocusRef.current = false;
+    };
+    el.addEventListener('focusin', onFocusIn);
+    document.addEventListener('focusin', onDocumentFocusIn);
+    return () => {
+      el.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusin', onDocumentFocusIn);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (wasOpenRef.current && !open && heldFocusRef.current) {
+      heldFocusRef.current = false;
+      triggerRef.current?.focus();
+    }
     wasOpenRef.current = open;
   }, [open]);
 
   return (
-    <div className="annotation-menu-group">
+    <div className="annotation-menu-group" ref={groupRef}>
       <button
         ref={triggerRef}
         type="button"
@@ -48,7 +88,9 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
         // of the panel it is describing.
         title={label}
         aria-label={label}
-        aria-haspopup="true"
+        // A plain disclosure, not a menu: `aria-haspopup="true"` is a synonym
+        // for `"menu"` and promised a menu-role popup this never renders (the
+        // panel is a `group`). `aria-expanded` alone is the correct pairing.
         aria-expanded={open}
         onClick={() => onToggle(open ? null : groupKey)}
       >

@@ -582,7 +582,9 @@
     "select": "Markera",
     "eraser": "Suddgummi",
     "select_hint": "Markera och flytta objekt",
-    "eraser_hint": "Dra över objekt för att sudda dem"
+    "eraser_hint": "Dra över objekt för att sudda dem",
+    "vote_dot_picker_open": "Välj färg på röstpricken",
+    "vote_dot_picker": "Röstprickens färger"
   },
   "common": {
     "saving": "Sparar...",

@@ -272,10 +272,10 @@ describe('GraphCanvas annotation tool modes', () => {
   });
 
   describe('eraser', () => {
-    function eraseOver(el, { pointerType = 'mouse' } = {}) {
+    function eraseOver(el, { pointerType = 'mouse' } = {}, at = 10) {
       act(() => {
-        el.dispatchEvent(pointerEvent('pointerdown', { pointerType, clientX: 10, clientY: 10 }));
-        el.dispatchEvent(pointerEvent('pointerup', { pointerType, clientX: 10, clientY: 10 }));
+        el.dispatchEvent(pointerEvent('pointerdown', { pointerType, clientX: at, clientY: at }));
+        el.dispatchEvent(pointerEvent('pointerup', { pointerType, clientX: at, clientY: at }));
       });
     }
 
@@ -358,6 +358,143 @@ describe('GraphCanvas annotation tool modes', () => {
       withElementAtPoint(el, () => eraseOver(screen.getByTestId('react-flow')));
 
       expect(store.nodes.find((n) => n.id === 'note-1')).toBeTruthy();
+    });
+
+    it('keeps erasing across a whole sweep, not just the first object', () => {
+      // The regression: erasing changes `nodes`, and a `nodes` dependency tore
+      // the listeners down and rebuilt them after the first hit — losing the
+      // in-flight gesture, so the user had to lift and press again per object.
+      store.nodes = [
+        { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} },
+        { id: 'note-2', type: 'note', position: { x: 0, y: 0 }, data: {} },
+      ];
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^eraser$/i);
+
+      const first = mountNodeElement('note-1');
+      const second = mountNodeElement('note-2');
+      const rf = screen.getByTestId('react-flow');
+      // One press, then movement across two objects, then one release.
+      withElementAtPoint(first, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+        });
+      });
+      withElementAtPoint(second, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointermove', { clientX: 60, clientY: 60 }));
+        });
+      });
+      act(() => {
+        rf.dispatchEvent(pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
+      });
+
+      expect(store.nodes.find((n) => n.id === 'note-1')).toBeUndefined();
+      expect(store.nodes.find((n) => n.id === 'note-2')).toBeUndefined();
+    });
+
+    it('does not cascade down a stack of objects at one spot', () => {
+      // A small annotation sitting on a graph node: erasing the annotation
+      // must not hide the node on the very next pixel of movement. The
+      // per-object key alone does not prevent this — whatever is underneath
+      // is simply a new key.
+      const onHide = vi.fn();
+      store.nodes = [{ id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
+      render(<GraphCanvas nodes={[]} edges={[]} onHide={onHide} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^eraser$/i);
+
+      const annotation = mountNodeElement('note-1');
+      const underneath = mountNodeElement('graph-1');
+      const rf = screen.getByTestId('react-flow');
+      withElementAtPoint(annotation, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+        });
+      });
+      // Barely any movement — the same spot, now showing what was underneath.
+      withElementAtPoint(underneath, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointermove', { clientX: 2, clientY: 1 }));
+        });
+      });
+
+      expect(store.nodes.find((n) => n.id === 'note-1')).toBeUndefined();
+      expect(onHide).not.toHaveBeenCalled();
+    });
+
+    it('refuses to erase a group, whose children it cannot re-parent', () => {
+      // Deleting a group is not a filter: its children have to be un-parented
+      // and their positions converted back to absolute. A bare removal leaves
+      // them pointing at a parent that no longer exists — and a group's large
+      // empty interior is exactly what a sweeping eraser lands on.
+      store.nodes = [{ id: 'group-1', type: 'group', position: { x: 0, y: 0 }, data: {} }];
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^eraser$/i);
+
+      const el = mountNodeElement('group-1');
+      withElementAtPoint(el, () => eraseOver(screen.getByTestId('react-flow')));
+
+      expect(store.nodes.find((n) => n.id === 'group-1')).toBeTruthy();
+    });
+
+    it('refuses to erase a locked annotation, or one another client is editing', () => {
+      store.nodes = [
+        { id: 'locked', type: 'note', position: { x: 0, y: 0 }, data: { locked: true } },
+        { id: 'claimed', type: 'note', position: { x: 0, y: 0 }, data: {} },
+      ];
+      // The live lease arrives as a prop, not as seeded node data: the canvas
+      // owns `data.remoteLease` and rewrites it from `remoteLeases` on every
+      // change, so a hand-seeded value is cleared before the gesture runs.
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteLeases={{ claimed: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+          onAnnotationChange={vi.fn()}
+        />
+      );
+      openToolbox();
+      arm(/^eraser$/i);
+
+      for (const id of ['locked', 'claimed']) {
+        const el = mountNodeElement(id);
+        withElementAtPoint(el, () => eraseOver(screen.getByTestId('react-flow')));
+      }
+
+      expect(store.nodes.find((n) => n.id === 'locked')).toBeTruthy();
+      expect(store.nodes.find((n) => n.id === 'claimed')).toBeTruthy();
+    });
+
+    it('recovers when the release is never delivered to the canvas', () => {
+      // A sweep that ends outside the wrapper used to latch the gesture
+      // forever: `erasingPointerId` stayed set and every later erase was
+      // rejected, so the eraser silently died.
+      store.nodes = [
+        { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} },
+        { id: 'note-2', type: 'note', position: { x: 0, y: 0 }, data: {} },
+      ];
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^eraser$/i);
+
+      const rf = screen.getByTestId('react-flow');
+      const first = mountNodeElement('note-1');
+      withElementAtPoint(first, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+        });
+      });
+      // The release lands on the window, never on the wrapper.
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerup', { clientX: 999, clientY: 999 }));
+      });
+
+      const second = mountNodeElement('note-2');
+      withElementAtPoint(second, () => eraseOver(rf, {}, 200));
+      expect(store.nodes.find((n) => n.id === 'note-2')).toBeUndefined();
     });
 
     it('disables panning, marquee selection and node dragging while armed', () => {

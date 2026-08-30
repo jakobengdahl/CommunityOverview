@@ -369,11 +369,35 @@
   left: 0;
   z-index: 1;
   min-width: 150px;
+  /* The menu is placed at the raw pointer position, so a group near the top
+     of the window would open a panel above the viewport edge with no way to
+     reach it. Capping the height and letting it scroll keeps every control
+     reachable wherever the menu lands. */
+  max-height: 60vh;
+  overflow-y: auto;
   padding: 8px;
   border: 1px solid #444;
   border-radius: 8px;
   background: #2a2a2a;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* In the mobile sheet the bar is the first content of a scrolling container,
+   so "above the trigger" is off the top of that container — the panel would
+   open into space the user cannot scroll to. It drops below instead, where
+   the sheet's own scrolling can reach it. */
+.graph-annotation-context-menu--bar.sheet .annotation-menu-group-panel {
+  bottom: auto;
+  top: calc(100% + 6px);
+  max-height: none;
+}
+
+/* A group near the right edge of the bar would otherwise push its panel off
+   the right of the window; anchoring the last few groups' panels to their
+   right edge keeps them on screen. */
+.annotation-menu-group:nth-last-child(-n + 4) .annotation-menu-group-panel {
+  left: auto;
+  right: 0;
 }
 
 /* A panel's own controls keep the spacing they had as sections, minus the

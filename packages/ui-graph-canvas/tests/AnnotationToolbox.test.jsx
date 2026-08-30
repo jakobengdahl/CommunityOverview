@@ -182,6 +182,37 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'circle' });
   });
 
+  it('creates directly on Enter/Space instead of arming, so a keyboard user can still place', () => {
+    // Arming is a pointer contract: what completes it is a pointerdown on the
+    // canvas. Routing keyboard activation through it too would leave a
+    // keyboard user with a live tool and no way to place anything — removing
+    // the only keyboard route to a standalone annotation.
+    const onCreate = vi.fn();
+    const onSelectTool = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} onSelectTool={onSelectTool} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.keyDown(screen.getByRole('button', { name: /^note$/i }), { key: 'Enter' });
+    expect(onCreate).toHaveBeenLastCalledWith('note', undefined);
+
+    fireEvent.keyDown(screen.getByRole('button', { name: /^vote dot$/i }), { key: ' ' });
+    expect(onCreate).toHaveBeenLastCalledWith('vote_dot', { color: '#94a3b8' });
+
+    // The pointer path is untouched: a click still arms.
+    fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    expect(onSelectTool).toHaveBeenLastCalledWith('note', undefined);
+  });
+
+  it('does not report a pressed state for image, which never becomes the armed tool', () => {
+    render(<AnnotationToolbox onCreate={vi.fn()} onSelectTool={vi.fn()} activeKind="select" />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    expect(screen.getByRole('button', { name: /^image$/i })).not.toHaveAttribute('aria-pressed');
+    expect(screen.getByRole('button', { name: /^select$/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
   it('calls onCreate with the vote_dot kind and the slot’s current colour', () => {
     // vote_dot is a collapsed slot now, like shape and icon, where the variant
     // IS the colour — placing a run of dots in one colour was otherwise eight

@@ -2689,6 +2689,8 @@ function App() {
             freehandHint: t('annotation_toolbox.freehand_hint'),
             select: t('annotation_toolbox.select'),
             eraser: t('annotation_toolbox.eraser'),
+            voteDotPickerOpen: t('annotation_toolbox.vote_dot_picker_open'),
+            voteDotPicker: t('annotation_toolbox.vote_dot_picker'),
             selectHint: t('annotation_toolbox.select_hint'),
             eraserHint: t('annotation_toolbox.eraser_hint'),
           }}

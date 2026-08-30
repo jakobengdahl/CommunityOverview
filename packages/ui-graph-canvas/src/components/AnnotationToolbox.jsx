@@ -511,6 +511,24 @@ function AnnotationToolbox({
     else onCreate?.(kind, options);
   };
 
+  // Enter/Space CREATES rather than arming, at the viewport centre.
+  //
+  // Arming is a pointer contract: the gesture that completes it is a
+  // pointerdown/pointerup on the canvas. Routing keyboard activation through
+  // it too would leave a keyboard user with a live tool and no way to place
+  // anything — silently removing the only keyboard route to a standalone
+  // annotation. Handled as a real key event (and preventDefault'ing the click
+  // the browser would synthesize from it) rather than by sniffing
+  // `event.detail`, which is 0 for plenty of legitimate programmatic clicks
+  // and would misread them as keyboard use.
+  const handleToolKeyDown = (event, kind, options) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (!onCreate) return;
+    event.preventDefault();
+    setHovered(null);
+    onCreate(kind, options);
+  };
+
   // Shared per-item button, used for every toolbox entry except the shape
   // slot (which needs the extra corner button and fold-out — see
   // `renderShapeSlot` below). Unchanged in behaviour from before the shape
@@ -546,11 +564,14 @@ function AnnotationToolbox({
           setHovered(null);
           activateTool(kind, options);
         }}
+        onKeyDown={(event) => handleToolKeyDown(event, kind, options)}
         aria-label={lbl[labelKey]}
         // Every item is now a tool that can be armed, not just the one
         // one-shot drawing mode, so the pressed state reports for all of
-        // them rather than being special-cased to 'freehand'.
-        aria-pressed={activeKind === kind}
+        // them rather than being special-cased to 'freehand'. `image` never
+        // becomes the armed tool, so it reports nothing rather than
+        // permanently announcing an un-pressed toggle it is not.
+        aria-pressed={kind === 'image' ? undefined : activeKind === kind}
         // The description is the accessible *description*, referenced
         // rather than duplicated. A `title` would give the same text a
         // second, native tooltip on top of the styled one — the visual
@@ -653,6 +674,7 @@ function AnnotationToolbox({
             setHovered(null);
             activateTool('shape', options);
           }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'shape', options)}
           aria-label={lbl[variant.labelKey]}
           aria-pressed={activeKind === 'shape'}
           aria-describedby={hovered?.key === variant.labelKey ? TOOLTIP_ID : undefined}
@@ -771,6 +793,7 @@ function AnnotationToolbox({
             setHovered(null);
             activateTool('icon', options);
           }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'icon', options)}
           aria-label={`${lbl.icon}: ${variant.label}`}
           aria-pressed={activeKind === 'icon'}
           aria-describedby={hovered?.key === 'icon' ? TOOLTIP_ID : undefined}
@@ -871,6 +894,7 @@ function AnnotationToolbox({
             setHovered(null);
             activateTool('vote_dot', options);
           }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'vote_dot', options)}
           aria-label={lbl.voteDot}
           aria-pressed={activeKind === 'vote_dot'}
           aria-describedby={hovered?.key === 'voteDot' ? TOOLTIP_ID : undefined}

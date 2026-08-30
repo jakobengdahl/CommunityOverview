@@ -83,7 +83,9 @@ function nextRovingIndex(items, currentElement, key) {
   const currentIndex = items.indexOf(currentElement);
   if (key === 'Home') return 0;
   if (key === 'End') return items.length - 1;
-  if (key === 'ArrowDown') return currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+  if (key === 'ArrowDown' || key === 'ArrowRight') {
+    return currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+  }
   return currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
 }
 
@@ -132,7 +134,16 @@ export function useAnnotationMenuKeyNav(containerRef) {
     (event) => {
       const container = containerRef.current;
       if (!container) return;
-      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      // Left/Right rove only in the horizontal property bar
+      // (task-annotation-compact-property-bar), where they are the arrows a
+      // user actually reaches for. They are deliberately NOT accepted in the
+      // vertical menus this same hook also serves: ArrowRight already means
+      // "open this submenu" there (see Submenu below), and roving on it too
+      // would move focus off the trigger the submenu just opened from.
+      const rovingKeys = container.classList.contains('graph-annotation-context-menu--bar')
+        ? ['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End']
+        : ['ArrowDown', 'ArrowUp', 'Home', 'End'];
+      if (rovingKeys.includes(event.key)) {
         const items = Array.from(container.querySelectorAll('button:not([disabled])'));
         if (items.length === 0) return;
         event.preventDefault();

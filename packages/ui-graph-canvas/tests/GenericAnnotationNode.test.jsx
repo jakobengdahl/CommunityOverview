@@ -760,10 +760,19 @@ describe('GenericAnnotationNode property editor', () => {
     });
 
     it('offers no value stepper on a kind that never had one either', () => {
+      // The retired vote_dot stepper (task-annotation-vote-dot-simplify). The
+      // old assertion queried 'Increase value', a string that exists nowhere
+      // in the codebase, so it passed no matter what — including if a stepper
+      // came back under any other name. Counting the Layer group's own
+      // buttons is the invariant that actually holds: bring-to-front and
+      // send-to-back, and nothing else.
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
       openGroup('Layer');
-      expect(screen.queryByLabelText('Increase value')).toBeNull();
+      const panel = screen.getByRole('group', { name: 'Layer' });
+      expect(panel.querySelectorAll('button')).toHaveLength(2);
+      expect(screen.getByLabelText('Bring to front')).toBeInTheDocument();
+      expect(screen.getByLabelText('Send to back')).toBeInTheDocument();
     });
   });
 
@@ -841,7 +850,10 @@ describe('GenericAnnotationNode property editor', () => {
         <GenericAnnotationNode id="v1" type="vote_dot" data={{ locked: true }} />
       );
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
-      openGroup('Rotation');
+      // A locked annotation renders the unlock/duplicate branch, not the
+      // property bar, so there is no group to open — the controls are absent
+      // because the bar itself is.
+      expect(screen.queryByRole('button', { name: 'Layer' })).toBeNull();
       expect(screen.queryByLabelText('Bring to front')).toBeNull();
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
     });
@@ -891,7 +903,6 @@ describe('GenericAnnotationNode locked context menu', () => {
           ? screen.getByTestId('shape-halo')
           : container.querySelector(`.kind-${kind}`);
       fireEvent.contextMenu(root);
-      openGroup('Shape');
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
       expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
       expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
@@ -908,7 +919,6 @@ describe('GenericAnnotationNode locked context menu', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.kind-shape'));
-    openGroup('Rotation');
     fireEvent.click(screen.getByText(/Unlock/));
     const updated = applyLatestUpdate({ id: 's1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);

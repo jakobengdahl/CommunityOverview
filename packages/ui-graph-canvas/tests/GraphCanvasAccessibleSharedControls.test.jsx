@@ -13,10 +13,12 @@ import { GraphCanvas } from '../src/index';
 const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
 
 // Creating from the toolbox is a two-step gesture (task-annotation-tool-modes):
-// the toolbox arms a tool, and the next tap on empty canvas is where the object
-// goes. The mock captures every prop GraphCanvas passes to `<ReactFlow>`, so
-// the pane tap is driven through the captured `onPaneClick` rather than a DOM
-// event on an element this mock never renders.
+// the toolbox arms a tool, and the next press on empty canvas is where the
+// object goes. That press is a real pointer gesture on the canvas wrapper, not
+// ReactFlow's `onPaneClick` — that callback never fires while the pane is in
+// selection mode, which is the desktop default, so placement rode on a
+// callback that was never delivered. The mock therefore renders a stand-in
+// pane element for the gesture to land on.
 function pointerEvent(
   type,
   { pointerId = 1, pointerType = 'mouse', clientX = 0, clientY = 0 } = {}

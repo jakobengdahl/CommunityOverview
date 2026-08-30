@@ -582,7 +582,9 @@
     "select": "Select",
     "eraser": "Eraser",
     "select_hint": "Select and move objects",
-    "eraser_hint": "Drag over objects to erase them"
+    "eraser_hint": "Drag over objects to erase them",
+    "vote_dot_picker_open": "Choose a vote dot colour",
+    "vote_dot_picker": "Vote dot colours"
   },
   "common": {
     "saving": "Saving...",
