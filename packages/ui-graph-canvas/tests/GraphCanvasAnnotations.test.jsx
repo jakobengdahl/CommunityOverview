@@ -289,7 +289,7 @@ describe('GraphCanvas annotation creation', () => {
       hoisted.selectionOnChange({
         nodes: [
           { id: 'note-locked', type: 'note', data: { locked: true } },
-          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+          { id: 'note-claimed', type: 'note', data: { remoteLease: { clientId: 'other' } } },
         ],
         edges: [],
       });
@@ -320,7 +320,7 @@ describe('GraphCanvas annotation creation', () => {
         nodes: [
           { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
           { id: 'note-locked', type: 'note', data: { locked: true } },
-          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+          { id: 'note-claimed', type: 'note', data: { remoteLease: { clientId: 'other' } } },
         ],
         edges: [],
       });
@@ -349,7 +349,7 @@ describe('GraphCanvas annotation creation', () => {
         nodes: [
           { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
           { id: 'note-locked', type: 'note', data: { locked: true } },
-          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+          { id: 'note-claimed', type: 'note', data: { remoteLease: { clientId: 'other' } } },
         ],
         edges: [],
       });
@@ -383,7 +383,7 @@ describe('GraphCanvas annotation creation', () => {
           { id: 'graph-1', type: 'custom', data: { nodeType: 'Actor' } },
           { id: 'note-free', type: 'note', data: {} },
           { id: 'note-locked', type: 'note', data: { locked: true } },
-          { id: 'note-claimed', type: 'note', data: { remoteSelection: { clientId: 'other' } } },
+          { id: 'note-claimed', type: 'note', data: { remoteLease: { clientId: 'other' } } },
         ],
         edges: [],
       });

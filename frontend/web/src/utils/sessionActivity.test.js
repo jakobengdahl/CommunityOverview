@@ -1139,23 +1139,23 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 409, message: 'session busy, retry' })).toBe('busy');
   });
 
-  it('maps the ClaimConflict 409 to claimed (retryable), not to conflict', () => {
-    // Verbatim str(ClaimConflict) from backend/core/session_manager.py; the
+  it('maps the LeaseConflict 409 to claimed (retryable), not to conflict', () => {
+    // Verbatim str(LeaseConflict) from backend/core/session_manager.py; the
     // ids vary, so the classifier matches the invariant middle of the string.
     expect(
       classifyUndoError({
         status: 409,
         message:
-          "annotation 'note-1' is claimed by another client ('client-b'); " +
-          'wait for the claim to release or expire before editing it',
+          "annotation 'note-1' is being edited by another client ('client-b'); " +
+          'wait for the lease to release or expire before editing it',
       })
     ).toBe('claimed');
     expect(
       classifyUndoError({
         status: 409,
         message:
-          "annotation 'sticky-42' is claimed by another client ('someone-else'); " +
-          'wait for the claim to release or expire before editing it',
+          "annotation 'sticky-42' is being edited by another client ('someone-else'); " +
+          'wait for the lease to release or expire before editing it',
       })
     ).toBe('claimed');
   });
@@ -1244,7 +1244,7 @@ describe('classifyUndoError × i18n', () => {
     { status: 429 },
     { status: 404, message: 'no undoable action' },
     { status: 409, message: 'session busy, retry' },
-    { status: 409, message: "annotation 'note-1' is claimed by another client ('c2'); wait" },
+    { status: 409, message: "annotation 'note-1' is being edited by another client ('c2'); wait" },
     { status: 409, message: 'affected state changed since this action' },
     { status: 500 },
   ];

@@ -345,7 +345,7 @@ describe('GenericAnnotationNode', () => {
     render(
       <GenericAnnotationNode
         type="shape"
-        data={{ remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        data={{ remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
         selected
       />
     );
@@ -487,7 +487,7 @@ describe('GenericAnnotationNode property editor', () => {
           type="icon"
           data={{
             icon: 'circle',
-            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+            remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
       </AnnotationContext.Provider>
@@ -511,7 +511,7 @@ describe('GenericAnnotationNode property editor', () => {
           type="shape"
           data={{
             shape: 'circle',
-            remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+            remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
           }}
         />
       </AnnotationContext.Provider>
@@ -665,7 +665,7 @@ describe('GenericAnnotationNode property editor', () => {
           <GenericAnnotationNode
             id="s1"
             type="shape"
-            data={{ shape: 'circle', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+            data={{ shape: 'circle', remoteLease: { color: '#f00', displayName: 'Ada' } }}
           />
         </AnnotationContext.Provider>
       );
@@ -733,7 +733,7 @@ describe('GenericAnnotationNode property editor', () => {
           <GenericAnnotationNode
             id="v1"
             type="vote_dot"
-            data={{ remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+            data={{ remoteLease: { color: '#f00', displayName: 'Ada' } }}
           />
         </AnnotationContext.Provider>
       );
@@ -974,11 +974,28 @@ describe('GenericAnnotationNode inline text editing', () => {
     expect(screen.getByText('Hello')).toBeInTheDocument();
   });
 
-  it('refuses to enter edit mode while another client holds the selection claim', () => {
+  it('refuses to enter edit mode while another client holds the edit lease', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     render(
       <AnnotationContext.Provider
         value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt, labels: {} }}
+      >
+        <GenericAnnotationNode
+          id="t1"
+          type="text"
+          data={{ text: 'Hello', remoteLease: { color: '#f00', displayName: 'Ada' } }}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mere remoteSelection (no edit lease) does not refuse entry into edit mode', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn(), labels: {} }}
       >
         <GenericAnnotationNode
           id="t1"
@@ -988,8 +1005,7 @@ describe('GenericAnnotationNode inline text editing', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.doubleClick(screen.getByText('Hello'));
-    expect(screen.queryByRole('textbox')).toBeNull();
-    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
   // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted lock gates every
@@ -1482,7 +1498,7 @@ describe('text/shape typography', () => {
         <GenericAnnotationNode
           id="t1"
           type="text"
-          data={{ text: 'Hi', remoteSelection: { color: '#fff', displayName: 'Ada' } }}
+          data={{ text: 'Hi', remoteLease: { color: '#fff', displayName: 'Ada' } }}
         />
       </AnnotationContext.Provider>
     );

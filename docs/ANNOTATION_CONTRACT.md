@@ -319,8 +319,8 @@ An annotation tied with the current front is not treated as already in front —
 the tie is what the click exists to break — so it moves. A click that would
 change nothing (already alone at the front, or at the back) is a no-op and
 publishes no operation, and so is a click on an annotation another client
-currently holds the claim on (the attempt is surfaced, as for every other
-annotation mutation). A `locked` annotation is not offered the layer row at
+currently holds the edit lease on (the attempt is surfaced, as for every
+other annotation mutation). A `locked` annotation is not offered the layer row at
 all — the row's own `locked` check (`AnnotationLayerControls`) withholds
 it independently of any one caller's markup, same as before.
 
@@ -364,8 +364,8 @@ header, and its colour swatches and Delete Group are out of reach. Nothing
 else is left to withhold: those are the whole of the unlocked menu, so the
 locked branch carries Unlock alone rather than by exception. The rename guard
 goes one step further than the overlay kinds, whose
-double-click text editors still refuse only a live remote claim and not the
-persisted flag — the group's behaviour is the one this baseline describes, and
+double-click text editors still refuse only a live remote edit lease and not
+the persisted flag — the group's behaviour is the one this baseline describes, and
 the overlays' is a tracked gap. The keyboard rule still does not reach a group
 — `Delete` skips them entirely, so their children stay correctly parented —
 and hands that job to the group's own menu, which now honours the flag.
@@ -438,7 +438,7 @@ Delete excludes:
   same as Delete — its own context menu is where its box, as opposed to its
   members, is manipulated.
 - **A currently-attached label/text/icon is excluded**, even though it is
-  neither locked nor claimed. The pre-existing attachment-follow effect
+  neither locked nor leased. The pre-existing attachment-follow effect
   (`ATTACHABLE_OVERLAY_KINDS`, above) re-glues such an overlay to its
   target's centre on every `nodes` change, unconditionally — moving it here
   would be undone by that effect on the very next render, a fight between
@@ -446,13 +446,17 @@ Delete excludes:
   asked for. It is left out of the move set and simply follows if its own
   attachment target happens to move as part of the same selection.
 
-The locked/remote-claimed exclusion itself is unchanged from Delete's own
-rule (a locked or another-client-claimed overlay is skipped, not refused for
+The locked/remote-leased exclusion itself is unchanged from Delete's own
+rule (a locked or another-client-leased overlay is skipped, not refused for
 the whole selection — "the more forgiving of the two options", matching
 delete's own choice recorded above), and the same priority order Delete's
-own notice uses when a selection mixes skip reasons: a remote claim's notice
+own notice uses when a selection mixes skip reasons: a remote lease's notice
 wins over a plain lock's, which wins over the attached-item notice, since a
-remote claim is the one the user cannot resolve alone.
+remote lease is the one the user cannot resolve alone. (Before
+task-annotation-exclusive-edit-leases this exclusion fired on a mere remote
+*selection*; it now fires only once another client actually starts editing
+the annotation — a bystander's selection no longer removes anything from the
+eligible set.)
 
 Every position this produces is written through the exact publish paths a
 drag or Organize already use — `onNodePositionChange` for a graph node
@@ -525,7 +529,7 @@ annotation, whatever the type or tool — see [MCP access](#mcp-access) for the
 per-type breakdown of which tool does the writing. `locked` is a shared UI
 convention, not a permission, and reads as a stronger guarantee than it is
 precisely because the menus and the keyboard now enforce it so uniformly.
-Contrast a selection claim, which the server does enforce for browser writes.
+Contrast an edit lease, which the server does enforce for browser writes.
 
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
@@ -622,46 +626,78 @@ create/delete/style/geometry publish immediately, and `note`/`label` content
 edits sync on every keystroke (not only on blur) with the scheduler
 debouncing/coalescing the actual publish to at most once per 300 ms.
 Selection claims are extended to every annotation kind — previously the
-browser only claimed graph nodes at all — and are now enforced client-side:
-a claim another live client holds blocks local dragging, resizing, and every
-per-kind mutation (with a surfaced notice rather than a silent no-op).
+browser only claimed graph nodes at all — and are a purely cosmetic "who has
+this selected" presence marker (`ClaimMap`, `selection_claimed`/
+`selection_released`): last-write-wins, never checked before a write. See the
+next paragraph for the mechanism that actually is exclusive.
 
-**Status update:** the server now also rejects (409 `ClaimConflict`) a
-**browser** batch op (`POST /sessions/{id}/ops`, i.e. `SessionManager.apply_ops`
-— the path every generic annotation mutation from the GUI's op scheduler goes
-through) and the human clipboard-paste/file-upload image endpoint
+**Status update (`task-annotation-exclusive-edit-leases`, deciding
+`dec-mcp-agent-ops-vs-annotation-claimmap`):** exclusivity is now a genuinely
+separate, first-actual-editor-wins **edit lease** (`LeaseMap`,
+`backend/core/session_hub.py`), acquired via `edit_lease_acquired`/
+`edit_lease_released` ops — never by `selection_claimed`. A lease is acquired
+only when real editing starts: opening a text field, beginning a geometry
+gesture (drag/resize), opening a right-click property editor, or starting a
+bulk mutation (multi-select delete, align/distribute) or undo — never on mere
+selection, closing the exact gap the previous revision of this section left
+open (a claim landing mid-gesture from *selecting* the same object no longer
+happens at all, because selection no longer claims anything). Unlike the
+selection map, `LeaseMap.acquire()` **refuses** an id already held live by a
+different client rather than taking it over: the first client to acquire
+keeps the lease until it releases, finishes, lets the 30 s TTL expire, or
+disconnects — a second acquisition attempt gets an explicit denial, reported
+back to the caller (never a silent takeover). The client-side per-component
+guards (every generic annotation component refuses a local mutation while
+`isRemoteLocked(data)` is true) now read `data.remoteLease`, populated only
+from this map — `data.remoteSelection` remains available for a cosmetic
+marker but has no bearing on whether an edit is allowed.
+
+The server also rejects (409 `LeaseConflict`) a **browser** batch op
+(`POST /sessions/{id}/ops`, i.e. `SessionManager.apply_ops` — the path every
+generic annotation mutation from the GUI's op scheduler goes through) and the
+human clipboard-paste/file-upload image endpoint
 (`POST /sessions/{id}/annotations/image`) when it would update or delete an
-annotation another client currently holds a live claim on. `ClaimMap`
-(`backend/core/session_hub.py`) itself is unchanged and stays *advisory* —
-`claim()` still always takes over an existing claim (LWW) rather than
-refusing — but every write path that goes through `apply_ops` now reads a
-snapshot of it first and refuses instead of silently applying, matching the
-client-side exclusivity above with a server backstop a client that ignores
-`data.remoteSelection` can no longer bypass. `undo_last_action` (`/undo`) is
-covered too: it replays a stored inverse op, so the same check runs against
-that op before anything is touched. Actor-scoping is not a substitute — undo
-reverts the caller's *own* past action, but the annotation it lands on may
-have been claimed by someone else since. A refused undo changes nothing and
-leaves the record undoable once the claim clears — and because the Activity
-drawer's undo button carries no claim awareness of its own, this is the one
-place a claim refusal reaches an ordinary user, so the UI renders it as the
-retryable "someone else has that selected" message rather than the permanent
-"can no longer be undone" one (`classifyUndoError`,
+annotation another client currently holds a live edit lease on — the same
+enforcement point as before, now checked against leases instead of the old
+advisory claim map. `undo_last_action` (`/undo`) is covered too: it replays a
+stored inverse op, so the same check runs against that op before anything is
+touched. Actor-scoping is not a substitute — undo reverts the caller's *own*
+past action, but the annotation it lands on may have come under someone
+else's live edit lease since. A refused undo changes nothing and leaves the
+record undoable once the lease clears — and because the Activity drawer's
+undo button carries no lease awareness of its own, this is the one place a
+lease refusal reaches an ordinary user, so the UI renders it as the retryable
+"someone else has that selected" message rather than the permanent "can no
+longer be undone" one (`classifyUndoError`,
 `frontend/web/src/utils/sessionActivity.js`).
 
-**Remaining gap:** this is scoped to browser-originated writes only. The
-synchronous MCP write path (`upsert_annotation`/`update_annotation`/
-`delete_annotation`/`apply_layout`/`add_node_refs`, all keyed to the shared
-`mcp-agent` client id — `backend/service/mcp_tools.py`) never goes through
-`apply_ops` and is not checked against `ClaimMap` at all: an MCP agent still
-silently overrides a live human claim exactly as before, the same way it
-already bypasses the client-side exclusivity UI and the `locked` flag today.
-Whether MCP-issued ops should be checked against claims too — an agent is
-often doing the kind of bulk/automated arrangement work a claim exists to
-protect against, but agents also need to act on sessions nobody has open — is
-a genuine, still-open product decision, tracked on
-`task-annotation-shared-session-realtime`; it is deliberately not guessed at
-here. Actor-scoped conditional undo *is* implemented
+A refused/interrupted edit does not lose the user's local draft: a text
+editor whose background lease renewal loses a race stays open, showing
+whatever the user has typed, with syncing stopped rather than the draft being
+discarded (`useEditableText`'s remote-lease-arrives-mid-edit handling) — the
+same protection a `startEditing` denial gets by never having entered edit
+mode with anything typed yet. A geometry gesture, bulk mutation or property
+edit applies **optimistically** the same way every other mutation in this
+package does (no round trip before the user sees the result), acquiring/
+releasing the lease in the background around it rather than gating the
+mutation on the round trip; the server-side `LeaseConflict` check above
+remains the authoritative backstop for the rare case where that background
+acquisition loses a race.
+
+**Remaining gap:** the exclusive edit lease is scoped to browser-originated
+writes only. The synchronous MCP write path (`upsert_annotation`/
+`update_annotation`/`delete_annotation`/`apply_layout`/`add_node_refs`, all
+keyed to the shared `mcp-agent` client id — `backend/service/mcp_tools.py`)
+never goes through `apply_ops` and does not acquire or check leases at all in
+v1: an MCP agent still silently overrides a live human edit lease exactly as
+before, the same way it already bypasses the client-side exclusivity UI and
+the `locked` flag today. This is a deliberate v1 boundary, not an oversight —
+`dec-mcp-agent-ops-vs-annotation-claimmap` (accepted 2026-08-30) decided
+human edit leases are exclusive while leaving MCP writes unchanged for now;
+making MCP-issued writes respect a live human lease (never acquiring one of
+its own — v1 has no per-agent identity to make that meaningful) is
+`task-mcp-annotation-human-edit-guard`'s separate, deliberately-sequenced-after
+scope. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
 ### Two-client conflict matrix
@@ -669,12 +705,30 @@ here. Actor-scoped conditional undo *is* implemented
 PR #443 covers the mid-drag "claim lands mid-gesture" race and the per-kind
 mutation guards (every generic annotation component refuses a local mutation
 while `isRemoteLocked(data)` is true); PR #451 covers server-side claim
-enforcement for one client at a time. Neither documents what actually happens
-when **two real clients** touch the **same** annotation at close to the same
-moment. This section does, backed by two-real-client tests against the actual
-`SessionManager.apply_ops` path — not just a call into the `ClaimMap` helper
-in isolation — in `backend/core/tests/test_session_manager.py`'s
-`TestConflictMatrixTwoClients`.
+enforcement for one client at a time. Neither documented what actually
+happens when **two real clients** touch the **same** annotation at close to
+the same moment. This section does, backed by two-real-client tests against
+the actual `SessionManager.apply_ops` path — not just a call into the
+`LeaseMap` helper in isolation — in `backend/core/tests/
+test_session_manager.py`'s `TestConflictMatrixTwoClients`.
+
+**Updated for `task-annotation-exclusive-edit-leases`.** The matrix below
+originally read "claim" throughout, describing the LWW selection-claim
+enforcement PR #451 shipped. The enforcement mechanism has since changed to
+the first-actual-editor-wins edit lease described in [Operation timing and
+leases](#operation-timing-and-leases) above — selection no longer gates a
+write at all. The **"held" column's outcome is unchanged in substance** (a
+second writer is still refused, `409`, with the first writer's edit standing)
+— what changed is *how* the first writer comes to hold it (editing must have
+actually started, not merely been selected) and *what* the server checks
+(`LeaseConflict` against `LeaseMap`, not `ClaimConflict` against `ClaimMap`).
+The **"no lease held" column and the whole-annotation-clobber finding below
+are unaffected by this task** — a lease narrows the collision window (two
+clients can no longer race to edit the same annotation with neither one
+protected) but does not add field-level granularity; the clobber case, and
+its fix (per-field patches), remain `dec-annotation-field-patches-and-
+conflicts`' separate, still-open scope. Do not read this task as having
+closed that finding — it has not.
 
 **The mechanism the matrix rests on.** Two facts, each already documented
 elsewhere in this file, combine into a property that is not obvious from
@@ -708,42 +762,52 @@ slice's scope — see this section's closing paragraph.
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
 category on both sides (e.g. both edit text) or a different one (e.g. A edits
-text, B edits geometry); columns are whether a live selection claim is held by
-A when B's op arrives. Verified for `shape` as the representative generic kind
-(`TestConflictMatrixTwoClients`);
-the claim check itself (`_claimed_annotation_target`,
-`session_manager.py`) is keyed only on annotation `id`, never on `type`, so
-the claimed columns hold identically for every v1 kind — the per-kind audit
-below confirms this for the other five generic kinds plus `note`.
+text, B edits geometry); columns are whether a live edit lease is held by A
+when B's op arrives (A came to hold it by actually starting to edit — opening
+a text field, a geometry gesture, a property editor, a bulk mutation — not by
+merely selecting the annotation). Verified for `shape` as the representative
+generic kind (`TestConflictMatrixTwoClients`); the lease check itself
+(`_claimed_annotation_target`, `session_manager.py`) is keyed only on
+annotation `id`, never on `type`, so the leased columns hold identically for
+every v1 kind — the per-kind audit below confirms this for the other five
+generic kinds plus `note`.
 
-| A's edit | B's edit (no claim held by A) | Outcome, no claim | B's edit (A holds the claim) | Outcome, A claims |
+| A's edit | B's edit (no lease held by A) | Outcome, no lease | B's edit (A holds the lease) | Outcome, A holds the lease |
 |---|---|---|---|---|
-| text | text (same field) | Accepted — B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_claim_second_writer_wins`) | text | 409 `ClaimConflict`; A's edit stands (`TestClaimEnforcement.test_non_holder_update_is_rejected`) |
-| text | geometry (different field) | Accepted, but B's write silently **clobbers A's text** back to whatever B's stale local copy held — the documented finding above (`test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit`) | geometry | 409 `ClaimConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a claimed annotation (`test_claim_blocks_a_different_field_edit_too_not_only_same_field`) |
-| (any) | style | Accepted, same whole-document LWW as the text/text row — an unrelated style write can clobber a concurrent edit the same way | style | 409 `ClaimConflict` (`test_non_holder_style_edit_is_rejected_while_claimed`) |
-| (any) | lock toggle | Accepted, same mechanism — `locked` is an ordinary field on an `annotation_updated` op, not a separate op type | lock toggle | 409 `ClaimConflict` (`test_non_holder_lock_toggle_is_rejected_while_claimed`) — a non-holder cannot lock out from under the claim holder either |
-| (any) | delete | Accepted — the annotation is gone; no field survives to clobber | delete | 409 `ClaimConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_claimed`, mirroring the existing `note` case) |
+| text | text (same field) | Accepted — B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_lease_second_writer_wins`) | text | 409 `LeaseConflict`; A's edit stands (`TestLeaseEnforcement.test_non_holder_update_is_rejected`) |
+| text | geometry (different field) | Accepted, but B's write silently **clobbers A's text** back to whatever B's stale local copy held — the documented finding above (`test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit`) | geometry | 409 `LeaseConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a leased annotation (`test_lease_blocks_a_different_field_edit_too_not_only_same_field`) |
+| (any) | style | Accepted, same whole-document LWW as the text/text row — an unrelated style write can clobber a concurrent edit the same way | style | 409 `LeaseConflict` (`test_non_holder_style_edit_is_rejected_while_leased`) |
+| (any) | lock toggle | Accepted, same mechanism — `locked` is an ordinary field on an `annotation_updated` op, not a separate op type | lock toggle | 409 `LeaseConflict` (`test_non_holder_lock_toggle_is_rejected_while_leased`) — a non-holder cannot lock out from under the lease holder either |
+| (any) | delete | Accepted — the annotation is gone; no field survives to clobber | delete | 409 `LeaseConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_leased`, mirroring the existing `note` case) |
 
-Reading the matrix: the **claimed** column is the safe one for every row —
-holding the claim protects every field of the annotation, not merely the one
+Reading the matrix: the **leased** column is the safe one for every row —
+holding the lease protects every field of the annotation, not merely the one
 the holder itself is editing, because the check is per-annotation-id, not
-per-field. The **unclaimed** column is whole-document last-write-wins for
+per-field. The **unleased** column is whole-document last-write-wins for
 every row, including the different-field (text/geometry) row where that is
-easy to mis-read as a safe merge. In practice that unclaimed race is narrow — a
+easy to mis-read as a safe merge. In practice that unleased race is narrow — a
 remote op is folded into a connected client's own baseline as soon as its SSE
 delivery arrives (typically well under the round trip a human drag/keystroke
 takes), so the window is bounded by network latency, not by anything in this
 document's control — but it is real, not eliminated, and this section exists
-so nobody has to rediscover it under a poor network to learn it.
+so nobody has to rediscover it under a poor network to learn it. A live edit
+lease closes the window only for the annotation it was actually acquired
+on — it does not retroactively protect a write that never went through a
+lease-acquiring entry point, and it does not make the *leased* column's own
+per-field granularity any finer than before.
 
-**What this does not change.** No code changed to produce this section —
-only tests and documentation. The clobber case is a property of the existing
-whole-annotation-resend/shallow-merge design (both already shipped, both
-individually reasonable), not a regression this slice introduces or should
-quietly patch. Closing it for real would mean per-field patch ops instead of
-whole-annotation resends — a bigger design change, and a decision for the
-project owner, not something to guess at inside a documentation-and-test
-slice. It is recorded here, and in this PR's body, as a finding rather than
+**What this does not change.** No code changed for `task-annotation-shared-
+session-realtime`'s original run of this section — only tests and
+documentation; `task-annotation-exclusive-edit-leases` later changed the
+enforcement mechanism itself (advisory selection claim → exclusive edit
+lease, see [Operation timing and leases](#operation-timing-and-leases)) but
+did **not** touch this clobber finding. The clobber case is a property of the
+existing whole-annotation-resend/shallow-merge design (both already shipped,
+both individually reasonable), not a regression either slice introduced or
+should quietly patch. Closing it for real would mean per-field patch ops
+instead of whole-annotation resends — a bigger design change tracked as
+`dec-annotation-field-patches-and-conflicts`, separate from and not resolved
+by the edit-lease work above. It is recorded here as a finding rather than
 fixed.
 
 ## Attachment and detach behavior
@@ -846,7 +910,7 @@ rather than here, because each is a detail of the section it sits in: a
 locked group's own menu withholds every destructive action, [Layer
 order](#layer-order) above explains why the lock protects content rather than
 (a non-existent) visibility; and the multi-select delete path filters
-locked/claimed/ungrouped-node selections exactly like the keyboard
+locked/leased/ungrouped-node selections exactly like the keyboard
 `Delete`/`Backspace` handler that same section describes, so the two paths
 cannot drift apart the way they once did.
 
@@ -1622,7 +1686,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — no text, no title anywhere in its markup |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to `alt` when set, empty otherwise — never says "image annotation" |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps as every other kind; accessible name is **empty** — pure SVG path(s), no text or title |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; selection claims cover every annotation kind, are enforced client-side, and the server now rejects a browser write (ops, image ingest and undo alike) against a claim someone else holds — but the MCP write path still bypasses `ClaimMap` entirely, a still-open decision ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered, including a whole-document-last-write-wins finding for concurrent different-field edits when neither side holds the claim; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path still bypasses `LeaseMap` entirely, by deliberate sequencing rather than an open decision — that is `task-mcp-annotation-human-edit-guard`'s own scope ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered, including a whole-document-last-write-wins finding for concurrent different-field edits when neither side holds the lease; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
 
 ## Downstream closure rule
 

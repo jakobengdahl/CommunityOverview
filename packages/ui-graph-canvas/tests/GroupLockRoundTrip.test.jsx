@@ -43,7 +43,7 @@ vi.mock('reactflow', () => {
 });
 
 // setNodes fires from several effects and only one of them is the
-// remote-selection reconciler; find its result by the marker it clears rather
+// remote-lease reconciler; find its result by the marker it clears rather
 // than by position, which is not stable.
 function groupAfterClaimReconcile(from) {
   for (const call of hoisted.setNodes.mock.calls) {
@@ -51,7 +51,7 @@ function groupAfterClaimReconcile(from) {
     const result = typeof updater === 'function' ? updater(from) : updater;
     if (!Array.isArray(result)) continue;
     const group = result.find((n) => n?.type === 'group');
-    if (group && group.data?.remoteSelection === null) return group;
+    if (group && group.data?.remoteLease === null) return group;
   }
   return null;
 }
@@ -141,12 +141,15 @@ describe('group lock/layer round trip through the canvas', () => {
     expect(group.draggable).toBe(false);
   });
 
-  // The remote-selection effect rewrites `draggable` for every annotation node
-  // that carries or carried a claim marker. Groups must come out of it the same
-  // way the builders make them, or the first collaborator to click a group and
-  // let go pins it draggable for the rest of the session — overriding the
-  // canvas-wide switch exactly as an explicit boolean from the builders would.
-  it('leaves an unlocked group deferring to the canvas switch after a claim is released', () => {
+  // The remote-lease effect rewrites `draggable` for every annotation node
+  // that carries or carried an edit-lease marker (task-annotation-exclusive-
+  // edit-leases — a mere selection claim, unlike this, never gates dragging;
+  // see the two remoteSelection-only tests below for that half). Groups must
+  // come out of it the same way the builders make them, or the first
+  // collaborator to start editing a group and let go pins it draggable for
+  // the rest of the session — overriding the canvas-wide switch exactly as an
+  // explicit boolean from the builders would.
+  it('leaves an unlocked group deferring to the canvas switch after a lease is released', () => {
     hoisted.seededNodes = [
       {
         id: 'g1',
@@ -154,18 +157,18 @@ describe('group lock/layer round trip through the canvas', () => {
         position: { x: 0, y: 0 },
         data: {
           label: 'Team',
-          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
         },
         draggable: false,
       },
     ];
-    render(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    render(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
     const group = groupAfterClaimReconcile(hoisted.seededNodes);
     expect(group).not.toBeNull();
     expect(group.draggable).toBeUndefined();
   });
 
-  it('still pins a locked group after a claim is released', () => {
+  it('still pins a locked group after a lease is released', () => {
     hoisted.seededNodes = [
       {
         id: 'g1',
@@ -174,15 +177,41 @@ describe('group lock/layer round trip through the canvas', () => {
         data: {
           label: 'Team',
           locked: true,
+          remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+        },
+        draggable: false,
+      },
+    ];
+    render(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
+    const group = groupAfterClaimReconcile(hoisted.seededNodes);
+    expect(group).not.toBeNull();
+    expect(group.draggable).toBe(false);
+  });
+
+  // task-annotation-exclusive-edit-leases: a mere selection claim (the
+  // cosmetic-only effect, unaffected by this task) must never touch
+  // `draggable` at all — only the remote-lease effect above does.
+  it('a mere remoteSelection reconcile never rewrites draggable', () => {
+    hoisted.seededNodes = [
+      {
+        id: 'g1',
+        type: 'group',
+        position: { x: 0, y: 0 },
+        data: {
+          label: 'Team',
           remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
         },
         draggable: false,
       },
     ];
     render(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
-    const group = groupAfterClaimReconcile(hoisted.seededNodes);
-    expect(group).not.toBeNull();
-    expect(group.draggable).toBe(false);
+    for (const call of hoisted.setNodes.mock.calls) {
+      const updater = call[0];
+      const result = typeof updater === 'function' ? updater(hoisted.seededNodes) : updater;
+      if (!Array.isArray(result)) continue;
+      const group = result.find((n) => n?.type === 'group');
+      if (group) expect(group.draggable).toBe(false);
+    }
   });
 
   it('re-emits locked and z in the save-view snapshot', () => {

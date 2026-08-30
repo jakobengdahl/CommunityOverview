@@ -120,7 +120,7 @@ describe('GroupNode remote selection claim exclusivity', () => {
   it('refuses a rename while another client holds the claim, notifying instead', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderGroup({
       label: 'G',
-      remoteSelection: REMOTE_CLAIM,
+      remoteLease: REMOTE_CLAIM,
     });
     fireEvent.doubleClick(screen.getByText('G'));
     expect(screen.queryByRole('textbox')).toBeNull();
@@ -131,7 +131,7 @@ describe('GroupNode remote selection claim exclusivity', () => {
   it('refuses to open the context menu while another client holds the claim', () => {
     const { notifyRemoteLockedAttempt } = renderGroup({
       label: 'G',
-      remoteSelection: REMOTE_CLAIM,
+      remoteLease: REMOTE_CLAIM,
     });
     fireEvent.contextMenu(screen.getByText('G'));
     expect(document.querySelector('.graph-group-context-menu')).toBeNull();
@@ -139,9 +139,22 @@ describe('GroupNode remote selection claim exclusivity', () => {
   });
 
   it("renders the claiming collaborator's badge and outline", () => {
-    const { container } = renderGroup({ label: 'G', remoteSelection: REMOTE_CLAIM });
+    const { container } = renderGroup({ label: 'G', remoteLease: REMOTE_CLAIM });
     expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
     expect(container.querySelector('.graph-group-node').style.outline).toContain('#e6194b');
+  });
+
+  it('a mere remoteSelection (no edit lease) still shows the badge but never refuses a rename', () => {
+    // task-annotation-exclusive-edit-leases: selection stays a purely
+    // cosmetic marker — it must never gate a rename or menu open.
+    const { container, notifyRemoteLockedAttempt } = renderGroup({
+      label: 'G',
+      remoteSelection: REMOTE_CLAIM,
+    });
+    expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
+    fireEvent.doubleClick(screen.getByText('G'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
   });
 
   it('edits normally once no claim is present', () => {
@@ -395,7 +408,7 @@ describe('GroupNode locked context menu', () => {
       <AnnotationContext.Provider
         value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
       >
-        <GroupNode id="group-1" data={{ ...lockedData, remoteSelection: REMOTE_CLAIM }} selected />
+        <GroupNode id="group-1" data={{ ...lockedData, remoteLease: REMOTE_CLAIM }} selected />
       </AnnotationContext.Provider>
     );
     fireEvent.click(screen.getByRole('button', { name: /unlock/i }));

@@ -59,12 +59,24 @@ const MAX_BATCH_BYTES = 240 * 1024;
 // apart (review round 6).
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
-// Selection claims are advisory soft-locks (design 3.5). The server expires a
+// Selection claims are a purely cosmetic presence marker (design 3.5) — never
+// an edit lock (task-annotation-exclusive-edit-leases). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
 // window and mirrors the same TTL so a departed collaborator's marker never
 // lingers even if its disconnect event is missed.
 const CLAIM_TTL_MS = 30_000;
 const CLAIM_RENEW_MS = 15_000;
+
+// Edit leases are the exclusive mechanism a write is actually checked
+// against (task-annotation-exclusive-edit-leases): acquired only when real
+// editing starts, first-actual-editor-wins, never on mere selection. Same
+// TTL/renewal cadence as the (unrelated) selection claim above — both mirror
+// the server's 30 s lease/claim TTL — but tracked and renewed independently,
+// since a client can select something without editing it and vice versa
+// (briefly, for an edit-start entry point like a bulk action that never
+// shows a selection outline at all).
+const LEASE_TTL_MS = 30_000;
+const LEASE_RENEW_MS = 15_000;
 
 const EMPTY_MIRROR = Object.freeze({
   node_refs: [],
@@ -346,7 +358,7 @@ export class SessionSyncClient {
    * @param {string} opts.streamUrl  Full SSE URL (query appended by the client).
    * @param {string} opts.opsUrl     Full POST URL for op batches.
    * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
-   *   onSelections, onPresenceJoined, onPresenceLeft, onSessionRenamed,
+   *   onSelections, onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand.
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
@@ -431,6 +443,22 @@ export class SessionSyncClient {
     this._localSelection = []; // element ids this client currently claims
     this._renewTimer = null;
     this._pruneTimer = null;
+
+    // Edit leases (task-annotation-exclusive-edit-leases), also ephemeral but
+    // tracked separately from selection claims above — see LEASE_TTL_MS.
+    this._leases = new Map(); // element_id -> { clientId, expiresAt }
+    this._activeEditIds = new Set(); // element ids this client is actively editing
+    // Ids the caller currently *wants* held, set synchronously the instant
+    // beginEditing is called — distinct from _activeEditIds, which only gains
+    // an id once its acquisition round trip actually resolves. See
+    // beginEditing's docstring for why this exists: without it, an
+    // endEditing that lands while the matching beginEditing is still
+    // in-flight has nothing in _activeEditIds to find yet, so the release
+    // would silently do nothing and the later-resolving acquire would then
+    // hold a lease nobody wants released — until the 30s TTL expired.
+    this._editIntent = new Set();
+    this._leaseRenewTimer = null;
+    this._leasePruneTimer = null;
   }
 
   get seq() {
@@ -610,10 +638,240 @@ export class SessionSyncClient {
     }
   }
 
+  // ── Edit leases (task-annotation-exclusive-edit-leases) ────────────────────
+  //
+  // Deliberately a *separate* protocol from the selection claims above, not a
+  // repurposing of them in place: collaborative UI still wants a "who has
+  // this selected" marker even when nobody is editing, so getRemoteSelections
+  // above stays untouched and purely cosmetic. Only these methods below ever
+  // acquire, renew or release an edit lease — never a selection change.
+
+  /**
+   * Live edit leases held by *other* clients, as
+   * ``element_id -> { clientId, color, displayName }`` — same shape as
+   * ``getRemoteSelections()``, safe to render as a remote marker (or, more
+   * usefully, to gate local editing: ``isRemoteLocked`` in
+   * ``packages/ui-graph-canvas/src/utils/annotations.js`` reads exactly this).
+   */
+  getRemoteLeases() {
+    const now = this._now();
+    const out = {};
+    for (const [eid, lease] of this._leases) {
+      if (lease.expiresAt <= now || lease.clientId === this.clientId) continue;
+      const member = this._roster.get(lease.clientId);
+      if (!member) continue;
+      out[eid] = {
+        clientId: lease.clientId,
+        color: member.color,
+        displayName: member.display_name,
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Acquire (or renew) an edit lease on `elementIds` — the one call every
+   * real edit-start entry point makes before mutating: opening a text field,
+   * beginning a geometry gesture, opening a property editor, or starting a
+   * bulk mutation/undo. Bypasses the debounced op queue (unlike
+   * `setLocalSelection`) and awaits the server's answer directly, because the
+   * caller needs to know *before* proceeding whether it was refused — the
+   * "explicit busy/conflict response" the design calls for, not a background
+   * echo. Starts renewing every granted id every `LEASE_RENEW_MS` until
+   * `endEditing` is called for it.
+   *
+   * Resolves `{granted, denied}`; `denied` maps a refused id to the display
+   * name of whoever holds it (falling back to the raw client id if the
+   * roster has not caught up yet), so the caller can show exactly who is in
+   * the way. Fails *open* (grants locally without a round trip) when there is
+   * no live connection yet or no `fetch` at all (e.g. under test) — nothing
+   * server-side could hold a competing lease before the session even exists,
+   * and the mutating op the caller sends next is still checked server-side
+   * regardless (defense in depth — see `LeaseConflict` in
+   * `backend/core/session_manager.py`).
+   *
+   * Records each id in `_editIntent` synchronously, before the round trip —
+   * so a fast `endEditing` landing while this call is still in flight (a
+   * quick Escape right after double-click, a fast drag, a menu opened and
+   * closed within one round trip) is not silently lost: `_commitGranted`
+   * checks `_editIntent` again once the round trip resolves, and releases
+   * anything the caller no longer wants instead of committing a lease
+   * nobody asked to keep — see `endEditing`.
+   */
+  async beginEditing(elementIds) {
+    const ids = Array.from(
+      new Set((elementIds || []).filter((id) => typeof id === 'string' && id))
+    );
+    if (!ids.length) return { granted: [], denied: {} };
+    for (const id of ids) this._editIntent.add(id);
+    if (!this._fetch || !this._ready) {
+      this._commitGranted(ids);
+      return { granted: ids, denied: {} };
+    }
+    let granted = ids;
+    let denied = {};
+    try {
+      const resp = await this._postOps([{ op: 'edit_lease_acquired', element_ids: ids }]);
+      if (resp && resp.ok) {
+        const body = await resp.json().catch(() => null);
+        const result = body?.applied?.[0];
+        granted = Array.isArray(result?.element_ids) ? result.element_ids : [];
+        const deniedByClientId = result?.denied || {};
+        denied = {};
+        for (const [eid, clientId] of Object.entries(deniedByClientId)) {
+          const member = this._roster.get(clientId);
+          denied[eid] = member?.display_name || clientId;
+        }
+      }
+      // A non-ok response (network hiccup aside — see the catch below) falls
+      // through with the optimistic `granted = ids` default: the same
+      // fail-open reasoning as the no-connection branch above.
+    } catch {
+      /* fail open — see the docstring above */
+    }
+    this._commitGranted(granted);
+    return { granted, denied };
+  }
+
+  /**
+   * Commit a resolved acquisition: only for ids still in `_editIntent` (the
+   * caller has not since called `endEditing` for them) does this add the
+   * lease to local tracking and keep renewing it. An id the caller already
+   * released while the acquisition was in flight is instead released again
+   * right away — the earlier `endEditing` found nothing in `_activeEditIds`
+   * yet and so had nothing to enqueue, and without this the server would be
+   * left thinking this client holds a lease nobody wants, for the full 30s
+   * TTL, wrongly refusing a genuine second editor in the meantime.
+   */
+  _commitGranted(granted) {
+    const expiresAt = this._now() + LEASE_TTL_MS;
+    const toReleaseAgain = [];
+    for (const id of granted) {
+      if (this._editIntent.has(id)) {
+        this._leases.set(id, { clientId: this.clientId, expiresAt });
+        this._activeEditIds.add(id);
+      } else {
+        toReleaseAgain.push(id);
+      }
+    }
+    if (this._activeEditIds.size) this._startLeaseRenewTimer();
+    if (toReleaseAgain.length) {
+      this._enqueue([{ op: 'edit_lease_released', element_ids: toReleaseAgain }]);
+    }
+  }
+
+  /**
+   * Release an edit lease this client holds on `elementIds` — called when an
+   * edit finishes or is cancelled (text blur/Escape/commit, geometry gesture
+   * end, property editor close, bulk mutation/undo complete). Ids this client
+   * is not actively editing are ignored, so it is safe to call with a
+   * superset. Queued rather than awaited (unlike `beginEditing`): nothing
+   * downstream needs to know the release landed, and the id is removed from
+   * local tracking immediately either way.
+   *
+   * Always drops `elementIds` from `_editIntent` first, whether or not they
+   * are in `_activeEditIds` yet — see `_commitGranted`: a matching
+   * `beginEditing` still in flight for one of these ids reads that absence
+   * when it resolves and releases the lease immediately instead of holding
+   * it, rather than this call finding nothing yet to do and the release
+   * being lost.
+   */
+  endEditing(elementIds) {
+    const requested = elementIds || [];
+    for (const id of requested) this._editIntent.delete(id);
+    const ids = requested.filter((id) => this._activeEditIds.has(id));
+    if (!ids.length) return;
+    for (const id of ids) this._activeEditIds.delete(id);
+    if (!this._activeEditIds.size) this._stopLeaseRenewTimer();
+    this._enqueue([{ op: 'edit_lease_released', element_ids: ids }]);
+  }
+
+  _emitLeases() {
+    if (this.handlers.onLeases) this.handlers.onLeases(this.getRemoteLeases());
+  }
+
+  _seedLeases(leases) {
+    const now = this._now();
+    this._leases = new Map();
+    for (const [eid, clientId] of Object.entries(leases || {})) {
+      this._leases.set(eid, { clientId, expiresAt: now + LEASE_TTL_MS });
+    }
+    this._emitLeases();
+  }
+
+  _applyLeaseOp(clientId, op) {
+    const ids = Array.isArray(op.element_ids) ? op.element_ids : [];
+    if (!ids.length) return;
+    if (op.op === 'edit_lease_acquired') {
+      const expiresAt = this._now() + LEASE_TTL_MS;
+      for (const eid of ids) this._leases.set(eid, { clientId, expiresAt });
+    } else {
+      for (const eid of ids) {
+        const held = this._leases.get(eid);
+        if (held && held.clientId === clientId) this._leases.delete(eid);
+      }
+    }
+    this._emitLeases();
+  }
+
+  _pruneLeases() {
+    const now = this._now();
+    let changed = false;
+    for (const [eid, lease] of this._leases) {
+      if (lease.expiresAt <= now) {
+        this._leases.delete(eid);
+        changed = true;
+      }
+    }
+    if (changed) this._emitLeases();
+  }
+
+  _startLeasePruneTimer() {
+    if (this._leasePruneTimer || this._closed) return;
+    this._leasePruneTimer = setInterval(() => this._pruneLeases(), LEASE_TTL_MS / 3);
+  }
+
+  _startLeaseRenewTimer() {
+    if (this._leaseRenewTimer || this._closed) return;
+    this._leaseRenewTimer = setInterval(() => {
+      if (!this._activeEditIds.size) {
+        this._stopLeaseRenewTimer();
+        return;
+      }
+      // Skip renewals while the stream is down — same reasoning as the
+      // selection claim renew timer above: the server released this
+      // client's leases on disconnect, and _readvertiseLeases re-acquires
+      // them on reconnect instead.
+      if (!this._ready) return;
+      this.beginEditing(Array.from(this._activeEditIds));
+    }, LEASE_RENEW_MS);
+  }
+
+  _stopLeaseRenewTimer() {
+    if (this._leaseRenewTimer) {
+      clearInterval(this._leaseRenewTimer);
+      this._leaseRenewTimer = null;
+    }
+  }
+
+  /**
+   * Re-acquire this client's actively-held edit leases after a reconnect —
+   * the server released them on disconnect (same reasoning as
+   * `_readvertiseSelection`). A lease lost to someone else in the gap is a
+   * real, correctly-reported conflict here, not a bug: the caller's next
+   * renewal (or its own mutation) surfaces it the normal way.
+   */
+  _readvertiseLeases() {
+    if (this._activeEditIds.size) {
+      this.beginEditing(Array.from(this._activeEditIds));
+    }
+  }
+
   /** Open the SSE stream. Idempotent. */
   connect() {
     if (this._source || this._closed || !this._EventSource) return;
     this._startPruneTimer();
+    this._startLeasePruneTimer();
     const params = new URLSearchParams({ client_id: this.clientId });
     if (this.displayName) params.set('name', this.displayName);
     if (this._appliedSeq > 0) params.set('since_seq', String(this._appliedSeq));
@@ -936,13 +1194,29 @@ export class SessionSyncClient {
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
       } else if (
         resp &&
-        (resp.status === 400 || resp.status === 413 || resp.status === 404 || resp.status === 410)
+        (resp.status === 400 ||
+          resp.status === 413 ||
+          resp.status === 404 ||
+          resp.status === 410 ||
+          resp.status === 409)
       ) {
-        // Terminal rejection (malformed / too large / session gone). Retrying
-        // never succeeds. If this was a multi-op batch, requeue and switch to
+        // Terminal rejection (malformed / too large / session gone / lease
+        // conflict). Retrying never succeeds — including 409/LeaseConflict
+        // (task-annotation-exclusive-edit-leases): unlike a 5xx, the batch
+        // isn't wrong because of a transient server hiccup, it lost the race
+        // for an exclusive edit lease another client actually holds, and
+        // resending the same frozen op content once that lease clears would
+        // silently overwrite whatever real edit the lease-holder made in the
+        // interim — the exact data-loss path this lease mechanism exists to
+        // prevent. Drop it here the same as a permanently-invalid op; the
+        // caller (onDropped, keyed by resp.status) is responsible for telling
+        // the user their change didn't apply and, if it wants to retry at
+        // all, doing so with fresh current-state content rather than this
+        // stale queued op. If this was a multi-op batch, requeue and switch to
         // one-at-a-time so only the offending op is ultimately dropped; a lone
         // rejected op is dropped outright (its effect stays in the baseline, but
-        // it is genuinely un-persistable — e.g. a hard annotation-limit hit).
+        // it is genuinely un-persistable — e.g. a hard annotation-limit hit, or
+        // an annotation another client is actively editing).
         if (batch.length > 1) {
           this._queue = batch.concat(this._queue);
           this._forceSingle = true;
@@ -1027,11 +1301,13 @@ export class SessionSyncClient {
         this._ready = true;
         this._resolveReadyWaiters();
         this._seedPresence(data.roster, data.claims);
+        this._seedLeases(data.leases);
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
         } else {
           this._readvertiseSelection();
+          this._readvertiseLeases();
           if (this.handlers.onResync) this.handlers.onResync();
         }
         this._flushSoon();
@@ -1045,9 +1321,12 @@ export class SessionSyncClient {
         this._resolveReadyWaiters();
         this._hadSnapshot = true;
         this._seedPresence(data.roster, data.claims);
+        this._seedLeases(data.leases);
         // catch_up only follows a reconnect (since_seq was sent), so always
-        // re-advertise the local selection the server dropped on disconnect.
+        // re-advertise the local selection and active edit leases the server
+        // dropped on disconnect.
         this._readvertiseSelection();
+        this._readvertiseLeases();
         if (Array.isArray(data.ops) && data.ops.length && this.handlers.onResync) {
           this.handlers.onResync();
         }
@@ -1077,6 +1356,15 @@ export class SessionSyncClient {
         // no tracking since the local user sees their own selection natively.
         if (op.op === 'selection_claimed' || op.op === 'selection_released') {
           if (data.client_id !== this.clientId) this._applyClaimOp(data.client_id, op);
+          return;
+        }
+        // Edit-lease ops are ephemeral too, but exclusive rather than advisory
+        // (task-annotation-exclusive-edit-leases) — see beginEditing/
+        // endEditing above. Our own echoes are skipped for the same reason:
+        // beginEditing already updated `_leases` optimistically from the
+        // direct acquire response, before this broadcast could arrive.
+        if (op.op === 'edit_lease_acquired' || op.op === 'edit_lease_released') {
+          if (data.client_id !== this.clientId) this._applyLeaseOp(data.client_id, op);
           return;
         }
         if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
@@ -1110,8 +1398,16 @@ export class SessionSyncClient {
             claimsChanged = true;
           }
         }
+        let leasesChanged = false;
+        for (const [eid, lease] of this._leases) {
+          if (lease.clientId === data.client_id) {
+            this._leases.delete(eid);
+            leasesChanged = true;
+          }
+        }
         this._emitPresence();
         if (claimsChanged) this._emitSelections();
+        if (leasesChanged) this._emitLeases();
         if (this.handlers.onPresenceLeft) this.handlers.onPresenceLeft(data.client_id);
         break;
       }
@@ -1158,6 +1454,11 @@ export class SessionSyncClient {
     if (this._pruneTimer) {
       clearInterval(this._pruneTimer);
       this._pruneTimer = null;
+    }
+    this._stopLeaseRenewTimer();
+    if (this._leasePruneTimer) {
+      clearInterval(this._leasePruneTimer);
+      this._leasePruneTimer = null;
     }
     this._queue = [];
     // A close() before the client ever became ready (e.g. a session switch

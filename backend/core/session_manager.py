@@ -2,21 +2,26 @@
 Orchestration for shared sessions: the op protocol, conflict rules and catch-up.
 
 ``SessionManager`` ties the persistent ``SessionStore`` to the ephemeral
-``session_hub`` (event bus + presence + claims). It is the single entry point
-used by the REST/SSE endpoints and by MCP pushes:
+``session_hub`` (event bus + presence + selection claims + edit leases). It is
+the single entry point used by the REST/SSE endpoints and by MCP pushes:
 
 * ``apply_ops`` — validates a batch, applies each op under a per-session lock in
   arrival order (server-ordered last-write-wins, no CRDT — design D2), assigns a
   monotonic ``seq`` to each state op, persists once per batch, and broadcasts
   every applied op to all subscribers including the originator. It also rejects
-  (``ClaimConflict``) a batch op that would mutate an annotation another client
-  currently holds a live selection claim on — one of three gated browser write
+  (``LeaseConflict``) a batch op that would mutate an annotation another client
+  currently holds a live *edit lease* on — one of three gated browser write
   paths, alongside ``undo_last_action`` and the image-ingest endpoint;
-  see ``ClaimConflict`` for the full picture and for what stays out of scope.
+  see ``LeaseConflict`` for the full picture and for what stays out of scope.
+  It also handles edit-lease acquisition/renewal/release itself
+  (``edit_lease_acquired``/``edit_lease_released``) — see ``LEASE_OPS``.
 * selection claims (``selection_claimed`` / ``selection_released``) are handled
-  inline but stay ephemeral — broadcast, never persisted, never sequenced.
+  inline but stay ephemeral — broadcast, never persisted, never sequenced, and
+  (since ``dec-mcp-agent-ops-vs-annotation-claimmap``) purely a cosmetic "who
+  has this selected" presence marker — they never gate a write. Edit leases
+  (``LEASE_OPS``) are the ones that do.
 * ``connect`` / ``disconnect`` manage presence and release a departing client's
-  claims.
+  claims and leases.
 * ``catch_up`` returns either the missed ops (from the store ring buffer) or a
   full-state snapshot when the ring cannot prove continuity.
 * a per-client token bucket bounds op throughput (429 on exhaustion).
@@ -40,6 +45,7 @@ from .session_annotations import IMAGE_TYPE, annotation_type_of, is_embedded_ima
 from .session_hub import (
     ClaimMap,
     InProcessEventBus,
+    LeaseMap,
     PresenceRegistry,
     SessionEventBus,
     Subscription,
@@ -53,6 +59,12 @@ from .session_store import (
 )
 
 CLAIM_OPS = {"selection_claimed", "selection_released"}
+# Edit-lease acquisition/release — task-annotation-exclusive-edit-leases. Kept
+# distinct from CLAIM_OPS: claim ops are LWW and never fail, while an acquire
+# here can be (partially) denied, so apply_ops handles the two differently
+# (see the LEASE_OPS branch there for how a denial is reported without
+# aborting the rest of the batch).
+LEASE_OPS = {"edit_lease_acquired", "edit_lease_released"}
 
 # Ops carry node **references** + layout + annotations, never node copies, so
 # these bounds are generous for the real op cadence (drag-end, D9): a single
@@ -189,31 +201,36 @@ class RevisionConflict(Exception):
         self.actual = actual
 
 
-class ClaimConflict(Exception):
+class LeaseConflict(Exception):
     """A browser write tried to mutate an annotation another client currently
-    holds a live selection claim on.
+    holds a live edit lease on (first-actual-editor-wins —
+    ``dec-mcp-agent-ops-vs-annotation-claimmap``,
+    ``task-annotation-exclusive-edit-leases``).
 
-    Raised from the two ``SessionManager`` paths that check live claims: the
-    ``apply_ops`` batch (the REST ``/ops`` endpoint) and ``undo_last_action``
-    (``/undo``), which replays a stored inverse op and is reachable from the
-    browser only — no MCP tool calls it. A third browser write path is gated
-    too without raising this class: the image-ingest endpoint
-    (``POST /sessions/{id}/annotations/image``) replaces an annotation directly
-    rather than through ``apply_ops``, so it checks the same claim snapshot
-    itself and only borrows this class to format its 409 detail. The
-    synchronous MCP write path
+    Raised from the two ``SessionManager`` paths that check live leases: the
+    ``apply_ops`` batch (the REST ``/ops`` endpoint — this also covers a
+    denied ``edit_lease_acquired`` attempt targeting an id another client
+    already holds, reported in that op's own ``denied`` result rather than by
+    raising, since an acquire denial must not abort the rest of the batch)
+    and ``undo_last_action`` (``/undo``), which replays a stored inverse op
+    and is reachable from the browser only — no MCP tool calls it. A third
+    browser write path is gated too without raising this class: the
+    image-ingest endpoint (``POST /sessions/{id}/annotations/image``)
+    replaces an annotation directly rather than through ``apply_ops``, so it
+    checks the same lease snapshot itself and only borrows this class to
+    format its 409 detail. The synchronous MCP write path
     (``upsert_annotation``/``update_annotation``/``delete_annotation``/
     ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
-    client id — see ``mcp_tools.py``) never calls ``apply_ops`` and is
-    unaffected by this check; see the ``ClaimMap`` bullet in ``session_hub``'s
-    module docstring for the open decision on whether it should be (the class
-    docstring is a one-liner and does not carry it).
+    client id — see ``mcp_tools.py``) never calls ``apply_ops`` and does not
+    acquire or check leases in v1 — see ``dec-mcp-agent-ops-vs-annotation-
+    claimmap``; covering it is ``task-mcp-annotation-human-edit-guard``'s
+    separate, deliberately-sequenced-after scope, not this class's.
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
         super().__init__(
-            f"annotation {annotation_id!r} is claimed by another client "
-            f"({held_by!r}); wait for the claim to release or expire before "
+            f"annotation {annotation_id!r} is being edited by another client "
+            f"({held_by!r}); wait for the lease to release or expire before "
             "editing it"
         )
         self.annotation_id = annotation_id
@@ -276,15 +293,15 @@ class _TokenBucket:
 def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional[str]:
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
-    Used to check an op against the live claim snapshot before applying it —
-    a batch op in ``apply_ops``, or the stored inverse op ``undo_last_action``
-    is about to replay. Only ``annotation_updated``/``annotation_deleted``
-    always target an existing annotation; ``annotation_created`` targets one
-    only when its id already exists in the session (the upsert-as-replace
-    case) — a genuinely new id has no prior claim to protect. Every other
-    state op type (node/edge/layout/rename ops) is out of scope for this
-    check — see ``ClaimConflict``'s docstring for why annotations only, for
-    now.
+    Used to check an op against the live edit-lease snapshot before applying
+    it — a batch op in ``apply_ops``, or the stored inverse op
+    ``undo_last_action`` is about to replay. Only
+    ``annotation_updated``/``annotation_deleted`` always target an existing
+    annotation; ``annotation_created`` targets one only when its id already
+    exists in the session (the upsert-as-replace case) — a genuinely new id
+    has no prior lease to protect. Every other state op type (node/edge/
+    layout/rename ops) is out of scope for this check — see
+    ``LeaseConflict``'s docstring for why annotations only, for now.
     """
     op_type = op.get("op")
     if op_type == "annotation_updated":
@@ -418,7 +435,8 @@ def _check_image_budgets(
 
 
 class SessionManager:
-    """High-level façade over the session store, event bus, presence and claims."""
+    """High-level façade over the session store, event bus, presence, selection
+    claims and edit leases."""
 
     def __init__(
         self,
@@ -427,6 +445,7 @@ class SessionManager:
         event_bus: Optional[SessionEventBus] = None,
         presence: Optional[PresenceRegistry] = None,
         claims: Optional[ClaimMap] = None,
+        leases: Optional[LeaseMap] = None,
         max_ops_per_batch: int = _DEFAULT_MAX_OPS_PER_BATCH,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
         max_op_batch_bytes: int = _DEFAULT_MAX_OP_BATCH_BYTES,
@@ -439,6 +458,7 @@ class SessionManager:
         self.bus = event_bus or InProcessEventBus()
         self.presence = presence or PresenceRegistry()
         self.claims = claims or ClaimMap()
+        self.leases = leases or LeaseMap()
         self._max_ops = max_ops_per_batch
         self._max_sessions = max_sessions
         self._max_op_batch_bytes = max_op_batch_bytes
@@ -746,7 +766,7 @@ class SessionManager:
             if not isinstance(op, dict):
                 raise OpError("each op must be an object")
             op_type = op.get("op")
-            if op_type in CLAIM_OPS:
+            if op_type in CLAIM_OPS or op_type in LEASE_OPS:
                 self._validate_claim_op(op)
             elif op_type not in STATE_OPS:
                 raise OpError(f"unknown op: {op_type!r}")
@@ -773,15 +793,23 @@ class SessionManager:
             ring = self.store.ring(session_id)
             saved_ring = list(ring) if ring is not None else None
 
-            # Read once, before this batch applies anything: claim() / release()
-            # for this session only ever run later in this same critical
-            # section (below, under this same lock), so this snapshot is a
-            # consistent view of who held what when the batch started —
-            # matching apply_ops' own all-or-nothing semantics (D3 enforcement;
-            # see ClaimConflict's docstring for what this does not cover yet).
-            live_claims = self.claims.snapshot(session_id)
+            # Read once, before this batch applies anything: acquire()/release()
+            # for this session only ever commit to the real map later in this
+            # same critical section (below, under this same lock; see the
+            # "commit succeeded" block) — so a fresh copy taken here is a
+            # consistent view of who held what when the batch started, matching
+            # apply_ops' own all-or-nothing semantics (see LeaseConflict's
+            # docstring for what this does not cover yet). Walked as a mutable
+            # working copy (not re-read) so that an `edit_lease_acquired`/
+            # `edit_lease_released` op earlier in *this* batch is visible to a
+            # mutating op — or another lease op — later in the same batch,
+            # exactly the way `self.store.apply_state_op` below sees each
+            # state op's effect on `session.state` as it walks the same list.
+            working_leases: Dict[str, str] = dict(self.leases.snapshot(session_id))
 
-            # ("state", applied) | ("claim", op_type, element_ids), in arrival order
+            # ("state", applied) | ("claim", op_type, element_ids)
+            # | ("lease_acquire", granted, denied) | ("lease_release", element_ids),
+            # in arrival order
             pending: List[Tuple[Any, ...]] = []
             state_changed = False
             try:
@@ -789,12 +817,32 @@ class SessionManager:
                     op_type = op["op"]
                     if op_type in CLAIM_OPS:
                         pending.append(("claim", op_type, list(op["element_ids"])))
+                    elif op_type == "edit_lease_acquired":
+                        granted: List[str] = []
+                        denied: Dict[str, str] = {}
+                        # De-duplicated so a caller listing the same id twice in
+                        # one request cannot inflate `granted`/broadcast it twice.
+                        for eid in dict.fromkeys(op["element_ids"]):
+                            holder = working_leases.get(eid)
+                            if holder is not None and holder != client_id:
+                                denied[eid] = holder
+                            else:
+                                working_leases[eid] = client_id
+                                granted.append(eid)
+                        pending.append(("lease_acquire", granted, denied))
+                    elif op_type == "edit_lease_released":
+                        released: List[str] = []
+                        for eid in dict.fromkeys(op["element_ids"]):
+                            if working_leases.get(eid) == client_id:
+                                del working_leases[eid]
+                                released.append(eid)
+                        pending.append(("lease_release", released))
                     else:
                         conflict_id = _claimed_annotation_target(op, session)
                         if conflict_id is not None:
-                            holder = live_claims.get(conflict_id)
+                            holder = working_leases.get(conflict_id)
                             if holder is not None and holder != client_id:
-                                raise ClaimConflict(conflict_id, holder)
+                                raise LeaseConflict(conflict_id, holder)
                         result = self.store.apply_state_op(
                             session, {**op, "client_id": client_id}
                         )
@@ -849,11 +897,17 @@ class SessionManager:
                     ring.extend(saved_ring)
                 raise
 
-            # Commit succeeded: apply ephemeral claim effects and broadcast every
-            # op in arrival order (originator included; clients apply idempotently).
+            # Commit succeeded: apply ephemeral claim/lease effects and broadcast
+            # every op in arrival order (originator included; clients apply
+            # idempotently). Lease grants/releases are committed to the real
+            # `self.leases` map only here — nothing else can have touched it
+            # since the snapshot above, this whole method still holding the
+            # per-session lock, so committing exactly what `working_leases`
+            # simulation already decided cannot itself be refused.
             applied: List[Dict[str, Any]] = []
             for entry in pending:
-                if entry[0] == "state":
+                kind = entry[0]
+                if kind == "state":
                     result = entry[1]
                     self.bus.publish(
                         session_id,
@@ -865,7 +919,7 @@ class SessionManager:
                         },
                     )
                     applied.append(result)
-                else:
+                elif kind == "claim":
                     _, op_type, element_ids = entry
                     if op_type == "selection_claimed":
                         self.claims.claim(session_id, client_id, element_ids)
@@ -886,6 +940,52 @@ class SessionManager:
                         },
                     )
                     applied.append({"op": op_type, "element_ids": element_ids})
+                elif kind == "lease_acquire":
+                    _, granted, denied = entry
+                    if granted:
+                        self.leases.acquire(session_id, client_id, granted)
+                        # Only the ids this client now actually holds are
+                        # broadcast — a denial is meaningful only to the
+                        # requester, which learns it from `applied` below, not
+                        # from the fan-out other clients receive.
+                        self.bus.publish(
+                            session_id,
+                            {
+                                "type": "op",
+                                "client_id": client_id,
+                                "op": {
+                                    "op": "edit_lease_acquired",
+                                    "client_id": client_id,
+                                    "element_ids": granted,
+                                },
+                            },
+                        )
+                    applied.append(
+                        {
+                            "op": "edit_lease_acquired",
+                            "element_ids": granted,
+                            "denied": denied,
+                        }
+                    )
+                else:  # "lease_release"
+                    _, element_ids = entry
+                    if element_ids:
+                        self.leases.release(session_id, client_id, element_ids)
+                        self.bus.publish(
+                            session_id,
+                            {
+                                "type": "op",
+                                "client_id": client_id,
+                                "op": {
+                                    "op": "edit_lease_released",
+                                    "client_id": client_id,
+                                    "element_ids": element_ids,
+                                },
+                            },
+                        )
+                    applied.append(
+                        {"op": "edit_lease_released", "element_ids": element_ids}
+                    )
 
         return {"applied": applied, "seq": session.seq}
 
@@ -1493,19 +1593,23 @@ class SessionManager:
 
         inverse_op = dict(record["inverse_op"])
         # Undo is a browser write like any other, so it answers to the same
-        # claim rule apply_ops does (D3). Actor-scoping is not a substitute:
+        # edit-lease rule apply_ops does. Actor-scoping is not a substitute:
         # undo reverts *your own* past action, but the annotation it touches
-        # may have been claimed by someone else since you made it. Placed
-        # ahead of every mutation below so a refusal leaves the session as it
-        # found it; the two do not actually overlap today (the
-        # _deleted_annotation_ids branch runs only for an annotation_created
-        # inverse, whose id undo_conflict_reason has already rejected if it
-        # still exists), but the ordering should not rely on that.
+        # may be under someone else's live edit lease since you made it —
+        # participating in the *new* lease semantics rather than the old
+        # advisory ClaimMap is exactly the point of this check (PR #456
+        # originally gated undo on the claim map; the mechanism underneath
+        # changed, not this call site's intent). Placed ahead of every
+        # mutation below so a refusal leaves the session as it found it; the
+        # two do not actually overlap today (the _deleted_annotation_ids
+        # branch runs only for an annotation_created inverse, whose id
+        # undo_conflict_reason has already rejected if it still exists), but
+        # the ordering should not rely on that.
         conflict_id = _claimed_annotation_target(inverse_op, session)
         if conflict_id is not None:
-            holder = self.claims.snapshot(session_id).get(conflict_id)
+            holder = self.leases.snapshot(session_id).get(conflict_id)
             if holder is not None and holder != client_id:
-                raise ClaimConflict(conflict_id, holder)
+                raise LeaseConflict(conflict_id, holder)
 
         if inverse_op.get("op") == "annotation_created":
             ann_id = (inverse_op.get("annotation") or {}).get("id")
@@ -1613,6 +1717,8 @@ class SessionManager:
 
     @staticmethod
     def _validate_claim_op(op: Dict[str, Any]) -> None:
+        """Shared shape check for CLAIM_OPS and LEASE_OPS: both carry only an
+        ``element_ids`` list of strings, so one validator covers both."""
         element_ids = op.get("element_ids")
         if not isinstance(element_ids, list) or not all(
             isinstance(e, str) for e in element_ids
@@ -1642,8 +1748,8 @@ class SessionManager:
         # presence.leave() returns the member only when the *last* live
         # connection for this client_id has closed.  On a fast reconnect the
         # old SSE closes while the new one is already open; in that case leave()
-        # returns None and we must not release claims or broadcast presence_left,
-        # because the still-open sibling connection owns both.
+        # returns None and we must not release claims/leases or broadcast
+        # presence_left, because the still-open sibling connection owns both.
         member = self.presence.leave(session_id, client_id)
         if member is not None:
             released = self.claims.release_all(session_id, client_id)
@@ -1657,6 +1763,20 @@ class SessionManager:
                             "op": "selection_released",
                             "client_id": client_id,
                             "element_ids": released,
+                        },
+                    },
+                )
+            released_leases = self.leases.release_all(session_id, client_id)
+            if released_leases:
+                self.bus.publish(
+                    session_id,
+                    {
+                        "type": "op",
+                        "client_id": client_id,
+                        "op": {
+                            "op": "edit_lease_released",
+                            "client_id": client_id,
+                            "element_ids": released_leases,
                         },
                     },
                 )
@@ -1675,6 +1795,7 @@ class SessionManager:
             raise SessionNotFound()
         roster = self.presence.roster(session_id)
         claims = self.claims.snapshot(session_id)
+        leases = self.leases.snapshot(session_id)
         if since_seq is not None:
             missed = self.store.ops_since(session_id, since_seq)
             if missed is not None:
@@ -1684,6 +1805,7 @@ class SessionManager:
                     "ops": missed,
                     "roster": roster,
                     "claims": claims,
+                    "leases": leases,
                 }
         return {
             "type": "snapshot",
@@ -1691,6 +1813,7 @@ class SessionManager:
             "session": session.to_dict(),
             "roster": roster,
             "claims": claims,
+            "leases": leases,
         }
 
     # ---------------- MCP push ----------------

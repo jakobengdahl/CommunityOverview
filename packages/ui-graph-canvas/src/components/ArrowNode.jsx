@@ -2,9 +2,15 @@ import { memo, useState, useRef, useEffect, useContext, useCallback } from 'reac
 import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
-import { findSnapTarget, isArrowAnchored, isRemoteLocked } from '../utils/annotations';
+import {
+  findSnapTarget,
+  isArrowAnchored,
+  isRemoteLocked,
+  remoteEditBadge,
+} from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './ArrowNode.css';
 
 /**
@@ -48,12 +54,14 @@ function ArrowNode({ id, data, selected }) {
   const contextMenuRef = useRef(null);
   const draggingRef = useRef(null);
   const { setNodes, screenToFlowPosition, getNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this arrow's lease exclusive (task-annotation-shared-session-realtime).
+  const { notifyChange, notifyRemoteLockedAttempt, labels, beginEditing, endEditing } =
+    useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  useAnnotationEditLease(id, Boolean(contextMenu));
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -195,6 +203,11 @@ function ArrowNode({ id, data, selected }) {
       if (remoteLocked) notifyRemoteLockedAttempt();
       return;
     }
+    // Geometry gesture (task-annotation-exclusive-edit-leases): acquired
+    // fire-and-forget at drag start (the pointer-driven drag already begins
+    // visually here, same reasoning as NodeResizer's onResizeStart
+    // elsewhere) and released when the gesture ends.
+    beginEditing?.([id]);
     draggingRef.current = endpoint;
     const handleMove = (ev) => {
       const flowPoint = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
@@ -210,6 +223,7 @@ function ArrowNode({ id, data, selected }) {
     const handleUp = () => {
       teardown();
       notifyChange('geometry');
+      endEditing?.([id]);
     };
     dragTeardownRef.current = teardown;
     window.addEventListener('pointermove', handleMove, true);
@@ -223,6 +237,7 @@ function ArrowNode({ id, data, selected }) {
   const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
+  const badge = remoteEditBadge(data);
 
   const boxW = Math.abs(dx) + PAD * 2;
   const boxH = Math.abs(dy) + PAD * 2;
@@ -240,20 +255,24 @@ function ArrowNode({ id, data, selected }) {
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        {remoteLocked && (
+        {badge && (
           <div
             className="graph-node-remote-badge"
             style={{
-              backgroundColor: data.remoteSelection.color,
+              backgroundColor: badge.color,
               left: originX - 2,
               top: originY - 11,
             }}
-            title={data.remoteSelection.displayName}
+            title={badge.displayName}
           >
-            {data.remoteSelection.displayName}
+            {badge.displayName}
           </div>
         )}
         <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>

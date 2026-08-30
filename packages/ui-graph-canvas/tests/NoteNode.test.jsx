@@ -278,7 +278,7 @@ describe('NoteNode inline text editing', () => {
     expect(notifyChange).not.toHaveBeenCalledWith('text');
   });
 
-  it('refuses to enter edit mode while another client holds the selection claim', () => {
+  it('refuses to enter edit mode while another client holds the edit lease', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     render(
       <AnnotationContext.Provider
@@ -290,7 +290,7 @@ describe('NoteNode inline text editing', () => {
       >
         <NoteNode
           id="n1"
-          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          data={{ text: 'Hello', remoteLease: { color: '#f00', displayName: 'Ada' } }}
           selected={false}
         />
       </AnnotationContext.Provider>
@@ -298,6 +298,26 @@ describe('NoteNode inline text editing', () => {
     fireEvent.doubleClick(screen.getByText('Hello'));
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mere remoteSelection (no edit lease) does not refuse entry into edit mode', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt: vi.fn(),
+          labels: { notePlaceholder: 'Note' },
+        }}
+      >
+        <NoteNode
+          id="n1"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          selected={false}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
   // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted lock gates every

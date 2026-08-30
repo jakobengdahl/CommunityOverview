@@ -927,36 +927,49 @@ describe('resolveAttachedPosition', () => {
   });
 });
 
-// task-annotation-shared-session-realtime: another live client's selection
-// claim makes an annotation's edit lease exclusive rather than merely
-// advisory. isRemoteLocked/isAnnotationDraggable are the single source of
-// truth every annotation component and GraphCanvas's remote-claim effect
-// reads to enforce it.
+// task-annotation-exclusive-edit-leases: another live client's *edit lease*
+// (never a mere selection claim) makes an annotation's edit lock exclusive.
+// isRemoteLocked/isAnnotationDraggable are the single source of truth every
+// annotation component and GraphCanvas's remote-lease effect reads to
+// enforce it.
 describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)', () => {
-  const CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
+  const LEASE = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
-  it('isRemoteLocked is false with no remoteSelection and true once one is set', () => {
+  it('isRemoteLocked is false with no remoteLease and true once one is set', () => {
     expect(isRemoteLocked(undefined)).toBe(false);
     expect(isRemoteLocked({})).toBe(false);
-    expect(isRemoteLocked({ remoteSelection: null })).toBe(false);
-    expect(isRemoteLocked({ remoteSelection: CLAIM })).toBe(true);
+    expect(isRemoteLocked({ remoteLease: null })).toBe(false);
+    expect(isRemoteLocked({ remoteLease: LEASE })).toBe(true);
+  });
+
+  it('a mere remoteSelection (cosmetic presence, no edit lease) never locks', () => {
+    // The exact bug task-annotation-exclusive-edit-leases closes: selection
+    // alone must never acquire or steal an edit lease.
+    expect(isRemoteLocked({ remoteSelection: LEASE })).toBe(false);
+    expect(isRemoteLocked({ remoteSelection: LEASE, remoteLease: null })).toBe(false);
   });
 
   it('a plain unlocked, unclaimed annotation is draggable', () => {
     expect(isAnnotationDraggable({ type: 'note', data: {} })).toBe(true);
   });
 
-  it('a persisted `locked` flag blocks dragging, independent of any claim', () => {
+  it('a persisted `locked` flag blocks dragging, independent of any lease', () => {
     expect(isAnnotationDraggable({ type: 'note', data: { locked: true } })).toBe(false);
   });
 
-  it('a live remote claim blocks dragging even when unlocked', () => {
+  it('a live remote edit lease blocks dragging even when unlocked', () => {
     expect(
-      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteSelection: CLAIM } })
+      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteLease: LEASE } })
     ).toBe(false);
   });
 
-  it('an anchored arrow stays non-draggable regardless of claim state', () => {
+  it('a mere remoteSelection does not block dragging', () => {
+    expect(
+      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteSelection: LEASE } })
+    ).toBe(true);
+  });
+
+  it('an anchored arrow stays non-draggable regardless of lease state', () => {
     expect(isAnnotationDraggable({ type: 'arrow', data: { startAnchor: 'node-a' } })).toBe(false);
   });
 
@@ -964,8 +977,8 @@ describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)',
     expect(isAnnotationDraggable({ type: 'arrow', data: {} })).toBe(true);
   });
 
-  it('a group box is subject to the same claim-based exclusivity as any other annotation', () => {
+  it('a group box is subject to the same lease-based exclusivity as any other annotation', () => {
     expect(isAnnotationDraggable({ type: 'group', data: {} })).toBe(true);
-    expect(isAnnotationDraggable({ type: 'group', data: { remoteSelection: CLAIM } })).toBe(false);
+    expect(isAnnotationDraggable({ type: 'group', data: { remoteLease: LEASE } })).toBe(false);
   });
 });

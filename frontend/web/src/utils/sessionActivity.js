@@ -442,18 +442,26 @@ export function classifyUndoError(err) {
     // Two of the backend's 409s are transient and retryable, and the generic
     // conflict message ("can no longer be undone") is false for both, so each
     // is matched on its own backend text: the session is mid-write
-    // (LayoutBusy), or another client holds a live selection claim on the
-    // annotation the inverse op would touch (ClaimConflict) — the latter
-    // clears on deselect or when the 30 s TTL expires. The claim string is
-    // pinned from the backend side by
+    // (LayoutBusy), or another client holds a live edit lease on the
+    // annotation the inverse op would touch (LeaseConflict, task-annotation-
+    // exclusive-edit-leases — this used to be a mere selection claim; a lease
+    // is acquired only on actual edit-start, never on selection) — the
+    // latter clears on release or when the 30 s TTL expires. The 'claimed'
+    // classification name is kept (not renamed to 'leased') to avoid an
+    // unrelated i18n-key churn across en.json/sv.json for what is still, from
+    // the UI's point of view, "someone else is holding this". The message
+    // string is pinned from the backend side by
     // backend/core/tests/test_session_manager.py's
-    // test_claim_conflict_message_matches_the_ui_classifier, so a wording
+    // test_lease_conflict_message_matches_the_ui_classifier, so a wording
     // change there fails CI rather than silently degrading this into the
     // (false, permanent-sounding) conflict text. The LayoutBusy string is not
     // pinned that way — it is a literal in rest_api.py, and a drift there
     // falls back to the conflict message.
     if (err?.message === 'session busy, retry') return 'busy';
-    if (typeof err?.message === 'string' && err.message.includes('is claimed by another client')) {
+    if (
+      typeof err?.message === 'string' &&
+      err.message.includes('is being edited by another client')
+    ) {
       return 'claimed';
     }
     return 'conflict';

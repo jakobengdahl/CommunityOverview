@@ -7,6 +7,7 @@ import {
   rotationStyle,
   ROTATABLE_OVERLAY_KINDS,
   isRemoteLocked,
+  remoteEditBadge,
   resolveRotatedResizeGeometry,
   DEFAULT_GENERIC_TEXT_FONT_SIZE,
   DEFAULT_SHAPE_CAPTION_FONT_SIZE,
@@ -21,6 +22,7 @@ import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerCo
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -336,10 +338,16 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           : DEFAULT_COLOR
       : data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
-    useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this annotation's lease exclusive (task-annotation-shared-session-realtime).
+  const {
+    notifyChange,
+    notifyRemoteLockedAttempt,
+    labels,
+    attachNearby,
+    beginEditing,
+    endEditing,
+  } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
   const { setNodes } = useReactFlow();
   const selectedClass = selected ? ' selected' : '';
@@ -367,6 +375,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
+  useAnnotationEditLease(id, Boolean(contextMenu));
   // Snapshot of {x, y, width, height} at the start of the current resize
   // gesture, read by handleResizeEnd to map the gesture's net delta back
   // through this annotation's rotation (resolveRotatedResizeGeometry).
@@ -595,8 +604,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
+  // Geometry gesture (task-annotation-exclusive-edit-leases): acquired
+  // fire-and-forget at resize start (NodeResizer already begins the visual
+  // drag by the time this fires) and released at resize end.
   const handleResizeStart = (event, params) => {
     resizeStartRef.current = params;
+    beginEditing?.([id]);
   };
 
   // NodeResizer computes `params` as if this annotation's box were
@@ -626,13 +639,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     }
     resizeStartRef.current = null;
     notifyChange('geometry');
+    endEditing?.([id]);
   };
 
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
   // consistent geometry lock rather than only blocking one of two ways to
-  // move/resize the object. A remote claim (another client's exclusive lease)
-  // hides them the same way.
+  // move/resize the object. A remote edit lease (another client actively
+  // editing) hides them the same way.
   // Locking the ratio is what keeps a regular figure regular through a resize.
   // Without it the box is free and the percentage clip-path distorts again the
   // moment the user drags a handle, which is how the squashed shapes were
@@ -660,13 +674,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     />
   );
 
-  const remoteBadge = remoteLocked && (
+  const badge = remoteEditBadge(data);
+  const remoteBadge = badge && (
     <div
       className="graph-node-remote-badge"
-      style={{ backgroundColor: data.remoteSelection.color }}
-      title={data.remoteSelection.displayName}
+      style={{ backgroundColor: badge.color }}
+      title={badge.displayName}
     >
-      {data.remoteSelection.displayName}
+      {badge.displayName}
     </div>
   );
 

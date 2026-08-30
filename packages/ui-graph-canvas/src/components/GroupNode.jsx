@@ -2,7 +2,8 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { isRemoteLocked } from '../utils/annotations';
+import { isRemoteLocked, remoteEditBadge } from '../utils/annotations';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './GroupNode.css';
 
 /**
@@ -25,14 +26,17 @@ function GroupNode({ id, data, selected }) {
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this group's lease exclusive (task-annotation-shared-session-realtime).
+  const { notifyChange, notifyRemoteLockedAttempt, labels, beginEditing, endEditing } =
+    useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
-  // The persisted flag, distinct from the remote claim above. It only started
+  // The persisted flag, distinct from the remote lease above. It only started
   // reaching this component when the group translators began carrying it;
   // before that a group locked over MCP rendered its full menu.
   const locked = Boolean(data?.locked);
+  useAnnotationEditLease(id, isEditing);
+  useAnnotationEditLease(id, Boolean(contextMenu));
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -97,7 +101,7 @@ function GroupNode({ id, data, selected }) {
       return;
     }
     // A rename is an edit, so the persisted lock refuses it as the menu does.
-    // Silently, unlike the remote claim above: that one is somebody else
+    // Silently, unlike the remote lease above: that one is somebody else
     // holding the object right now and worth surfacing, while this one is a
     // standing state the menu already explains with its Unlock button.
     if (locked) return;
@@ -234,13 +238,18 @@ function GroupNode({ id, data, selected }) {
   };
 
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const groupBadge = remoteEditBadge(data);
 
   return (
     <>
       <NodeResizer
         minWidth={200}
         minHeight={150}
-        onResizeEnd={() => notifyChange('geometry')}
+        onResizeStart={() => beginEditing?.([id])}
+        onResizeEnd={() => {
+          notifyChange('geometry');
+          endEditing?.([id]);
+        }}
         isVisible={selected && !remoteLocked && !locked}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
@@ -257,17 +266,17 @@ function GroupNode({ id, data, selected }) {
         style={{
           borderColor: data.color || '#646cff',
           backgroundColor: `${data.color || '#646cff'}15`,
-          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
-          outlineOffset: remoteLocked ? '2px' : undefined,
+          outline: groupBadge ? `2px solid ${groupBadge.color}` : undefined,
+          outlineOffset: groupBadge ? '2px' : undefined,
         }}
       >
-        {remoteLocked && (
+        {groupBadge && (
           <div
             className="graph-node-remote-badge"
-            style={{ backgroundColor: data.remoteSelection.color }}
-            title={data.remoteSelection.displayName}
+            style={{ backgroundColor: groupBadge.color }}
+            title={groupBadge.displayName}
           >
-            {data.remoteSelection.displayName}
+            {groupBadge.displayName}
           </div>
         )}
         <div

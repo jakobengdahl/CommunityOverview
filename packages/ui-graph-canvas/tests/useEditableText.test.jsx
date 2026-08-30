@@ -116,7 +116,23 @@ describe('useEditableText', () => {
     expect(applyUpdate({ id: 'n1', data: { text: 'Hello' } }).data.text).toBe('world');
   });
 
-  it('refuses to enter edit mode while a remote client holds the selection claim', () => {
+  it('refuses to enter edit mode while a remote client holds the edit lease', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useEditableText('n1', {
+          text: 'Hello',
+          remoteLease: { color: '#f00', displayName: 'Ada' },
+        }),
+      { wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }) }
+    );
+    act(() => result.current.startEditing({ stopPropagation: () => {} }));
+    expect(result.current.isEditing).toBe(false);
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mere remoteSelection (no edit lease) does not refuse entry — selection alone never gates editing', () => {
+    // task-annotation-exclusive-edit-leases: the exact bug this task closes.
     const notifyRemoteLockedAttempt = vi.fn();
     const { result } = renderHook(
       () =>
@@ -127,8 +143,24 @@ describe('useEditableText', () => {
       { wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }) }
     );
     act(() => result.current.startEditing({ stopPropagation: () => {} }));
-    expect(result.current.isEditing).toBe(false);
-    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(result.current.isEditing).toBe(true);
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
+  it('startEditing acquires the edit lease in the background rather than gating entry on it', () => {
+    const beginEditing = vi.fn().mockResolvedValue({ granted: ['n1'], denied: {} });
+    const { result } = renderHook(() => useEditableText('n1', { text: 'Hello' }), {
+      wrapper: makeWrapper({
+        notifyChange: vi.fn(),
+        notifyRemoteLockedAttempt: vi.fn(),
+        beginEditing,
+      }),
+    });
+    act(() => result.current.startEditing({ stopPropagation: () => {} }));
+    // Entered edit mode immediately — no round trip before the textarea
+    // appears, matching every other optimistic realtime path in this repo.
+    expect(result.current.isEditing).toBe(true);
+    expect(beginEditing).toHaveBeenCalledWith(['n1']);
   });
 
   it('handleTextChange refuses to publish while remote-locked, but still updates local draft', () => {
@@ -137,7 +169,7 @@ describe('useEditableText', () => {
       () =>
         useEditableText('n1', {
           text: 'Hello',
-          remoteSelection: { color: '#f00', displayName: 'Ada' },
+          remoteLease: { color: '#f00', displayName: 'Ada' },
         }),
       { wrapper: makeWrapper({ notifyChange, notifyRemoteLockedAttempt: vi.fn() }) }
     );
@@ -153,7 +185,7 @@ describe('useEditableText', () => {
       () =>
         useEditableText('n1', {
           text: 'Hello',
-          remoteSelection: { color: '#f00', displayName: 'Ada' },
+          remoteLease: { color: '#f00', displayName: 'Ada' },
         }),
       { wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }) }
     );
@@ -164,11 +196,40 @@ describe('useEditableText', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
 
+  it('a remote lease arriving mid-edit keeps the editor open and preserves the local draft', async () => {
+    // task-annotation-exclusive-edit-leases: this client's own background
+    // renewal lost a race after a TTL gap — unlike the persisted-lock case
+    // below, the in-progress draft must not be discarded.
+    const notifyChange = vi.fn();
+    const notifyRemoteLockedAttempt = vi.fn();
+    const { result, rerender } = renderHook(({ data }) => useEditableText('n1', data), {
+      initialProps: { data: { text: 'Hello' } },
+      wrapper: makeWrapper({ notifyChange, notifyRemoteLockedAttempt }),
+    });
+    act(() => result.current.startEditing({ stopPropagation: () => {} }));
+    act(() => result.current.handleTextChange({ target: { value: 'typed before race lost' } }));
+    expect(result.current.text).toBe('typed before race lost');
+    hoisted.setNodes.mockClear();
+    notifyChange.mockClear();
+
+    // Someone else's acquisition won and was broadcast.
+    rerender({ data: { text: 'Hello', remoteLease: { color: '#f00', displayName: 'Ada' } } });
+    expect(result.current.isEditing).toBe(true);
+    expect(result.current.text).toBe('typed before race lost');
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+
+    // Further typing does not sync — handleTextChange's own remoteLocked
+    // guard, unaffected by this task, but worth pinning here too.
+    act(() => result.current.handleTextChange({ target: { value: 'still not syncing' } }));
+    expect(result.current.text).toBe('still not syncing');
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
   // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted `data.locked` flag
   // gates every context menu, but until now not this double-click editor —
   // the one edit path that bypasses the menu entirely. Matches GroupNode's
   // rename guard.
-  it('refuses to enter edit mode while locked, without treating it as a remote-claim attempt', () => {
+  it('refuses to enter edit mode while locked, without treating it as a remote-lease attempt', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     const { result } = renderHook(() => useEditableText('n1', { text: 'Hello', locked: true }), {
       wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt }),

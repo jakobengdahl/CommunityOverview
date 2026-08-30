@@ -225,6 +225,8 @@ function App() {
     setRoster,
     remoteSelections,
     setRemoteSelections,
+    remoteLeases,
+    setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
@@ -936,11 +938,10 @@ function App() {
       setSelectedGraphNodes(selectedWithData);
       // Advertise the local selection as selection claims so collaborators see
       // colored markers on the elements this user is working with (design 3.5).
-      // Extended to every annotation kind, not just graph nodes
-      // (task-annotation-shared-session-realtime): GraphCanvas's own
-      // remote-selection effect makes an annotation claim exclusive (it blocks
-      // local dragging and every mutation while another client holds it), not
-      // merely advisory the way the graph-node marker still is.
+      // Extended to every annotation kind, not just graph nodes. Purely
+      // cosmetic (task-annotation-exclusive-edit-leases): selecting an
+      // annotation never blocks another client's dragging or editing of it —
+      // only an actual edit-lease acquisition (handleBeginEditing below) does.
       const claimIds = selectedNodes
         .filter((n) => n.type === 'custom' || CANVAS_ANNOTATION_TYPES.has(n.type))
         .map((n) => n.id);
@@ -948,6 +949,24 @@ function App() {
     },
     [setSelectedGraphNodes]
   );
+
+  // GraphCanvas's edit-lease acquire/release pair (task-annotation-exclusive-
+  // edit-leases): every real edit-start entry point in the canvas package
+  // (text field open, geometry gesture, property editor, bulk mutation)
+  // calls these via AnnotationContext before mutating. Thin wrappers over
+  // the sync client so GraphCanvas never has to know about SessionSyncClient
+  // directly — mirrors how handleSelectionChange above wraps
+  // setLocalSelection. Optimistic-fail-open when no session is connected
+  // yet (nothing server-side could hold a competing lease before the
+  // session exists), matching SessionSyncClient.beginEditing's own
+  // reasoning.
+  const handleBeginEditing = useCallback(async (elementIds) => {
+    if (!syncRef.current) return { granted: elementIds || [], denied: {} };
+    return syncRef.current.beginEditing(elementIds);
+  }, []);
+  const handleEndEditing = useCallback((elementIds) => {
+    syncRef.current?.endEditing(elementIds);
+  }, []);
 
   // Callback: Double-click on node
   const handleNodeDoubleClick = useCallback(
@@ -1909,6 +1928,7 @@ function App() {
       },
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
+      onLeases: (l) => setRemoteLeases(l),
       onSessionRenamed: (name) => {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
@@ -1945,9 +1965,24 @@ function App() {
       // in flight when this fires must know to exclude them from what it
       // folds/replays, or it would resurrect content the server just
       // permanently rejected.
-      onDropped: (batch) => {
+      //
+      // A 409 drop is the same "never retry this stale content" terminal
+      // handling, but a different cause: LeaseConflict
+      // (task-annotation-exclusive-edit-leases) means another client holds a
+      // live edit lease on the annotation this op targeted, not that the op
+      // itself is malformed. Show the same "someone else is editing this
+      // annotation" notice the direct-acquire denial already uses
+      // (GraphCanvas.jsx's annotationRemoteLocked) instead of the generic
+      // sync-error text, so the queued-op path — the actual enforcement point
+      // for most real edits per useAnnotationEditLease's own docstring — tells
+      // the user why their change didn't apply rather than staying silent.
+      onDropped: (batch, status) => {
         (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
-        showNotification('error', t('sessions.change_not_saved'));
+        if (status === 409) {
+          showNotification('info', t('context_menu.annotation_remote_locked'));
+        } else {
+          showNotification('error', t('sessions.change_not_saved'));
+        }
         resyncFromServer(sessionId);
       },
     };
@@ -1964,6 +1999,7 @@ function App() {
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
+    setRemoteLeases,
   ]);
 
   // Switch working session: persist the current one first (ops via the snapshot
@@ -2364,6 +2400,9 @@ function App() {
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}
+          remoteLeases={remoteLeases}
+          onBeginEditing={handleBeginEditing}
+          onEndEditing={handleEndEditing}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}

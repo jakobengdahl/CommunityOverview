@@ -272,6 +272,9 @@ function GraphCanvasInner({
   remoteAnnotationOps = null,
   onRemoteAnnotationsApplied,
   remoteSelections = null,
+  remoteLeases = null,
+  onBeginEditing,
+  onEndEditing,
   federationDepth = 1,
   onFederationDepthChange,
   maxFederationDepth = 4,
@@ -679,12 +682,35 @@ function GraphCanvasInner({
     []
   );
   // Surfaced by an annotation component when a mutation is refused because
-  // another client currently holds the annotation's selection claim (leases
-  // are exclusive — task-annotation-shared-session-realtime), so the attempt
-  // is visible rather than a silent no-op.
+  // another client currently holds a live edit lease on the annotation
+  // (task-annotation-exclusive-edit-leases — first-actual-editor-wins, never
+  // a mere selection), so the attempt is visible rather than a silent no-op.
   const notifyRemoteLockedAttempt = useCallback(() => {
     showNotification('info', cml.annotationRemoteLocked);
   }, [cml.annotationRemoteLocked, showNotification]);
+
+  // AnnotationContext's edit-lease acquire/release pair — every real
+  // edit-start entry point (text field open, geometry gesture, property
+  // editor, bulk mutation/undo) calls these before mutating
+  // (task-annotation-exclusive-edit-leases). Wraps the host-supplied
+  // `onBeginEditing`/`onEndEditing` (bound to sessionSyncClient.
+  // beginEditing/endEditing in App.jsx) with the same "no host wired up"
+  // fail-open default AnnotationContext's own default carries, so a caller
+  // that renders GraphCanvas without a live session (e.g. a standalone demo)
+  // degrades to the pre-lease local-only behaviour instead of throwing.
+  const beginEditing = useCallback(
+    async (elementIds) => {
+      if (!onBeginEditing) return { granted: elementIds || [], denied: {} };
+      return onBeginEditing(elementIds);
+    },
+    [onBeginEditing]
+  );
+  const endEditing = useCallback(
+    (elementIds) => {
+      onEndEditing?.(elementIds);
+    },
+    [onEndEditing]
+  );
 
   // An annotation that could not be drawn is reported once per session rather
   // than once per annotation: a graph carrying several of the same broken
@@ -708,6 +734,8 @@ function GraphCanvasInner({
       notifyChange: notifyAnnotationChange,
       notifyRemoteLockedAttempt,
       notifyRenderFailure: reportAnnotationRenderError,
+      beginEditing,
+      endEditing,
       attachNearby,
       labels: {
         color: cml.annotationColor,
@@ -757,6 +785,8 @@ function GraphCanvasInner({
     [
       notifyAnnotationChange,
       notifyRemoteLockedAttempt,
+      beginEditing,
+      endEditing,
       attachNearby,
       cml.annotationColor,
       cml.annotationFill,
@@ -1224,8 +1254,8 @@ function GraphCanvasInner({
     // which is all eleven v1 kinds except `group` — from the canvas;
     // graph nodes are hidden, not deleted. Excluding `group` leaves it to
     // its own context menu, so its children stay correctly parented.
-    // Two are skipped: one held by another client's live selection
-    // claim (leases are exclusive — task-annotation-shared-session-realtime)
+    // Two are skipped: one held by another client's live edit lease
+    // (task-annotation-exclusive-edit-leases — first-actual-editor-wins)
     // and one that is locked, which stays selectable but offers only
     // unlock or copy — the rule every overlay annotation's context menu
     // applies, and `group`'s menu now applies it too. Delete never reaches
@@ -1239,11 +1269,22 @@ function GraphCanvasInner({
     );
     const skippedOwnLocked = selectedNodes.some((n) => OVERLAY_TYPES.has(n.type) && n.data?.locked);
     if (overlayIds.length > 0) {
-      const removeSet = new Set(overlayIds);
-      setNodes((nds) => nds.filter((n) => !removeSet.has(n.id)));
+      // A bulk delete is itself an edit-start entry point (task-annotation-
+      // exclusive-edit-leases): applies optimistically like every other
+      // mutation here (no round trip before the user sees the result) while
+      // acquiring/releasing the lease in the background around it — the
+      // server remains the authoritative backstop for a lost race
+      // (LeaseConflict) regardless. Locally-known-locked ids never reach
+      // here at all (filtered above), so the only thing the background
+      // acquisition covers is the narrow race window since that local read.
+      setNodes((nds) => {
+        const removeSet = new Set(overlayIds);
+        return nds.filter((n) => !removeSet.has(n.id));
+      });
       onAnnotationChangeRef.current?.('delete');
+      beginEditing(overlayIds).then(() => endEditing(overlayIds));
     }
-    // A remote claim wins the notice when the selection mixes both: it is
+    // A remote lease wins the notice when the selection mixes both: it is
     // the one the user cannot resolve alone.
     if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
     else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
@@ -1255,6 +1296,8 @@ function GraphCanvasInner({
     cml.annotationRemoteLocked,
     cml.annotationLockedSkipped,
     hideSelectedGraphNodes,
+    beginEditing,
+    endEditing,
   ]);
 
   // Apply a batch of { id, position, parentId } moves to the canvas and persist
@@ -1410,7 +1453,7 @@ function GraphCanvasInner({
   //   whatever it is anchored to, same as an edge follows its nodes.
   // - `group` is excluded, matching deleteSelectedNodes's own exclusion —
   //   its box is manipulated from its own context menu, not this one.
-  // - A locked or remote-claimed overlay is excluded exactly like
+  // - A locked or remote-leased overlay is excluded exactly like
   //   deleteSelectedNodes excludes it: this action skips the ineligible
   //   member and proceeds with the rest, rather than refusing the whole
   //   selection — the more forgiving of the two options and the one delete
@@ -1518,7 +1561,7 @@ function GraphCanvasInner({
     [nodes, setNodes, onNodePositionChange, closeAllMenus, recordMove]
   );
 
-  // A remote claim wins the notice when the selection mixes several skip
+  // A remote lease wins the notice when the selection mixes several skip
   // reasons, matching deleteSelectedNodes's own priority — it is the one the
   // user cannot resolve alone by e.g. detaching an annotation themselves.
   const notifySkippedAlignment = useCallback(
@@ -1535,6 +1578,24 @@ function GraphCanvasInner({
     ]
   );
 
+  // Align/distribute are bulk mutations (task-annotation-exclusive-edit-
+  // leases): acquire a lease on every *annotation* member of `movable`
+  // before repositioning it (graph nodes carry no lease — leases are an
+  // annotation-only concept). Members already excluded locally by
+  // alignDistributeEligibility never reach here; this only covers the race
+  // window since that local read, same reasoning as deleteSelectedNodes.
+  // Fire-and-forget: applying the move itself stays synchronous/optimistic
+  // (below), matching every other mutation in this package, so this only
+  // ever runs in the background around it — never gates the move on the
+  // round trip.
+  const acquireLeasesForOverlayMove = useCallback(
+    (movable) => {
+      const overlayIds = movable.filter((n) => ANNOTATION_TYPES.has(n.type)).map((n) => n.id);
+      if (overlayIds.length) beginEditing(overlayIds).then(() => endEditing(overlayIds));
+    },
+    [beginEditing, endEditing]
+  );
+
   // Align every eligible selected node/annotation's bounding box to a shared
   // edge or centre line (mode: 'left' | 'centerX' | 'right' | 'top' |
   // 'centerY' | 'bottom'). Absent from the menu (see the MultiNodeContextMenu
@@ -1545,9 +1606,16 @@ function GraphCanvasInner({
       const { movable, ...skip } = alignDistributeEligibility;
       if (movable.length < 2) return;
       applyAlignedPositions(alignNodes(alignmentBounds(movable), mode));
+      acquireLeasesForOverlayMove(movable);
       notifySkippedAlignment(skip);
     },
-    [alignDistributeEligibility, alignmentBounds, applyAlignedPositions, notifySkippedAlignment]
+    [
+      alignDistributeEligibility,
+      alignmentBounds,
+      applyAlignedPositions,
+      notifySkippedAlignment,
+      acquireLeasesForOverlayMove,
+    ]
   );
 
   // Spread every eligible selected node/annotation evenly (equal gaps) along
@@ -1559,9 +1627,16 @@ function GraphCanvasInner({
       const { movable, ...skip } = alignDistributeEligibility;
       if (movable.length < 3) return;
       applyAlignedPositions(distributeNodes(alignmentBounds(movable), axis));
+      acquireLeasesForOverlayMove(movable);
       notifySkippedAlignment(skip);
     },
-    [alignDistributeEligibility, alignmentBounds, applyAlignedPositions, notifySkippedAlignment]
+    [
+      alignDistributeEligibility,
+      alignmentBounds,
+      applyAlignedPositions,
+      notifySkippedAlignment,
+      acquireLeasesForOverlayMove,
+    ]
   );
 
   // Create a free-floating annotation (note, label, arrow, or one of the
@@ -1967,6 +2042,15 @@ function GraphCanvasInner({
       }
       dragStartPositionsRef.current = snap;
 
+      // Geometry gesture (task-annotation-exclusive-edit-leases): a plain
+      // drag is centralised here for every annotation type, unlike resize/
+      // rotate which stay per-component. Acquired fire-and-forget (ReactFlow
+      // already started the visual drag by the time this fires — an
+      // annotation already refused via `draggable` in isAnnotationDraggable
+      // never reaches here at all) and released in onNodeDragStop below.
+      const draggedAnnotationIds = set.filter((n) => ANNOTATION_TYPES.has(n.type)).map((n) => n.id);
+      if (draggedAnnotationIds.length) beginEditing(draggedAnnotationIds);
+
       // Alt+drag: arm "move node together with its directly connected
       // neighbours". Alt is chosen to avoid the Shift/Ctrl/Meta multi-select
       // gesture. The neighbour snapshot is taken from ReactFlow's live store so
@@ -1994,7 +2078,7 @@ function GraphCanvasInner({
         neighbors: startById,
       };
     },
-    [edges, getFlowNodes]
+    [edges, getFlowNodes, beginEditing]
   );
 
   const onNodeDrag = useCallback(
@@ -2016,6 +2100,18 @@ function GraphCanvasInner({
 
   const onNodeDragStop = useCallback(
     (event, draggedNode, allDraggedNodes) => {
+      // Release whatever onNodeDragStart acquired, regardless of which
+      // branch below this drag ends up taking (including the focus-view
+      // early return just below) — otherwise a lease acquired for a drag
+      // that never persists would sit held until its TTL expires instead of
+      // freeing up immediately.
+      const draggedSet =
+        allDraggedNodes && allDraggedNodes.length > 0 ? allDraggedNodes : [draggedNode];
+      const draggedAnnotationIds = draggedSet
+        .filter((n) => ANNOTATION_TYPES.has(n.type))
+        .map((n) => n.id);
+      if (draggedAnnotationIds.length) endEditing(draggedAnnotationIds);
+
       // Focus view renders a temporary ego layout; dragging there must not
       // overwrite the persisted whole-graph positions of the visible nodes.
       if (activeFocusRootId) {
@@ -2164,7 +2260,7 @@ function GraphCanvasInner({
         return reorderNodesForParentChild(mapped);
       });
     },
-    [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId]
+    [setNodes, onNodePositionChange, getFlowNodes, recordMove, activeFocusRootId, endEditing]
   );
 
   // Right-click on empty background. A plain right-click opens the annotation
@@ -3004,9 +3100,9 @@ function GraphCanvasInner({
       if (n.type !== 'arrow') continue;
       if (!n.data?.startAnchor && !n.data?.endAnchor) continue;
       const resolved = n.data?.locked ? null : resolveAnchoredArrow(n, centers);
-      // Folds in the same remote-claim exclusivity the selection-claim effect
+      // Folds in the same remote-lease exclusivity the remote-lease effect
       // applies, so this effect (which runs on every `nodes` change, far more
-      // often) never resets `draggable` back to true out from under a claim
+      // often) never resets `draggable` back to true out from under a lease
       // another client is holding.
       const desiredDraggable =
         !n.data?.locked && !isArrowHeld(n.data, existing) && !isRemoteLocked(n.data);
@@ -3091,22 +3187,40 @@ function GraphCanvasInner({
   // render, sourced from the host's `inputNodes` prop (see the
   // `reactFlowNodes` memo above); annotation nodes live only in ReactFlow's own
   // node state instead, so the same live claim needs an effect to push it in.
-  // A claim held by another client also blocks local dragging here —
-  // annotation leases are exclusive, not merely advisory, unlike the
-  // pre-existing graph-node selection markers, which are visual-only.
+  // Purely cosmetic (task-annotation-exclusive-edit-leases): selection never
+  // blocks local dragging — see the remote-lease effect right below for that.
   useEffect(() => {
     setNodes((nds) =>
       nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteSelections?.[n.id] ?? null;
         if (!marker && !n.data?.remoteSelection) return n;
-        const nextData = { ...n.data, remoteSelection: marker };
+        return { ...n, data: { ...n.data, remoteSelection: marker } };
+      })
+    );
+  }, [remoteSelections, setNodes]);
+
+  // Mirror live remote *edit leases* onto annotation nodes
+  // (task-annotation-exclusive-edit-leases). A lease held by another client
+  // blocks local dragging here — leases are exclusive (first-actual-editor-
+  // wins), unlike the purely cosmetic selection markers the effect above
+  // stamps. Same shape/effect-per-source-of-truth split the selection effect
+  // above uses, and for the same reason: annotation nodes live only in
+  // ReactFlow's own node state, not the host's `inputNodes` prop, so pushing
+  // a live map onto them needs an effect rather than a render-time memo.
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (!ANNOTATION_TYPES.has(n.type)) return n;
+        const marker = remoteLeases?.[n.id] ?? null;
+        if (!marker && !n.data?.remoteLease) return n;
+        const nextData = { ...n.data, remoteLease: marker };
         const draggable = isAnnotationDraggable({ ...n, data: nextData });
         // A group that may be dragged resolves `draggable` to `undefined`, so
         // it keeps deferring to the canvas-wide `nodesDraggable` switch — the
         // same value the two group builders write. Writing an explicit `true`
         // here would pin that decision for the rest of the session the first
-        // time a collaborator claimed the group and let go, leaving it
+        // time a collaborator's lease on the group cleared, leaving it
         // draggable during a freehand stroke. Overlays keep the explicit
         // boolean they are hydrated with.
         return {
@@ -3116,7 +3230,7 @@ function GraphCanvasInner({
         };
       })
     );
-  }, [remoteSelections, setNodes]);
+  }, [remoteLeases, setNodes]);
 
   // Apply node positions arriving from another client (design step 6), holding
   // positions for not-yet-mounted nodes until they appear.

@@ -9,10 +9,11 @@ import {
   hasPressureData,
   segmentsFromCurvePoints,
 } from '../utils/freehandPath';
-import { isRemoteLocked, isAnnotationDraggable } from '../utils/annotations';
+import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection } from './ContextMenus';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -88,19 +89,22 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const locked = Boolean(data?.locked);
   const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
     useContext(AnnotationContext);
+  // Another client's live edit lease (task-annotation-exclusive-edit-leases):
+  // dragging is already refused centrally via `draggable` (GraphCanvas's
+  // remote-lease effect); the context-menu guards below refuse the
+  // per-component mutations this component does have (colour/width/
+  // smoothing/opacity/delete/unlock).
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
   const { setNodes } = useReactFlow();
-  // Another client's live selection claim (task-annotation-shared-session-
-  // realtime): dragging is already refused centrally via `draggable`
-  // (GraphCanvas's remote-selection effect); this only adds the visual cue,
-  // since freehand strokes have no per-component mutation UI of their own to
-  // guard.
-  const remoteSelection = data?.remoteSelection || null;
+  // Cosmetic "who's here" marker — prefers the active editor over a mere
+  // selection (see remoteEditBadge's doc comment).
+  const badge = remoteEditBadge(data);
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
+  useAnnotationEditLease(id, Boolean(contextMenu));
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -226,18 +230,18 @@ function FreehandAnnotationNode({ id, data, selected }) {
       style={{
         marginLeft: -originX,
         marginTop: -originY,
-        outline: remoteSelection ? `2px solid ${remoteSelection.color}` : undefined,
-        outlineOffset: remoteSelection ? '2px' : undefined,
+        outline: badge ? `2px solid ${badge.color}` : undefined,
+        outlineOffset: badge ? '2px' : undefined,
       }}
       onContextMenu={openContextMenu}
     >
-      {remoteSelection && (
+      {badge && (
         <div
           className="graph-node-remote-badge"
-          style={{ backgroundColor: remoteSelection.color, left: originX - 2, top: originY - 11 }}
-          title={remoteSelection.displayName}
+          style={{ backgroundColor: badge.color, left: originX - 2, top: originY - 11 }}
+          title={badge.displayName}
         >
-          {remoteSelection.displayName}
+          {badge.displayName}
         </div>
       )}
       <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
