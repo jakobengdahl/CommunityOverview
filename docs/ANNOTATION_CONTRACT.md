@@ -176,17 +176,22 @@ MCP. The required entry points are:
   (a note's rename input, `AnnotationSizeControl`'s width/height inputs,
   etc.) could leave it rendered behind the keyboard rather than above it.
   `BottomSheet` now tracks the gap via the existing
-  `useVisualViewportInset` hook (already used by `ChatPanel`'s sheet
-  variant for the same class of problem) and applies it as a
-  `--keyboard-inset` CSS custom property that shrinks the sheet's scrim to
+  `useVisualViewportInset` hook and applies it as a `--keyboard-inset`
+  CSS custom property that shrinks the sheet's scrim to
   the actually-visible area, plus a focus-triggered `scrollIntoView` so a
   field switched to while the keyboard is already open, or the field that
   triggered the keyboard opening in the first place, is brought into view
   within the sheet's own scrollable content. Degrades to a no-op wherever
   `visualViewport` is unavailable, same as `useVisualViewportInset` itself.
-  Covers every `BottomSheet` consumer (Search/Create/Annotate/Edit), not
-  only the Edit surface. Test: `BottomSheet.test.jsx`'s "on-screen keyboard
-  avoidance" cases.
+  Covers every `BottomSheet` consumer (Search/Create/Annotate/Edit/Chat),
+  not only the Edit surface. `ChatPanel`'s sheet variant previously had its
+  own, separate `useVisualViewportInset`-driven margin on the composer for
+  the same problem; once `BottomSheet` itself started shrinking its scrim,
+  the two stacked and roughly doubled the gap above the keyboard on the
+  Chat sheet, so `ChatPanel`'s own mechanism was removed in favor of
+  `BottomSheet`'s. Test: `BottomSheet.test.jsx`'s "on-screen keyboard
+  avoidance" cases and `ChatPanel.sheetVariant.test.jsx`'s nested-composition
+  regression test.
 
 ### Desktop wireframe
 
