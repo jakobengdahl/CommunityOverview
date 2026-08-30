@@ -49,6 +49,22 @@
 }
 
 /* ==========================================
+   Chat Panel — sheet variant (mobile)
+   Hosted as the children of the shared BottomSheet primitive
+   (MobileShell.jsx), so it carries none of the floating variant's fixed
+   positioning/backdrop/border — those are BottomSheet's job. It fills
+   whatever height BottomSheet.css's .bottom-sheet-content gives it so
+   .chat-messages (flex:1, its own overflow-y) is the only element that
+   actually scrolls; the composer's keyboard-aware margin (inline style,
+   see ChatPanel.jsx) shrinks that space further above an on-screen keyboard.
+   ========================================== */
+.chat-panel-sheet {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ==========================================
    Minimized Chat Panel (vertical bar)
    ========================================== */
 .chat-panel-minimized {
@@ -816,6 +832,14 @@
    minimized bar's 40px width is widened to the minimum instead of relying
    on its already-tall vertical extent. */
 @media (pointer: coarse) {
+  .chat-panel-floating,
+  .chat-panel-floating.minimap-hidden {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    height: auto;
+    max-height: none;
+    min-height: 0;
+  }
+
   .chat-panel-minimized {
     width: 44px;
   }

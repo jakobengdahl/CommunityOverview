@@ -286,6 +286,7 @@ function FloatingToolbar({
   onSaveView,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
+  variant = 'floating',
 }) {
   const { t } = useI18n();
   const { isCoarsePointer } = useViewportMode();
@@ -369,7 +370,10 @@ function FloatingToolbar({
 
   return (
     <>
-      <div className="floating-toolbar" id="guide-target-toolbar">
+      <div
+        className={`floating-toolbar${variant === 'sheet' ? ' floating-toolbar--sheet' : ''}`}
+        id="guide-target-toolbar"
+      >
         {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;

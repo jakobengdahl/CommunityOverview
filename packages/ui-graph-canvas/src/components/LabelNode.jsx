@@ -2,7 +2,20 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { DEFAULT_LABEL_FONT_SIZE } from '../utils/annotations';
+import {
+  DEFAULT_LABEL_FONT_SIZE,
+  rotationStyle,
+  isRemoteLocked,
+  isAnnotationDraggable,
+  remoteEditBadge,
+} from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useEditableText } from '../hooks/useEditableText';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './LabelNode.css';
 
 /**
@@ -12,27 +25,34 @@ import './LabelNode.css';
  * the session's annotation list (kind: "label").
  */
 const LABEL_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+const DEFAULT_LABEL_COLOR = '#64748b';
 const LABEL_FONT_SIZES = [14, 16, 20, 28];
 
 function LabelNode({ id, data, selected }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [text, setText] = useState(data.text || '');
   const [contextMenu, setContextMenu] = useState(null);
-  const inputRef = useRef(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, labels } = useContext(AnnotationContext);
-
-  useEffect(() => {
-    setText(data.text || '');
-  }, [data.text]);
-
-  useEffect(() => {
-    if (isEditing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [isEditing]);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, enterAttachMode } =
+    useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
+  const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
+  const locked = Boolean(data?.locked);
+  // A single-line `<input>` commits on Enter too, unlike NoteNode/
+  // GenericAnnotationNode's `<textarea>` which leaves Enter alone to insert
+  // a newline — see useEditableText's doc comment.
+  const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
+    useEditableText(id, data, { commitOnEnter: true });
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -56,61 +76,127 @@ function LabelNode({ id, data, selected }) {
     };
   }, [contextMenu]);
 
-  const commitText = () => {
-    setIsEditing(false);
-    const trimmed = text.trim();
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, text: trimmed } } : n))
-    );
-    notifyChange();
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      commitText();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      setText(data.text || '');
-      setIsEditing(false);
-    }
-  };
-
   const changeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, color } } : n)));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const changeFontSize = (fontSize) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fontSize } } : n)));
-    notifyChange();
+    notifyChange('style');
+  };
+
+  const changeRotation = (deg) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    const next = ((deg % 360) + 360) % 360;
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, rotation: next } } : n))
+    );
+    notifyChange('geometry');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
   };
 
-  const color = data.color || LABEL_COLORS[0];
+  // Non-drag detach (task-annotation-accessible-shared-controls): clears
+  // `data.attachment` without needing to drag the label away from its
+  // target, mirroring how a drag detaches once it clears
+  // ATTACH_SNAP_RADIUS. Local, not a shared AnnotationContext function like
+  // `enterAttachMode` below — it only ever touches this node's own data, the
+  // same shape every other single-node setter here (`changeColor`, `unlock`,
+  // …) already is.
+  const detach = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, attachment: undefined } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate (rendered via
+  // AnnotationDuplicateControl below, in both the locked and unlocked
+  // branches) — colour/size/rotation/delete stay out of reach while `locked`
+  // is set, matching resize/drag already refusing it.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== id) return n;
+        const nextData = { ...n.data, locked: false };
+        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+      })
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
+  const color = data.color || DEFAULT_LABEL_COLOR;
   const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
+  const opacity = Number.isFinite(data.opacity) ? data.opacity : 1;
+  const badge = remoteEditBadge(data);
 
   return (
     <>
       <div
         className={`graph-label-node${selected ? ' selected' : ''}`}
-        style={{ color, fontSize }}
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          setIsEditing(true);
+        style={{
+          color,
+          fontSize,
+          opacity,
+          ...rotationStyle('label', data.rotation),
+          outline: badge ? `2px solid ${badge.color}` : undefined,
+          outlineOffset: badge ? '2px' : undefined,
         }}
+        onDoubleClick={startEditing}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {badge && (
+          <div
+            className="graph-node-remote-badge"
+            style={{ backgroundColor: badge.color }}
+            title={badge.displayName}
+          >
+            {badge.displayName}
+          </div>
+        )}
         {isEditing ? (
           <input
             ref={inputRef}
@@ -118,7 +204,7 @@ function LabelNode({ id, data, selected }) {
             className="graph-label-input nodrag"
             style={{ fontSize }}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={handleTextChange}
             onBlur={commitText}
             onKeyDown={handleKeyDown}
             onClick={(e) => e.stopPropagation()}
@@ -129,43 +215,144 @@ function LabelNode({ id, data, selected }) {
           </span>
         )}
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button,
+          shown only while selected. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
-            <div className="context-menu-title">{labels.color}</div>
-            <div className="context-menu-colors">
-              {LABEL_COLORS.map((c) => (
-                <button
-                  key={c}
-                  className="color-button"
-                  style={{ backgroundColor: c }}
-                  onClick={() => changeColor(c)}
-                />
-              ))}
-            </div>
-            <div className="context-menu-title">{labels.textSize}</div>
-            <div className="context-menu-sizes">
-              {LABEL_FONT_SIZES.map((s) => (
-                <button
-                  key={s}
-                  className={`size-button${fontSize === s ? ' active' : ''}`}
-                  style={{ fontSize: Math.min(s, 18) }}
-                  onClick={() => changeFontSize(s)}
-                >
-                  A
+            {locked ? (
+              // The capability baseline's two actions for a locked object:
+              // unlock, and duplicate (a duplicate never mutates the locked
+              // source, so locking does not withhold it) — everything else
+              // stays out of reach while `locked` is set, matching
+              // resize/drag already refusing it.
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
                 </button>
-              ))}
-            </div>
-            <button className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.color}</div>
+                <div className="context-menu-colors">
+                  {LABEL_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className={`color-button${color === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      onClick={() => changeColor(c)}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.textSize}</div>
+                <div className="context-menu-sizes">
+                  {LABEL_FONT_SIZES.map((s) => (
+                    <button
+                      key={s}
+                      className={`size-button${fontSize === s ? ' active' : ''}`}
+                      style={{ fontSize: Math.min(s, 18) }}
+                      onClick={() => changeFontSize(s)}
+                    >
+                      A
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.rotation}</div>
+                <div className="context-menu-rotate">
+                  <button
+                    type="button"
+                    className="rotate-button"
+                    aria-label={labels.rotateLeft}
+                    onClick={() => changeRotation((data.rotation ?? 0) - 15)}
+                  >
+                    ⟲
+                  </button>
+                  <button
+                    type="button"
+                    className="rotate-button rotate-reset"
+                    aria-label={labels.rotateReset}
+                    onClick={() => changeRotation(0)}
+                  >
+                    {Math.round(data.rotation ?? 0)}°
+                  </button>
+                  <button
+                    type="button"
+                    className="rotate-button"
+                    aria-label={labels.rotateRight}
+                    onClick={() => changeRotation((data.rotation ?? 0) + 15)}
+                  >
+                    ⟳
+                  </button>
+                </div>
+                <AnnotationOpacityControl
+                  labels={labels}
+                  opacity={opacity}
+                  onChangeOpacity={changeOpacity}
+                />
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
+                <NearbyObjectMenuSection
+                  labels={labels}
+                  onAttach={(kind) => attachNearby(id, kind)}
+                />
+                {/* Non-drag "Attach to…" target-tap mode
+                    (task-annotation-accessible-shared-controls): `label` is
+                    one of ATTACHABLE_OVERLAY_KINDS, so — unlike the "Add
+                    nearby" section above, which creates a NEW pre-attached
+                    annotation — this attaches THIS existing one. */}
+                <button
+                  type="button"
+                  className="context-menu-attach"
+                  onClick={() => {
+                    enterAttachMode?.(id);
+                    setContextMenu(null);
+                  }}
+                >
+                  🧷 {labels.attachTo}
+                </button>
+                {data.attachment && (
+                  <button type="button" className="context-menu-attach" onClick={detach}>
+                    {labels.detach}
+                  </button>
+                )}
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+                <button className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
+                </button>
+              </>
+            )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

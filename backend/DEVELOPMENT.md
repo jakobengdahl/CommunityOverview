@@ -291,6 +291,43 @@ npm run test:e2e
 
 E2E tests include:
 - `chat.spec.js` - Complete chat workflow testing
+- `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
+
+Playwright starts the backend and the vite dev server itself (the `webServer`
+block in `playwright.config.js`), so no server needs to be running first. If one
+already is, Playwright reuses it rather than starting its own — which also means
+the `env` block (placeholder API key, throwaway graph file) does not apply, so a
+hand-started dev server keeps its own key and its e2e nodes land in its own
+graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
+makes Playwright refuse to start against an occupied port.
+
+The mobile specs require the backend to report an LLM as available, because the
+chat panel does not mount otherwise. Against a reused backend with no API key
+configured they fail at startup rather than half-passing.
+
+#### Mobile smoke tests
+
+`mobile-smoke.spec.js` runs under two extra projects, `mobile-iphone`
+(iPhone 13, 390px) and `mobile-pixel` (Pixel 7, 412px). Both emulate touch and
+a coarse pointer, which is what the app's own mobile behaviour keys off, and
+both run on Chromium — the long-press assertion drives real touch events over
+CDP, which only Chromium exposes.
+
+```bash
+cd frontend/web
+npx playwright test tests/e2e/mobile-smoke.spec.js --project=mobile-iphone --project=mobile-pixel
+```
+
+The specs cover the app loading inside the viewport width, the hamburger
+opening the session drawer, creating a node from the toolbox, a long-press on
+that node opening its context menu, and the chat composer staying on screen.
+The desktop `chromium` project skips them, and they skip every other spec.
+
+The viewport check measures both edges and excludes surfaces listed in
+`KNOWN_RIGHT_OVERFLOW` / `KNOWN_LEFT_OVERFLOW` at the top of the spec, which
+already hang off a phone viewport. The lists are per-edge on purpose: exempting
+a subtree from both edges costs more coverage than the break it silences.
+Removing an entry once the surface is fixed turns the check back on for it.
 
 ### E2E Tests with Live Backend
 
@@ -335,8 +372,18 @@ kept separate so a failure points at the layer that broke:
 - **Gateway tests** — the MCP OAuth gateway suite, run in isolation with its own
   pinned dependencies.
 
+Two lint jobs (`Python lint (ruff)` and `Frontend lint (eslint + prettier)`) run
+alongside them, and one further job is **non-required**:
+
+- **Mobile e2e (non-required)** — `mobile-smoke.spec.js` on the `mobile-iphone`
+  and `mobile-pixel` projects. It carries no gate job, is not part of branch
+  protection, and is not in the build job's `needs`, so a mobile regression is
+  reported without blocking a merge or a release. Like the test jobs it is
+  gated on `detect-changes`, so a docs-only PR skips it. On failure the run
+  uploads the Playwright HTML report as the `mobile-e2e-report` artifact.
+
 The Docker build/publish job runs only on `preview`/`prod` pushes (and version
-tags) and depends on all three test jobs. `main` is the integration branch:
+tags) and depends on the three test jobs. `main` is the integration branch:
 pushes to it run the tests but publish no image.
 
 ## API Reference
@@ -517,7 +564,11 @@ not followed and an archived neighbour is not reached (so an archived node canno
 re-enter results via a later hop); the starting node is always returned as the
 anchor. A fetch by id (`GET /api/nodes/{id}` / `get_node_details`) still returns an
 archived node — the default-exclude applies to search and traversal, not to direct
-lookups. Federated nodes/edges preserve the origin graph's `archived` flag, so a
+lookups. The same fetch's incident `edges` (added so a client that just received
+this node's id over a live session op, e.g. `nodes_added` from an MCP
+`add_nodes_to_session`, can hydrate its edges to already-visible nodes) does apply
+the default-exclude: an archived edge, or one with an archived endpoint, is
+omitted. Federated nodes/edges preserve the origin graph's `archived` flag, so a
 node archived upstream stays hidden downstream.
 
 **Mutations.** Archiving goes through dedicated operations rather than a generic
@@ -669,8 +720,25 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413`), plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9 |
-| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, claims, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
+| POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
+| GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
+| GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
+| POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict), if the annotation the inverse op would touch is held by another client's live edit lease (`LeaseConflict` — undo is a browser write and answers to the same rule as `POST /ops`; actor-scoping does not cover it, since the action is the caller's own but the annotation may have come under another client's lease since — retryable, unlike the state-changed conflict), or the session is mid-write (retry), `429` rate-limited. A mismatched `expected_revision` is a fourth `409` (`expected revision N, session is at M`). All four are distinguished only by their prose `detail`; the web UI branches on it in `classifyUndoError` so the retryable ones do not read as permanent — it never sends `expected_revision`, so it handles three of the four. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
+
+#### Edit leases vs. selection claims
+
+`selection_claimed`/`selection_released` are a purely cosmetic, advisory
+presence marker ("who has this selected") — the map is last-write-wins
+(`ClaimMap`) and nothing checks it before a write. `edit_lease_acquired`/
+`edit_lease_released` (`LeaseMap`) are the exclusive mechanism a write is
+actually checked against: acquired only when real editing starts (a text
+field opens, a geometry gesture begins, a property editor opens, a bulk
+mutation or undo is about to touch the annotation), first-actual-editor-wins
+(a second acquisition attempt is refused, not given a takeover), renewed
+while editing continues, and released on completion, expiry (same 30 s TTL)
+or disconnect. See `docs/ANNOTATION_CONTRACT.md`'s "Two-client conflict
+matrix" for the write-side behaviour this produces.
 
 Session state is server-owned: the browser no longer uploads canvas state, and
 MCP query tools read visible nodes / selection from the shared-session store
@@ -755,6 +823,10 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
 | `rename_visualization_session` | Set or clear a session's display name |
 | `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+| `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
+| `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
+| `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |
+| `delete_sticky_note` | Delete a sticky note by its stable id |
 
 Two independent things can be true of a session id, and
 `connect_to_visualization_session` reports both rather than collapsing them:
@@ -924,6 +996,284 @@ projection (`session_id`, `name`, `lifecycle_state`, timestamps, `revision`,
 `?session=<id>` link (from `COMMUNITYOVERVIEW_PUBLIC_BASE_URL`; `null` when
 unconfigured) so an assistant can hand the user a direct link without guessing a
 host. `owner`/`workspace` remain reserved and are populated by the hosted layer.
+
+#### Sticky note tools
+
+`list_sticky_notes` / `create_sticky_note` / `update_sticky_note` /
+`delete_sticky_note` let an assistant read and edit `note` annotations
+(docs/ANNOTATION_CONTRACT.md) in an open session — the same annotation
+document a connected browser renders and edits, so a note an agent creates
+appears on every collaborator's canvas via the same op broadcast the layout
+tools use. Coordinates are model space, matching the layout tools above.
+Writes share the layout tools' optimistic-concurrency contract: read
+`revision` from `list_sticky_notes`, thread it into `expected_revision` on a
+write, and a stale write returns `revision_conflict` with the current
+revision rather than silently clobbering a concurrent edit. A write that
+would touch an annotation another (browser) client currently holds a live
+**edit lease** on returns `lease_conflict` (with `annotation_id`/`held_by`)
+instead of silently overriding it — a collaboration-courtesy refusal, not an
+authorization check; see docs/ANNOTATION_CONTRACT.md's "Operation timing and
+leases". Re-read current state before retrying, the same as
+`revision_conflict`; this tool never acquires a lease of its own
+(`task-mcp-annotation-human-edit-guard`).
+
+`create_sticky_note` doubles as an upsert: passing an `annotation_id` that
+already exists replaces that note (idempotent for a retried call with the
+same id); omitting it lets the server mint a stable id, returned in the
+result. `update_sticky_note` is a partial update — only the given arguments
+(`text`/`color`/`font_size`/`x`/`y`/`w`/`h`/`rotation`/`z`/`locked`) change,
+and a position-only or size-only update leaves the other half exactly as it
+was. `delete_sticky_note` and `update_sticky_note` both resolve
+`annotation_id` against notes only — an id that names a different annotation
+type (e.g. a `line`) reports `not_found` rather than editing across types.
+`update_sticky_note` also accepts the same optional `base_version` the
+generic `update_annotation` tool does (docs/ANNOTATION_CONTRACT.md's
+"Field-level patches and base_version"): given, a write that touches a field
+someone else has changed since — including a position-only move's carried-
+forward `w`/`h`, since `geometry` is always resent as a whole sub-object —
+is rejected as `field_conflict` instead of silently clobbering a concurrent
+edit to that field.
+
+`create_sticky_note` and `update_sticky_note` are also where a note's
+`rotation`, `z` and `locked` are set — the generic `reorder_annotation`/
+`set_annotation_lock` tools below resolve ids against the generic type set
+only, so they refuse a note id (`not_found`) rather than editing it. Omitting
+`rotation`/`z` on create defaults them to `0`, matching the generic tools'
+convention for the same fields; `locked` defaults to `False`.
+`list_sticky_notes` reports all three back.
+
+#### Generic annotation tools
+
+`list_annotations` / `create_annotation` / `update_annotation` /
+`delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
+`duplicate_annotation` extend MCP annotation access to the rest of the v1
+model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
+`shape`, `icon`, `vote_dot`, `freehand` — plus `image`, for everything except
+creating one (see the image annotation tool below). They share the
+sticky-note tools' session/revision contract — model-space coordinates,
+`revision` / `expected_revision` optimistic concurrency, `revision_conflict`
+on a stale write, `lease_conflict` on a live human edit lease — over the same
+annotation document. `create_group_annotation`/`update_group_members`/
+`delete_group_annotation` and `create_image_annotation` (below) share it too;
+all thirteen MCP tools that can mutate an existing annotation check the same
+lease at the actual mutation boundary and never acquire one themselves.
+
+`note` keeps its own dedicated tool set above and `group` (node-membership
+boxes) keeps its own below ("Group annotation tools"); neither is exposed
+through this generic tool set. Both boundaries are enforced the same way
+`create_sticky_note` already guards notes: `create_annotation` refuses to
+create/replace a `note` or `group` id (`wrong_type`), and refuses to
+silently convert an existing generic annotation into a different type at
+the same id (also `wrong_type` — delete it first or use a new id); the
+other generic tools resolve `annotation_id` against the generic type set
+only, so a note or group id reports `not_found` rather than being edited
+across the tool-set boundary.
+
+`create_annotation` takes a per-type `content` dict for the payload fields
+that differ by type (a line's `from`/`to`/arrows, a label's `text`, a
+shape's `shape` name, ...) — see docs/ANNOTATION_CONTRACT.md for the field
+list per type — plus the common `x`/`y`/`w`/`h`/`rotation`/`style`/`z`/
+`locked` envelope every type shares. A shape's `content.shape` is one of
+`rectangle`, `circle`, `triangle`, `rhombus`, `hexagon` or `process_arrow`
+(the canvas resolves case and separator variants such as `"Process Arrow"`);
+a name outside that set is stored verbatim and drawn as a rectangle — that
+membership is not enforced, only the field's *type* is (a non-string or
+empty `shape`/`icon` is refused as `invalid_content`, mirroring the same
+check backend/core/session_annotations.py's `_validate_generic_content` runs
+for both tools). `text` and `shape` also read typography out of the shared `style` argument
+rather than `content`: `style.fontSize` (px), `style.font` (one of the
+curated family names in `GENERIC_FONT_FAMILIES`,
+`packages/ui-graph-canvas/src/utils/annotations.js` — a short list of CSS
+generic font families such as `serif`/`monospace`/`cursive`, chosen over free
+font-name entry so rendering stays predictable across clients with no font
+files to ship; omitted/absent means the app's own default font), and
+`style.textAlign` (one of the nine box positions `top-left` through
+`bottom-right`). Each falls back independently to how the canvas already
+rendered before these existed, so omitting any of them changes nothing for an
+existing annotation. `shape` also reads `style.fill`/`style.border`
+(task-annotation-merge-frame-into-shape-rectangle): each independently a CSS
+colour string or the literal `"transparent"`, e.g. `{"style": {"fill":
+"transparent", "border": "#94a3b8"}}` for a transparent-bodied box with a
+coloured outline — what the retired `frame` type used to be, before it was
+folded into `shape`. Omitting either leaves it at its default (a solid grey
+fill, no border), the same look a plain `shape` always had; no migration was
+written for annotations already stored with type `frame` (see
+docs/ANNOTATION_CONTRACT.md's "Unrecognised annotation data").
+`text`/`label`/`icon` accept a
+`content.attachment = {target_id, target_type, anchor, offset}` binding them
+to a node (`vote_dot` used to be in this list; task-annotation-vote-dot-simplify
+retired its attachment behaviour — it is now a plain coloured dot that always
+lives on its own), and a `line`'s `content.start`/`content.end` may each carry a
+`point` (`{x, y}`) and/or an `attachment`
+(docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"); a
+structurally malformed attachment or endpoint (missing/empty `target_id`, a
+non-numeric `offset`) is refused as `invalid_content` rather than stored, on
+both `create_annotation` and `update_annotation`. Both tools refuse the
+malformed write *before* touching the session — a rejected `content` never
+partially mutates the stored annotation.
+`rotation` is in degrees, and every type these generic tools manage stores
+and reports back whatever is written (`note` is not one of them: it has its
+own `rotation`/`z`/`locked` arguments on `create_sticky_note`/
+`update_sticky_note` instead, reported back by `list_sticky_notes` — see
+docs/ANNOTATION_CONTRACT.md's `note` row). The canvas *draws* a rotation for
+text, label, note, image, icon, vote dot and shape only: whatever is
+stored for a `line` or a `freehand` stroke is never rendered (a tracked gap in
+docs/ANNOTATION_CONTRACT.md's acceptance matrix), so do not read a stored
+rotation on those two as something a viewer can see.
+
+`update_annotation` is a partial update over that same envelope plus
+`content`. It also accepts an optional `base_version` — read from a prior
+`list_annotations`/write result's `annotation.version` — for field-level
+conflict detection finer than `expected_revision`: a concurrent change to a
+*different* field of the same annotation since `base_version` still merges
+silently, and only a genuine change to a field *this* call is itself trying
+to set raises `field_conflict` (`{success: false, error: "field_conflict",
+conflicting_fields, server_version, annotation}` — the current server value,
+so a caller can re-derive a fresh patch instead of blindly retrying the
+rejected one). Omitted, the write applies unconditionally as it always has
+(docs/ANNOTATION_CONTRACT.md's [Field-level patches and
+base_version](ANNOTATION_CONTRACT.md#field-level-patches-and-base_version)
+has the full wire contract and the tests that pin it).
+`reorder_annotation` and
+`set_annotation_lock` are single-purpose wrappers over `z` and `locked`
+respectively — narrow enough that the whole-annotation clobber this
+mechanism exists for was never their exposure, so neither accepts
+`base_version` yet; `duplicate_annotation` copies an existing annotation
+(including its `content`/`style`) to a new id at an optional offset,
+translating a `line`'s endpoints and a `freehand` stroke's `points` by the
+same `dx`/`dy` as the envelope so the copy keeps its shape instead of the
+stroke geometry staying behind while the envelope moves.
+`list_annotations` reads across every v1 type, including `note` and `group`,
+so an assistant gets one full inventory of the session's annotation
+document; pass `types` to filter it.
+
+#### Group annotation tools
+
+`create_group_annotation` creates, or replaces by id (an upsert), a `group`
+(node-membership box) annotation: `label`/`description`/`color` plus the
+common `x`/`y`/`w`/`h`/`z`/`locked` envelope, and optionally a starting
+`member_node_ids` list. `update_group_members` is the ongoing way to manage
+membership: given `add_member_node_ids` and/or `remove_member_node_ids`, it
+reads the group's current `member_node_ids`, applies the additions and
+removals (a duplicate add is a no-op, a remove of an absent id is dropped
+without error), and writes the merged result as one `group_membership_changed`
+op — so a caller adding one member does not have to fetch and resend the
+whole current list. This is last-write-wins under a genuine race between two
+concurrent calls, the same as every other MCP annotation write
+(`session_manager.py`'s module docstring — server-ordered, no CRDT); pass
+`expected_revision` for real conflict detection instead.
+
+`create_group_annotation`'s upsert path deliberately does **not** reset
+`member_node_ids` to `[]` when the argument is omitted, unlike every other
+field: the op is a shallow `dict.update`, so if omitting `member_node_ids`
+always meant "clear it," calling this tool again just to rename or
+recolor an existing group would silently wipe out membership
+`update_group_members` had set. Pass an explicit list (`[]` included) to
+set membership from this tool instead.
+
+`delete_group_annotation` deletes a `group` by id, sharing the same
+revision-checked delete contract as `delete_annotation`/`delete_sticky_note`.
+It removes only the group box — `member_node_ids` names graph nodes by id,
+not annotations the group owns, so there is nothing else to cascade-delete.
+This matches the canvas GUI's own "Delete Group" action
+(`packages/ui-graph-canvas/src/components/GroupNode.jsx`'s
+`removeGroupKeepChildren`), which un-parents and keeps every member node
+rather than deleting or hiding them.
+
+All three tools resolve `annotation_id`/`group_id` against `group`-typed
+annotations only — a note or generic-type id is refused (`wrong_type` on
+create, `not_found` on `update_group_members`/`delete_group_annotation`),
+matching the note/generic boundary above. `group_membership_changed` is
+outside `session_activity.UNDOABLE_OPS` (see that module's docstring), so a
+membership change made through `update_group_members` is not itself
+undoable through `undo_last_action` — creating or deleting the group
+annotation is, like any other type.
+
+#### Image annotation tool
+
+`create_image_annotation` creates (or replaces by id) an `image` annotation,
+sharing the generic tools' session/revision contract. Unlike
+`create_annotation`, it does not take `content` directly — it takes
+`image_data` (a `data:image/...;base64,...` string, or bare base64) or
+`image_url` (an http(s) URL, fetched once server-side), ingests the image
+(`backend/core/image_ingest.py`: decode, validate the real format from the
+decoded bytes, downscale to a longest side of 2560px if needed, re-encode as
+WebP), and stores the result as an embedded data URI in `content.image.url` —
+never the original remote link — so the annotation keeps rendering after the
+source disappears. Only PNG, JPEG and WebP are accepted.
+
+Because one embedded image is far bigger than the small generic op-batch cap
+the other annotation writes share, `create_image_annotation` does not apply
+that cap at all; instead `SessionManager.upsert_image_annotation` enforces
+its own image-specific budgets before writing anything — a per-image cap
+after optimization, a cap on a session's total embedded-image bytes, and a
+cap on the full session document size — all reported as MCP error `too_large`.
+Once created, an image annotation is an ordinary generic annotation for the
+ops that only touch its envelope: `update_annotation`, `delete_annotation`,
+`reorder_annotation` and `set_annotation_lock` all act on it like any other
+type. `duplicate_annotation` is the exception, and only for an annotation
+whose stored URL is not an embedded one (i.e. persisted before the ingest
+rule existed): the copy lands on a new id, so it counts as introducing a new
+reference to unvalidated content and is refused with the ingest error rather
+than silently propagating it. Duplicating a properly ingested image works
+normally — it goes through `upsert_annotation`, which now recognizes a
+validated-shape embedded image payload (by its `image_ingest.
+OPTIMIZED_CONTENT_TYPE` data-URI prefix) and routes it through the same
+image budgets instead of the small flat op-batch cap; a realistically sized
+picture used to fail there with `too_large` even though creating that same
+picture succeeded.
+
+`create_image_annotation` is the **only** way an image annotation's pixel
+content is set. `create_annotation` refuses `type="image"` (`invalid_type`)
+and `update_annotation` refuses a `content` carrying an `image` key
+(`invalid_content`), so neither can store an image reference that skipped
+ingest; replacing the picture of an existing image annotation means calling
+`create_image_annotation` again with the same `annotation_id`. Below both
+tools, `SessionStore.apply_state_op` rejects any `annotation_created`/
+`annotation_updated` op — including one posted straight to
+`/api/sessions/{id}/ops` — that sets an `image.url` which is not an embedded
+`data:image/webp;base64` URI (the content type ingest emits), so the rule
+holds for every session annotation write rather than tool by tool. Two
+exemptions keep existing state usable: re-sending the URL already stored
+under that id (which the browser does on every move/resize/lock), and an
+undo replaying its own stored inverse op.
+
+This implements docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement"
+requirement. Read that section for what it deliberately does *not* cover —
+the store can tell an embedded data URI from a remote link but not *which*
+embedded bytes actually came from ingest, so a client can still forge a
+correctly-prefixed data URI (bounded by the per-image budget, not
+unlimited). The session/document byte budgets themselves are enforced on
+every write path that can persist a validated-shape embedded image —
+`upsert_image_annotation`, `upsert_annotation` (so `duplicate_annotation`
+shares them too), and `apply_ops` (so a browser move/resize/relayer/lock
+does too) — not only the dedicated ingest path, and `apply_ops` additionally
+checks the session's *cumulative* image/document totals after each batch so
+many small, individually-legal batches cannot walk a session past budget
+over time either.
+
+A `SavedView`/`VisualizationView` node's `annotation_document`/`annotations`
+are ordinary node metadata, not a session write, so they go through a
+separate pair of checks instead of the one above:
+`saved_view_annotation_error` applies the identical embedded-URL rule at
+write time (`add_nodes`/`update_node` in `backend/service/mutations.py`,
+with no byte-identical-URL exemption), and `sanitize_saved_view_metadata`
+strips any non-embedded URL at read time regardless of how it reached
+storage (`get_saved_view` in `backend/service/views.py`, and the generic
+`serialize_node` in `backend/service/serializers.py` so every node read —
+search, `get_node_details`, the canvas's double-click-to-open-a-view flow —
+is covered, not only `get_saved_view`). See
+docs/ANNOTATION_CONTRACT.md's "Image ingest enforcement" section for the
+full rationale, including the one write path (`adopt_federated_node`) that
+still bypasses the write-side check.
+
+The human GUI (clipboard paste, or a dropped/uploaded file on the canvas)
+reaches the identical pipeline through `POST /api/sessions/{id}/annotations/image`
+rather than this MCP tool — same `image_ingest.py` call, same
+`SessionManager.upsert_image_annotation` budgets, so there is exactly one
+ingest path regardless of caller. See that endpoint's row above for why its
+op is attributed to a dedicated client id instead of the pasting browser's
+own.
 
 ### UI Backend Endpoints
 

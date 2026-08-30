@@ -35,6 +35,7 @@ shared knowledge graphs. This guide covers all user-facing features.
    - [Connecting](#82-connecting)
    - [Live visualization control via session ID](#83-live-visualization-control-via-session-id)
    - [External pulse triggers](#84-external-pulse-triggers)
+9. [On a phone](#9-on-a-phone)
 
 ---
 
@@ -123,6 +124,12 @@ Right-clicking a node opens the context menu:
 
 - **Edit** — open the edit dialog
 - **Hide** — remove the node from the current view (does not delete it from the graph)
+- **Dim node / Restore node** — fade the node instead of hiding it: it stays visible, at
+  reduced prominence, so you keep its position as context. Restore brings it back to full
+  visibility.
+- **Dim incident edges / Restore incident edges** — fade every connection touching this
+  node (only offered when it has any), to de-emphasise its relationships without hiding
+  the node or the edges' other endpoints.
 - **Expand** — load all nodes directly connected to this node into the canvas
 - **Select all nodes of the same type** — select every node of this node's type across the
   whole visualization, including ones scrolled outside the current viewport
@@ -145,19 +152,51 @@ Right-clicking on the **canvas background** offers quick-create options:
 - Create EventSubscription (webhook)
 - Create Agent
 
-Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
-Select all nodes of the same type, Organize, Hide all, Delete all. "Select all nodes of the
-same type" extends the selection to every node whose type matches any type already in the
-selection. **Organize** arranges the selected nodes — Auto-tidy, Cluster, List horizontally,
-List vertically, or Arrange as tree — keeping them centred where they already sit.
-**Auto-tidy** is the one-click option: it picks a sensible structure for you — a tree when
-the selected nodes are connected in a hierarchy, otherwise a per-type grouping — and always
-lays them out overlap-free. The same arrangements are available from the keyboard: press
-**Ctrl/Cmd+O** with a multi-selection, then **A** (auto-tidy), **C** (cluster), **H**
-(horizontal), **V** (vertical) or **T** (tree).
+Right-clicking an **edge** opens: **Change type** (a submenu listing every relationship
+type defined in the schema; the edge's current type is shown checked and cannot be
+re-selected), **Edit**, **Hide**, **Dim connection / Restore connection**, and **Delete**.
+If the edge is part of a larger multi-edge selection, dim/restore applies to the whole
+selection rather than just the one you right-clicked.
 
-Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
-Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
+Right-clicking a **selection of multiple nodes** shows bulk actions: Show only these,
+Select all nodes of the same type, an **Organize** submenu, Hide all, **Dim selected /
+Restore selected**, **Dim incident edges / Restore incident edges** (every connection
+touching any of the selected nodes, de-duplicated), Delete all. "Select
+all nodes of the same type" extends the selection to every node whose type matches any
+type already in the selection. **Organize** opens a submenu of arrangements — Auto-tidy,
+Cluster, List horizontally, List vertically, or Arrange as tree — keeping the nodes
+centred where they already sit. **Auto-tidy** is the one-click option: it picks a sensible
+structure for you — a tree when the selected nodes are connected in a hierarchy,
+otherwise a per-type grouping — and always lays them out overlap-free. The same
+arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a
+multi-selection, then **A** (auto-tidy), **C** (cluster), **H** (horizontal), **V**
+(vertical) or **T** (tree).
+
+The same right-click menu also offers **Align** and **Distribute**, and — unlike
+Organize — both work across a selection mixing graph nodes with annotations (notes,
+labels, shapes, text, icons and the rest), not graph nodes alone. **Align** opens a
+submenu of six edge/centre choices: Align left, Align horizontal centers, Align right,
+Align top, Align vertical middles, Align bottom, each computed from the selection's
+actual on-canvas boxes. **Distribute** offers Distribute horizontally and Distribute
+vertically, spacing the selection with equal gaps between neighbouring boxes while the
+two outermost members stay put; it only appears once 3 or more members are eligible; a
+2-member selection can only be aligned. A locked annotation, one someone else is
+currently editing, and one already attached to another node or annotation (dragged
+close enough to snap onto it) are left out of either action — attached items keep
+following whatever they're attached to instead of being moved independently, which
+would otherwise fight the very effect that keeps them glued in place. When any of the
+selection was left out this way, a brief notice says why.
+
+Every context menu supports keyboard use: opening one moves focus to its first item,
+**↑/↓** move between items and wrap at the ends, **Home/End** jump to the first/last
+item, and **Escape** closes the menu and returns focus to wherever it was before the
+menu opened. A submenu trigger (**Change type**, **Organize**, **Align**, **Distribute**)
+also opens with **→** or **Enter**, and closes with **←** or **Escape** without closing
+the menu it belongs to.
+
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag, an
+Organize arrangement, or an Align/Distribute), and **Ctrl/Cmd+Shift+Z** (or
+**Ctrl/Cmd+Y**) reapplies it.
 The undo history covers the layout you are looking at, so it is discarded whenever the
 canvas is repopulated — switching session, loading a saved view, or clearing the board.
 Moves made by other people in the session, or by an assistant arranging the view, do not
@@ -169,13 +208,43 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
+A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
+where they appear, and are simply no longer grouped. The deletion is recorded in the
+session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
+from there while it is still your most recent undoable action.
+
+**Group order** moves a group's background forward or backward *among your other group
+boxes only* — it never changes where a group sits relative to your graph nodes or to any
+other annotation, which stays fixed: a group background is always behind everything else
+on the canvas, whatever you do here. With only one group on the board the two buttons have
+nothing to do and do nothing; add a second overlapping group and they let you pick which
+one shows through where the two boxes overlap. Reordering groups this way never moves,
+resizes or re-groups anything inside either box — only the boxes themselves change places.
+
+If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
+what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
+it is the same action you were already getting, named for what it does.
+
+A group box can also be locked, the same way an annotation can. A locked group stays where
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, reorder it
+against your other groups, or delete it. Its right-click menu has a single action —
+**Unlock** — and choosing it gives the full menu back. Locking is done by an assistant or
+an agent on your behalf, so a group you did not lock yourself may already be locked when
+you open a shared board.
+
+Locking protects the group box, not what is inside it. Dragging a node into or out of a
+locked group still works, so the group's membership can change even while the box cannot.
+
 Alongside groups, you can add free-floating **annotations** to a session by right-clicking
 an empty area of the canvas and choosing one of:
 
 - **Note** — a resizable sticky note for longer comments. Double-click to edit its text;
-  right-click for a colour, to change the text size, or to delete it.
+  right-click for a colour, to change the text size, to rotate it, or to delete it.
 - **Label** — a short free-floating text label. Double-click to edit, right-click to
-  recolour, change its text size, or delete.
+  recolour, change its text size, rotate it, or delete. Drag a label close to a node or
+  another annotation and it snaps onto it (magnetic), staying attached as that target
+  moves; drag it away again to detach it, keeping wherever you dropped it.
 - **Arrow / line** — a connector you can position anywhere on the canvas. Right-click to
   recolour, toggle an arrowhead on either end (so it can be a plain line, a single arrow,
   or a double arrow), or delete. When selected, drag either endpoint; bring an endpoint
@@ -185,6 +254,197 @@ an empty area of the canvas and choosing one of:
 Annotations are part of the session, not the knowledge graph: they are stored with the
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
+
+**Editing an existing annotation.** Right-click (or, with a stylus, press and hold on the
+annotation itself) still opens the property menu described below, but selecting any annotation — a group box included — also shows a small round
+**✎ Edit** button in its corner — a visible way in that works by click or tap alone, and by
+keyboard: Tab to the button and press Enter or Space, or press **Shift+F10** (or the
+keyboard's Menu key) while the annotation itself is focused. It opens the exact same menu
+right-click does, positioned next to the button instead of at a pointer position, and moves
+keyboard focus into the menu — closing it (Escape, an outside click, or picking an action)
+returns focus to wherever it was before. Inside an open menu, **arrow keys** move between
+its options and **Tab** cycles within it rather than leaving it. On a phone (or any narrow,
+touch screen), tapping it opens the annotation's editor in the same bottom sheet the
+**Annotate** slot uses for creating one (see [9. On a phone](#9-on-a-phone)) — no need to
+long-press, which has always been unreliable across browsers and is never the *only* way in.
+
+A freshly created annotation (from the toolbox, the right-click "add" menu, or a
+drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
+without having to click or tap to find it first.
+
+For **Text**, **Shape**, **Icon**, **Vote dot** and **Image** annotations the property
+menu is a compact row of small icons rather than a tall list of labelled sections. Each
+icon is one property — colour, fill, border, text alignment, text size, font, shape,
+rotation, opacity, size, layer order — and shows what that property is currently set to,
+so a fill button carries the current fill colour. Click one to open just that property's
+controls; click another to switch. **Delete** sits directly in the row, and the remaining
+one-off commands (Duplicate, Add nearby, Attach to…) are behind the **⋯** button. The row
+is deliberately small: the old stacked menu was taller than a phone screen and covered the
+object you were editing.
+
+The nine-position **text alignment** grid mirrors where the text will sit: the top-middle
+button puts the text at the top centre, the bottom-left button at the bottom left, and so
+on.
+
+Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
+device with no fine pointer:
+
+- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+  handle) also get a numeric width and height in their menu, with an **Apply** button, so
+  resizing doesn't require dragging a corner handle precisely.
+- **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
+  or another annotation) get an **Attach to…** button. Choosing it puts the canvas into a
+  "pick a target" mode (a banner names it, with its own Cancel button, and Escape also
+  backs out); tapping or clicking any eligible node or annotation next attaches the one you
+  started from to it, keeping it exactly where it currently sits relative to the target —
+  the same result dragging it there would have given. Once attached, the same menu offers
+  **Detach**.
+- **Multiple objects here** — if you tap or click a point where more than one annotation
+  overlaps, a small list appears naming each one so you can pick which you meant, instead of
+  only ever getting whichever one happens to be drawn on top.
+- **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
+  toggles a mode where tapping adds each node to the selection instead of replacing it — the
+  touch equivalent of holding Shift or Ctrl while clicking. Tap empty canvas to clear the
+  selection.
+
+A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
+annotation** to expand it, then pick a tool: **Select**, **Note**, **Text**, **Label**, a
+**Shape**, **Icon**, **Vote dot**, **Image**, **Freehand**, or **Eraser**. Each is a
+single icon with no caption — hover one (or read its name with a screen reader) to see
+what it does. The toolbox is hidden while a focus view is active, since annotations are
+set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
+
+**Picking a tool arms it; the canvas decides where the object goes.** After choosing, say,
+**Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
+the tool stays armed until you pick a different one — so placing a row of dots is a row of
+taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
+the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+same. You can still drag a tool straight from the toolbox onto the canvas to place a single
+object without arming anything.
+
+**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+press and drag: an outline follows the pointer showing the box you are about to get, and
+releasing creates it at that size. Dragging left from where you started mirrors the shape,
+and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
+rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
+places them exactly like a press does.
+
+The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
+button shows the colour it will place, and its fold-out picker offers the full palette.
+Pick one and every dot you place is that colour.
+
+The **Shape** entry is a single slot rather than one icon per variant: it shows whichever
+shape (rectangle, circle, triangle, rhombus, hexagon, or process arrow) you last used —
+rectangle to start — and clicking or dragging from it uses that shape, remembering your
+choice for next time. A small button in the slot's bottom-right corner opens a picker
+listing every shape; right-clicking the slot does the same. Picking one both sets the
+slot's default and arms the shape tool, so you can choose a circle and draw it straight
+away. The **Icon** slot works the same way.
+
+The **Eraser** removes things by dragging over them: an annotation you drag across is
+deleted, while a graph node or edge is only **hidden** — the eraser never deletes graph
+data. If your stylus has an eraser on the far end, flipping the pen over erases without
+arming anything.
+
+**Freehand** arms a drawing mode (the button stays highlighted and a banner reminds you
+Escape cancels) and, like every other tool, stays armed: lift the pen and press again to
+draw the next stroke. Escape or picking another tool is how you leave it. On a
+pressure-sensitive stylus the stroke's width follows how hard you press, and the width is
+visible as you draw rather than only after you lift. Draw one stroke with your mouse, finger or
+stylus and the mode turns itself off again once you lift the pointer — click **Freehand**
+again for another stroke. Panning and marquee-selection are disabled while a stroke is
+being drawn, and a second finger touching down mid-stroke is ignored (with a brief notice)
+rather than starting a second line. Without pressure data (a mouse, a finger, or a
+pressure-less pen) the stroke draws at a constant width instead. Right-click a finished
+stroke for its own colour, stroke-width, smoothing and opacity controls.
+
+**Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
+file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
+(Ctrl/Cmd+V); or drag an image file in from your desktop and drop it. Either way the image
+is uploaded to the server, which validates it, optimises it, and embeds the result — so it
+keeps rendering even if the original file or URL later disappears. It appears on the
+canvas a moment after you paste or drop it, once the server has finished processing.
+
+Like Note and Label, a **Text** annotation and any **Shape** — including a process
+arrow — can be double-clicked to type into it: click away, press Escape, or just click
+elsewhere on the canvas to finish. A Shape's caption stays inside its outline no matter
+the variant — a triangle or hexagon's text sits within the part of the figure it's
+guaranteed to fit rather than spilling past a corner.
+
+A Text annotation's or Shape's caption's right-click menu also has a nine-position
+alignment grid (each button doubles as a small live preview of that position), a text-size
+picker, and a font picker: **Default** plus a short curated list — **Serif**,
+**Monospace**, **Cursive** — chosen so text renders the same way for everyone rather than
+depending on a font file the viewer might not have. For a Shape, note that the alignment
+grid's top/middle/bottom choices only matter once the shape is tall enough to show the
+difference; for a Text annotation, which always sizes itself to its own content, only
+left/center/right currently make a visible difference, and only once the text spans more
+than one line.
+
+Right-click any Text, Shape, Icon or Image annotation for the same rotate control
+the note and label menus offer, plus a colour picker for the kinds that paint one
+(an image keeps its own pixels, so it gets no swatches). A Shape's menu instead has
+independent **Fill** and **Border** swatch sections — each including a **Transparent**
+option — so you can give a shape a solid fill and no border (the classic look), a
+transparent fill with a coloured outline (a plain framing box, drawn around whatever
+it sits over — the "add a frame" toolbox button used to make exactly this, before it
+was folded into Shape), or any combination of the two. A Shape's menu also has a subtype
+picker to swap its variant (circle, triangle, and so on) after it's been placed. An
+**Icon** annotation starts with a generic default glyph — right-click it to open a picker
+grid covering the full icon vocabulary and choose the one you actually want. A **voting
+dot** is a plain coloured dot — right-click it for the same colour picker as the other
+kinds; it has no value to set and does not attach to a node or another annotation the
+way Icon does. Icon annotations do support that same attach behaviour as labels once
+placed: drag one near a node or another annotation to attach it.
+
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
+images all also have an **Opacity** row in their menu, offering four levels (30%, 50%,
+75%, 100%) — useful for fading a shape or note behind the nodes it's framing without
+hiding it entirely. Freehand strokes have had this since drawing shipped; every other
+kind gets it from the same row now too.
+
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
+images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
+front** puts the annotation on top of the other annotations and **Send to back** puts it
+underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
+a shape behind a label. The buttons do nothing once an annotation is already alone at the
+front or the back, and a locked annotation has no Layer row at all — right-click it and
+choose **Unlock** first. Pressing **Delete** will not remove a locked annotation either;
+it stays put and tells you to unlock it first.
+
+Send to back normally goes all the way back, behind your graph's own nodes and edges —
+which is what you want for a shape you're using to frame a group of nodes visually. Bring
+it forward again with **Bring to front**.
+
+A group box does not have this Layer row — it is not a member of this set — because a
+group background is *always* behind your graph's own nodes and every other annotation,
+unconditionally; there is nothing to bring to front or send to back it against. What a
+group box has instead is its own **Group order** row, described above, which only reorders
+group boxes against each other. See [2.5 Groups and annotations](#25-groups-and-annotations).
+
+The same set of annotations — notes, labels, arrows, freehand strokes, text,
+shapes, icons, voting dots and images — also has a **Duplicate** action in their
+right-click menu, just below Layer. It places a copy right next to the original, carrying
+over its colour, size, rotation and any attachment to a node or another annotation.
+Unlike Layer or Delete, Duplicate still works on a **locked** annotation — locking
+protects an object from being changed, and duplicating it doesn't change it, so a locked
+annotation's right-click menu offers **Unlock** and **Duplicate** rather than Unlock
+alone. The copy itself is never locked, even when the original is: it's a new,
+independent annotation you're free to edit right away. A group box does not get a
+Duplicate action — its substance is the graph nodes it groups, not its own content, so
+copying the box alone would not be a real duplicate.
+
+Right-click a node, or any annotation except a group box, and its menu has an
+**Add nearby** section with three buttons: **Label**, **Icon**, **Text**. (**Vote
+dot** is not offered here — it doesn't attach to anything, see above.)
+A transparent-fill shape is included here too — its menu offers "Add nearby" the
+same as any other shape.
+Choosing one creates that annotation already attached to whatever you right-clicked —
+positioned right next to it and following it if it moves — without the create-then-drag-near
+two steps that were previously the only way to attach a new label, icon or piece
+of text. Detach it afterward the same way as any attached annotation: drag it away from its
+target. Arrows are not offered here, since dragging either of a newly placed arrow's
+endpoints already snaps it onto a nearby target the moment you draw it.
 
 ### 2.6 Saved views
 
@@ -248,8 +508,9 @@ between two nodes does not push the rest of the session out of the trail. A node
 added keeps its **Added** label even after you return to it later.
 
 This trail is per-session and lives only in your browser. It is separate from
-**Recent activity** ([5.2](#52-recent-activity-audit-log)), which is a persisted
-audit log of who changed what in the graph data.
+**Recent activity** ([5.2](#52-recent-activity-audit-log)), whose Graph tab is a
+persisted audit log of who changed what in the graph data (its Session tab is a
+different, session-scoped record: this session's own annotation/canvas activity).
 
 ---
 
@@ -408,6 +669,12 @@ where they make a question easier to answer.
 
 ## 5. Session menu and settings
 
+The session menu includes **Fullscreen canvas**, which hides application chrome
+while preserving the current canvas, selection, assistant, and drawer state.
+Use the subtle return button or Escape to leave it. The shortcut is
+Ctrl+Shift+F on Windows/Linux and Cmd+Shift+F on macOS. If browser fullscreen is
+unavailable or denied, the same action automatically uses an in-app focus mode.
+
 Click the **☰** (hamburger) icon in the top-left corner to open the session menu —
 a panel that slides out from the left and docks to the screen edge. While it is open,
 the toolbar shifts right so it keeps floating next to the panel.
@@ -426,7 +693,7 @@ AI apps:
 | **Search previous sessions** | Filters the recent-session list by name or ID |
 | **Connect to session (via ID)** | Joins an existing session by entering its ID (format `1234-5678-9012-3456`) |
 | **Recent sessions** | The most recently used sessions — shown by name if you have named them, otherwise by ID. Click one to load it; the current session is saved automatically first. Hover a row and open the **⋮** menu for per-session actions: **Name session**, **Copy link** (copies the shareable `?session=…` URL to the clipboard), **Copy pulse-trigger URL** (on the session you are currently in — see [8.4](#84-external-pulse-triggers)), and **Delete session**. |
-| **Recent activity** | Opens the activity panel — a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
+| **Recent activity** | Opens the activity panel — this session's annotation/canvas activity with undo, plus a read-only audit log of graph changes (see [5.2](#52-recent-activity-audit-log)) |
 | **Lock / Unlock visualization** | Guards the current board against accidental clearing. While locked, **Esc × 2** does nothing at all, and the top-bar **clear** button asks for an emphatic confirmation warning that everything on the board will be removed. The setting is remembered in your browser. |
 | **Settings** | Opens the Settings dialog (see below) |
 
@@ -479,17 +746,54 @@ recognisable name under **Settings → Your presence → Display name**; it is s
 to everyone in the roster and on your selection badges. The name is stored in
 your browser and takes effect the next time you open or switch session.
 
+**Reconnecting after a dropped connection.** If your connection drops — a
+network blip, closing your laptop, a poor signal — any edits you made while
+offline are kept locally and delivered once you reconnect; they are not lost.
+When the app reconnects and recovers edits made while you were offline, it
+shows a brief "Reconnected — restored N change(s) made while offline"
+notification.
+
 ### 5.2 Recent activity (audit log)
 
-Open **Recent activity** from the bottom of the session menu to see a read-only
-log of everything that has changed in the graph, newest first. The panel slides
-in from the right edge of the screen.
+Open **Recent activity** from the bottom of the session menu to see the activity
+panel. It slides in from the right edge of the screen and has two tabs:
+**Session** (this session's annotation and canvas activity — sticky notes, shapes,
+node moves, layout changes, dimming/restoring nodes or connections, edge-intensity
+changes — with undo) and **Graph** (a read-only log of
+everything that has changed in the graph itself, newest first). They are
+deliberately separate: session activity lives with the session and disappears
+with it; graph history is the permanent audit trail.
 
 ![Recent activity panel](images/recent-activity.png)
-*The activity panel lists graph changes newest-first, with an **AI** badge on
-changes made by an agent.*
+*The activity panel's Session tab, with a readable description per action and an
+**Undo** button on your own latest undoable action.*
 
-Each entry shows:
+#### Session tab
+
+Every annotation or canvas change you or a collaborator makes in the current
+session appears here as a plain-language entry — "Created a sticky note",
+"Moved \"Acme Corp\"", "Rotated a shape", "Raised the layer of a shape" — with
+who did it (your own actions are marked *(You)*) and when. The entry names what
+actually changed: moving an annotation reads as a move and changing its layer as
+a layer change, distinct from locking or unlocking it.
+
+- **Undo** appears only on *your own* most recent undoable action — you can
+  never undo someone else's change. The same action is also available as
+  **Undo my last action** above the list.
+- If the item you are trying to undo has changed since (someone else edited it,
+  or you did something else to it first), undo fails with a clear conflict
+  message instead of silently overwriting that later change.
+- If someone else currently has that item selected, undo waits rather than
+  reaching through them: you are told to try again in a moment, and it works
+  once they click away. This one is temporary — unlike the conflict above, the
+  action stays undoable.
+- Session activity is kept for 7 days or the last 500 actions per session,
+  whichever comes first — it is not a permanent record.
+
+#### Graph tab
+
+The graph tab lists graph changes newest-first, with an **AI** badge on changes
+made by an agent. Each entry shows:
 
 - **What happened** — node or connection created, updated, or deleted.
 - **When** — a relative time (e.g. "5 min ago") with the exact date and time
@@ -501,8 +805,9 @@ Each entry shows:
 
 For an update, a compact **before → after** diff lists the fields that changed.
 Use **Load more** at the bottom to page further back through the history, and the
-refresh icon in the header to reload from the top. This view never changes the
-graph — it is purely for looking back at what happened.
+refresh icon in the header to reload from the top (it reloads whichever tab is
+open). This view never changes the graph — it is purely for looking back at what
+happened.
 
 History is also available per item: double-click a node (or open a connection's
 editor) and switch to the **History** tab to see only that item's changes. When a
@@ -520,12 +825,27 @@ The top of the dialog shows the total number of nodes and edges currently in the
 followed by a colour-coded breakdown by node type. If there are more than five types,
 a **Details** button opens a full node-type statistics dialog.
 
+#### Metamodel explorer
+
+**Explore metamodel** opens an interactive, read-only view of the graph's active
+schema — the node types and relationship types this deployment is configured with,
+rendered as a network you can pan and zoom. Click a node type to see its
+description, fields and current node count; relationship types are drawn as
+directed, labelled connections between the node types they are configured to
+apply to. Relationship types with no configured source/target rule are listed
+separately rather than drawn to every node type, since no rule was actually
+configured. A **Table** tab presents the same information as two accessible
+data tables, for screen readers or a quick text scan. This view never lets you
+change the schema — editing the metamodel is not part of the open-source core.
+
 #### View settings
 
 | Option | Effect |
 |--------|--------|
 | **Show minimap** | Toggle the minimap overlay in the bottom-right corner of the canvas |
 | **Show node preview popup** | Toggle the hover info popup that previews a node's details. Turn it off if the popup gets in the way. |
+| **Edge intensity** | A slider setting the baseline visibility for every connection in this session. Dimmed connections (see [2.4](#24-right-click-context-menu)) always render below this baseline — lowering it fades the whole graph's connections together, while dimming still singles out specific ones underneath that. |
+| **Assistant panel open** | Toggle the chat panel between expanded and collapsed. Your choice is remembered in the browser and used every time you return, overriding this deployment's configured startup default. Click **Reset to default** underneath to forget your choice and go back to that default. |
 
 #### Your presence
 
@@ -535,11 +855,11 @@ a **Details** button opens a full node-type statistics dialog.
 
 #### Language
 
-Switch between **English** and **Svenska**. The change takes effect immediately and
-applies to all UI labels and chat placeholders.
+The UI is temporarily English-only; the language switcher is not shown in
+Settings while this is in effect.
 
 The AI assistant always responds in the language you write in, regardless of the
-UI language setting.
+UI language.
 
 #### Admin
 
@@ -714,6 +1034,85 @@ animation.
 
 ---
 
+## 9. On a phone
+
+On a phone-sized screen (roughly 768 px wide and below) the canvas swaps its
+desktop chrome — the header, search bar, toolbar, chat panel and session
+menu — for a layout that fits a thumb.
+
+**Navigation.** A compact top bar replaces the desktop header, and a six-slot
+bottom navigation bar replaces the toolbar and the hamburger menu:
+
+| Slot | Effect |
+|------|--------|
+| **Graph** | Closes any open panel and returns to the full-screen canvas |
+| **Search** | Opens the graph search in a sheet that slides up from the bottom |
+| **Create** | Opens the node-type picker in the same bottom sheet, for adding a
+graph node (an Actor, Initiative, and so on) |
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
+shapes, icons, vote dots, images and freehand drawing — in its own bottom
+sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
+mark on the canvas, not a graph node, and the two creation flows stay visually
+and behaviorally distinct even though both live behind the same style of
+sheet |
+| **Chat** | Opens the AI assistant (only shown when it is available) |
+| **Menu** | Opens the session menu — the same panel described in
+[section 5](#5-session-menu-and-settings), as a full-width overlay with a
+dimmed scrim behind it on a phone, rather than the narrower panel desktop
+uses. Tap the scrim, tap the **✕**, or press **Escape** to close it. |
+
+Only one of these is ever open at a time — opening one closes whatever else was
+open, so the canvas is never covered by more than one panel at once. On a phone
+the annotation toolbox is *only* reachable through the **Annotate** slot; unlike
+on desktop, it does not also float over the canvas as a small always-visible
+strip, so it never competes with the bottom navigation for space.
+
+**Editing an existing annotation on a phone.** Tap an annotation to select it, then tap
+the small **✎ Edit** button that appears on it. That opens its property editor — colour,
+opacity, rotation, layer, duplicate, delete, and whatever else that kind offers — in a
+seventh sheet, laid out full-width for a thumb the same way the Annotate sheet is, and
+subject to the same "only one panel open" rule as everything else in the list above
+(opening it closes Annotate/Search/Create/Chat/Menu, and opening any of those closes it).
+It has no bottom-nav slot of its own — it only opens contextually, from the annotation's
+own Edit button, since it always needs an annotation to edit.
+
+**Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
+the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,
+**fit whole graph**, and **focus**. The minimap is not drawn at this width even
+if you have switched it on under Settings — it would cover a large share of the
+screen. Switching back to a wider screen restores the desktop controls and your
+minimap setting; nothing is changed permanently.
+
+Fitting the graph also frames it more tightly than on desktop, so a fitted graph
+fills the screen instead of sitting in a wide margin.
+
+**Focus view.** A large graph is hard to read on a phone, so you can narrow the
+canvas to one node at a time:
+
+1. Tap a node to select it. The **focus** button (◎) in the pill becomes active.
+2. Tap **focus**. The canvas now shows only that node and the nodes directly
+   connected to it, arranged in a ring around it.
+3. Tap the same button again to return to the whole graph.
+
+The focus view is a lens, not an edit. Leaving it puts every node back exactly
+where it was, including nodes inside groups, and your notes, labels and arrows
+come back with them — they are set aside while you are focused so the view frames
+the ring rather than an annotation parked elsewhere on the canvas. The focus
+layout itself is never saved: while you are focused, the canvas saves the view
+you focused *from*, so an autosave or a session switch records your real layout
+rather than the temporary one.
+
+Because annotations are set aside, you cannot add a note, label or arrow while
+focused — leave the focus view first. Everything else works as usual.
+
+Focus needs a single node selected; it is not offered for notes, labels, arrows
+or groups. The canvas returns to the full graph on its own if the node you are
+focused on is removed, if you switch to another session, or if the screen stops
+being phone-sized — turning a phone to landscape ends the focus view rather than
+leaving you in it without the controls to get out.
+
+---
+
 ## Appendix: Keyboard shortcuts
 
 | Shortcut | Action |
@@ -722,7 +1121,7 @@ animation.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag, Organize, or Align/Distribute) |
 | **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
@@ -746,8 +1145,15 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `node-marking.png` | pending | Canvas with colour marking dots and legend |
 | `document-upload.png` | ✓ | Chat after file upload with extracted entity proposals |
 | `hamburger-menu.png` | ✓ | Session menu (☰) — left panel with session navigation and Settings entry |
-| `recent-activity.png` | pending | Recent activity panel (right side) with entries, an AI badge, and a before→after diff |
+| `recent-activity.png` | pending | Recent activity panel (right side), Session tab: entries with an Undo button and an actor badge |
 | `create-agent.png` | ✓ | Create Agent dialog with all configuration sections |
 | `skills.png` | ✓ | Chat panel bottom showing active skill and selected nodes |
 | `mcp-session-control.png` | ✓ | External AI (ChatGPT) controlling the canvas via session ID |
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
+| `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
+| `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
+| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the six-slot bottom navigation |
+| `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
+| `mobile-annotate-sheet.png` | pending | Phone viewport with the Annotate bottom sheet open, showing the expanded annotation toolbox grid |
+| `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
+| `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |

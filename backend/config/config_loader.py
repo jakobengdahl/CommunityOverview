@@ -142,6 +142,17 @@ class RelationshipTypeConfig(BaseModel):
     """Configuration for a single relationship type."""
 
     description: str = ""
+    source_types: List[str] = Field(default_factory=list)
+    target_types: List[str] = Field(default_factory=list)
+
+    @field_validator("source_types", "target_types", mode="before")
+    @classmethod
+    def normalize_applicability_types(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        return v
 
 
 class SchemaConfig(BaseModel):
@@ -338,12 +349,28 @@ class PresentationConfig(BaseModel):
     prompt_prefix: str = ""
     prompt_suffix: str = ""
     default_language: str = "en"
+    # Whether the chat/assistant panel starts collapsed for a first-time visitor.
+    # A visitor's own explicit open/collapse choice (persisted client-side) always
+    # takes precedence over this once made.
+    default_chat_collapsed: bool = False
     language_policy: LanguagePolicyConfig = Field(default_factory=LanguagePolicyConfig)
     widget_url: str = ""  # URL template for the graph widget
     expert_agents: List[ExpertAgentConfig] = Field(default_factory=list)
     skills_config: SkillsConfig = Field(default_factory=SkillsConfig)
     capabilities: List[CapabilityConfig] = Field(default_factory=list)
     guides: List[GuideConfig] = Field(default_factory=list)
+
+
+class AiAssistantUiConfig(BaseModel):
+    """Initial assistant presentation before a browser preference exists."""
+
+    default_collapsed: bool = False
+
+
+class UiConfig(BaseModel):
+    """Open-core browser UI defaults."""
+
+    ai_assistant: AiAssistantUiConfig = Field(default_factory=AiAssistantUiConfig)
 
 
 class SystemConfig(BaseModel):
@@ -357,6 +384,7 @@ class SchemaFileConfig(BaseModel):
 
     schema_: SchemaConfig = Field(alias="schema", default_factory=SchemaConfig)
     presentation: PresentationConfig = Field(default_factory=PresentationConfig)
+    ui: UiConfig = Field(default_factory=UiConfig)
     runtime: RuntimeMetadataConfig = Field(default_factory=RuntimeMetadataConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
     # Config-driven dedicated REST interfaces per node/edge type (open core).
@@ -553,9 +581,64 @@ def get_schema() -> Dict[str, Any]:
             for name, cfg in schema.node_types.items()
         },
         "relationship_types": {
-            name: {"description": cfg.description}
+            name: {
+                "description": cfg.description,
+                "source_types": cfg.source_types,
+                "target_types": cfg.target_types,
+            }
             for name, cfg in schema.relationship_types.items()
         },
+    }
+
+
+def relationship_type_allows_node_types(
+    relationship_type: str, source_type: str, target_type: str
+) -> Dict[str, Any]:
+    """Validate relationship type applicability for a directed source->target pair.
+
+    Missing source_types/target_types rules are intentionally permissive for
+    backward compatibility. A "*" entry on either side also permits any node type.
+    """
+    schema = _get_loader().config.schema_
+    config = schema.relationship_types.get(relationship_type)
+    if config is None:
+        # Unconfigured relationship types are allowed for backward compatibility.
+        return {"allowed": True, "message": ""}
+
+    source_rules = list(config.source_types or [])
+    target_rules = list(config.target_types or [])
+
+    # If neither source nor target rules are configured, allow any node types.
+    if not source_rules and not target_rules:
+        return {"allowed": True, "message": ""}
+
+    source_allowed = (
+        not source_rules or "*" in source_rules or source_type in source_rules
+    )
+    target_allowed = (
+        not target_rules or "*" in target_rules or target_type in target_rules
+    )
+
+    if source_allowed and target_allowed:
+        return {"allowed": True, "message": ""}
+
+    parts = []
+    if not source_allowed:
+        parts.append(
+            f"source type '{source_type}' is not allowed"
+            f" (allowed: {', '.join(source_rules)})"
+        )
+    if not target_allowed:
+        parts.append(
+            f"target type '{target_type}' is not allowed"
+            f" (allowed: {', '.join(target_rules)})"
+        )
+    return {
+        "allowed": False,
+        "message": (
+            f"Relationship type '{relationship_type}' cannot connect "
+            f"{source_type} -> {target_type}: " + "; ".join(parts)
+        ),
     }
 
 
@@ -570,6 +653,8 @@ def get_presentation() -> Dict[str, Any]:
     - prompt_prefix: Prefix for LLM system prompt
     - prompt_suffix: Suffix for LLM system prompt
     - default_language: Default language code
+    - default_chat_collapsed: Whether the assistant panel starts collapsed
+      for a visitor with no stored preference of their own
     """
     loader = _get_loader()
     pres = loader.config.presentation
@@ -588,11 +673,13 @@ def get_presentation() -> Dict[str, Any]:
         "prompt_prefix": pres.prompt_prefix,
         "prompt_suffix": pres.prompt_suffix,
         "default_language": pres.default_language,
+        "default_chat_collapsed": pres.default_chat_collapsed,
         "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
         "capabilities": [capability.model_dump() for capability in pres.capabilities],
         "guides": [guide.model_dump() for guide in pres.guides],
+        "ui": loader.config.ui.model_dump(),
     }
 
 

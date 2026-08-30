@@ -111,7 +111,9 @@ account-bound history, workspace ACLs) lives behind that boundary and is out of
 scope for the open core.
 
 The REST/ops surface is bounded to keep a single instance healthy under load:
-each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413`), and
+each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413` —
+an op carrying a validated embedded image is budgeted separately instead, and
+the session's cumulative document/image size is also checked per batch), and
 a per-client token bucket (200 burst, 100 ops/s refill → `429`) throttles a
 runaway client (design §3.9).
 

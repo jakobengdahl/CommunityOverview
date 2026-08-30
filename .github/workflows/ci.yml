@@ -31,7 +31,13 @@
 #     PR is ready for review, so docs-only and draft PRs do not pay for the
 #     full suite.
 #   - The always-running gate jobs keep the branch-protection required-check
-#     names reporting on every PR, so a skipped heavy job never blocks merge.
+#     names reporting on every PR, so a path-skipped heavy job never blocks
+#     merge. A DRAFT-skipped one does: the gate passes a skip only when
+#     detect-changes found nothing relevant to run, and fails a skip that
+#     happened purely because the PR was a draft. Otherwise the five required
+#     checks would report green on a draft whose tests never ran, and "CI is
+#     green" would stop meaning "the suite passed" exactly where it is relied
+#     on - the draft-to-ready step right before a merge.
 # =============================================================================
 
 name: CI
@@ -96,6 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       service_code: ${{ steps.classify.outputs.service_code }}
+      python_code: ${{ steps.classify.outputs.python_code }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,22 +140,32 @@ jobs:
           # Fail-safe: could not resolve a diff (schedule/dispatch/new branch) ->
           # run the heavy jobs.
           if [ -z "$changed" ]; then
-            echo "No diff resolved — defaulting service_code=true (fail-safe)."
+            echo "No diff resolved — defaulting service_code=true python_code=true (fail-safe)."
             echo "service_code=true" >> "$GITHUB_OUTPUT"
+            echo "python_code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           service_code=false
+          # python_code narrows further than service_code: it drives the Python
+          # lint job specifically, so a PR that only touches e.g. frontend/ isn't
+          # made to pay for (or be blocked by) unrelated ruff drift on backend/
+          # or scripts/ it never touched.
+          python_code=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
               docs/*|*.md) ;;        # documentation only
               *) service_code=true ;; # real service/app/config/workflow code
             esac
+            case "$f" in
+              backend/*|scripts/*|pyproject.toml|.github/workflows/*) python_code=true ;;
+            esac
           done <<< "$changed"
 
           echo "service_code=$service_code" >> "$GITHUB_OUTPUT"
-          echo "Resolved: service_code=$service_code"
+          echo "python_code=$python_code" >> "$GITHUB_OUTPUT"
+          echo "Resolved: service_code=$service_code python_code=$python_code"
 
   # ---------------------------------------------------------------------------
   # Backend tests – full pytest suite. Runs only when service code changed and
@@ -158,7 +175,11 @@ jobs:
   # network model download.
   #
   # This is the WORKER job. Branch protection requires the "Backend tests" gate
-  # job below (not this one), so a skip here never blocks merge.
+  # job below (not this one). The gate passes a path-skip (service_code=false)
+  # and fails a draft-skip, so a draft never reports green for a suite it did
+  # not run. A skip here can also block merge without being draft-caused: if
+  # detect-changes itself fails this job skips via `needs`, and the gate then
+  # fails on its own detect-changes guard.
   # ---------------------------------------------------------------------------
   backend-tests-run:
     name: Backend tests (run)
@@ -187,8 +208,15 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
 
   # Gate: always runs and carries the branch-protection required-check name
-  # "Backend tests". Passes when the worker succeeded or was skipped (docs-only
-  # or draft PR); fails only when the worker actually failed or was cancelled.
+  # "Backend tests". Passes when the worker succeeded, or when it was skipped
+  # because nothing relevant changed (service_code=false) - there is then
+  # nothing to verify. It FAILS when the worker was skipped while
+  # service_code=true, which can only mean a draft PR: the suite did not run on
+  # this head, so reporting green would tell branch protection, an agent or a
+  # reviewer that it passed. A draft cannot be merged anyway, and the
+  # ready_for_review trigger re-runs the workflow, so the gate turns honestly
+  # green the moment it matters. Also fails when the worker actually failed or
+  # was cancelled.
   backend-tests:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -199,20 +227,33 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.backend-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Backend tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
+              fi
+              echo "::error::Backend tests was skipped with service_code=$CODE, so this head has NOT run the full backend suite. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Backend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
   # ---------------------------------------------------------------------------
   # Frontend tests – vitest across all npm workspaces (web, widget, canvas, xr).
-  # GitHub Actions sets CI=true, so vitest runs once instead of watch mode.
+  # Every workspace's `test` script is `vitest run`, so the suite exits on its
+  # own here and locally; `test:watch` is the interactive variant.
   # Playwright e2e stays out of this required path (see DEVELOPMENT.md).
   #
   # WORKER job; the "Frontend tests" gate below carries the required-check name.
@@ -232,7 +273,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
@@ -241,7 +282,9 @@ jobs:
       - name: Run workspace unit tests
         run: npm run test:unit
 
-  # Gate carrying the required-check name "Frontend tests".
+  # Gate carrying the required-check name "Frontend tests". Same semantics as the
+  # "Backend tests" gate above: a skip passes only when service_code=false;
+  # a skip while service_code=true means a draft PR and fails.
   frontend-tests:
     name: Frontend tests
     runs-on: ubuntu-latest
@@ -252,14 +295,26 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.frontend-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Frontend tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
+              fi
+              echo "::error::Frontend tests was skipped with service_code=$CODE, so this head has NOT run the workspace unit tests. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Frontend tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
 
@@ -294,7 +349,9 @@ jobs:
         run: pytest test_oauth_flow.py -q
         working-directory: services/mcp_oauth_gateway
 
-  # Gate carrying the required-check name "Gateway tests".
+  # Gate carrying the required-check name "Gateway tests". Same semantics as the
+  # "Backend tests" gate above: a skip passes only when service_code=false;
+  # a skip while service_code=true means a draft PR and fails.
   gateway-tests:
     name: Gateway tests
     runs-on: ubuntu-latest
@@ -305,16 +362,101 @@ jobs:
         env:
           DETECT: ${{ needs.detect-changes.result }}
           RESULT: ${{ needs.gateway-tests-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.service_code }}
         run: |
-          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT"
+          echo "detect-changes result: $DETECT | Gateway tests (run) result: $RESULT | service_code=$CODE"
           if [ "$DETECT" != "success" ]; then
             echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
             exit 1
           fi
           case "$RESULT" in
-            success|skipped) echo "Gate passed."; exit 0 ;;
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              # Fail closed: only an explicit false lets a skip through. An
+              # empty service_code would mean detect-changes never published it,
+              # which the guard above already rejects - but defaulting to
+              # "pass" here is the exact shape of the bug this gate fixes.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (service_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
+              fi
+              echo "::error::Gateway tests was skipped with service_code=$CODE, so this head has NOT run the gateway suite. For service_code=true the cause is a draft pull request: mark the PR ready for review to run it. A skip must not report green."
+              exit 1 ;;
             *) echo "::error::Gateway tests result '$RESULT' is not acceptable"; exit 1 ;;
           esac
+
+  # ---------------------------------------------------------------------------
+  # Mobile e2e – Playwright smoke on emulated phone viewports (iPhone 13 and
+  # Pixel 7, both on Chromium). Covers what unit tests cannot: that the app
+  # still lays out inside a phone viewport and that its touch interactions —
+  # long-press context menu, toolbox node creation, the chat composer — survive.
+  #
+  # NON-REQUIRED by design: this job carries no gate, is absent from branch
+  # protection, and is absent from the build job's `needs`, so a red run reports
+  # a mobile regression without blocking a merge or a release. It runs on the
+  # workflow's existing push/pull_request triggers and adds no build or publish
+  # path of its own.
+  #
+  # Playwright starts the backend and the vite dev server itself; see the
+  # webServer block in frontend/web/playwright.config.js.
+  # ---------------------------------------------------------------------------
+  mobile-e2e:
+    name: Mobile e2e (non-required)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    # A browser job has more ways to wedge than a unit-test job. Bounded so a
+    # hung step fails in minutes instead of holding a runner for the default six
+    # hours — this job is non-required, so a timeout costs nothing but a red
+    # square, while a hang costs runner minutes for everyone.
+    timeout-minutes: 20
+    if: >-
+      needs.detect-changes.outputs.service_code == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # Base requirements only, like the backend job: the specs never reach a
+      # model, so the ML stack is dead weight here.
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Browser download only, no `--with-deps`: the runner image already ships
+      # the shared libraries Chromium needs, and the apt-get half of
+      # `--with-deps` is the one step here that can block on a package lock —
+      # observed hanging for 20+ minutes after completing in 21s on an earlier
+      # run of this same job.
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+        working-directory: frontend/web
+
+      - name: Run mobile smoke tests
+        run: npx playwright test tests/e2e/mobile-smoke.spec.js --project=mobile-iphone --project=mobile-pixel
+        working-directory: frontend/web
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-e2e-report
+          path: frontend/web/playwright-report/
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Lint gates – mechanical correctness checks (unused imports, undefined
@@ -324,13 +466,22 @@ jobs:
   # them required (STRUCTURE_REVIEW item A4). Config: root pyproject.toml
   # (ruff), eslint.config.mjs + .prettierrc.json (JS workspaces).
   #
-  # Lint runs on every PR (including docs-only PRs): it is cheap, and keeping it
-  # unconditional means the "Python lint (ruff)" and "Frontend lint" required
-  # checks always report without needing a gate job.
+  # Python lint follows the same gate/worker split as the *-tests jobs above:
+  # the WORKER only runs when detect-changes reports python_code=true, so a PR
+  # that never touches backend/, scripts/, pyproject.toml or the workflow file
+  # isn't blocked by unrelated ruff drift it didn't introduce. The gate below
+  # always runs and carries the required-check name "Python lint (ruff)", so
+  # branch protection keeps seeing that check on every PR.
+  #
+  # Frontend lint stays unconditional: it is cheap enough that scoping it
+  # wasn't worth the added indirection, and keeping it simple means the
+  # "Frontend lint" required check always reports without needing a gate job.
   # ---------------------------------------------------------------------------
-  python-lint:
-    name: Python lint (ruff)
+  python-lint-run:
+    name: Python lint (ruff) (run)
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python_code == 'true'
 
     steps:
       - name: Checkout code
@@ -353,6 +504,43 @@ jobs:
       - name: Ruff format check
         run: ruff format --check backend scripts
 
+  # Gate: always runs and carries the branch-protection required-check name
+  # "Python lint (ruff)". Passes when the worker succeeded or was skipped
+  # because no Python-relevant files changed (python_code=false). Fails when
+  # the worker was skipped while python_code=true - today the worker carries no
+  # draft condition so that cannot happen, but the check is kept uniform with
+  # the *-tests gates so adding one later cannot silently reintroduce a green
+  # tick for an unrun job.
+  python-lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, python-lint-run]
+    if: always()
+    steps:
+      - name: Verify python lint succeeded or was skipped
+        env:
+          DETECT: ${{ needs.detect-changes.result }}
+          RESULT: ${{ needs.python-lint-run.result }}
+          CODE: ${{ needs.detect-changes.outputs.python_code }}
+        run: |
+          echo "detect-changes result: $DETECT | Python lint (ruff) (run) result: $RESULT | python_code=$CODE"
+          if [ "$DETECT" != "success" ]; then
+            echo "::error::detect-changes did not succeed ($DETECT); refusing to pass the gate"
+            exit 1
+          fi
+          case "$RESULT" in
+            success) echo "Gate passed."; exit 0 ;;
+            skipped)
+              # Fail closed, as in the *-tests gates above.
+              if [ "$CODE" = "false" ]; then
+                echo "Gate passed (python_code=false: nothing relevant changed, nothing to verify)."
+                exit 0
+              fi
+              echo "::error::Python lint was skipped with python_code=$CODE, so this head has NOT run ruff check/format. This worker carries no draft condition, so the state should be unreachable - if you are reading this, a condition was added to python-lint-run without updating this gate. Do not merge on the strength of this check."
+              exit 1 ;;
+            *) echo "::error::Python lint result '$RESULT' is not acceptable"; exit 1 ;;
+          esac
+
   frontend-lint:
     name: Frontend lint (eslint + prettier)
     runs-on: ubuntu-latest
@@ -364,7 +552,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       # ESLint and Prettier still walk every frontend/** file on disk,

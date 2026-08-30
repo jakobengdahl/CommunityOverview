@@ -28,6 +28,22 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.config.config_loader import RestInterfaceConfig, get_rest_interfaces
+from backend.core.image_ingest import (
+    DEFAULT_MAX_SOURCE_IMAGE_BYTES,
+    ImageFetchError,
+    InvalidImageData,
+    OptimizedImageTooLarge,
+    SourceImageTooLarge,
+    UnsupportedImageType,
+    decode_image_data,
+    fetch_image_bytes,
+    optimize_image,
+)
+from backend.core.session_annotations import (
+    annotation_type_of,
+    build_annotation,
+    is_generic_annotation,
+)
 from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mode
 from backend.runtime.authorization import use_request_authorization
 
@@ -352,6 +368,49 @@ class SessionOpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(..., description="Ordered ops to apply")
 
 
+class UndoSessionActionRequest(BaseModel):
+    """Request model for undoing a session actor's latest eligible action."""
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Requesting actor's client id"
+    )
+    expected_revision: Optional[int] = Field(
+        None, description="Client's last-known seq; conflicts if the session moved on"
+    )
+
+
+class IngestSessionImageRequest(BaseModel):
+    """Request model for the human clipboard-paste / file-upload image GUI.
+
+    Mirrors the MCP ``create_image_annotation`` tool's inputs (same underlying
+    ``image_ingest``/``upsert_image_annotation`` pipeline — see
+    ``_register_session_endpoints``'s ``ingest_session_image`` handler), so a
+    human pasting or dropping an image on the canvas goes through the same
+    validated, budget-enforced ingest as an MCP agent.
+    """
+
+    client_id: str = Field(
+        ..., min_length=1, max_length=100, description="Pasting browser's client id"
+    )
+    x: float
+    y: float
+    image_data: Optional[str] = Field(
+        None, description="Image bytes as a data: URL or bare base64"
+    )
+    image_url: Optional[str] = Field(
+        None, description="http(s) URL to fetch server-side, exactly once"
+    )
+    w: Optional[float] = None
+    h: Optional[float] = None
+    rotation: Optional[float] = None
+    alt: Optional[str] = None
+    style: Optional[Dict[str, Any]] = None
+    z: Optional[float] = None
+    locked: bool = False
+    annotation_id: Optional[str] = None
+    expected_revision: Optional[int] = None
+
+
 def _resolve_stream_event(
     event: Dict[str, Any], session_manager, session_id: str
 ) -> Dict[str, Any]:
@@ -370,11 +429,106 @@ def _resolve_stream_event(
     return event
 
 
+# Stable marker distinct from any real browser `graph_client_id` (see
+# frontend/web/src/services/api.js's getClientId), attributing a human GUI
+# image-ingest op's SSE broadcast the same way _MCP_LAYOUT_CLIENT_ID in
+# mcp_tools.py attributes an MCP agent's writes. sessionSyncClient.js drops the
+# SSE echo of an op carrying the sender's own client_id (standard "don't
+# re-apply your own optimistic update" behaviour) — but this op is a server
+# round-trip (validate/optimize/embed), so the pasting browser must see the
+# server's actual outcome over the normal SSE channel, not a client-side
+# guess. Sending the op back under the browser's own client_id would make
+# that echo indistinguishable from a self-authored op and it would be
+# silently dropped, so a distinct marker is required, not optional.
+_HUMAN_IMAGE_INGEST_CLIENT_ID = "human-image-ingest"
+
+# Sanity ceiling for the raw HTTP body of one ``POST .../annotations/image``
+# request, checked from ``Content-Length`` (and, as a backstop, the actual
+# buffered body) before any parsing happens — mirrors why
+# ``apply_session_ops`` needs the same kind of pre-parse check just above: a
+# typed Pydantic body parameter lets FastAPI/Starlette read and fully parse
+# the request before this handler, or image_ingest's own size checks, ever
+# run, so an oversized payload would be fully buffered regardless of what
+# decode_image_data later rejects. The legitimate ceiling is a base64
+# ``image_data`` payload of the largest accepted source image
+# (``DEFAULT_MAX_SOURCE_IMAGE_BYTES``, 20MB): base64's 4/3 expansion plus the
+# surrounding JSON puts a real request at roughly 27MB, so this cap uses a
+# clean 2x multiple of the source limit for headroom — comfortably above
+# that so this early, coarse check cannot itself reject a legitimate upload.
+# ``decode_image_data`` still enforces the tight, exact bound once the body
+# is parsed.
+_MAX_IMAGE_INGEST_BODY_BYTES = 2 * DEFAULT_MAX_SOURCE_IMAGE_BYTES
+
+
+def _fetch_and_optimize_image(image_data: Optional[str], image_url: Optional[str]):
+    """Run the blocking fetch/decode/optimize steps of image ingest.
+
+    Both a URL fetch (network I/O, up to the ingest module's own timeout) and
+    Pillow's decode/re-encode (CPU-bound) are synchronous; the caller runs this
+    via ``asyncio.to_thread`` so a slow or malicious ``image_url`` cannot stall
+    the event loop for every other request. Mirrors the MCP
+    ``create_image_annotation`` tool's ingest call exactly, so REST and MCP
+    share one ingest path (backend/service/mcp_tools.py).
+    """
+    raw = (
+        fetch_image_bytes(image_url)
+        if image_url is not None
+        else decode_image_data(image_data)
+    )
+    return optimize_image(raw)
+
+
 def _raise_for_access_denied(result: Dict[str, Any]) -> None:
     if result.get("error_code") == "access_denied":
         raise HTTPException(
             status_code=403, detail=result.get("message") or result.get("error")
         )
+
+
+async def _read_body_within_cap(
+    http_request: Request, max_bytes: int, oversized_detail: str
+) -> bytes:
+    """Read a request body, rejecting early once it is known to exceed ``max_bytes``.
+
+    Shared by ``apply_session_ops`` and ``ingest_session_image``, both of
+    which take their body as a raw ``Request`` instead of a typed Pydantic
+    parameter specifically so this check can run *before* the request is
+    buffered — a typed body parameter would let FastAPI/Starlette read and
+    parse the whole thing first, defeating the point of a pre-parse cap.
+
+    Checks the declared ``Content-Length`` header first, so a wildly
+    oversized request is rejected without ever being read into memory; then
+    re-checks the actually-buffered length as a backstop for a request whose
+    header is missing, absent, or understates the truth (e.g. chunked
+    transfer-encoding, or a client that simply lies).
+    """
+    content_length = http_request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_bytes:
+            raise HTTPException(status_code=413, detail=oversized_detail)
+    body = await http_request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail=oversized_detail)
+    return body
+
+
+def _parse_body_or_422(model_cls, body: bytes):
+    """Parse ``body`` as ``model_cls``, matching FastAPI's default 422 shape.
+
+    Automatic body validation no longer runs once the route takes a raw
+    ``Request`` (see ``_read_body_within_cap``), so this reproduces it: a
+    list of error dicts, the same shape ``RequestValidationError`` produces.
+    ``jsonable_encoder`` handles error entries whose ``"input"`` is raw bytes
+    (e.g. an invalid-JSON error embeds the undecoded body).
+    """
+    try:
+        return model_cls.model_validate_json(body)
+    except PydanticValidationError as exc:
+        raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
 
 
 # ==================== Route Registration Helpers ====================
@@ -410,7 +564,11 @@ def _register_search_endpoints(router: APIRouter, service: GraphService) -> None
             result = service.get_node_details(node_id)
         _raise_for_access_denied(result)
         if not result.get("success", True):
-            raise HTTPException(status_code=404, detail=result.get("error"))
+            status_code = 404 if result.get("error") else 400
+            raise HTTPException(
+                status_code=status_code,
+                detail=result.get("error") or result.get("message"),
+            )
         return result
 
     @router.post("/nodes/{node_id}/related")
@@ -697,6 +855,11 @@ def _register_metadata_endpoints(router: APIRouter, service: GraphService) -> No
         """List all allowed relationship types according to schema config."""
         return service.list_relationship_types()
 
+    @router.get("/meta/relationship-applicability/audit")
+    async def audit_relationship_applicability() -> Dict[str, Any]:
+        """Report existing edges that violate relationship applicability rules."""
+        return service.audit_relationship_applicability()
+
     @router.get("/meta/subtypes")
     async def get_subtypes(
         node_type: Optional[str] = Query(None, description="Filter by node type"),
@@ -784,12 +947,23 @@ def _register_session_endpoints(
     legacy ``/sessions/{id}/state|stream`` MCP-push channel, which is unchanged.
     """
     from backend.core.session_manager import (
+        AnnotationRecentlyDeleted,
+        ImageBudgetExceeded,
+        LayoutBusy,
+        LeaseConflict,
+        NoUndoableAction,
         OpBatchTooLarge,
         RateLimited,
+        RevisionConflict,
         SessionLimitReached,
         SessionNotFound,
+        UndoConflict,
     )
-    from backend.core.session_store import OpError, is_valid_session_id
+    from backend.core.session_store import (
+        AnnotationFieldConflict,
+        OpError,
+        is_valid_session_id,
+    )
 
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
@@ -888,30 +1062,17 @@ def _register_session_endpoints(
         session_id: str, http_request: Request
     ) -> Dict[str, Any]:
         # Reject an oversized batch from the Content-Length header alone, before
-        # buffering the body — the len(json.dumps(ops)) cap in apply_ops only
-        # catches this after FastAPI has already read and parsed the whole body.
-        content_length = http_request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_length = int(content_length)
-            except ValueError:
-                declared_length = None
-            if (
-                declared_length is not None
-                and declared_length > session_manager.max_op_batch_bytes
-            ):
-                raise HTTPException(status_code=413, detail="op batch too large")
-        body = await http_request.body()
-        if len(body) > session_manager.max_op_batch_bytes:
-            raise HTTPException(status_code=413, detail="op batch too large")
-        try:
-            request = SessionOpsRequest.model_validate_json(body)
-        except PydanticValidationError as exc:
-            # Match FastAPI's default RequestValidationError shape (a list of
-            # error dicts), since automatic body validation no longer runs.
-            # jsonable_encoder handles error entries whose "input" is raw bytes
-            # (e.g. an invalid-JSON error embeds the undecoded body).
-            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors()))
+        # buffering the body — the per-op accounting in apply_ops only catches
+        # this after FastAPI has already read and parsed the whole body. This
+        # pre-parse check cannot yet tell an ordinary batch from one carrying a
+        # validated embedded image (that requires decoding the JSON), so it
+        # admits the larger `max_request_body_bytes` ceiling; apply_ops applies
+        # the tighter, per-case cap once it has parsed the ops.
+        max_body_bytes = session_manager.max_request_body_bytes
+        body = await _read_body_within_cap(
+            http_request, max_body_bytes, "op batch too large"
+        )
+        request = _parse_body_or_422(SessionOpsRequest, body)
         try:
             return await session_manager.apply_ops(
                 session_id, request.client_id, request.base_seq, request.ops
@@ -922,6 +1083,282 @@ def _register_session_endpoints(
             raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="op batch too large")
+        except LeaseConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except AnnotationFieldConflict as exc:
+            # Same 409 status as LeaseConflict (both mean "this write raced a
+            # concurrent edit, don't retry it as-is" — sessionSyncClient.js's
+            # terminal-rejection handling is shared for the whole class), but
+            # a structured `detail` object rather than a bare string: the
+            # browser distinguishes the two causes (a live edit lease vs. a
+            # genuine field-version race) to show an accurate notice instead
+            # of always claiming "someone else is editing this" — see
+            # App.jsx's onDropped.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "field_conflict",
+                    "annotation_id": exc.annotation_id,
+                    "conflicting_fields": exc.conflicts,
+                    "server_version": exc.server_version,
+                    "message": str(exc),
+                },
+            )
+        except OpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/sessions/{session_id}/annotations/image")
+    async def ingest_session_image(
+        session_id: str, http_request: Request
+    ) -> Dict[str, Any]:
+        """Human GUI clipboard-paste / file-upload image ingest.
+
+        Shares the exact validate/optimize/embed pipeline the MCP
+        ``create_image_annotation`` tool uses (``image_ingest.py`` +
+        ``SessionManager.upsert_image_annotation`` — see that tool in
+        mcp_tools.py for the sibling error-mapping), so a pasted/uploaded image
+        goes through the same server-side ingest, budgets and SSRF protections
+        as an MCP agent's. It never persists the raw ``image_url``/``image_data``
+        the caller sent, only the optimized embedded copy.
+
+        The annotation is attributed to `_HUMAN_IMAGE_INGEST_CLIENT_ID` rather
+        than `request.client_id` (see that constant's docstring for why the
+        echo would otherwise be dropped) so the pasting browser's own SSE
+        subscription (`GET .../stream`) still receives it — this response is
+        no longer the *only* path to seeing it, though: the pasting browser
+        (frontend/web/src/App.jsx's handleImageIngest) applies this response
+        to its canvas immediately, and treats the later SSE echo as a
+        delivery confirmation rather than the sole signal that the upload
+        succeeded. Other collaborators watching the same session still learn
+        of it only via that echo.
+
+        Takes the body as raw ``Request`` rather than a typed Pydantic
+        parameter — same reason as ``apply_session_ops`` above — so
+        ``_read_body_within_cap``'s Content-Length pre-check runs before
+        FastAPI/Starlette buffers and parses the whole request; a typed body
+        parameter would have already done both by the time any size check
+        could run.
+        """
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+
+        body = await _read_body_within_cap(
+            http_request, _MAX_IMAGE_INGEST_BODY_BYTES, "image upload too large"
+        )
+        request = _parse_body_or_422(IngestSessionImageRequest, body)
+
+        if bool(request.image_data) == bool(request.image_url):
+            raise HTTPException(
+                status_code=400,
+                detail="Give exactly one of image_data or image_url.",
+            )
+
+        if request.annotation_id is not None:
+            session = session_manager.get_session(session_id)
+            if session is not None:
+                existing = next(
+                    (
+                        a
+                        for a in session.state.get("annotations", [])
+                        if a.get("id") == request.annotation_id
+                    ),
+                    None,
+                )
+                if existing is not None and (
+                    not is_generic_annotation(existing)
+                    or annotation_type_of(existing) != "image"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Annotation id {request.annotation_id!r} already "
+                            "exists as a different type; image upload will not "
+                            "silently convert it."
+                        ),
+                    )
+                # This replaces an existing annotation directly (not through
+                # apply_ops, so LeaseMap enforcement there never sees it) — the
+                # pasting browser's own client_id is known here (unlike the op
+                # sent to upsert_image_annotation below, which is always
+                # attributed to the shared _HUMAN_IMAGE_INGEST_CLIENT_ID for SSE
+                # echo purposes — see that constant's docstring), so check it
+                # against the same live-lease snapshot apply_ops uses, before
+                # paying for the fetch/optimize below.
+                if existing is not None:
+                    holder = session_manager.leases.snapshot(session_id).get(
+                        request.annotation_id
+                    )
+                    if holder is not None and holder != request.client_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=str(LeaseConflict(request.annotation_id, holder)),
+                        )
+
+        try:
+            optimized = await asyncio.to_thread(
+                _fetch_and_optimize_image, request.image_data, request.image_url
+            )
+        except SourceImageTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+        except ImageFetchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except InvalidImageData as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except UnsupportedImageType as exc:
+            raise HTTPException(status_code=415, detail=str(exc))
+        except OptimizedImageTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+
+        content = {
+            "image": {
+                "url": optimized.data_url,
+                "width": optimized.width,
+                "height": optimized.height,
+            },
+            "alt": request.alt or "",
+        }
+        try:
+            annotation = build_annotation(
+                type="image",
+                x=request.x,
+                y=request.y,
+                w=request.w if request.w is not None else optimized.width,
+                h=request.h if request.h is not None else optimized.height,
+                rotation=request.rotation,
+                content=content,
+                style=request.style,
+                z=request.z,
+                locked=request.locked,
+                annotation_id=request.annotation_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Preserve the pasting browser's real identity as the annotation's
+        # human-visible creator; only the op's attribution (SSE broadcast +
+        # activity actor, passed as the second arg below) uses the dedicated
+        # marker. `SessionStore.apply_state_op` only defaults `created_by` from
+        # the op's client_id when the annotation doesn't already carry one, so
+        # setting it here keeps both facts distinct and correct.
+        annotation["created_by"] = request.client_id
+
+        try:
+            result = session_manager.upsert_image_annotation(
+                session_id,
+                _HUMAN_IMAGE_INGEST_CLIENT_ID,
+                annotation,
+                optimized_image_bytes=len(optimized.data),
+                # The lease check inside upsert_image_annotation must judge
+                # this against the real posting browser's identity, not the
+                # marker above — see lease_client_id's docstring. Without
+                # this, a browser replacing an image it holds its own lease
+                # on would be rejected as if a stranger held it.
+                lease_client_id=request.client_id,
+                # Throttle by request source, not by the marker above (which is
+                # the same string for every human upload server-wide, so it
+                # would put every user in one bucket) and not by the caller's
+                # `client_id` either: that is a browser-chosen localStorage
+                # value, so a caller could rotate it to mint an unlimited
+                # supply of fresh buckets. `_lookup_rate_key` is the same
+                # spoof-resistant source key the lookup throttle already uses,
+                # and so shares its precondition: behind a reverse proxy this
+                # separates users only if `trusted_proxy_hops` is configured
+                # for the deployment.
+                rate_limit_key=_lookup_rate_key(http_request),
+                expected_revision=request.expected_revision,
+            )
+        except RevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"expected revision {exc.expected}, session is at {exc.actual}",
+            )
+        except AnnotationRecentlyDeleted:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Annotation id {request.annotation_id!r} was just deleted "
+                    "by another collaborator; retry with a different id."
+                ),
+            )
+        except LeaseConflict as exc:
+            # The pre-check above (before the fetch/optimize step) is a
+            # fail-fast UX nicety only; this is the authoritative check
+            # inside upsert_image_annotation itself, closing the race where a
+            # lease is acquired by someone else during the awaited
+            # fetch/optimize step — see LeaseConflict's docstring. Same 409
+            # shape as apply_session_ops/undo_session_action use for this
+            # exception, so the browser's shared terminal-rejection handling
+            # (sessionSyncClient.js) applies uniformly.
+            raise HTTPException(status_code=409, detail=str(exc))
+        except LayoutBusy:
+            raise HTTPException(status_code=409, detail="session busy, retry")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        except ImageBudgetExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except OpError as exc:
+            # A same-id collision with a different type slipped past the
+            # pre-check above (a concurrent write landed in the window between
+            # that read and this write — the pre-check is a fast-path UX
+            # nicety, not the enforcement point); SessionStore.apply_state_op
+            # is the actual authority and raises OpError here instead of
+            # silently retyping the annotation.
+            raise HTTPException(status_code=409, detail=str(exc))
+
+        return {
+            "annotation": result.get("annotation"),
+            "revision": result.get("revision"),
+        }
+
+    @router.get("/sessions/{session_id}/activity")
+    async def get_session_activity(
+        session_id: str,
+        actor: Optional[str] = Query(
+            None, description="Restrict to activity by this client id"
+        ),
+        limit: int = Query(50, ge=1, le=500, description="Max records to return"),
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        try:
+            records = session_manager.list_activity(
+                session_id, actor=actor, limit=limit
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"session_id": session_id, "activity": records}
+
+    @router.post("/sessions/{session_id}/undo")
+    async def undo_session_action(
+        session_id: str, request: UndoSessionActionRequest
+    ) -> Dict[str, Any]:
+        if not is_valid_session_id(session_id):
+            raise HTTPException(status_code=400, detail="invalid session_id format")
+        try:
+            return session_manager.undo_last_action(
+                session_id,
+                request.client_id,
+                expected_revision=request.expected_revision,
+            )
+        except SessionNotFound:
+            raise HTTPException(status_code=404, detail="session not found")
+        except NoUndoableAction:
+            raise HTTPException(status_code=404, detail="no undoable action")
+        except UndoConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.reason)
+        except LeaseConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except RevisionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"expected revision {exc.expected}, session is at {exc.actual}",
+            )
+        except LayoutBusy:
+            raise HTTPException(status_code=409, detail="session busy, retry")
+        except RateLimited:
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1164,8 +1601,9 @@ def create_rest_router(
             )
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception("Error in /collect/%s endpoint", short_name)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     # Register config-driven dedicated interfaces last, after every fixed route
     # (including /collect/{short_name}), so a fixed route always wins if an

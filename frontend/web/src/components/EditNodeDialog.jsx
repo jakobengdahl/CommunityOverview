@@ -144,7 +144,7 @@ function EditNodeDialog({ node, onClose, onSave }) {
             />
             <h2>Edit {formData.type || 'Node'}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>
+          <button className="close-button" onClick={onClose} aria-label="Close">
             ×
           </button>
         </header>

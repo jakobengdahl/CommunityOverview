@@ -2,7 +2,18 @@ import { memo, useState, useRef, useEffect, useContext, useCallback } from 'reac
 import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
-import { findSnapTarget, isArrowAnchored } from '../utils/annotations';
+import {
+  findSnapTarget,
+  isArrowAnchored,
+  isRemoteLocked,
+  remoteEditBadge,
+} from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './ArrowNode.css';
 
 /**
@@ -17,7 +28,28 @@ import './ArrowNode.css';
  * Arrows never anchor to other arrows. Stored in the session's annotation list
  * (kind: "arrow").
  */
-const ARROW_COLORS = ['#e6edf3', '#FDE047', '#4ADE80', '#60A5FA', '#F472B6', '#FB923C'];
+// Black, because a connector has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// line drawn without choosing a colour is invisible, so the tool reads as
+// broken rather than as mis-coloured. Same value and same fix shape as
+// FreehandAnnotationNode's DEFAULT_FREEHAND_COLOR — the other kind whose
+// whole interaction is "draw and see a line". Not exported: unlike freehand,
+// the canvas creates an arrow with `color: undefined` and leaves the fallback
+// below as the single source, so there is no second copy to keep in step.
+const DEFAULT_ARROW_COLOR = '#111827';
+
+// DEFAULT_ARROW_COLOR leads so the picker can always return a line to the
+// colour it was created with; '#e6edf3' stays available for a dark background.
+const ARROW_COLORS = [
+  DEFAULT_ARROW_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
 const PAD = 12;
 
 function ArrowNode({ id, data, selected }) {
@@ -25,7 +57,21 @@ function ArrowNode({ id, data, selected }) {
   const contextMenuRef = useRef(null);
   const draggingRef = useRef(null);
   const { setNodes, screenToFlowPosition, getNodes } = useReactFlow();
-  const { notifyChange, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, beginEditing, endEditing } =
+    useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
+  const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -54,28 +100,59 @@ function ArrowNode({ id, data, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, ...patch };
-        return { ...n, data: nextData, draggable: !isArrowAnchored(nextData) };
+        return { ...n, data: nextData, draggable: !nextData.locked && !isArrowAnchored(nextData) };
       })
     );
   };
 
   const changeColor = (color) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     patchData({ color });
     setContextMenu(null);
-    notifyChange();
+    notifyChange('style');
   };
 
   const toggleHead = (end) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) =>
       nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, [end]: !n.data[end] } } : n))
     );
-    notifyChange();
+    notifyChange('style');
   };
 
   const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
-    notifyChange();
+    notifyChange('delete');
+  };
+
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate — matching
+  // NoteNode/LabelNode/GenericAnnotationNode/FreehandAnnotationNode, which
+  // have had this branch all along. Until this existed a locked line was the
+  // one annotation kind whose menu still recoloured, toggled arrowheads and
+  // deleted, and the one with no way to unlock from the GUI at all.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    patchData({ locked: false });
+    setContextMenu(null);
+    notifyChange('style');
   };
 
   // Move one endpoint to a new flow-coordinate point, snapping onto a nearby
@@ -96,6 +173,7 @@ function ArrowNode({ id, data, selected }) {
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id !== id) return n;
+          if (n.data?.locked || isRemoteLocked(n.data)) return n;
           const dx = Number(n.data.dx ?? 160);
           const dy = Number(n.data.dy ?? 0);
           let position = n.position;
@@ -111,7 +189,12 @@ function ArrowNode({ id, data, selected }) {
             nextData.dy = snapPoint.y - n.position.y;
             nextData.endAnchor = targetId || undefined;
           }
-          return { ...n, position, data: nextData, draggable: !isArrowAnchored(nextData) };
+          return {
+            ...n,
+            position,
+            data: nextData,
+            draggable: !nextData.locked && !isArrowAnchored(nextData),
+          };
         })
       );
     },
@@ -126,6 +209,15 @@ function ArrowNode({ id, data, selected }) {
   const startEndpointDrag = (endpoint) => (e) => {
     e.stopPropagation();
     e.preventDefault();
+    if (data.locked || remoteLocked) {
+      if (remoteLocked) notifyRemoteLockedAttempt();
+      return;
+    }
+    // Geometry gesture (task-annotation-exclusive-edit-leases): acquired
+    // fire-and-forget at drag start (the pointer-driven drag already begins
+    // visually here, same reasoning as NodeResizer's onResizeStart
+    // elsewhere) and released when the gesture ends.
+    beginEditing?.([id]);
     draggingRef.current = endpoint;
     const handleMove = (ev) => {
       const flowPoint = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
@@ -140,7 +232,8 @@ function ArrowNode({ id, data, selected }) {
     };
     const handleUp = () => {
       teardown();
-      notifyChange();
+      notifyChange('geometry');
+      endEditing?.([id]);
     };
     dragTeardownRef.current = teardown;
     window.addEventListener('pointermove', handleMove, true);
@@ -150,9 +243,12 @@ function ArrowNode({ id, data, selected }) {
 
   const dx = Number(data.dx ?? 160);
   const dy = Number(data.dy ?? 0);
-  const color = data.color || ARROW_COLORS[0];
+  const color = data.color || DEFAULT_ARROW_COLOR;
+  const opacity = Number.isFinite(data.opacity) ? data.opacity : 1;
+  const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
+  const badge = remoteEditBadge(data);
 
   const boxW = Math.abs(dx) + PAD * 2;
   const boxH = Math.abs(dy) + PAD * 2;
@@ -170,9 +266,26 @@ function ArrowNode({ id, data, selected }) {
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {badge && (
+          <div
+            className="graph-node-remote-badge"
+            style={{
+              backgroundColor: badge.color,
+              left: originX - 2,
+              top: originY - 11,
+            }}
+            title={badge.displayName}
+          >
+            {badge.displayName}
+          </div>
+        )}
         <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
           <defs>
             <marker
@@ -207,17 +320,24 @@ function ArrowNode({ id, data, selected }) {
             stroke="transparent"
             strokeWidth={16}
           />
-          <line
-            x1={originX}
-            y1={originY}
-            x2={endX}
-            y2={endY}
-            stroke={color}
-            strokeWidth={2.5}
-            markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
-            markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
-          />
-          {selected && (
+          {/* Opacity (task-annotation-responsive-bottom-toolbox) applies only
+              to the painted line — the transparent hit target above and the
+              endpoint handles below stay fully interactive/visible whatever
+              the arrow's opacity, matching FreehandAnnotationNode's own
+              `<g className="graph-freehand-stroke" opacity={opacity}>`. */}
+          <g opacity={opacity}>
+            <line
+              x1={originX}
+              y1={originY}
+              x2={endX}
+              y2={endY}
+              stroke={color}
+              strokeWidth={2.5}
+              markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
+              markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
+            />
+          </g>
+          {selected && !locked && !remoteLocked && (
             <>
               <circle
                 className="graph-arrow-handle nodrag"
@@ -245,38 +365,87 @@ function ArrowNode({ id, data, selected }) {
           )}
         </svg>
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected. An arrow has no box to anchor a corner to, so
+          this sits near the flow-position origin (the arrow's start point;
+          `overlayToFlowNode` puts the ReactFlow node there) rather than any
+          particular visual corner — a sibling of `.graph-arrow-node`, so its
+          own `marginLeft`/`marginTop` origin shift does not apply to it. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger annotation-edit-trigger-arrow nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
-            <div className="context-menu-title">{labels.color}</div>
-            <div className="context-menu-colors">
-              {ARROW_COLORS.map((c) => (
-                <button
-                  key={c}
-                  className="color-button"
-                  style={{ backgroundColor: c }}
-                  onClick={() => changeColor(c)}
+            {locked ? (
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.color}</div>
+                <div className="context-menu-colors">
+                  {ARROW_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className={`color-button${color === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      onClick={() => changeColor(c)}
+                    />
+                  ))}
+                </div>
+                <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
+                  <span>{labels.arrowStartHead}</span>
+                  <span>{startArrow ? '✔' : ''}</span>
+                </button>
+                <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
+                  <span>{labels.arrowEndHead}</span>
+                  <span>{endArrow ? '✔' : ''}</span>
+                </button>
+                <AnnotationOpacityControl
+                  labels={labels}
+                  opacity={opacity}
+                  onChangeOpacity={changeOpacity}
                 />
-              ))}
-            </div>
-            <button className="context-menu-toggle" onClick={() => toggleHead('startArrow')}>
-              <span>{labels.arrowStartHead}</span>
-              <span>{startArrow ? '✔' : ''}</span>
-            </button>
-            <button className="context-menu-toggle" onClick={() => toggleHead('endArrow')}>
-              <span>{labels.arrowEndHead}</span>
-              <span>{endArrow ? '✔' : ''}</span>
-            </button>
-            <button className="context-menu-delete" onClick={remove}>
-              🗑️ {labels.delete}
-            </button>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+                <button className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
+                </button>
+              </>
+            )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

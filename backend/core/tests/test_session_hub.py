@@ -7,7 +7,12 @@ presence roster/colour assignment, and selection-claim TTL/release.
 import asyncio
 import threading
 
-from backend.core.session_hub import ClaimMap, InProcessEventBus, PresenceRegistry
+from backend.core.session_hub import (
+    ClaimMap,
+    InProcessEventBus,
+    LeaseMap,
+    PresenceRegistry,
+)
 
 
 class TestInProcessEventBus:
@@ -216,3 +221,75 @@ class TestClaimMap:
         cm.claim("1234-5678", "c1", ["n1"])
         clock["t"] = 31.0
         assert cm.snapshot("1234-5678") == {}
+
+
+class TestLeaseMap:
+    """Unit coverage for ``LeaseMap`` itself (task-annotation-exclusive-edit-
+    leases) — first-holder-wins acquisition, as opposed to ``ClaimMap``'s LWW
+    takeover above. ``backend/core/tests/test_session_manager.py``'s
+    ``TestLeaseAcquisition``/``TestLeaseEnforcement`` cover the same
+    semantics exercised through the real ``apply_ops`` batch path.
+    """
+
+    def test_acquire_and_snapshot(self):
+        lm = LeaseMap()
+        granted, denied = lm.acquire("1234-5678", "c1", ["n1", "n2"])
+        assert granted == ["n1", "n2"]
+        assert denied == {}
+        assert lm.snapshot("1234-5678") == {"n1": "c1", "n2": "c1"}
+
+    def test_second_client_is_denied_not_given_a_takeover(self):
+        lm = LeaseMap()
+        lm.acquire("1234-5678", "c1", ["n1"])
+        granted, denied = lm.acquire("1234-5678", "c2", ["n1"])
+        assert granted == []
+        assert denied == {"n1": "c1"}
+        # Unlike ClaimMap.claim (LWW), the first holder is unaffected.
+        assert lm.snapshot("1234-5678") == {"n1": "c1"}
+
+    def test_same_client_reacquiring_renews(self):
+        clock = {"t": 0.0}
+        lm = LeaseMap(ttl=30.0, time_fn=lambda: clock["t"])
+        lm.acquire("1234-5678", "c1", ["n1"])
+        clock["t"] = 25.0
+        granted, denied = lm.acquire("1234-5678", "c1", ["n1"])
+        assert granted == ["n1"]
+        assert denied == {}
+        clock["t"] = 50.0  # 50s since first acquire, but 25s since the renewal
+        assert lm.snapshot("1234-5678") == {"n1": "c1"}
+
+    def test_partial_grant_across_a_mixed_batch(self):
+        lm = LeaseMap()
+        lm.acquire("1234-5678", "c1", ["n1"])
+        granted, denied = lm.acquire("1234-5678", "c2", ["n1", "n2"])
+        assert granted == ["n2"]
+        assert denied == {"n1": "c1"}
+        assert lm.snapshot("1234-5678") == {"n1": "c1", "n2": "c2"}
+
+    def test_release_only_own_lease(self):
+        lm = LeaseMap()
+        lm.acquire("1234-5678", "c1", ["n1"])
+        released = lm.release("1234-5678", "c2", ["n1"])
+        assert released == []
+        assert lm.snapshot("1234-5678") == {"n1": "c1"}
+        released = lm.release("1234-5678", "c1", ["n1"])
+        assert released == ["n1"]
+        assert lm.snapshot("1234-5678") == {}
+
+    def test_release_all_on_disconnect(self):
+        lm = LeaseMap()
+        lm.acquire("1234-5678", "c1", ["n1", "n2"])
+        lm.acquire("1234-5678", "c2", ["n3"])
+        released = lm.release_all("1234-5678", "c1")
+        assert set(released) == {"n1", "n2"}
+        assert lm.snapshot("1234-5678") == {"n3": "c2"}
+
+    def test_ttl_expiry_reopens_acquisition(self):
+        clock = {"t": 0.0}
+        lm = LeaseMap(ttl=30.0, time_fn=lambda: clock["t"])
+        lm.acquire("1234-5678", "c1", ["n1"])
+        clock["t"] = 31.0
+        assert lm.snapshot("1234-5678") == {}
+        granted, denied = lm.acquire("1234-5678", "c2", ["n1"])
+        assert granted == ["n1"]
+        assert denied == {}

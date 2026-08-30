@@ -209,6 +209,40 @@ class TestStateOps:
         self._apply(store, s, {"op": "edges_hidden", "edge_ids": ["e1"]})
         assert s.state["hidden_edge_ids"] == ["e1"]
 
+    def test_dim_restore_nodes_and_edges(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(store, s, {"op": "nodes_dimmed", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_undimmed", "node_ids": ["a"]})
+        assert s.state["dimmed_node_ids"] == ["b"]
+        self._apply(store, s, {"op": "edges_dimmed", "edge_ids": ["e1", "e2"]})
+        self._apply(store, s, {"op": "edges_undimmed", "edge_ids": ["e2"]})
+        assert s.state["dimmed_edge_ids"] == ["e1"]
+
+    def test_nodes_removed_also_cleans_dimmed_node_ids(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(store, s, {"op": "nodes_added", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_dimmed", "node_ids": ["a", "b"]})
+        self._apply(store, s, {"op": "nodes_removed", "node_ids": ["a"]})
+        assert s.state["dimmed_node_ids"] == ["b"]
+
+    def test_edge_intensity_set_clamps_and_defaults_to_full(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        assert s.state["edge_intensity"] == 1.0
+        applied = self._apply(store, s, {"op": "edge_intensity_set", "value": 0.4})
+        assert applied["value"] == 0.4
+        assert s.state["edge_intensity"] == 0.4
+        # Out-of-range values clamp rather than raise, so a slightly stale
+        # client cannot fail the whole batch on a cosmetic overshoot.
+        self._apply(store, s, {"op": "edge_intensity_set", "value": 5})
+        assert s.state["edge_intensity"] == 1.0
+        self._apply(store, s, {"op": "edge_intensity_set", "value": -2})
+        assert s.state["edge_intensity"] == 0.0
+        with pytest.raises(OpError):
+            self._apply(store, s, {"op": "edge_intensity_set", "value": "bright"})
+
     def test_annotation_created_assigns_id(self, tmp_path):
         store = _store(tmp_path)
         s = store.create()
@@ -218,7 +252,38 @@ class TestStateOps:
             {"op": "annotation_created", "annotation": {"kind": "note", "text": "hi"}},
         )
         assert isinstance(applied["annotation"]["id"], str)
+        assert applied["annotation"]["type"] == "note"
         assert s.state["annotations"][0]["text"] == "hi"
+
+    def test_annotation_created_accepts_v1_types_and_migrates_arrow_alias(
+        self, tmp_path
+    ):
+        store = _store(tmp_path)
+        s = store.create()
+        line = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {
+                    "id": "line-1",
+                    "type": "line",
+                    "from": {"x": 0, "y": 0},
+                    "to": {"x": 1, "y": 1},
+                },
+            },
+        )
+        arrow = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "arrow-1", "kind": "arrow"},
+            },
+        )
+        assert line["annotation"]["kind"] == "line"
+        assert arrow["annotation"]["type"] == "line"
+        assert [a["id"] for a in s.state["annotations"]] == ["line-1", "arrow-1"]
 
     def test_annotation_created_retry_with_same_id_upserts_not_duplicates(
         self, tmp_path
@@ -265,6 +330,79 @@ class TestStateOps:
         )
         assert result is None
         assert s.seq == seq_before  # dropped op must not advance seq
+
+    def test_annotation_created_upsert_rejects_type_change(self, tmp_path):
+        """A create-op that upserts by id (existing id, new content) must not
+        be able to retype the annotation — that must go through delete +
+        create, which is an explicit, visible two-step action."""
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "ann-1", "type": "line", "to": {"x": 1, "y": 1}},
+            },
+        )
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "ann-1", "type": "shape"},
+                },
+            )
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
+
+    def test_annotation_updated_rejects_type_change(self, tmp_path):
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"type": "line", "to": {"x": 1, "y": 1}},
+            },
+        )
+        ann_id = applied["annotation"]["id"]
+        seq_before = s.seq
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": ann_id, "type": "shape"},
+                },
+            )
+        assert s.seq == seq_before
+        assert s.state["annotations"][0]["type"] == "line"
+
+    def test_annotation_updated_rejects_type_change_via_kind_alias(self, tmp_path):
+        """The legacy `arrow` alias resolves to `line`; a stored `line`
+        annotation must still be protected even when the incoming patch
+        spells its (different) type via `kind` instead of `type`."""
+        store = _store(tmp_path)
+        s = store.create()
+        applied = self._apply(
+            store, s, {"op": "annotation_created", "annotation": {"kind": "note"}}
+        )
+        ann_id = applied["annotation"]["id"]
+        with pytest.raises(OpError):
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": ann_id, "kind": "arrow"},
+                },
+            )
+        assert s.state["annotations"][0]["type"] == "note"
 
     def test_group_membership_changed_requires_group(self, tmp_path):
         store = _store(tmp_path)

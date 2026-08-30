@@ -86,7 +86,17 @@ def build_schema_context(schema: Dict[str, Any]) -> str:
         lines.append("\nRelationship types (use ONLY these exact type names):")
         for type_name, type_config in rel_types.items():
             desc = type_config.get("description", "")
+            source_types = type_config.get("source_types") or []
+            target_types = type_config.get("target_types") or []
+            rule_parts = []
+            if source_types:
+                rule_parts.append(f"source_types=[{', '.join(source_types)}]")
+            if target_types:
+                rule_parts.append(f"target_types=[{', '.join(target_types)}]")
+            rules = f" ({'; '.join(rule_parts)})" if rule_parts else ""
             lines.append(f"  - {type_name}: {desc}")
+            if rules:
+                lines[-1] += rules
 
     # Node structure reference
     lines.append("""
@@ -103,6 +113,7 @@ Field limits:
 
 Edge type is OPTIONAL. If omitted, the edge defaults to "RELATES_TO" (a general connection).
 You may specify a type from the relationship types list above when a more specific relationship is known.
+When a relationship type lists source_types or target_types, respect those directed applicability rules. "*" means any node type.
 --- END SCHEMA ---""")
 
     return "\n".join(lines)

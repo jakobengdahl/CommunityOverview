@@ -52,20 +52,44 @@ const MAX_BATCH_BYTES = 240 * 1024;
 // the same at-least-once retry the pre-existing network-error path already did.
 // Resends are safe: set ops and moves are idempotent and annotation_created is
 // an upsert-by-id server-side (R3), so a resend after a lost response converges.
-const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+// Exported so App.jsx's reconnect-resync reentrancy guard (resyncFromServer,
+// task fbd32fc9) can bound its own api.getSession() call by the same value
+// rather than duplicating the number — the two exist for the same reason
+// (api.js's fetch has no timeout of its own) and must not silently drift
+// apart (review round 6).
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
-// Selection claims are advisory soft-locks (design 3.5). The server expires a
+// Selection claims are a purely cosmetic presence marker (design 3.5) — never
+// an edit lock (task-annotation-exclusive-edit-leases). The server expires a
 // claim 30 s after its last renewal; the local client renews well inside that
 // window and mirrors the same TTL so a departed collaborator's marker never
 // lingers even if its disconnect event is missed.
 const CLAIM_TTL_MS = 30_000;
 const CLAIM_RENEW_MS = 15_000;
 
+// Edit leases are the exclusive mechanism a write is actually checked
+// against (task-annotation-exclusive-edit-leases): acquired only when real
+// editing starts, first-actual-editor-wins, never on mere selection. Same
+// TTL/renewal cadence as the (unrelated) selection claim above — both mirror
+// the server's 30 s lease/claim TTL — but tracked and renewed independently,
+// since a client can select something without editing it and vice versa
+// (briefly, for an edit-start entry point like a bulk action that never
+// shows a selection outline at all).
+const LEASE_TTL_MS = 30_000;
+const LEASE_RENEW_MS = 15_000;
+
 const EMPTY_MIRROR = Object.freeze({
   node_refs: [],
   positions: {},
   hidden_node_ids: [],
   hidden_edge_ids: [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden_*) but render at reduced prominence;
+  // edge_intensity is the session's global baseline opacity for every
+  // non-dimmed edge. Diffed/applied the same way as the hidden_* sets below.
+  dimmed_node_ids: [],
+  dimmed_edge_ids: [],
+  edge_intensity: 1.0,
   annotations: [],
 });
 
@@ -89,11 +113,15 @@ export function normalizeMirror(state) {
       positions[id] = roundPos(pos);
     }
   }
+  const intensity = Number(s.edge_intensity);
   return {
     node_refs: Array.from(new Set(s.node_refs || [])),
     positions,
     hidden_node_ids: Array.from(new Set(s.hidden_node_ids || [])),
     hidden_edge_ids: Array.from(new Set(s.hidden_edge_ids || [])),
+    dimmed_node_ids: Array.from(new Set(s.dimmed_node_ids || [])),
+    dimmed_edge_ids: Array.from(new Set(s.dimmed_edge_ids || [])),
+    edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: Array.isArray(s.annotations) ? s.annotations : [],
   };
 }
@@ -115,15 +143,66 @@ function canonical(value) {
   return value;
 }
 
+// Server-owned bookkeeping (dec-annotation-field-patches-and-conflicts,
+// session_store.py's _ANNOTATION_META_FIELDS): never diffed as "content" —
+// `version`/`field_versions` change on every remote op regardless of what
+// this client edited, and `updated_at`/`created_by` were already excluded
+// for the same reason. Diffing them would make every incoming remote update
+// look like a further local change and re-publish a no-op patch forever.
+const ANNOTATION_META_FIELDS = new Set([
+  'id',
+  'type',
+  'kind',
+  'version',
+  'field_versions',
+  'updated_at',
+  'created_by',
+]);
+
 function annotationsEqual(a, b, { ignoreMembers = false } = {}) {
   const strip = (ann) => {
     const copy = { ...ann };
     delete copy.updated_at;
     delete copy.created_by;
+    delete copy.version;
+    delete copy.field_versions;
     if (ignoreMembers) delete copy.member_node_ids;
     return copy;
   };
   return JSON.stringify(canonical(strip(a))) === JSON.stringify(canonical(strip(b)));
+}
+
+/**
+ * Compute the field-level patch that turns `before` (the last-synced
+ * baseline) into `next` (the current local canvas value) — only the keys
+ * that actually differ, plus the id/type/kind every `annotation_updated` op
+ * must carry to identify and validate its target.
+ *
+ * This is the fix for the whole-annotation clobber
+ * (smallfix-whole-annotation-clobber-on-concurrent-different-field-edit):
+ * the browser previously always resent the *whole* `next` object on any
+ * change, so a field this client never touched — but whose local mirror
+ * simply had not yet caught up with a concurrent peer's edit — rode along
+ * and silently overwrote that peer's change. Sending only genuinely-changed
+ * keys means an untouched field is never in the outgoing patch at all, so
+ * there is nothing for it to clobber. Paired with `base_version` (the
+ * annotation's version as of `before`), the server can additionally tell a
+ * field this client is *trying* to change apart from one merely present —
+ * see docs/ANNOTATION_CONTRACT.md's "Two-client conflict matrix".
+ */
+export function diffAnnotationFields(before, next, { ignoreMembers = false } = {}) {
+  const patch = { id: next.id, type: next.type, kind: next.kind };
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(next || {})]);
+  for (const key of keys) {
+    if (ANNOTATION_META_FIELDS.has(key)) continue;
+    if (ignoreMembers && key === 'member_node_ids') continue;
+    const beforeValue = canonical(before ? before[key] : undefined);
+    const nextValue = canonical(next[key]);
+    if (JSON.stringify(beforeValue) !== JSON.stringify(nextValue)) {
+      patch[key] = next[key];
+    }
+  }
+  return patch;
 }
 
 /**
@@ -170,6 +249,20 @@ export function computeOps(prevState, nextState) {
   if (edgeHiddenAdded.length) ops.push({ op: 'edges_hidden', edge_ids: edgeHiddenAdded });
   if (edgeHiddenRemoved.length) ops.push({ op: 'edges_shown', edge_ids: edgeHiddenRemoved });
 
+  const nodeDimmedAdded = diffAdded(prev.dimmed_node_ids, next.dimmed_node_ids);
+  const nodeDimmedRemoved = diffAdded(next.dimmed_node_ids, prev.dimmed_node_ids);
+  if (nodeDimmedAdded.length) ops.push({ op: 'nodes_dimmed', node_ids: nodeDimmedAdded });
+  if (nodeDimmedRemoved.length) ops.push({ op: 'nodes_undimmed', node_ids: nodeDimmedRemoved });
+
+  const edgeDimmedAdded = diffAdded(prev.dimmed_edge_ids, next.dimmed_edge_ids);
+  const edgeDimmedRemoved = diffAdded(next.dimmed_edge_ids, prev.dimmed_edge_ids);
+  if (edgeDimmedAdded.length) ops.push({ op: 'edges_dimmed', edge_ids: edgeDimmedAdded });
+  if (edgeDimmedRemoved.length) ops.push({ op: 'edges_undimmed', edge_ids: edgeDimmedRemoved });
+
+  if (next.edge_intensity !== prev.edge_intensity) {
+    ops.push({ op: 'edge_intensity_set', value: next.edge_intensity });
+  }
+
   // Annotations, keyed by id.
   const prevAnn = new Map(prev.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
   const nextAnn = new Map(next.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
@@ -187,10 +280,18 @@ export function computeOps(prevState, nextState) {
         ops.push({ op: 'group_membership_changed', group_id: id, member_node_ids: nextMembers });
       }
       if (!annotationsEqual(before, ann, { ignoreMembers: true })) {
-        ops.push({ op: 'annotation_updated', annotation: ann });
+        ops.push({
+          op: 'annotation_updated',
+          annotation: diffAnnotationFields(before, ann, { ignoreMembers: true }),
+          base_version: before.version,
+        });
       }
     } else if (!annotationsEqual(before, ann)) {
-      ops.push({ op: 'annotation_updated', annotation: ann });
+      ops.push({
+        op: 'annotation_updated',
+        annotation: diffAnnotationFields(before, ann),
+        base_version: before.version,
+      });
     }
   }
   for (const id of prevAnn.keys()) {
@@ -220,6 +321,7 @@ export function applyOpToMirror(mirrorState, op) {
       m.node_refs = m.node_refs.filter((id) => !drop.has(id));
       m.positions = Object.fromEntries(Object.entries(m.positions).filter(([id]) => !drop.has(id)));
       m.hidden_node_ids = m.hidden_node_ids.filter((id) => !drop.has(id));
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
       m.annotations = m.annotations.map((a) =>
         Array.isArray(a.member_node_ids)
           ? { ...a, member_node_ids: a.member_node_ids.filter((id) => !drop.has(id)) }
@@ -257,6 +359,25 @@ export function applyOpToMirror(mirrorState, op) {
       m.hidden_edge_ids = m.hidden_edge_ids.filter((id) => !drop.has(id));
       break;
     }
+    case 'nodes_dimmed':
+      m.dimmed_node_ids = Array.from(new Set([...m.dimmed_node_ids, ...(op.node_ids || [])]));
+      break;
+    case 'nodes_undimmed': {
+      const drop = new Set(op.node_ids || []);
+      m.dimmed_node_ids = m.dimmed_node_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edges_dimmed':
+      m.dimmed_edge_ids = Array.from(new Set([...m.dimmed_edge_ids, ...(op.edge_ids || [])]));
+      break;
+    case 'edges_undimmed': {
+      const drop = new Set(op.edge_ids || []);
+      m.dimmed_edge_ids = m.dimmed_edge_ids.filter((id) => !drop.has(id));
+      break;
+    }
+    case 'edge_intensity_set':
+      if (typeof op.value === 'number') m.edge_intensity = Math.max(0, Math.min(1, op.value));
+      break;
     case 'annotation_created':
     case 'annotation_updated': {
       const ann = op.annotation;
@@ -287,6 +408,230 @@ export function applyOpToMirror(mirrorState, op) {
   return m;
 }
 
+/**
+ * Return `nextState` with every annotation's `version`/`field_versions` set
+ * to what this client will treat as current once `ops` (about to be
+ * enqueued — see `syncState`) are sent.
+ *
+ * A touched annotation (one `ops` carries an `annotation_created` or
+ * `annotation_updated` for) gets the version the server is expected to bump
+ * it to — mirroring `session_store.py`'s own bump exactly: new version =
+ * the baseline's prior version + 1; `field_versions[k]` = that new version
+ * for every key the outgoing patch actually touches, never one it does not.
+ * A brand new `annotation_created` (no baseline entry for the id yet)
+ * predicts version 1 / empty `field_versions`, matching the server's
+ * fresh-annotation branch — `group_membership_changed` never bumps version
+ * server-side and is not one of the two op types this function acts on.
+ *
+ * This closes the same-client self-conflict race (round 2 review,
+ * dec-annotation-field-patches-and-conflicts): `annotationChangeScheduler.js`
+ * publishes `style`/`geometry`/`create`/`delete` immediately, with no
+ * debounce, so two rapid edits to the *same* field both get computed before
+ * either's ack lands. Assigning `this._baseline = nextState` verbatim (the
+ * pre-fix behaviour) would leave the baseline's version/field_versions at
+ * whatever the *canvas* last had — which only learns the fresh value
+ * asynchronously, through the ack round-trip (`onLocalAnnotationsApplied`)
+ * — so the second edit would read back the same pre-send version and send
+ * an identical, already-stale `base_version`, and the server would refuse
+ * the batch as a conflict against no one but this client's own prior write.
+ *
+ * An annotation `ops` does *not* touch this round keeps the *baseline's*
+ * own version/field_versions rather than `nextState`'s: the internal
+ * baseline is updated synchronously the moment either a local send is
+ * predicted (this function, on the previous call) or a remote op arrives
+ * (`_handleEvent`'s `'op'` case), so it is always at least as current as the
+ * canvas for these two fields — taking the canvas's copy here instead would
+ * silently undo whatever an earlier call already predicted for it before
+ * the canvas caught up.
+ */
+export function predictAnnotationVersionsForSend(baselineState, nextState, ops) {
+  const baseline = normalizeMirror(baselineState);
+  const next = normalizeMirror(nextState);
+  const baselineAnn = new Map(baseline.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
+  const predicted = new Map();
+  for (const op of ops || []) {
+    if (op.op !== 'annotation_created' && op.op !== 'annotation_updated') continue;
+    const patch = op.annotation;
+    if (!patch || !patch.id) continue;
+    const before = baselineAnn.get(patch.id);
+    if (op.op === 'annotation_created' && !before) {
+      predicted.set(patch.id, { version: 1, field_versions: {} });
+      continue;
+    }
+    const version = (Number(before?.version) || 1) + 1;
+    const field_versions = { ...(before?.field_versions || {}) };
+    for (const key of Object.keys(patch)) {
+      if (key === 'id' || key === 'type' || key === 'kind') continue;
+      field_versions[key] = version;
+    }
+    predicted.set(patch.id, { version, field_versions });
+  }
+  next.annotations = next.annotations.map((a) => {
+    if (!a || !a.id) return a;
+    const override = predicted.get(a.id);
+    if (override) return { ...a, ...override };
+    const known = baselineAnn.get(a.id);
+    if (!known) return a;
+    return { ...a, version: known.version, field_versions: known.field_versions };
+  });
+  return next;
+}
+
+/**
+ * Fold one just-acked `annotation_created`/`annotation_updated` result onto
+ * the baseline the same way `applyOpToMirror` always has — except `version`
+ * and `field_versions` are merged to the *higher* of what the baseline
+ * already holds and what this ack reports, never regressed to the ack's
+ * value outright.
+ *
+ * A later, still-unacked local edit to the *same* annotation may already
+ * have advanced the baseline past what this ack knows about: the ack is
+ * only authoritative as of the *earlier* op it is acking, computed and sent
+ * before that later op existed (see `predictAnnotationVersionsForSend`,
+ * which is what put that further-advanced value there). Overwriting it here
+ * would wipe an already-baked, already-sent prediction — including a
+ * `field_versions` entry for a field only that later op touched, which this
+ * ack's response never mentions at all — and reintroduce the same
+ * self-conflict race this whole mechanism exists to close, once the later
+ * op's own ack arrives and the server's per-field check runs against a
+ * version this client had already moved past locally.
+ *
+ * Every other field (the annotation's actual content) is still taken from
+ * the ack as-is via `applyOpToMirror`, unchanged from before this function
+ * existed — a real content-ordering question `_flush`'s success branch
+ * already had before this task and out of this fix's scope.
+ */
+export function foldAckedAnnotationOp(mirrorState, op) {
+  const mirror = normalizeMirror(mirrorState);
+  const ann = op && op.annotation;
+  if (!ann || !ann.id) return applyOpToMirror(mirror, op);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return applyOpToMirror(mirror, op);
+  const version = Math.max(Number(current.version) || 0, Number(ann.version) || 0);
+  const field_versions = { ...(current.field_versions || {}) };
+  for (const [field, v] of Object.entries(ann.field_versions || {})) {
+    const nv = Number(v) || 0;
+    if (nv > (field_versions[field] || 0)) field_versions[field] = nv;
+  }
+  return applyOpToMirror(mirror, { ...op, annotation: { ...ann, version, field_versions } });
+}
+
+/**
+ * Whether an `annotation_created`/`annotation_updated` op is stale/reordered
+ * relative to what `mirrorState`'s baseline already holds for that
+ * annotation — the exact predicate `foldRemoteAnnotationOp` (below) uses to
+ * decide whether to drop an incoming remote op atomically, factored out on
+ * its own (round 5, smallfix-applyremoteop-canvas-no-version-guard) so
+ * `_handleEvent`'s `'op'` case can gate delivery to `onRemoteOps` — and so
+ * ultimately reach the *canvas* App.jsx renders from it — on the very same
+ * decision, rather than adding a second, independently-drifting
+ * reimplementation of this comparison at the canvas layer (a third one,
+ * after `foldAckedAnnotationOp`'s own differently-scoped merge, would have
+ * been a fourth-order repeat of the same bug class this whole four-round
+ * chain exists to close: two guards that *should* always agree but are
+ * free, by construction, to quietly stop agreeing).
+ *
+ * A non-annotation op, an op with no `annotation.id`, an id the mirror has
+ * no entry for yet (a fresh annotation — round 3's "no baseline entry"
+ * rule), or a version that cannot be compared as a finite number, all read
+ * as "not stale": the caller should apply normally. See
+ * `foldRemoteAnnotationOp`'s own docstring below for the full reasoning on
+ * why a strictly lower version means the whole incoming record — content
+ * included — is already superseded.
+ */
+export function isAnnotationOpStale(mirrorState, op) {
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') return false;
+  const ann = op.annotation;
+  if (!ann || !ann.id) return false;
+  const mirror = normalizeMirror(mirrorState);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return false;
+  const incomingVersion = Number(ann.version);
+  const currentVersion = Number(current.version) || 0;
+  return Number.isFinite(incomingVersion) && incomingVersion < currentVersion;
+}
+
+/**
+ * Apply a remote `annotation_created`/`annotation_updated` broadcast to the
+ * baseline, refusing to let it regress an annotation this client already
+ * has newer data for. Sole caller: `_handleEvent`'s `'op'` case, for an op
+ * attributed to a genuinely different client — never this client's own
+ * (that echo is filtered before reaching here, see the "echo of our own
+ * op" check just above that call site).
+ *
+ * Round 3 review, following the same-client race fix in
+ * `foldAckedAnnotationOp` (round 2): the SSE stream and this client's own
+ * POST-ack channel have no cross-ordering guarantee (see the R15 comment on
+ * `_appliedSeq` above — a concurrent op's broadcast can still be in flight
+ * on a separate HTTP connection when this client's own later op's ack
+ * already landed). So a genuinely different client's broadcast for a
+ * chronologically EARLIER op can arrive after this client's own
+ * already-acked LATER op on the same annotation, and — applied
+ * unconditionally via plain `applyOpToMirror`, as before this fix — would
+ * silently regress both `version`/`field_versions` and content back to that
+ * earlier point, reintroducing the exact spurious `field_conflict` the
+ * whole round-2 mechanism exists to close, this time from a genuine
+ * two-client interleaving rather than a same-client race.
+ *
+ * This function is deliberately NOT `foldAckedAnnotationOp` reused
+ * unmodified: that function max-merges `version`/`field_versions` but still
+ * overwrites content unconditionally (documented in its own docstring as an
+ * accepted, separately-tracked gap for the ack path, where the content is
+ * always this client's own trustworthy write). Reusing it here would fix
+ * the version regression but still let a stale broadcast's stale content
+ * overwrite fresher confirmed fields — version:3 but a field's value
+ * reverted to its version-2 content, an internally inconsistent record.
+ * Every `annotation_created`/`annotation_updated` op the server emits
+ * carries the FULL current record (`session_store.py` mutates the one
+ * server-side object in place and hands back the whole thing, never a
+ * diff — see `applied["annotation"] = target`), so a lower `version` than
+ * the baseline already holds means the ENTIRE incoming record is already a
+ * strictly older, superseded snapshot: there is no field in it the
+ * baseline's newer snapshot does not already have at least as current,
+ * because the server applies ops for one annotation strictly in sequence
+ * against that single shared object — whichever of two ops actually landed
+ * first server-side is already folded into whichever landed second. So
+ * rejecting the whole stale op atomically (rather than merging it in
+ * field-by-field against its own `field_versions`) is not just simpler but
+ * more correct here: a per-field merge would compare the incoming op's
+ * server-assigned version numbers against a baseline that can itself be a
+ * locally *predicted*, not-yet-confirmed version
+ * (`predictAnnotationVersionsForSend`, possibly still in flight when this
+ * op arrives) — mixing fields from two different, not-necessarily-aligned
+ * numbering schemes risks synthesizing a record no real server snapshot
+ * ever actually was. Dropping the whole op instead only ever keeps a
+ * complete, real snapshot already applied; if the drop was itself
+ * over-cautious (this client's own predicted baseline overshot true server
+ * order), this client's own next ack — always a full, cumulative snapshot
+ * too, via `foldAckedAnnotationOp` — recovers anything the rejected
+ * broadcast would have contributed, for the same reason: full-object state
+ * for one annotation is cumulative, never lost by ignoring an earlier,
+ * already-superseded echo of it.
+ *
+ * A version tie, an annotation this baseline has no entry for yet (a fresh
+ * id), or an op whose version cannot be compared, all apply normally
+ * through the ordinary `applyOpToMirror` path — this only ever changes
+ * behaviour for a genuine regression. Non-annotation ops are untouched.
+ * The staleness test itself is `isAnnotationOpStale` (above) — kept as one
+ * pure predicate so `_handleEvent` can consult the exact same answer this
+ * function acts on, without recomputing its own version of it.
+ */
+export function foldRemoteAnnotationOp(mirrorState, op) {
+  const mirror = normalizeMirror(mirrorState);
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') {
+    return applyOpToMirror(mirror, op);
+  }
+  if (isAnnotationOpStale(mirror, op)) {
+    // Stale/reordered broadcast — this client's baseline is already at
+    // least this current for this annotation (see docstring above). Drop
+    // the whole op atomically rather than partially merge it in.
+    return mirror;
+  }
+  return applyOpToMirror(mirror, op);
+}
+
 export class SessionSyncClient {
   /**
    * @param {Object} opts
@@ -295,9 +640,19 @@ export class SessionSyncClient {
    * @param {string|null} [opts.displayName]
    * @param {string} opts.streamUrl  Full SSE URL (query appended by the client).
    * @param {string} opts.opsUrl     Full POST URL for op batches.
-   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
-   *   onSelections, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped, onCommand.
+   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps (never
+   *   called for a stale/reordered annotation_created/annotation_updated
+   *   broadcast — `isAnnotationOpStale`/`foldRemoteAnnotationOp` reject it at
+   *   the same point they keep it out of the internal sync baseline, so a
+   *   caller applying these ops straight onto a live canvas, as App.jsx
+   *   does, is protected by construction rather than needing its own version
+   *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
+   *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
+   *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
+   *   with the acked annotation_created/annotation_updated `applied` entries
+   *   after this client's own op batch lands, so the caller can thread the
+   *   server's confirmed version/field_versions back onto the live canvas —
+   *   see `_flush`'s success branch).
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
    * @param {Function} [opts.EventSourceImpl]
@@ -333,6 +688,15 @@ export class SessionSyncClient {
 
     this._baseline = EMPTY_MIRROR;
     this._queue = [];
+    // Ops _takeBatch() has already spliced out of _queue for a POST that has
+    // not yet settled — tracked separately so getPendingOps() (the reconnect
+    // path's "what did this client edit that the server doesn't have yet"
+    // read — see that method) still reports them. Without this, an op whose
+    // batch happened to be mid-flight at the exact moment a connection drop
+    // and reconnect landed would be invisible to that read (spliced out of
+    // _queue already, not yet confirmed delivered), reproducing the same
+    // vanishing-edit bug on a narrower trigger.
+    this._inFlightOps = [];
     this._seq = 0;
     // Highest seq actually applied from a stream event (snapshot/catch_up/op),
     // as opposed to `_seq` — which `_flush` also optimistically advances to the
@@ -346,6 +710,11 @@ export class SessionSyncClient {
     // dropped forever instead of applied late.
     this._appliedSeq = 0;
     this._ready = false; // stream has delivered its first event (session exists)
+    // Resolvers for whenReady() callers (image ingest — see that method):
+    // posts directly rather than through the op queue, so it needs its own
+    // wait for the same "session exists server-side" fact _flush() already
+    // guards on, instead of racing the stream's own lazy materialisation.
+    this._readyWaiters = [];
     this._hadSnapshot = false;
     this._source = null;
     this._flushTimer = null;
@@ -355,12 +724,34 @@ export class SessionSyncClient {
     this._flushing = false;
     this._forceSingle = false;
 
+    // Annotation ids folded into the baseline directly via foldLocalOp,
+    // awaiting the one echo delivery that would otherwise fold the same
+    // (by-then possibly stale) creation-time content over it a second time —
+    // see foldLocalOp and _handleEvent's 'op' case.
+    this._locallyFoldedAnnotationIds = new Set();
+
     // Presence + selection claims (design 3.4 / 3.5), all ephemeral.
     this._roster = new Map(); // client_id -> member {client_id, display_name, color}
     this._claims = new Map(); // element_id -> { clientId, expiresAt }
     this._localSelection = []; // element ids this client currently claims
     this._renewTimer = null;
     this._pruneTimer = null;
+
+    // Edit leases (task-annotation-exclusive-edit-leases), also ephemeral but
+    // tracked separately from selection claims above — see LEASE_TTL_MS.
+    this._leases = new Map(); // element_id -> { clientId, expiresAt }
+    this._activeEditIds = new Set(); // element ids this client is actively editing
+    // Ids the caller currently *wants* held, set synchronously the instant
+    // beginEditing is called — distinct from _activeEditIds, which only gains
+    // an id once its acquisition round trip actually resolves. See
+    // beginEditing's docstring for why this exists: without it, an
+    // endEditing that lands while the matching beginEditing is still
+    // in-flight has nothing in _activeEditIds to find yet, so the release
+    // would silently do nothing and the later-resolving acquire would then
+    // hold a lease nobody wants released — until the 30s TTL expired.
+    this._editIntent = new Set();
+    this._leaseRenewTimer = null;
+    this._leasePruneTimer = null;
   }
 
   get seq() {
@@ -368,6 +759,29 @@ export class SessionSyncClient {
   }
   get connected() {
     return this._source != null;
+  }
+
+  /**
+   * Ops enqueued locally that have not yet been confirmed delivered to the
+   * server (queued while offline, awaiting a retry, or simply not flushed
+   * yet). A shallow copy, so callers cannot mutate the live queue.
+   *
+   * Exists for the reconnect path (task fbd32fc9): a resync after a dropped
+   * connection reloads the canvas wholesale from server truth (see App.jsx's
+   * resyncFromServer), which would otherwise silently discard whatever this
+   * client edited while offline — that content never reached the server, so
+   * the reload has no way to know about it. The caller reads this list
+   * *before* the reload and replays it afterwards; nothing here removes the
+   * ops from the queue, so the normal flush still delivers them to the
+   * server exactly once ordinary delivery would.
+   *
+   * Includes ops _takeBatch() has already spliced out of the queue for a POST
+   * still awaiting a response (_inFlightOps), not just what is still sitting
+   * in _queue — a connection can drop while a batch is mid-flight, and that
+   * batch will not rejoin _queue until its own request eventually settles.
+   */
+  getPendingOps() {
+    return this._inFlightOps.concat(this._queue);
   }
 
   /**
@@ -517,10 +931,240 @@ export class SessionSyncClient {
     }
   }
 
+  // ── Edit leases (task-annotation-exclusive-edit-leases) ────────────────────
+  //
+  // Deliberately a *separate* protocol from the selection claims above, not a
+  // repurposing of them in place: collaborative UI still wants a "who has
+  // this selected" marker even when nobody is editing, so getRemoteSelections
+  // above stays untouched and purely cosmetic. Only these methods below ever
+  // acquire, renew or release an edit lease — never a selection change.
+
+  /**
+   * Live edit leases held by *other* clients, as
+   * ``element_id -> { clientId, color, displayName }`` — same shape as
+   * ``getRemoteSelections()``, safe to render as a remote marker (or, more
+   * usefully, to gate local editing: ``isRemoteLocked`` in
+   * ``packages/ui-graph-canvas/src/utils/annotations.js`` reads exactly this).
+   */
+  getRemoteLeases() {
+    const now = this._now();
+    const out = {};
+    for (const [eid, lease] of this._leases) {
+      if (lease.expiresAt <= now || lease.clientId === this.clientId) continue;
+      const member = this._roster.get(lease.clientId);
+      if (!member) continue;
+      out[eid] = {
+        clientId: lease.clientId,
+        color: member.color,
+        displayName: member.display_name,
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Acquire (or renew) an edit lease on `elementIds` — the one call every
+   * real edit-start entry point makes before mutating: opening a text field,
+   * beginning a geometry gesture, opening a property editor, or starting a
+   * bulk mutation/undo. Bypasses the debounced op queue (unlike
+   * `setLocalSelection`) and awaits the server's answer directly, because the
+   * caller needs to know *before* proceeding whether it was refused — the
+   * "explicit busy/conflict response" the design calls for, not a background
+   * echo. Starts renewing every granted id every `LEASE_RENEW_MS` until
+   * `endEditing` is called for it.
+   *
+   * Resolves `{granted, denied}`; `denied` maps a refused id to the display
+   * name of whoever holds it (falling back to the raw client id if the
+   * roster has not caught up yet), so the caller can show exactly who is in
+   * the way. Fails *open* (grants locally without a round trip) when there is
+   * no live connection yet or no `fetch` at all (e.g. under test) — nothing
+   * server-side could hold a competing lease before the session even exists,
+   * and the mutating op the caller sends next is still checked server-side
+   * regardless (defense in depth — see `LeaseConflict` in
+   * `backend/core/session_manager.py`).
+   *
+   * Records each id in `_editIntent` synchronously, before the round trip —
+   * so a fast `endEditing` landing while this call is still in flight (a
+   * quick Escape right after double-click, a fast drag, a menu opened and
+   * closed within one round trip) is not silently lost: `_commitGranted`
+   * checks `_editIntent` again once the round trip resolves, and releases
+   * anything the caller no longer wants instead of committing a lease
+   * nobody asked to keep — see `endEditing`.
+   */
+  async beginEditing(elementIds) {
+    const ids = Array.from(
+      new Set((elementIds || []).filter((id) => typeof id === 'string' && id))
+    );
+    if (!ids.length) return { granted: [], denied: {} };
+    for (const id of ids) this._editIntent.add(id);
+    if (!this._fetch || !this._ready) {
+      this._commitGranted(ids);
+      return { granted: ids, denied: {} };
+    }
+    let granted = ids;
+    let denied = {};
+    try {
+      const resp = await this._postOps([{ op: 'edit_lease_acquired', element_ids: ids }]);
+      if (resp && resp.ok) {
+        const body = await resp.json().catch(() => null);
+        const result = body?.applied?.[0];
+        granted = Array.isArray(result?.element_ids) ? result.element_ids : [];
+        const deniedByClientId = result?.denied || {};
+        denied = {};
+        for (const [eid, clientId] of Object.entries(deniedByClientId)) {
+          const member = this._roster.get(clientId);
+          denied[eid] = member?.display_name || clientId;
+        }
+      }
+      // A non-ok response (network hiccup aside — see the catch below) falls
+      // through with the optimistic `granted = ids` default: the same
+      // fail-open reasoning as the no-connection branch above.
+    } catch {
+      /* fail open — see the docstring above */
+    }
+    this._commitGranted(granted);
+    return { granted, denied };
+  }
+
+  /**
+   * Commit a resolved acquisition: only for ids still in `_editIntent` (the
+   * caller has not since called `endEditing` for them) does this add the
+   * lease to local tracking and keep renewing it. An id the caller already
+   * released while the acquisition was in flight is instead released again
+   * right away — the earlier `endEditing` found nothing in `_activeEditIds`
+   * yet and so had nothing to enqueue, and without this the server would be
+   * left thinking this client holds a lease nobody wants, for the full 30s
+   * TTL, wrongly refusing a genuine second editor in the meantime.
+   */
+  _commitGranted(granted) {
+    const expiresAt = this._now() + LEASE_TTL_MS;
+    const toReleaseAgain = [];
+    for (const id of granted) {
+      if (this._editIntent.has(id)) {
+        this._leases.set(id, { clientId: this.clientId, expiresAt });
+        this._activeEditIds.add(id);
+      } else {
+        toReleaseAgain.push(id);
+      }
+    }
+    if (this._activeEditIds.size) this._startLeaseRenewTimer();
+    if (toReleaseAgain.length) {
+      this._enqueue([{ op: 'edit_lease_released', element_ids: toReleaseAgain }]);
+    }
+  }
+
+  /**
+   * Release an edit lease this client holds on `elementIds` — called when an
+   * edit finishes or is cancelled (text blur/Escape/commit, geometry gesture
+   * end, property editor close, bulk mutation/undo complete). Ids this client
+   * is not actively editing are ignored, so it is safe to call with a
+   * superset. Queued rather than awaited (unlike `beginEditing`): nothing
+   * downstream needs to know the release landed, and the id is removed from
+   * local tracking immediately either way.
+   *
+   * Always drops `elementIds` from `_editIntent` first, whether or not they
+   * are in `_activeEditIds` yet — see `_commitGranted`: a matching
+   * `beginEditing` still in flight for one of these ids reads that absence
+   * when it resolves and releases the lease immediately instead of holding
+   * it, rather than this call finding nothing yet to do and the release
+   * being lost.
+   */
+  endEditing(elementIds) {
+    const requested = elementIds || [];
+    for (const id of requested) this._editIntent.delete(id);
+    const ids = requested.filter((id) => this._activeEditIds.has(id));
+    if (!ids.length) return;
+    for (const id of ids) this._activeEditIds.delete(id);
+    if (!this._activeEditIds.size) this._stopLeaseRenewTimer();
+    this._enqueue([{ op: 'edit_lease_released', element_ids: ids }]);
+  }
+
+  _emitLeases() {
+    if (this.handlers.onLeases) this.handlers.onLeases(this.getRemoteLeases());
+  }
+
+  _seedLeases(leases) {
+    const now = this._now();
+    this._leases = new Map();
+    for (const [eid, clientId] of Object.entries(leases || {})) {
+      this._leases.set(eid, { clientId, expiresAt: now + LEASE_TTL_MS });
+    }
+    this._emitLeases();
+  }
+
+  _applyLeaseOp(clientId, op) {
+    const ids = Array.isArray(op.element_ids) ? op.element_ids : [];
+    if (!ids.length) return;
+    if (op.op === 'edit_lease_acquired') {
+      const expiresAt = this._now() + LEASE_TTL_MS;
+      for (const eid of ids) this._leases.set(eid, { clientId, expiresAt });
+    } else {
+      for (const eid of ids) {
+        const held = this._leases.get(eid);
+        if (held && held.clientId === clientId) this._leases.delete(eid);
+      }
+    }
+    this._emitLeases();
+  }
+
+  _pruneLeases() {
+    const now = this._now();
+    let changed = false;
+    for (const [eid, lease] of this._leases) {
+      if (lease.expiresAt <= now) {
+        this._leases.delete(eid);
+        changed = true;
+      }
+    }
+    if (changed) this._emitLeases();
+  }
+
+  _startLeasePruneTimer() {
+    if (this._leasePruneTimer || this._closed) return;
+    this._leasePruneTimer = setInterval(() => this._pruneLeases(), LEASE_TTL_MS / 3);
+  }
+
+  _startLeaseRenewTimer() {
+    if (this._leaseRenewTimer || this._closed) return;
+    this._leaseRenewTimer = setInterval(() => {
+      if (!this._activeEditIds.size) {
+        this._stopLeaseRenewTimer();
+        return;
+      }
+      // Skip renewals while the stream is down — same reasoning as the
+      // selection claim renew timer above: the server released this
+      // client's leases on disconnect, and _readvertiseLeases re-acquires
+      // them on reconnect instead.
+      if (!this._ready) return;
+      this.beginEditing(Array.from(this._activeEditIds));
+    }, LEASE_RENEW_MS);
+  }
+
+  _stopLeaseRenewTimer() {
+    if (this._leaseRenewTimer) {
+      clearInterval(this._leaseRenewTimer);
+      this._leaseRenewTimer = null;
+    }
+  }
+
+  /**
+   * Re-acquire this client's actively-held edit leases after a reconnect —
+   * the server released them on disconnect (same reasoning as
+   * `_readvertiseSelection`). A lease lost to someone else in the gap is a
+   * real, correctly-reported conflict here, not a bug: the caller's next
+   * renewal (or its own mutation) surfaces it the normal way.
+   */
+  _readvertiseLeases() {
+    if (this._activeEditIds.size) {
+      this.beginEditing(Array.from(this._activeEditIds));
+    }
+  }
+
   /** Open the SSE stream. Idempotent. */
   connect() {
     if (this._source || this._closed || !this._EventSource) return;
     this._startPruneTimer();
+    this._startLeasePruneTimer();
     const params = new URLSearchParams({ client_id: this.clientId });
     if (this.displayName) params.set('name', this.displayName);
     if (this._appliedSeq > 0) params.set('since_seq', String(this._appliedSeq));
@@ -556,20 +1200,106 @@ export class SessionSyncClient {
     this._source = source;
   }
 
+  _resolveReadyWaiters() {
+    if (!this._readyWaiters.length) return;
+    const waiters = this._readyWaiters;
+    this._readyWaiters = [];
+    waiters.forEach((resolve) => resolve());
+  }
+
+  /**
+   * Resolve once the stream has delivered its first event and the session is
+   * confirmed to exist server-side — the same fact `_flush()` gates queued ops
+   * on. A caller that posts directly instead of going through the op queue
+   * (image ingest — see App.jsx's handleImageIngest) must wait on this too, or
+   * it can race the session's own lazy materialisation (D13/D14: a session is
+   * never created server-side until its first real write) and 404 on a brand
+   * new session's very first action.
+   * @returns {Promise<void>}
+   */
+  whenReady() {
+    if (this._ready) return Promise.resolve();
+    return new Promise((resolve) => this._readyWaiters.push(resolve));
+  }
+
   /** Set the synced baseline without emitting ops (after a load or remote apply). */
   setBaseline(state) {
     this._baseline = normalizeMirror(state);
+    // A wholesale reset (initial load, or resyncFromServer after a
+    // reconnect) makes any pending "skip the next echo-fold" markers moot —
+    // the fresh baseline already reflects server truth for every annotation,
+    // this one included.
+    this._locallyFoldedAnnotationIds.clear();
+  }
+
+  /**
+   * Fold one op into the baseline directly, the same way the SSE `onmessage`
+   * handler folds a remote op before dispatching it (see `_handleEvent`'s
+   * 'op' case) — for a caller that applied an op to the canvas *without* it
+   * having come over that stream (image ingest: the REST response is applied
+   * immediately, ahead of this browser's own confirming echo — see App.jsx's
+   * handleImageIngest, which only calls this when its own delivery won the
+   * render race against that echo). Skipping this would leave the baseline
+   * stale until the echo arrives, so the next `syncState()` diff (e.g. the
+   * user repositioning the just-created annotation before the echo lands)
+   * would see it as absent from the baseline and re-emit a redundant
+   * `annotation_created` for something the server already has.
+   *
+   * Marks the op's annotation id so `_handleEvent`'s own fold (below) skips
+   * re-folding it when the echo arrives afterwards — the echo carries this
+   * same creation-time content, and re-folding it over a baseline this call
+   * already advanced would revert any edit made in the meantime.
+   *
+   * That marker is only ever consumed by an echo that reaches
+   * `_handleEvent`'s fold-skip check — which an ordinary, this-client-
+   * attributed op's echo never does, since the "echo of our own op" check
+   * just above it returns first (image ingest's op is the one documented
+   * exception: it is broadcast under a shared, non-personal client id
+   * specifically so this client's own echo does *not* get filtered there —
+   * see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py). For any op that
+   * *will* flush under this client's own id (queued ops enqueued the normal
+   * way, including a reconnect resync's recovered-ops replay — task
+   * fbd32fc9), calling this method would set a marker nothing will ever
+   * consume: it would sit until the next `setBaseline()` clears the whole
+   * set, and in the meantime could wrongly swallow a *different*
+   * collaborator's genuine edit to the same annotation id (their echo's
+   * `foldedId` would match the stale marker and skip folding their content).
+   * Use `foldOpIntoBaseline` for that case instead.
+   */
+  foldLocalOp(op) {
+    const id = op?.annotation?.id;
+    if (id) this._locallyFoldedAnnotationIds.add(id);
+    this._baseline = applyOpToMirror(this._baseline, op);
+  }
+
+  /**
+   * Fold one op into the baseline only — no annotation-echo marker. Use this
+   * for an op that will flush (or already flushed) under this client's own
+   * id, so its eventual echo is always filtered by the "echo of our own op"
+   * check in `_handleEvent` before it could ever reach — let alone need —
+   * `foldLocalOp`'s dedup marker (see that method's docstring for why
+   * setting one in that case is actively harmful, not just unnecessary).
+   */
+  foldOpIntoBaseline(op) {
+    this._baseline = applyOpToMirror(this._baseline, op);
   }
 
   /**
    * Diff a full host-state snapshot against the baseline and enqueue the
    * resulting ops. The baseline advances optimistically; transient POST
    * failures are retried so it never claims un-delivered state.
+   *
+   * Annotation `version`/`field_versions` are predicted for this send rather
+   * than taken verbatim from `state` — see `predictAnnotationVersionsForSend`
+   * for why: `state` is the live canvas snapshot, whose copy of those two
+   * fields only catches up asynchronously after this op's ack round-trips
+   * back (`onLocalAnnotationsApplied`), so a second rapid edit computed
+   * before that would otherwise read the same stale, pre-send version.
    */
   syncState(state) {
     const next = normalizeMirror(state);
     const ops = computeOps(this._baseline, next);
-    this._baseline = next;
+    this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
     if (ops.length) this._enqueue(ops);
   }
 
@@ -753,25 +1483,111 @@ export class SessionSyncClient {
     let batch = null;
     try {
       batch = this._takeBatch();
+      // Tracked from the moment it leaves _queue until this POST settles (see
+      // getPendingOps' docstring) — a connection can drop while this exact
+      // request is in flight.
+      this._inFlightOps = this._inFlightOps.concat(batch);
       const resp = await this._postOps(batch);
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
+        // A successful annotation_created/annotation_updated bumps `version`/
+        // `field_versions` server-side (dec-annotation-field-patches-and-
+        // conflicts) — the acked `body.applied` entry carries the full
+        // merged annotation with the new value, not just the patch this
+        // client sent. Fold it into the baseline the same way a remote op's
+        // echo would (no dedup marker needed — this is this client's own op,
+        // so its SSE echo is already filtered by the "echo of our own op"
+        // check in _handleEvent and will never reach here a second time).
+        // Without this, this client's OWN next edit to the same annotation
+        // would still read the pre-write version out of the baseline and
+        // send it back as `base_version`, which the server would then judge
+        // stale against the bump this very write just made — a spurious
+        // field_conflict against no one but itself.
+        //
+        // foldAckedAnnotationOp, not the plain foldOpIntoBaseline (round 2
+        // follow-up, same decision): this ack is only authoritative as of
+        // the op it is acking, and a *later*, still-unacked local edit to
+        // this same annotation may already have predicted the baseline
+        // further ahead (predictAnnotationVersionsForSend, called from
+        // syncState for every local edit, including ones enqueued while this
+        // request was in flight). A blind overwrite here would revert that
+        // already-baked, already-sent prediction — reintroducing the very
+        // self-conflict race this mechanism exists to close, the next time
+        // that later op's own ack round-trips.
+        const appliedAnnotations = [];
+        for (const entry of body.applied || []) {
+          if (
+            (entry?.op === 'annotation_created' || entry?.op === 'annotation_updated') &&
+            entry.annotation?.id
+          ) {
+            this._baseline = foldAckedAnnotationOp(this._baseline, entry);
+            appliedAnnotations.push(entry);
+          }
+        }
+        // Also hand these to the host so the *live canvas* node — not just
+        // this internal baseline — picks up the fresh version: syncState()
+        // rebuilds its next baseline wholesale from the canvas snapshot on
+        // every call (see its own docstring), so a version corrected only
+        // here would be overwritten by the canvas's still-stale value on
+        // the very next snapshot. onRemoteOps already knows how to turn an
+        // annotation_created/updated op into a canvas node update
+        // (App.jsx's applyRemoteOp) — this reuses that exact path rather
+        // than adding a second one, the same way handleImageIngest already
+        // reuses it for its own direct-apply case.
+        if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
+          this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
+        }
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
       } else if (
         resp &&
-        (resp.status === 400 || resp.status === 413 || resp.status === 404 || resp.status === 410)
+        (resp.status === 400 ||
+          resp.status === 413 ||
+          resp.status === 404 ||
+          resp.status === 410 ||
+          resp.status === 409)
       ) {
-        // Terminal rejection (malformed / too large / session gone). Retrying
-        // never succeeds. If this was a multi-op batch, requeue and switch to
+        // Terminal rejection (malformed / too large / session gone / lease
+        // conflict). Retrying never succeeds — including 409/LeaseConflict
+        // (task-annotation-exclusive-edit-leases): unlike a 5xx, the batch
+        // isn't wrong because of a transient server hiccup, it lost the race
+        // for an exclusive edit lease another client actually holds, and
+        // resending the same frozen op content once that lease clears would
+        // silently overwrite whatever real edit the lease-holder made in the
+        // interim — the exact data-loss path this lease mechanism exists to
+        // prevent. Drop it here the same as a permanently-invalid op; the
+        // caller (onDropped, keyed by resp.status) is responsible for telling
+        // the user their change didn't apply and, if it wants to retry at
+        // all, doing so with fresh current-state content rather than this
+        // stale queued op. If this was a multi-op batch, requeue and switch to
         // one-at-a-time so only the offending op is ultimately dropped; a lone
         // rejected op is dropped outright (its effect stays in the baseline, but
-        // it is genuinely un-persistable — e.g. a hard annotation-limit hit).
+        // it is genuinely un-persistable — e.g. a hard annotation-limit hit, or
+        // an annotation another client is actively editing).
         if (batch.length > 1) {
           this._queue = batch.concat(this._queue);
           this._forceSingle = true;
         } else {
-          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
+          // Remove from _inFlightOps *before* the handler runs, not only in
+          // this call's `finally` below (review round 9): App.jsx's onDropped
+          // handler calls resyncFromServer synchronously, and that reads
+          // getPendingOps() before this function ever yields back to it — a
+          // read racing ahead of the `finally` would still see this
+          // terminally-rejected op as "pending" and resurrect it onto the
+          // canvas via the very resync meant to converge away from it. The
+          // `finally`'s own filter is then a harmless no-op for a batch
+          // already removed.
+          this._removeInFlight(batch);
+          // Parsed only to let onDropped tell apart the two distinct 409
+          // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
+          // different-field-edit): a live edit lease (LeaseConflict) vs. a
+          // genuine field-version race (AnnotationFieldConflict) read very
+          // differently to a user — "someone else is editing this" is wrong
+          // when no one held a lease at all. Best-effort: a body that fails
+          // to parse (or isn't JSON) still drops the op exactly as before,
+          // just without the extra detail.
+          const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
+          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
       } else {
@@ -788,9 +1604,25 @@ export class SessionSyncClient {
       if (batch && batch.length) this._queue = batch.concat(this._queue);
       this._scheduleRetry();
     } finally {
+      // Whatever happened to this batch — delivered, terminally dropped
+      // (already removed above, ahead of the onDropped handler — a no-op
+      // here), or requeued into _queue — it is no longer in flight.
+      this._removeInFlight(batch);
       this._flushing = false;
       this._flushSoon();
     }
+  }
+
+  /**
+   * Remove exactly the ops in `batch` from `_inFlightOps` — by reference, not
+   * content, so an unrelated op with identical fields already re-added to
+   * `_queue` (a retry, or a later user edit with the same shape) is never
+   * mistaken for this one. Safe to call more than once for the same batch.
+   */
+  _removeInFlight(batch) {
+    if (!batch || !batch.length) return;
+    const settled = new Set(batch);
+    this._inFlightOps = this._inFlightOps.filter((op) => !settled.has(op));
   }
 
   _scheduleRetry() {
@@ -823,12 +1655,15 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq; // a snapshot brings the baseline fully up to date
         }
         this._ready = true;
+        this._resolveReadyWaiters();
         this._seedPresence(data.roster, data.claims);
+        this._seedLeases(data.leases);
         if (!this._hadSnapshot) {
           this._hadSnapshot = true;
           if (this.handlers.onReady) this.handlers.onReady(data.seq);
         } else {
           this._readvertiseSelection();
+          this._readvertiseLeases();
           if (this.handlers.onResync) this.handlers.onResync();
         }
         this._flushSoon();
@@ -839,11 +1674,15 @@ export class SessionSyncClient {
           this._appliedSeq = data.seq; // onResync below reloads state fully up to this seq
         }
         this._ready = true;
+        this._resolveReadyWaiters();
         this._hadSnapshot = true;
         this._seedPresence(data.roster, data.claims);
+        this._seedLeases(data.leases);
         // catch_up only follows a reconnect (since_seq was sent), so always
-        // re-advertise the local selection the server dropped on disconnect.
+        // re-advertise the local selection and active edit leases the server
+        // dropped on disconnect.
         this._readvertiseSelection();
+        this._readvertiseLeases();
         if (Array.isArray(data.ops) && data.ops.length && this.handlers.onResync) {
           this.handlers.onResync();
         }
@@ -875,11 +1714,66 @@ export class SessionSyncClient {
           if (data.client_id !== this.clientId) this._applyClaimOp(data.client_id, op);
           return;
         }
+        // Edit-lease ops are ephemeral too, but exclusive rather than advisory
+        // (task-annotation-exclusive-edit-leases) — see beginEditing/
+        // endEditing above. Our own echoes are skipped for the same reason:
+        // beginEditing already updated `_leases` optimistically from the
+        // direct acquire response, before this broadcast could arrive.
+        if (op.op === 'edit_lease_acquired' || op.op === 'edit_lease_released') {
+          if (data.client_id !== this.clientId) this._applyLeaseOp(data.client_id, op);
+          return;
+        }
         if (data.client_id === this.clientId) return; // echo of our own op — baseline already has it
         // Fold the remote change into the baseline before the host applies it,
-        // so the resulting local store change does not diff back out as an echo.
-        this._baseline = applyOpToMirror(this._baseline, op);
-        if (this.handlers.onRemoteOps)
+        // so the resulting local store change does not diff back out as an
+        // echo — UNLESS foldLocalOp already folded this exact annotation
+        // directly (image ingest's own delivery won the race against this
+        // echo — see foldLocalOp): re-folding this now-possibly-stale
+        // creation-time content would revert any edit made since.
+        //
+        // foldRemoteAnnotationOp, not the plain applyOpToMirror (round 3
+        // review): this SSE delivery and this client's own POST-ack channel
+        // have no cross-ordering guarantee (R15, above), so a genuinely
+        // different client's broadcast for a chronologically earlier op can
+        // arrive after this client's own already-acked later op on the same
+        // annotation — an unconditional fold would silently regress the
+        // baseline's version/field_versions and content back to that
+        // earlier point, reintroducing the same spurious field_conflict the
+        // round-2 self-conflict-race fix closed, this time via a genuine
+        // two-client interleaving. See foldRemoteAnnotationOp's own
+        // docstring for why the guard rejects a stale op atomically rather
+        // than merging it in field-by-field.
+        //
+        // `staleRemoteAnnotation` is computed from the SAME pre-fold
+        // baseline `foldRemoteAnnotationOp` is about to consult (round 5,
+        // smallfix-applyremoteop-canvas-no-version-guard) and gates whether
+        // `onRemoteOps` fires below at all. Before this, a stale op the fold
+        // just rejected still reached `onRemoteOps` unconditionally — and
+        // from there App.jsx's `applyRemoteOp`/`applyAnnotationUpsertToCanvas`
+        // wrote it straight onto the live canvas with no version check of
+        // its own, so the exact broadcast this guard was keeping out of the
+        // *baseline* still flashed onto the *canvas*. A later, unrelated
+        // autosave then diffed the canvas's now-reverted content against the
+        // (correctly un-regressed) baseline, computed a valid-looking
+        // `base_version`, and the server accepted it as a genuine new write —
+        // silently overwriting a collaborator's confirmed edit. Suppressing
+        // delivery here, at the single point that already knows the answer,
+        // means every consumer of `onRemoteOps` (App.jsx's canvas; the XR
+        // frontend's `sceneSession.js`, which imports this same class) is
+        // protected by construction — there is no second, independently
+        // maintained "is this stale" check anywhere else that could quietly
+        // stop agreeing with this one. Left `false` (apply normally) in the
+        // locally-folded-echo branch just below: that branch does not mean
+        // "stale", it means "already handled via foldLocalOp" (image
+        // ingest), and its own delivery must still reach the canvas the same
+        // way it always has (see foldLocalOp's docstring).
+        const foldedId = op?.annotation?.id;
+        let staleRemoteAnnotation = false;
+        if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
+          staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
+          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
+        }
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation)
           this.handlers.onRemoteOps([op], { clientId: data.client_id });
         break;
       }
@@ -899,8 +1793,16 @@ export class SessionSyncClient {
             claimsChanged = true;
           }
         }
+        let leasesChanged = false;
+        for (const [eid, lease] of this._leases) {
+          if (lease.clientId === data.client_id) {
+            this._leases.delete(eid);
+            leasesChanged = true;
+          }
+        }
         this._emitPresence();
         if (claimsChanged) this._emitSelections();
+        if (leasesChanged) this._emitLeases();
         if (this.handlers.onPresenceLeft) this.handlers.onPresenceLeft(data.client_id);
         break;
       }
@@ -948,6 +1850,19 @@ export class SessionSyncClient {
       clearInterval(this._pruneTimer);
       this._pruneTimer = null;
     }
+    this._stopLeaseRenewTimer();
+    if (this._leasePruneTimer) {
+      clearInterval(this._leasePruneTimer);
+      this._leasePruneTimer = null;
+    }
     this._queue = [];
+    // A close() before the client ever became ready (e.g. a session switch
+    // while whenReady() is still pending) must still resolve any waiter, or
+    // its awaiter hangs forever holding this whole client alive. Resolving
+    // (never becoming ready) rather than rejecting lets a caller's own
+    // "did the session change under me?" check after the await — see
+    // App.jsx's handleImageIngest — decide what to do, without every caller
+    // needing a try/catch just for this teardown path.
+    this._resolveReadyWaiters();
   }
 }

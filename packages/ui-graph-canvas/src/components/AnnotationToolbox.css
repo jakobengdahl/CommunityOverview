@@ -1,0 +1,576 @@
+/* Bottom-mounted annotation creation surface. Deliberately its own visual
+   language rather than reusing FloatingToolbar's left-rail/grid look, so
+   graph-node creation and annotation creation never read as the same control. */
+.annotation-toolbox {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+}
+
+.annotation-toolbox-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: rgba(17, 24, 39, 0.94);
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.annotation-toolbox-toggle:hover {
+  border-color: #38bdf8;
+  background: rgba(30, 41, 59, 0.96);
+}
+
+.annotation-toolbox-toggle-glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* One row, always (task-annotation-toolbox-icons-only). With the captions
+   gone every cell is a fixed 44px square, so the whole tool set fits a phone
+   viewport without wrapping; `nowrap` plus an x-scroll is the safety net for
+   the narrowest cases (or a future tool being added) — it degrades to a
+   swipeable strip rather than silently stealing a second row of canvas. */
+.annotation-toolbox-items {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.95);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Square, uniform cells on FloatingToolbar's model: one glyph, no caption.
+   The old cell was 64px wide with a wrapping caption underneath, and because
+   the items row wraps, a line containing a two-word caption ("Process arrow")
+   grew taller than the line above it — flex-wrap sizes each line to its own
+   content, so no amount of stretching inside a button evens out two lines of
+   different heights. A fixed square removes the cause rather than the
+   symptom. */
+.annotation-toolbox-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 8px;
+  /* Bare glyphs, no chrome (task-annotation-toolbox-icons-only). The filled,
+     outlined cell each item used to draw made the row read as ten buttons
+     competing for attention; with the caption gone the glyph has to be the
+     thing the eye lands on. The drop shadow is what the border used to do —
+     separate the mark from whatever is behind it — without drawing a box.
+     Hover/focus/active still paint a real surface, so the affordance and the
+     armed-tool state stay obvious. */
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e2e8f0;
+  cursor: pointer;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+}
+
+.annotation-toolbox-item:hover,
+.annotation-toolbox-item:focus-visible {
+  border-color: rgba(56, 189, 248, 0.9);
+  background: #334155;
+}
+
+/* Only items with something draggable to create get the grab affordance;
+   image (file picker) and freehand (armed mode) keep the plain pointer
+   cursor from .annotation-toolbox-item above, so they never look draggable. */
+.annotation-toolbox-item--draggable {
+  cursor: grab;
+  /* Disables the browser's own touch scroll/pan gesture on this item so a
+     touch/stylus press starts the pointer-drag path below instead of the
+     platform treating it as a scroll. Harmless on a mouse. */
+  touch-action: none;
+}
+
+.annotation-toolbox-item--draggable:active {
+  cursor: grabbing;
+}
+
+/* The "in hand" ghost for the coarse-pointer (touch/stylus) drag path — a
+   mouse drag never renders this, since the browser's native drag image
+   already provides the same visual for free. Screen-space and centred on the
+   pointer, the same convention the drag-preview overlay elsewhere on the
+   canvas uses for its own pointer-following visuals. */
+.annotation-toolbox-drag-ghost {
+  position: fixed;
+  z-index: 2000;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid #38bdf8;
+  background: rgba(30, 41, 59, 0.95);
+  color: #e2e8f0;
+  font-size: 20px;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* An armed one-shot drawing mode (currently only 'freehand'): the item stays
+   visually pressed until the stroke completes or is cancelled, so it reads
+   the same way a held tool does in a drawing app. */
+.annotation-toolbox-item--active {
+  border-color: #38bdf8;
+  background: #0f3b4f;
+  box-shadow: inset 0 0 0 1px #38bdf8;
+}
+
+.annotation-toolbox-item-glyph {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.annotation-toolbox-visual,
+.annotation-toolbox-icon-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: currentColor;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.annotation-toolbox-visual--note {
+  width: 24px;
+  height: 24px;
+  border-radius: 3px;
+  background: #fde047;
+  color: #713f12;
+  box-shadow: inset 0 -4px 0 rgba(202, 138, 4, 0.28);
+}
+
+.annotation-toolbox-visual--note::before,
+.annotation-toolbox-visual--note::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--note::before {
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px 0 3px 0;
+  background: linear-gradient(135deg, rgba(202, 138, 4, 0.35) 50%, #fef3c7 50%);
+}
+
+.annotation-toolbox-visual--note::after {
+  left: 5px;
+  top: 7px;
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor;
+  opacity: 0.55;
+}
+
+.annotation-toolbox-visual--text {
+  font-family: ui-serif, Georgia, serif;
+  color: #f8fafc;
+}
+
+.annotation-toolbox-visual--label {
+  width: 25px;
+  height: 17px;
+  border-radius: 4px 8px 8px 4px;
+  background: #f472b6;
+  clip-path: polygon(0 0, 78% 0, 100% 50%, 78% 100%, 0 100%);
+}
+
+.annotation-toolbox-visual--label::before {
+  content: '';
+  position: absolute;
+  right: 6px;
+  top: 7px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #831843;
+}
+
+/* The slot paints its own `background-color` inline, from whichever colour is
+   currently selected, so the button previews the dot it will place. The value
+   here is only the fallback for a glyph rendered without one. The inset ring
+   is dropped: it read as a doughnut rather than as the solid dot the canvas
+   actually draws, which defeated the point of previewing the colour. */
+.annotation-toolbox-visual--vote-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.annotation-toolbox-visual--image {
+  width: 25px;
+  height: 20px;
+  border: 2px solid #c4b5fd;
+  border-radius: 4px;
+  background: linear-gradient(135deg, transparent 52%, rgba(196, 181, 253, 0.45) 52%);
+}
+
+.annotation-toolbox-visual--image::before,
+.annotation-toolbox-visual--image::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--image::before {
+  left: 4px;
+  top: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #c4b5fd;
+}
+
+.annotation-toolbox-visual--image::after {
+  left: 4px;
+  bottom: 3px;
+  width: 15px;
+  height: 8px;
+  background: #c4b5fd;
+  clip-path: polygon(0 100%, 38% 28%, 56% 62%, 75% 38%, 100% 100%);
+}
+
+.annotation-toolbox-visual--freehand {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--freehand::before,
+.annotation-toolbox-visual--freehand::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--freehand::before {
+  left: 5px;
+  top: 11px;
+  width: 18px;
+  height: 4px;
+  border-radius: 999px;
+  background: #f8fafc;
+  transform: rotate(-38deg);
+}
+
+.annotation-toolbox-visual--freehand::after {
+  left: 4px;
+  bottom: 4px;
+  width: 13px;
+  height: 5px;
+  border-bottom: 2px solid #38bdf8;
+  border-radius: 50%;
+  transform: rotate(-18deg);
+}
+
+/* The icon slot shows the glyph alone (task-annotation-icon-no-chrome), with
+   no ring or fill behind it — matching what the icon annotation itself now
+   draws on the canvas (GenericAnnotationNode.css's .kind-icon). The circular
+   badge that used to sit here made the slot look like a different class of
+   control from every other item in the row, and it previewed the icon as
+   something the canvas no longer renders. Legibility comes from the item's
+   own drop shadow instead. */
+.annotation-toolbox-icon-glyph {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: #f8fafc;
+  font-size: 19px;
+}
+
+.annotation-toolbox-icon-glyph--abbreviated {
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+/* The two mode tools (task-annotation-tool-modes). Both are drawn from
+   pseudo-elements for the same reason every other glyph here is: an emoji
+   renders differently on every platform and a font icon would pull in a
+   dependency the canvas package does not have. */
+
+/* The standard cursor arrow, as ONE clipped shape. It was previously a
+   triangle plus a separately rotated bar for the tail, and the two never met
+   cleanly — the joint read as a kink, which is what made the icon look
+   crooked. A single polygon has no joint to misalign. */
+.annotation-toolbox-visual--select {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--select::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 3px;
+  width: 14px;
+  height: 19px;
+  background: #f8fafc;
+  clip-path: polygon(0 0, 0 76%, 24% 56%, 42% 100%, 60% 92%, 43% 50%, 72% 46%);
+}
+
+/* An eraser block: the rubber (angled, filled) over the surface it clears. */
+.annotation-toolbox-visual--eraser {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--eraser::before,
+.annotation-toolbox-visual--eraser::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--eraser::before {
+  left: 4px;
+  top: 5px;
+  width: 17px;
+  height: 11px;
+  border-radius: 2px;
+  background: #fca5a5;
+  transform: rotate(-28deg);
+}
+
+.annotation-toolbox-visual--eraser::after {
+  left: 4px;
+  bottom: 4px;
+  width: 17px;
+  height: 3px;
+  border-radius: 999px;
+  background: #f8fafc;
+}
+
+.annotation-toolbox-shape-glyph {
+  display: block;
+  width: 24px;
+  height: 16px;
+  background: currentColor;
+}
+
+.annotation-toolbox-shape-glyph--process-arrow {
+  clip-path: polygon(0% 0%, 70% 0%, 100% 50%, 70% 100%, 0% 100%);
+}
+
+/* The collapsed shape slot (task-annotation-shapes-under-one-toolbox-slot):
+   a plain positioning wrapper, sized by its main button (which keeps the
+   ordinary .annotation-toolbox-item look), with the corner picker-opener
+   button pinned to its bottom-right corner. */
+.annotation-toolbox-slot {
+  position: relative;
+  display: inline-flex;
+}
+
+.annotation-toolbox-slot-corner {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  background: #0f172a;
+  color: #7dd3fc;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-toolbox-slot-corner:hover,
+.annotation-toolbox-slot-corner:focus-visible {
+  background: #1e293b;
+  border-color: #38bdf8;
+}
+
+/* Compact/touch cells grow past 44px (see the @media/--compact/--touch rules
+   below) — the corner button follows so it stays visually anchored to the
+   larger cell's actual corner instead of drifting inward. */
+.annotation-toolbox--compact .annotation-toolbox-slot-corner,
+.annotation-toolbox--touch .annotation-toolbox-slot-corner {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
+/* Hidden by default — the hover tooltip carries the name and the description
+   instead. Shown wherever hover is unavailable, so a touch user never has to
+   hover to learn what an icon means. Two independent signals, the same pair
+   FloatingToolbar uses: the hover-capability media query (belt) and the
+   `touch` prop the host derives from its own coarse-pointer flag
+   (suspenders). Note `--compact` is NOT one of them: it is a viewport-width
+   signal, so it would caption a mouse user with a narrow window and miss a
+   coarse-pointer user on a wide one. */
+.annotation-toolbox-item-label {
+  display: none;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* Above the hovered cell and horizontally centred on it; the inline style
+   supplies the cell's centre, so the translate does the centring rather than
+   the caller having to measure the tooltip. */
+.annotation-toolbox-tooltip {
+  position: fixed;
+  z-index: 2000;
+  transform: translate(-50%, -100%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.65);
+  background: rgba(15, 23, 42, 0.97);
+  color: #f8fafc;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+/* No caption on a coarse pointer either (task-annotation-toolbox-icons-only).
+   Widening every cell to fit a word is what pushed the row to wrap in two on
+   a narrow viewport, and a two-row toolbox costs canvas height exactly where
+   there is least of it. The glyphs carry the meaning; the hover tooltip and
+   each button's aria-label carry the name. Cells only grow to a 44px touch
+   target here, they do not grow to fit text. */
+@media (hover: none) {
+  .annotation-toolbox-item {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+}
+
+/* Compact/mobile: bigger touch targets, full-width sheet-like strip rather
+   than a floating pill, matching the app's other bottom-anchored touch
+   controls (mobile_nav bottom bar, BottomSheet). No new shared surface
+   architecture is introduced - this is plain responsive CSS on the same
+   component. */
+.annotation-toolbox--compact {
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  transform: none;
+  max-width: none;
+}
+
+.annotation-toolbox--compact .annotation-toolbox-toggle {
+  width: 100%;
+  justify-content: center;
+  padding: 10px 14px;
+}
+
+.annotation-toolbox--compact .annotation-toolbox-items {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Compact is width-only: bigger cells for a narrow window, but no captions —
+   a mouse user with a small window can still hover. Captioning is the
+   `--touch` variant's job. */
+.annotation-toolbox--compact .annotation-toolbox-item {
+  min-width: 48px;
+  height: 48px;
+}
+
+/* The host's coarse-pointer signal. Captions the items the same way the
+   hover-capability query does, and covers the case that query can miss on
+   some hybrid devices that report hover while being used by finger. */
+.annotation-toolbox--touch .annotation-toolbox-item {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+}
+
+/* Sheet variant (variant="sheet" in AnnotationToolbox.jsx): portaled into the
+   app's mobile BottomSheet content (GraphCanvas's
+   annotationToolboxPortalContainer), not floating above the canvas like
+   --compact/--touch above. BottomSheet already supplies the surrounding
+   chrome (backdrop, drag handle, title bar, scroll container - see
+   frontend/web's BottomSheet.css .bottom-sheet-content), so this variant lays
+   out in normal document flow instead of stacking another
+   fixed/absolute-positioned surface on top of it, and drops the pill's own
+   border/shadow so it reads as the sheet's content rather than a second card
+   floating inside it. A grid (not the flex-wrap every other variant uses)
+   keeps cells a predictable thumb-reachable size across row lengths, and
+   labels stay visible unconditionally (matching --touch, but not conditional
+   on it: --sheet is always a touch-sized dedicated surface regardless of the
+   host's own touch-detection signal). */
+.annotation-toolbox--sheet {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  transform: none;
+  max-width: none;
+  width: 100%;
+  gap: 0;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 0 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-item {
+  width: 100%;
+  min-width: 0;
+  height: 68px;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-item-label {
+  display: inline;
+  font-size: 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-slot {
+  width: 100%;
+}

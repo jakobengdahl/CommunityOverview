@@ -27,6 +27,8 @@ vi.mock('reactflow', () => {
             data-animated={String(!!edge.animated)}
             data-stroke={edge.style?.stroke ?? ''}
             data-stroke-width={String(edge.style?.strokeWidth ?? '')}
+            data-stroke-opacity={String(edge.style?.strokeOpacity ?? '')}
+            data-edge-opacity-var={String(edge.style?.['--edge-opacity'] ?? '')}
             data-marker-end={edge.markerEnd ? String(edge.markerEnd.type) : ''}
             data-marker-start={edge.markerStart ? String(edge.markerStart.type) : ''}
             onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
@@ -127,6 +129,34 @@ describe('GraphCanvas', () => {
     expect(edge).toHaveAttribute('data-marker-end', '');
     expect(edge).toHaveAttribute('data-marker-start', '');
     expect(edge.className).toBe('react-flow__edge');
+  });
+
+  // task-session-focus-dimming-controls: a dimmed edge's opacity must reach
+  // the rendered edge both as a plain inline style (the non-animated case)
+  // and as the `--edge-opacity` custom property the rf-edge-pulse keyframe
+  // reads via calc() — a CSS animation overrides a plain inline style for
+  // the property it drives, so without this second copy an animated edge's
+  // dim/edge-intensity opacity would be silently cancelled by its own pulse.
+  it('carries the resolved edge opacity both as stroke-opacity and as --edge-opacity', () => {
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        edgeIntensity={0.6}
+        dimmedEdgeIds={['edge-1']}
+      />
+    );
+    const edge = screen.getByTestId('edge-edge-1');
+    // Dimmed at intensity 0.6 caps at the dimmed ceiling (0.25).
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.25');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.25');
+  });
+
+  it('renders a non-dimmed edge at the plain edge-intensity baseline', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} edgeIntensity={0.6} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.6');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.6');
   });
 
   // Endpoint-presence contract behind edge recovery on reload: when a load hands
@@ -282,12 +312,48 @@ describe('GraphCanvas', () => {
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
 
+    // Types are grouped behind a "Change type" submenu instead of the root menu.
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
     // General connection is always offered and reflects the RELATES_TO edge.
     expect(screen.getByRole('button', { name: /general connection/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^belongs_to$/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'BELONGS_TO');
+  });
+
+  it('filters edge relationship types by source and target node type', () => {
+    const schema = {
+      relationship_types: {
+        RELATES_TO: { description: 'Relates to' },
+        WORKS_FOR: {
+          description: 'Applies to Actor -> Initiative',
+          source_types: ['Actor'],
+          target_types: ['Initiative'],
+        },
+        IMPLEMENTS: {
+          description: 'Wrong direction for this edge',
+          source_types: ['Initiative'],
+          target_types: ['Actor'],
+        },
+      },
+    };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        schema={schema}
+        onSetEdgeType={vi.fn()}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
+    expect(screen.getByRole('button', { name: /^works_for$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^implements$/i })).toBeNull();
   });
 
   it('resets an edge to a general connection from its context menu', () => {
@@ -304,6 +370,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');

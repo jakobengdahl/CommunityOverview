@@ -261,13 +261,23 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # Unset (None) → MCP follows auth_enabled (backwards compatible).
         if config.mcp_auth_enabled is False:
             path = request.url.path
-            if path.startswith("/mcp") or path.startswith("/execute_tool"):
+            if (
+                path == "/mcp"
+                or path.startswith("/mcp/")
+                or path == "/execute_tool"
+                or path.startswith("/execute_tool/")
+            ):
                 return await call_next(request)
 
         # In MCP-only mode, only require auth for MCP and execute_tool paths
         if config.mcp_basic_auth and not config.auth_enabled:
             path = request.url.path
-            if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
+            if not (
+                path == "/mcp"
+                or path.startswith("/mcp/")
+                or path == "/execute_tool"
+                or path.startswith("/execute_tool/")
+            ):
                 return await call_next(request)
 
         # A valid signed session cookie (issued by POST /auth/login after a

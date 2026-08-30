@@ -77,7 +77,7 @@ describe('GraphCanvas undo/redo of node moves', () => {
     act(() => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
     });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 40 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 40 }, 'custom');
     expect(nodeById('node-1').position).toEqual({ x: 30, y: 40 });
 
     onNodePositionChange.mockClear();
@@ -86,7 +86,7 @@ describe('GraphCanvas undo/redo of node moves', () => {
     act(() => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true, shiftKey: true });
     });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 100, y: 50 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 100, y: 50 }, 'custom');
     expect(nodeById('node-1').position).toEqual({ x: 100, y: 50 });
   });
 
@@ -140,7 +140,7 @@ describe('GraphCanvas undo/redo of node moves', () => {
     act(() => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
     });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 500, y: 500 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 500, y: 500 }, 'custom');
     expect(nodeById('node-1').parentId).toBeUndefined();
     expect(nodeById('node-1').position).toEqual({ x: 500, y: 500 });
   });
@@ -189,8 +189,8 @@ describe('GraphCanvas undo/redo of node moves', () => {
     act(() => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
     });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 30 });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-2', { x: 50, y: 50 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 30 }, 'custom');
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-2', { x: 50, y: 50 }, 'custom');
     expect(nodeById('node-1').position).toEqual({ x: 30, y: 30 });
     expect(nodeById('node-2').position).toEqual({ x: 50, y: 50 });
   });
@@ -298,7 +298,7 @@ describe('GraphCanvas undo/redo of node moves', () => {
     act(() => {
       fireEvent.keyDown(document, { key: 'z', ctrlKey: true });
     });
-    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 40 });
+    expect(onNodePositionChange).toHaveBeenCalledWith('node-1', { x: 30, y: 40 }, 'custom');
   });
 
   it('Ctrl+Z is a no-op when there is nothing to undo', () => {

@@ -97,7 +97,7 @@ def search_graph(
     # candidate set instead of dropping matches that fell outside a `limit`-sized
     # text window.
     search_limit = (
-        max(limit, storage.get_stats().total_nodes)
+        max(limit, storage.get_node_count())
         if decision.graph_access.enabled or has_generic_filters
         else limit
     )
@@ -287,7 +287,40 @@ def get_node_details(
     if not node or not access.is_node_visible(node, decision.graph_access):
         return {"success": False, "error": f"Node with ID {node_id} not found"}
 
-    return {"success": True, "node": serialize_node(node)}
+    # A client that just received this node's id over the live session op
+    # stream (a `nodes_added` op — see App.jsx's applyRemoteOp) has no other
+    # way to learn which already-visible nodes it connects to: it calls this
+    # endpoint per newly-arrived id, one node at a time. resolve_session_nodes
+    # only recovers edges among a *whole* node_ref set on (re)join/reload, not
+    # incrementally per node, so this is the one hydration path a live push —
+    # MCP's add_nodes_to_session included — actually goes through. Mirrors
+    # search_graph's archived/visibility filtering for incident edges.
+    def _archived_endpoint(edge) -> bool:
+        # The anchor is always part of the result (get_node_details returns an
+        # archived node on a direct lookup — see the docstring/DEVELOPMENT.md
+        # note above), so an edge back to it must not be dropped just because
+        # the anchor itself is archived. Mirrors get_related_nodes'
+        # `_neighbor_blocked` anchor exemption in storage_search.py.
+        for endpoint_id in (edge.source, edge.target):
+            if endpoint_id == node_id:
+                continue
+            if _is_archived(storage.get_node(endpoint_id)):
+                return True
+        return False
+
+    incident_edges = [
+        edge
+        for edge in storage.get_incident_edges([node_id])
+        if not _is_archived(edge)
+        and not _archived_endpoint(edge)
+        and access.is_edge_visible(edge, storage, decision.graph_access)
+    ]
+
+    return {
+        "success": True,
+        "node": serialize_node(node),
+        "edges": serialize_edges(incident_edges),
+    }
 
 
 def get_related_nodes(
@@ -768,9 +801,23 @@ def list_relationship_types() -> Dict[str, Any]:
     relationship_types = []
     for type_name, type_config in schema.get("relationship_types", {}).items():
         relationship_types.append(
-            {"type": type_name, "description": type_config.get("description", "")}
+            {
+                "type": type_name,
+                "description": type_config.get("description", ""),
+                "source_types": type_config.get("source_types", []),
+                "target_types": type_config.get("target_types", []),
+            }
         )
     return {"relationship_types": relationship_types}
+
+
+def audit_relationship_applicability(storage: "GraphStorage") -> Dict[str, Any]:
+    violations = storage.audit_relationship_applicability()
+    return {
+        "success": True,
+        "violation_count": len(violations),
+        "violations": violations,
+    }
 
 
 def get_schema() -> Dict[str, Any]:

@@ -275,6 +275,31 @@ transition and removed in the final step.
 - Body caps per op batch (`_DEFAULT_MAX_OP_BATCH_BYTES`, 256 KB → `413`), max ops
   per batch (`_DEFAULT_MAX_OPS_PER_BATCH`, 500), max annotations per session, max
   ops/second per client (token bucket) with `429` + client backoff.
+  - **Image/session/document budgets, coordinated with the flat cap
+    (fixed).** The flat cap above and `image_ingest.py`'s image-specific
+    budgets (2 MB/image, 20 MB/session, 25 MB/document) used to be two
+    uncoordinated size regimes: `apply_ops` applied only the flat cap to
+    every op regardless of content, so a browser echoing a whole embedded
+    `image` annotation back on move/resize/relayer/lock — the exact shape
+    `sessionSyncClient.js` sends — always exceeded it and the annotation
+    became permanently unmovable once created above ~256 KB;
+    `duplicate_annotation` hit the same flat cap through `upsert_annotation`
+    even though `create_image_annotation` had used the much larger image
+    budget for the identical bytes. Both write paths now classify an op/
+    annotation carrying a validated-shape embedded image
+    (`session_manager._op_embedded_image_bytes` /
+    `_annotation_embedded_image_bytes`, gated on the exact
+    `image_ingest.OPTIMIZED_CONTENT_TYPE` data-URI prefix) and route it
+    through the per-image/session/document budgets instead of the flat cap,
+    via the shared `_check_image_budgets` helper every image-carrying write
+    path now calls. `apply_ops` also now checks the *cumulative* session
+    image/document totals after applying each batch, not just that one
+    batch's own size — closing the growth path where many small,
+    individually-legal batches (or the pre-existing large-text-payload
+    variant) walked a session's document size past budget over time. The
+    REST layer's pre-parse body-size check (`rest_api.py`) admits the larger
+    of the two caps, since it cannot yet tell which regime applies before
+    the body is JSON-decoded.
 - Session IDs remain unguessable enough for the core's trust model
   (`crypto.getRandomValues`, 10^8 space) — acceptable for open deployments already
   exposing connect-by-ID; SaaS adds real authorization.

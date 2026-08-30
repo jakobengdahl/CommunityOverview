@@ -310,7 +310,7 @@ fi
 echo -e "  ${BLUE}Graph data:${NC}  $GRAPH_FILE"
 echo -e "  ${BLUE}Language:${NC}    $APP_LANGUAGE"
 echo ""
-echo -e "  ${YELLOW}Language can also be set via URL: http://localhost:8000/web/?lang=sv${NC}"
+echo -e "  ${YELLOW}Note: the UI is temporarily locked to English; ?lang and --lang have no effect.${NC}"
 echo ""
 echo -e "Press Ctrl+C to stop the server."
 echo -e "${GREEN}========================================${NC}"

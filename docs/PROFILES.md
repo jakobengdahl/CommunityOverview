@@ -40,7 +40,8 @@ Start the application with a specific profile using `--profile`:
 # Use the SCB profile
 ./start-dev.sh --profile scb
 
-# Combine with language and data options
+# Combine with language and data options (--lang is currently inert; the UI
+# is temporarily locked to English — see docs/USER_GUIDE.md#language)
 ./start-dev.sh --profile scb --lang sv --data data/examples/scb-seed.json
 ```
 
@@ -96,6 +97,11 @@ The schema config defines the metadata model. It has two main sections:
     "prompt_prefix": "System prompt context for the AI assistant.",
     "prompt_suffix": "Reminders appended to the AI system prompt.",
     "default_language": "en"
+  },
+  "ui": {
+    "ai_assistant": {
+      "default_collapsed": false
+    }
   }
 }
 ```
@@ -202,7 +208,8 @@ The presentation section controls the UI and AI behavior:
     },
     "prompt_prefix": "You are a knowledge agent for my domain...",
     "prompt_suffix": "Always confirm before making changes.",
-    "default_language": "en"
+    "default_language": "en",
+    "default_chat_collapsed": false
   }
 }
 ```
@@ -215,7 +222,16 @@ The presentation section controls the UI and AI behavior:
 | `prompt_prefix` | Injected at the start of the AI system prompt |
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
+| `default_chat_collapsed` | Whether the assistant panel starts collapsed for a visitor with no stored preference of their own (default `false`, i.e. open). A visitor's own explicit open/collapse choice, once made, is stored in their browser and takes precedence over this on every later visit until they reset it |
 | `skills_config` | Skills loader settings (see below) |
+
+The optional top-level `ui.ai_assistant.default_collapsed` boolean controls the
+assistant's initial state for browsers that have not made a choice. It defaults
+to `false`, preserving the expanded assistant. Expanding or collapsing the
+assistant stores a browser-local preference under
+`community-graph:ui:ai-assistant-collapsed`; that preference takes precedence
+over profile configuration on later visits. It does not require an account and
+does not affect deployments where the assistant is unavailable.
 
 #### Model profiles
 

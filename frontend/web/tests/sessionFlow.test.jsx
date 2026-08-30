@@ -9,7 +9,8 @@ const canvasProps = vi.hoisted(() => ({ baselineEpoch: null }));
 
 // GraphCanvas stub: replays the saveViewSignal round-trip that App's session
 // snapshot mechanism is multiplexed over, without rendering ReactFlow.
-vi.mock('@community-graph/ui-graph-canvas', async () => {
+vi.mock('@community-graph/ui-graph-canvas', async (importOriginal) => {
+  const actual = await importOriginal();
   const { useEffect } = await import('react');
   function GraphCanvas({
     nodes = [],
@@ -36,6 +37,7 @@ vi.mock('@community-graph/ui-graph-canvas', async () => {
     return <div data-testid="graph-canvas-stub" />;
   }
   return {
+    ...actual,
     GraphCanvas,
     positionNewNodes: (newNodes) => newNodes,
   };
@@ -332,6 +334,460 @@ describe('Server-backed session lifecycle', () => {
     });
   });
 
+  // task fbd32fc9: a reconnect used to reload the canvas wholesale from
+  // server truth with no way back for whatever this client edited while
+  // disconnected. resyncFromServer now reads the sync client's still-queued
+  // (never-delivered) ops before that reload and replays them afterwards, so
+  // the local edit survives instead of silently vanishing.
+  it('a reconnect resync restores a local edit that never reached the server, and reports the recovery', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+
+    // Materialize a session (and its realtime stream) the same way the other
+    // tests do — the actual queued content is irrelevant here since
+    // getPendingOps is stubbed above to stand in for "an edit made offline".
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    // The server has no record of node-a (it never got delivered) — the
+    // default getSession mock resolves an empty session. A catch_up with a
+    // missed op is what a genuine reconnect after a drop delivers.
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // The reload would otherwise have wiped node-a from the canvas along with
+    // it — it must come back, and the recovery must be reported to the user.
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText('Reconnected — restored 1 change(s) made while offline')
+      ).toBeInTheDocument();
+    });
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 6 regression: an op enqueued *while* the reload request is
+  // still in flight is neither reflected in the reload's payload nor in the
+  // pre-request pending-ops snapshot (round 1's fix) — a second capture right
+  // before the destructive apply must pick it up too.
+  it('recovers an op enqueued while the reload request is still in flight', async () => {
+    let callCount = 0;
+    const lateOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockImplementation(() => {
+        callCount += 1;
+        // First read (before the request starts): nothing queued yet.
+        // Second read (right after it resolves): the op the user made
+        // while it was in flight.
+        return callCount === 1 ? [] : [lateOp];
+      });
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    expect(callCount).toBeGreaterThanOrEqual(2);
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 10 regression: an op the server terminally rejects (via
+  // onDropped) *while* a resync's reload request is still in flight stays
+  // visible in the pre-request pending-ops capture (round 1's fix) even
+  // though it is gone from a second, post-request capture (round 6's fix) —
+  // the union of the two (round 6) would otherwise keep it anyway and
+  // resurrect content the server just explicitly refused.
+  it('excludes an op the server terminally rejected while the reload was in flight', async () => {
+    const originalConnect = SessionSyncClient.prototype.connect;
+    let capturedClient = null;
+    const connectSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'connect')
+      .mockImplementation(function capture(...args) {
+        capturedClient = this;
+        return originalConnect.apply(this, args);
+      });
+
+    const droppedOp = { op: 'nodes_hidden', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([droppedOp]);
+
+    let releaseGetSession;
+    const getSessionGate = new Promise((resolve) => {
+      releaseGetSession = resolve;
+    });
+    api.getSession.mockImplementationOnce(async (id) => {
+      await getSessionGate;
+      return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+    expect(capturedClient).toBeTruthy();
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_added', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // The reload's getSession() is now gated in flight. Simulate
+    // SessionSyncClient reporting this exact op as terminally dropped in
+    // that window — precisely what its own _flush() does synchronously on a
+    // 400/413/404/410 for a single-op batch.
+    act(() => {
+      capturedClient.handlers.onDropped([droppedOp], 400);
+    });
+
+    await act(async () => {
+      releaseGetSession();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The drop must not have been resurrected onto the canvas.
+    await waitFor(() => {
+      expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('node-a');
+    });
+
+    connectSpy.mockRestore();
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 1 regression: reading the pending-ops queue *after* awaiting
+  // the reload request would race SessionSyncClient's own reconnect flush
+  // (armed right after onResync returns) — a flush that fires first can
+  // splice those exact ops out of the queue before this read ever sees them,
+  // silently reintroducing the data loss the test above guards against. The
+  // fix is call *order*: getPendingOps must run before getSession, not after.
+  it('captures pending ops before the reload request, not after (reconnect-flush race)', async () => {
+    const callOrder = [];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockImplementation(function pendingOpsSpy() {
+        callOrder.push('getPendingOps');
+        return [];
+      });
+    // Once, not permanently: a lasting override would leak past
+    // vi.clearAllMocks() (which resets call history, not implementations)
+    // into later tests.
+    const getSessionMock = api.getSession.getMockImplementation();
+    api.getSession.mockImplementationOnce(async (...args) => {
+      callOrder.push('getSession');
+      return getSessionMock(...args);
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(callOrder).toContain('getSession');
+    });
+    expect(callOrder.indexOf('getPendingOps')).toBeGreaterThanOrEqual(0);
+    expect(callOrder.indexOf('getPendingOps')).toBeLessThan(callOrder.indexOf('getSession'));
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 2 regression: a flaky connection reconnecting twice before a
+  // slow reload settles must not run two overlapping resyncs — that would
+  // replay the same pending ops twice and show a duplicate recovery toast.
+  it('a second reconnect while a resync is still in flight does not start a second reload', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    let releaseGetSession;
+    const getSessionGate = new Promise((resolve) => {
+      releaseGetSession = resolve;
+    });
+    const getSessionCalls = [];
+    // Once, not permanently: only one real call is expected (the guard must
+    // block the second reconnect's), and a lasting override would leak past
+    // vi.clearAllMocks() into later tests.
+    api.getSession.mockImplementationOnce(async (id) => {
+      getSessionCalls.push(id);
+      await getSessionGate;
+      return { id, state: {}, resolved: { nodes: [], edges: [] }, roster: [] };
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    const deliverCatchUp = () =>
+      act(() => {
+        sessionSource.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+
+    deliverCatchUp(); // first reconnect: getSession call #1 starts, gated
+    await waitFor(() => expect(getSessionCalls.length).toBe(1));
+    deliverCatchUp(); // second reconnect while the first resync is still in flight
+    await new Promise((r) => setTimeout(r, 20));
+    expect(getSessionCalls.length).toBe(1); // the second resync never called getSession
+
+    await act(async () => {
+      releaseGetSession();
+      await Promise.resolve();
+    });
+
+    // The (single) in-flight resync still completed and recovered the op.
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    expect(getSessionCalls.length).toBe(1);
+
+    getPendingOpsSpy.mockRestore();
+  });
+
+  // Review round 3 regression: replaying a recovered op onto the canvas
+  // (applyRemoteOp) without also folding it into the sync client's own
+  // baseline leaves the baseline stale — since this client's own echo for
+  // that op never arrives (echoes of one's own ops are always skipped),
+  // nothing else would ever fold it in, so every later autosave's diff would
+  // treat the recovered content as still-unsent and resend it indefinitely.
+  //
+  // (The other review-round-3 finding — a hung reload permanently wedging
+  // the reentrancy guard — is fixed by a token-guarded setTimeout self-heal
+  // matching SessionSyncClient's own already-unit-tested request-timeout
+  // precedent; simulating a real ~20s hang end-to-end through the full save
+  // dialog flow was judged impractical to do reliably here.)
+  //
+  // foldOpIntoBaseline, not foldLocalOp (review round 7): folding a recovered
+  // op with foldLocalOp — which additionally marks the annotation id to skip
+  // one *confirming echo* — left a marker nothing would ever consume (an
+  // ordinary op's echo is filtered by the "own client id" check before it
+  // could reach that marker), which could then wrongly swallow a *different*
+  // collaborator's later genuine edit to the same annotation. See
+  // foldOpIntoBaseline's docstring in sessionSyncClient.js.
+  it('folds each recovered op into the sync baseline, not just the canvas', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+    const foldOpIntoBaselineSpy = vi.spyOn(SessionSyncClient.prototype, 'foldOpIntoBaseline');
+    const foldLocalOpSpy = vi.spyOn(SessionSyncClient.prototype, 'foldLocalOp');
+    api.getNodeDetails.mockImplementation(async (id) =>
+      id === 'node-a' ? { node: NODE_A, edges: [] } : { success: false }
+    );
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(foldOpIntoBaselineSpy).toHaveBeenCalledWith(pendingOp);
+    });
+    // Not the annotation-echo-marking variant — see the comment above.
+    expect(foldLocalOpSpy).not.toHaveBeenCalled();
+
+    getPendingOpsSpy.mockRestore();
+    foldOpIntoBaselineSpy.mockRestore();
+    foldLocalOpSpy.mockRestore();
+  });
+
+  // Review round 1 regression: a bare local selection (no offline edits at
+  // all) re-queues a selection_claimed op on every reconnect
+  // (_readvertiseSelection). applyRemoteOp has no case for it — replaying it
+  // is a no-op — so it must not inflate the reported recovery count or claim
+  // a recovery happened when nothing the user did was actually restored.
+  it('does not report a recovery for a bare reconnect selection re-advertisement', async () => {
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([{ op: 'selection_claimed', element_ids: ['node-a'] }]);
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // Give the (fire-and-forget) resync a tick to complete.
+    await waitFor(() => {
+      expect(getPendingOpsSpy).toHaveBeenCalled();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');
@@ -353,6 +809,89 @@ describe('Server-backed session lifecycle', () => {
     // The target was loaded resolved from the server, carrying its saved position
     expect(api.getSession).toHaveBeenCalledWith('5555-6666', { resolve: true });
     expect(useGraphStore.getState().nodes[0]._savedPosition).toEqual({ x: 5, y: 6 });
+  });
+
+  // Review round 5 regression: resyncFromServer's replay loop awaits a
+  // network call per recovered nodes_added op; the canvas store it writes to
+  // is not scoped by session. If the user switches sessions while that await
+  // is still pending, a later op in the *old* session's recovered batch must
+  // not go on to land on the *new* session's now-loaded canvas.
+  it('stops replaying recovered ops once the user switches sessions mid-replay', async () => {
+    sessionStore.touchSession('5555-6666');
+
+    let releaseNodeA;
+    const nodeAGate = new Promise((resolve) => {
+      releaseNodeA = resolve;
+    });
+    // Two ops in the "offline" batch: the first stalls on its node fetch (so
+    // the test can switch sessions while the loop is paused there), the
+    // second must never apply once that switch has happened.
+    const pendingOps = [
+      { op: 'nodes_added', node_ids: ['node-a'] },
+      { op: 'nodes_hidden', node_ids: ['ghost-node'] },
+    ];
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue(pendingOps);
+    api.getNodeDetails.mockImplementation(async (id) => {
+      if (id !== 'node-a') return { success: false };
+      await nodeAGate;
+      return { node: NODE_A, edges: [] };
+    });
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    // The replay loop is now paused inside applyRemoteOp's fetch for node-a.
+    await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
+
+    // Switch to a different, already-known session while that fetch is
+    // still pending.
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByText('5555-6666'));
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    });
+
+    // Now let the stalled fetch resolve — the loop must re-check the active
+    // session before its next iteration and stop, so neither node-a (from
+    // the old session's own recovered op) nor the hidden-node effect of the
+    // batch's second op ever reaches session B's canvas.
+    await act(async () => {
+      releaseNodeA();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+    expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('ghost-node');
+
+    getPendingOpsSpy.mockRestore();
   });
 
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {

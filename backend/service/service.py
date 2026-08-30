@@ -451,6 +451,9 @@ class GraphService:
     def list_relationship_types(self) -> Dict[str, Any]:
         return queries.list_relationship_types()
 
+    def audit_relationship_applicability(self) -> Dict[str, Any]:
+        return queries.audit_relationship_applicability(self._storage)
+
     def get_schema(self) -> Dict[str, Any]:
         return queries.get_schema()
 

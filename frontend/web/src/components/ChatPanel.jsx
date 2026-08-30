@@ -40,7 +40,8 @@ const isSkillNode = (node) =>
   node.data?.nodeType === 'Skill' ||
   node.data?.type === 'Skill';
 
-function ChatPanel({ collectionShortName }) {
+function ChatPanel({ collectionShortName, variant = 'floating' }) {
+  const isSheet = variant === 'sheet';
   const {
     chatMessages,
     addChatMessage,
@@ -285,8 +286,6 @@ function ChatPanel({ collectionShortName }) {
       });
 
       if (isStaleSessionEpoch(requestEpoch)) return;
-
-      console.log('[ChatPanel] Response:', response);
 
       const toolResult = response.toolResult;
 
@@ -670,8 +669,11 @@ function ChatPanel({ collectionShortName }) {
     return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   };
 
-  // Minimized state
+  // Minimized state — the sheet variant is mounted (inside BottomSheet) only
+  // while chatPanelOpen is true, and the mobile bottom nav's Chat slot is the
+  // equivalent affordance while closed, so it has no minimized bar of its own.
   if (!chatPanelOpen) {
+    if (isSheet) return null;
     return (
       <div className="chat-panel-minimized" onClick={toggleChatPanel}>
         <ChatDotsFill size={18} className="chat-panel-minimized-icon" />
@@ -683,26 +685,38 @@ function ChatPanel({ collectionShortName }) {
   // Expanded state
   return (
     <div
-      className={`chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`}
+      className={
+        isSheet ? 'chat-panel-sheet' : `chat-panel-floating${!showMinimap ? ' minimap-hidden' : ''}`
+      }
       id="guide-target-chat"
     >
-      <div className="chat-header">
-        <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
-          <ChatDotsFill size={16} />
-          <h3>Graph assistant</h3>
-          {effectiveMaxDepth > 1 && (
-            <span className="chat-depth-indicator" title={t('federation.depth_indicator_tooltip')}>
-              {t('federation.depth_indicator', {
-                current: federationDepth,
-                max: effectiveMaxDepth,
-              })}
-            </span>
-          )}
+      {!isSheet && (
+        <div className="chat-header">
+          <div className="chat-header-left" onClick={toggleChatPanel} style={{ cursor: 'pointer' }}>
+            <ChatDotsFill size={16} />
+            <h3>Graph assistant</h3>
+            {effectiveMaxDepth > 1 && (
+              <span
+                className="chat-depth-indicator"
+                title={t('federation.depth_indicator_tooltip')}
+              >
+                {t('federation.depth_indicator', {
+                  current: federationDepth,
+                  max: effectiveMaxDepth,
+                })}
+              </span>
+            )}
+          </div>
+          <button
+            className="chat-collapse-button"
+            onClick={toggleChatPanel}
+            title={t('chat.minimize')}
+            aria-label={t('chat.minimize')}
+          >
+            <ChevronRight size={18} />
+          </button>
         </div>
-        <button className="chat-collapse-button" onClick={toggleChatPanel} title="Minimize">
-          <ChevronRight size={18} />
-        </button>
-      </div>
+      )}
 
       <div className="chat-messages">
         {chatMessages
@@ -909,6 +923,7 @@ function ChatPanel({ collectionShortName }) {
               className="selection-clear-button"
               onClick={clearSelectedGraphNodes}
               title={t('chat.clear_selection')}
+              aria-label={t('chat.clear_selection')}
             >
               <XCircleFill size={14} />
             </button>
@@ -926,6 +941,7 @@ function ChatPanel({ collectionShortName }) {
               className="remove-file-button"
               onClick={handleRemoveFile}
               title={t('chat.remove_file')}
+              aria-label={t('chat.remove_file')}
             >
               &times;
             </button>

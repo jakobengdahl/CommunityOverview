@@ -25,8 +25,12 @@
 }
 
 /* The toolbar follows the session drawer: it stays "floating" at the same
-   16px distance from the drawer's edge as it had from the screen edge. */
-.app.session-drawer-open .floating-toolbar {
+   16px distance from the drawer's edge as it had from the screen edge. This
+   fixed-position .floating-toolbar isn't mounted in mobile mode (MobileShell
+   hosts it as the sheet variant instead, laid out in normal flow), but the
+   override is scoped off .is-mobile defensively so it can never offset
+   mobile chrome even if that ever changes. */
+.app.session-drawer-open:not(.is-mobile) .floating-toolbar {
   left: calc(var(--session-drawer-width, 280px) + 16px);
 }
 
@@ -102,35 +106,56 @@
   color: inherit;
 }
 
+/* The floating (left) rail stays a two-column grid of bare icons on every
+   pointer type (task-annotation-toolbox-icons-only). It used to collapse to
+   one captioned row per node type without hover, which is what turned a
+   compact 2xN icon rail into a tall single column of text — on a phone that
+   is most of the canvas height, and the rail scrolls rather than fits. The
+   captions were there to replace an unavailable hover tooltip; the long-press
+   tooltip below (FloatingToolbar.jsx's own touch handling) covers that need
+   without spending the canvas area. Cells only grow to a 44px touch target.
+   The sheet variant is deliberately NOT included: it is a dedicated
+   full-width surface inside MobileShell's BottomSheet where a caption costs
+   nothing, and it keeps its labels. */
 @media (hover: none) {
-  .floating-toolbar {
-    grid-template-columns: 1fr;
-  }
-
   .floating-toolbar-item {
-    width: auto;
+    min-width: 44px;
     min-height: 44px;
-    justify-content: flex-start;
-    padding: 0 10px;
   }
-
-  .floating-toolbar-item-label {
-    display: inline;
-  }
-}
-
-.app.is-touch .floating-toolbar {
-  grid-template-columns: 1fr;
 }
 
 .app.is-touch .floating-toolbar-item {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Sheet variant: content hosted inside MobileShell's BottomSheet rather than
+   floating fixed on screen — the sheet primitive already owns positioning and
+   scrolling, so this drops the fixed chrome and always uses the single-column,
+   always-labelled layout the touch styles above already define. */
+.floating-toolbar--sheet {
+  position: static;
+  left: auto;
+  top: auto;
+  max-height: none;
+  width: 100%;
+  grid-template-columns: 1fr;
+  box-shadow: none;
+  border: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+}
+
+.floating-toolbar--sheet .floating-toolbar-item {
   width: auto;
   min-height: 44px;
   justify-content: flex-start;
   padding: 0 10px;
 }
 
-.app.is-touch .floating-toolbar-item-label {
+.floating-toolbar--sheet .floating-toolbar-item-label {
   display: inline;
 }
 

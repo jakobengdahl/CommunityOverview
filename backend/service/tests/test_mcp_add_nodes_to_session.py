@@ -114,6 +114,50 @@ class TestAddNodesToSession:
         assert op["op"] == "nodes_added"
         assert op["node_ids"] == ["alpha"]
 
+    def test_new_node_edge_to_already_visible_node_hydrates_for_connected_client(
+        self, tmp_path
+    ):
+        """End-to-end regression for the MCP live-push edge-rendering bug.
+
+        A connected browser already has ``alpha`` on its canvas. An MCP
+        client then adds ``beta`` — which the graph already connects to
+        ``alpha`` — to the same open session. The op stream delivers only
+        ``{op: nodes_added, node_ids: [beta]}`` (as in the broadcast test
+        above); to render it the browser hydrates the new id one node at a
+        time via ``get_node_details`` (see App.jsx's ``applyRemoteOp``). That
+        call must return the alpha<->beta edge, or it never renders until the
+        user separately expands the node.
+        """
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service)
+        tools_map["add_nodes"](
+            nodes=[
+                {"id": "alpha", "type": "Initiative", "name": "Alpha"},
+                {"id": "beta", "type": "Actor", "name": "Beta"},
+            ],
+            edges=[{"source": "alpha", "target": "beta"}],
+        )
+        sid = _session(manager)
+        tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        published = []
+        manager.bus.publish = lambda session_id, event: published.append(
+            (session_id, event)
+        )
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["beta"])
+        assert result["success"] is True
+        op = published[0][1]["op"]
+        assert op["op"] == "nodes_added"
+        assert op["node_ids"] == ["beta"]
+
+        # Simulates the connected browser's per-id hydration of the pushed node.
+        hydrated = tools_map["get_node_details"](node_id="beta")
+        assert hydrated["success"] is True
+        assert any(
+            {e["source"], e["target"]} == {"alpha", "beta"} for e in hydrated["edges"]
+        )
+
     def test_unknown_ids_are_skipped_rather_than_referenced(self, tools):
         """A stale id must not leave a phantom reference in session state."""
         tools_map, manager = tools

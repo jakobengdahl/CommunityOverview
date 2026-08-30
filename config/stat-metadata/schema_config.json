@@ -321,46 +321,72 @@
         "description": "Part of (variable is part of a data structure, NSI is part of the ESS)"
       },
       "PRODUCES": {
-        "description": "Produces (statistical programme produces dataset, actor produces statistics)"
+        "description": "Produces (statistical programme produces dataset, actor produces statistics)",
+        "source_types": ["StatisticalProgramme", "Actor"],
+        "target_types": ["DataSet"]
       },
       "HAS_STRUCTURE": {
-        "description": "Has structure (dataset has a defined data structure)"
+        "description": "Has structure (dataset has a defined data structure)",
+        "source_types": ["DataSet"],
+        "target_types": ["DataStructure"]
       },
       "HAS_VARIABLE": {
-        "description": "Has variable (data structure contains an instance variable)"
+        "description": "Has variable (data structure contains an instance variable)",
+        "source_types": ["DataStructure"],
+        "target_types": ["InstanceVariable"]
       },
       "HAS_QUESTIONNAIRE": {
-        "description": "Has questionnaire (statistical programme employs a questionnaire as its data collection instrument)"
+        "description": "Has questionnaire (statistical programme employs a questionnaire as its data collection instrument)",
+        "source_types": ["StatisticalProgramme"],
+        "target_types": ["Questionnaire"]
       },
       "HAS_COMPONENT": {
-        "description": "Has component (questionnaire contains a questionnaire component / individual question)"
+        "description": "Has component (questionnaire contains a questionnaire component / individual question)",
+        "source_types": ["Questionnaire"],
+        "target_types": ["QuestionnaireComponent"]
       },
       "COLLECTS": {
-        "description": "Collects (questionnaire component collects data for an instance variable)"
+        "description": "Collects (questionnaire component collects data for an instance variable)",
+        "source_types": ["QuestionnaireComponent"],
+        "target_types": ["InstanceVariable"]
       },
       "USES_VALUE_DOMAIN": {
-        "description": "Uses value domain (questionnaire component or instance variable uses a value domain to constrain permissible responses)"
+        "description": "Uses value domain (questionnaire component or instance variable uses a value domain to constrain permissible responses)",
+        "source_types": ["QuestionnaireComponent", "InstanceVariable"],
+        "target_types": ["ValueDomain"]
       },
       "MEASURES": {
-        "description": "Measures (instance variable measures a concept)"
+        "description": "Measures (instance variable measures a concept)",
+        "source_types": ["InstanceVariable"],
+        "target_types": ["Concept"]
       },
       "OBSERVED_FOR": {
-        "description": "Observed for (instance variable is observed for a unit type)"
+        "description": "Observed for (instance variable is observed for a unit type)",
+        "source_types": ["InstanceVariable"],
+        "target_types": ["UnitType"]
       },
       "USES_CODE_LIST": {
-        "description": "Uses code list (instance variable uses a code list for its values)"
+        "description": "Uses code list (instance variable uses a code list for its values)",
+        "source_types": ["InstanceVariable", "ValueDomain"],
+        "target_types": ["CodeList"]
       },
       "RELATES_TO": {
         "description": "Relates to (general connection)"
       },
       "USES": {
-        "description": "Uses (production solution uses a statistical programme as its processing basis)"
+        "description": "Uses (production solution uses a statistical programme as its processing basis)",
+        "source_types": ["ProductionSolution"],
+        "target_types": ["StatisticalProgramme"]
       },
       "INPUT_TO": {
-        "description": "Input to (an input dataset feeds into a process step in the production chain). Source = input dataset, target = process step."
+        "description": "Input to (an input dataset feeds into a process step in the production chain). Source = input dataset, target = process step.",
+        "source_types": ["DataSet"],
+        "target_types": ["ProcessStep"]
       },
       "PRODUCES_OUTPUT": {
-        "description": "Produces output (a process step produces an output dataset). Source = process step, target = output dataset."
+        "description": "Produces output (a process step produces an output dataset). Source = process step, target = output dataset.",
+        "source_types": ["ProcessStep"],
+        "target_types": ["DataSet"]
       },
       "HAS_VARIANT": {
         "description": "Has variant (register has a register variant; classification version has a variant)"

@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import useGraphStore from '../src/store/graphStore';
+import useGraphStore, { AI_ASSISTANT_COLLAPSED_STORAGE_KEY } from '../src/store/graphStore';
 
 describe('graphStore', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
     // Reset store to initial state
     useGraphStore.setState({
       nodes: [],
@@ -22,6 +24,60 @@ describe('graphStore', () => {
       isLoading: false,
       configLoaded: false,
       error: null,
+    });
+  });
+
+  describe('AI assistant collapsed preference', () => {
+    it('uses the configured default when no browser preference exists', () => {
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('stays expanded when configuration is absent', () => {
+      useGraphStore.getState().setConfig({}, {});
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('gives a valid browser preference precedence over configuration', () => {
+      localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, 'false');
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('persists explicit expand and collapse choices', () => {
+      useGraphStore.setState({ chatPanelOpen: true });
+      useGraphStore.getState().toggleChatPanel();
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('true');
+
+      useGraphStore.getState().setChatPanelOpen(true);
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBe('false');
+    });
+
+    it('does not persist guide-driven transient changes', () => {
+      useGraphStore.setState({ chatPanelOpen: true });
+      useGraphStore.getState().setChatPanelOpenTransient(false);
+      useGraphStore.getState().toggleChatPanelTransient();
+      expect(localStorage.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY)).toBeNull();
+    });
+
+    it('ignores malformed stored values', () => {
+      localStorage.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, '{broken');
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('continues when localStorage reads and writes throw', () => {
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('disabled');
+      });
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('disabled');
+      });
+
+      useGraphStore.getState().setConfig({}, { ui: { ai_assistant: { default_collapsed: true } } });
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+      expect(() => useGraphStore.getState().toggleChatPanel()).not.toThrow();
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
     });
   });
 
@@ -221,6 +277,40 @@ describe('graphStore', () => {
       expect(relTypes.map((r) => r.type)).toContain('BELONGS_TO');
       expect(relTypes.map((r) => r.type)).toContain('IMPLEMENTS');
     });
+
+    it('filters relationship types by directed source and target applicability', () => {
+      useGraphStore.setState({
+        schema: {
+          relationship_types: {
+            RELATES_TO: { description: 'Global' },
+            IMPLEMENTS: {
+              description: 'Directed',
+              source_types: ['Initiative'],
+              target_types: ['Legislation'],
+            },
+            TAGS: {
+              description: 'Wildcard source',
+              source_types: ['*'],
+              target_types: ['Theme'],
+            },
+          },
+        },
+      });
+
+      const relTypes = useGraphStore
+        .getState()
+        .getRelationshipTypesForNodes('Initiative', 'Legislation');
+
+      expect(relTypes.map((r) => r.type)).toEqual(['RELATES_TO', 'IMPLEMENTS']);
+      expect(
+        useGraphStore
+          .getState()
+          .isRelationshipTypeApplicable('IMPLEMENTS', 'Legislation', 'Initiative')
+      ).toBe(false);
+      expect(useGraphStore.getState().isRelationshipTypeApplicable('TAGS', 'Actor', 'Theme')).toBe(
+        true
+      );
+    });
   });
 
   describe('edge actions', () => {
@@ -348,6 +438,102 @@ describe('graphStore', () => {
 
       useGraphStore.getState().setFederationDepth('abc');
       expect(useGraphStore.getState().federationDepth).toBe(2);
+    });
+  });
+
+  describe('Chat panel default/collapsed persistence', () => {
+    const CHAT_PANEL_KEY = 'chat_panel_open';
+
+    afterEach(() => {
+      window.localStorage.removeItem(CHAT_PANEL_KEY);
+    });
+
+    it('applies the configured application default when no explicit choice was made', () => {
+      window.localStorage.removeItem(CHAT_PANEL_KEY);
+      useGraphStore
+        .getState()
+        .setConfig(
+          { node_types: {}, relationship_types: {} },
+          { introduction: 'Hi', default_chat_collapsed: true },
+          (k) => k,
+          'en'
+        );
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('applies an open default when the config omits default_chat_collapsed', () => {
+      window.localStorage.removeItem(CHAT_PANEL_KEY);
+      useGraphStore
+        .getState()
+        .setConfig(
+          { node_types: {}, relationship_types: {} },
+          { introduction: 'Hi' },
+          (k) => k,
+          'en'
+        );
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('an explicit user choice persists to localStorage and survives a later setConfig call', () => {
+      const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem');
+      useGraphStore.setState({ chatPanelOpen: true });
+
+      useGraphStore.getState().toggleChatPanel();
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+      expect(setItemSpy).toHaveBeenCalledWith(CHAT_PANEL_KEY, 'false');
+      setItemSpy.mockRestore();
+
+      // A later config load (e.g. a reload) must not override the explicit choice,
+      // even when the application default disagrees with it.
+      useGraphStore
+        .getState()
+        .setConfig(
+          { node_types: {}, relationship_types: {} },
+          { introduction: 'Hi', default_chat_collapsed: false },
+          (k) => k,
+          'en'
+        );
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+    });
+
+    it('transient chat-panel staging does not persist a preference', () => {
+      window.localStorage.removeItem(CHAT_PANEL_KEY);
+      const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem');
+
+      useGraphStore.getState().setChatPanelOpenTransient(false);
+
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
+      expect(setItemSpy).not.toHaveBeenCalledWith(CHAT_PANEL_KEY, expect.anything());
+      setItemSpy.mockRestore();
+
+      // Because nothing was persisted, the next config load still applies the
+      // application default rather than "honoring" the guide's staged state.
+      useGraphStore
+        .getState()
+        .setConfig(
+          { node_types: {}, relationship_types: {} },
+          { introduction: 'Hi', default_chat_collapsed: false },
+          (k) => k,
+          'en'
+        );
+      expect(useGraphStore.getState().chatPanelOpen).toBe(true);
+    });
+
+    it('resetChatPanelToDefault clears the stored choice and re-applies the application default', () => {
+      useGraphStore.setState({
+        presentation: { default_chat_collapsed: true },
+      });
+      useGraphStore.getState().toggleChatPanel(); // make an explicit (open) choice
+      window.localStorage.setItem(CHAT_PANEL_KEY, 'true');
+      useGraphStore.setState({ chatPanelOpen: true });
+
+      useGraphStore.getState().resetChatPanelToDefault();
+
+      expect(window.localStorage.getItem(CHAT_PANEL_KEY)).toBeNull();
+      expect(useGraphStore.getState().chatPanelOpen).toBe(false);
     });
   });
 });

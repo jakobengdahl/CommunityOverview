@@ -16,6 +16,9 @@ function makeDeps(overrides = {}) {
     addNodesToVisualization: vi.fn(),
     setHiddenNodeIds: vi.fn(),
     setHiddenEdgeIds: vi.fn(),
+    setDimmedNodeIds: vi.fn(),
+    setDimmedEdgeIds: vi.fn(),
+    setEdgeIntensity: vi.fn(),
     setPendingGroups: vi.fn(),
     setPendingAnnotations: vi.fn(),
     ensureSyncConnected: vi.fn(() => ({ setBaseline: vi.fn(), sessionId: null })),
@@ -89,6 +92,74 @@ describe('useSharedSession.applyServerSession', () => {
     expect(edges).toEqual([{ id: 'e1', source: 'node-a', target: 'node-a' }]);
     expect(deps.setHiddenNodeIds).toHaveBeenCalledWith(['h1']);
     expect(deps.setPendingGroups).toHaveBeenCalled();
+  });
+
+  it('restores saved session overlay annotations from server state', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: {
+          annotations: [
+            {
+              id: 'note-1',
+              type: 'note',
+              kind: 'note',
+              position: { x: 7, y: 8 },
+              text: 'saved note',
+            },
+          ],
+        },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setPendingAnnotations).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 7, y: 8 },
+        text: 'saved note',
+      }),
+    ]);
+  });
+
+  it('restores dimmed ids and the edge-intensity baseline from session state', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: {
+          dimmed_node_ids: ['n1'],
+          dimmed_edge_ids: ['e1', 'e2'],
+          edge_intensity: 0.4,
+          annotations: [],
+        },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setDimmedNodeIds).toHaveBeenCalledWith(['n1']);
+    expect(deps.setDimmedEdgeIds).toHaveBeenCalledWith(['e1', 'e2']);
+    expect(deps.setEdgeIntensity).toHaveBeenCalledWith(0.4);
+  });
+
+  it('does not call the dim/intensity setters when the session carries none', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: { annotations: [] },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setDimmedNodeIds).not.toHaveBeenCalled();
+    expect(deps.setDimmedEdgeIds).not.toHaveBeenCalled();
+    expect(deps.setEdgeIntensity).not.toHaveBeenCalled();
   });
 
   // Regression (SMALL_FIXES 2026-07-10): a truthy non-array resolved.edges must

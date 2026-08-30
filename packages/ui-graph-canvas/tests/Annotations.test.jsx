@@ -26,14 +26,20 @@ const labels = {
   arrowEndHead: 'End arrowhead',
 };
 
-function renderWithContext(ui, notifyChange = vi.fn()) {
+function renderWithContext(ui, notifyChange = vi.fn(), notifyRemoteLockedAttempt = vi.fn()) {
   return {
     notifyChange,
+    notifyRemoteLockedAttempt,
     ...render(
-      <AnnotationContext.Provider value={{ notifyChange, labels }}>{ui}</AnnotationContext.Provider>
+      <AnnotationContext.Provider value={{ notifyChange, notifyRemoteLockedAttempt, labels }}>
+        {ui}
+      </AnnotationContext.Provider>
     ),
   };
 }
+
+// A live claim held by another client (task-annotation-shared-session-realtime).
+const REMOTE_CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
 describe('NoteNode', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -49,6 +55,31 @@ describe('NoteNode', () => {
     expect(screen.getByText('Hello')).toBeInTheDocument();
   });
 
+  // Notes and labels render through their own components rather than
+  // GenericAnnotationNode, so their rotation is wired separately and needs its
+  // own coverage. A label's rotation is reachable today (the generic MCP tools
+  // accept `label`); a note's is not - the sticky-note tools take no rotation
+  // argument - so this pins the wiring ahead of the source that will set it.
+  // smallfix-annotation-rotated-resize-handles: the rotation now lives on
+  // the wrapper that also carries the note's resize handles, so they rotate
+  // along with it instead of staying axis-aligned around its unrotated
+  // bounds.
+  it('draws a rotation on the note body, on the wrapper that also carries its resizer', () => {
+    const { container } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', rotation: 30 }} selected={false} />
+    );
+    const wrap = container.querySelector('.graph-annotation-rotate-wrap');
+    expect(wrap.style.transform).toBe('rotate(30deg)');
+    expect(wrap.querySelector('.graph-note-node')).toBeTruthy();
+  });
+
+  it('leaves an unrotated note untransformed', () => {
+    const { container } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected={false} />
+    );
+    expect(container.querySelector('.graph-note-node').style.transform).toBe('');
+  });
+
   it('commits edited text and notifies on blur', () => {
     const { notifyChange } = renderWithContext(
       <NoteNode id="note-1" data={{ text: '' }} selected />
@@ -57,12 +88,30 @@ describe('NoteNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Remember this' } });
     fireEvent.blur(input);
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    // The updater sets the note text on the matching node.
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // Each keystroke syncs live (docs/ANNOTATION_CONTRACT.md's 300ms text
+    // debounce, coalesced downstream by the host's scheduler) in addition to
+    // blur's own trimmed commit — one call each here since this fires a
+    // single change event, then blur.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    // The last updater (blur's trimmed commit) is authoritative.
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     const result = updater([{ id: 'note-1', data: { text: '' } }]);
     expect(result[0].data.text).toBe('Remember this');
+  });
+
+  it('syncs text live on each keystroke, not only on blur', () => {
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: '' }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('Note'));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Rem' } });
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    expect(notifyChange).toHaveBeenCalledWith('text');
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    expect(updater([{ id: 'note-1', data: { text: '' } }])[0].data.text).toBe('Rem');
   });
 
   it('deletes itself and notifies from the context menu', () => {
@@ -81,8 +130,14 @@ describe('NoteNode', () => {
       <NoteNode id="note-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // 4 text-size buttons followed by 4 opacity-level buttons
+    // (task-annotation-responsive-bottom-toolbox's AnnotationOpacityControl,
+    // added after this menu's text-size row) — both groups share the
+    // `.size-button` styling class, same as this menu's rotation row sharing
+    // classes with others; text size renders first, so the first 4 are still
+    // exactly the ones this test means to click.
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[3]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
@@ -93,6 +148,20 @@ describe('NoteNode', () => {
 describe('LabelNode', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('draws a rotation on the label', () => {
+    const { container } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x', rotation: -15 }} selected={false} />
+    );
+    expect(container.querySelector('.graph-label-node').style.transform).toBe('rotate(-15deg)');
+  });
+
+  it('leaves an unrotated label untransformed', () => {
+    const { container } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x' }} selected={false} />
+    );
+    expect(container.querySelector('.graph-label-node').style.transform).toBe('');
+  });
+
   it('commits edited text on Enter', () => {
     const { notifyChange } = renderWithContext(
       <LabelNode id="label-1" data={{ text: '' }} selected />
@@ -101,9 +170,10 @@ describe('LabelNode', () => {
     const input = screen.getByRole('textbox');
     fireEvent.change(input, { target: { value: 'Region A' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
-    expect(notifyChange).toHaveBeenCalledTimes(1);
-    const updater = hoisted.setNodes.mock.calls[0][0];
+    // The change event's live sync, then Enter's own commit.
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(2);
+    expect(notifyChange).toHaveBeenCalledTimes(2);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
     expect(updater([{ id: 'label-1', data: {} }])[0].data.text).toBe('Region A');
   });
 
@@ -124,8 +194,10 @@ describe('LabelNode', () => {
       <LabelNode id="label-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // Same two-group `.size-button` layout as NoteNode's equivalent test
+    // above (text size, then AnnotationOpacityControl's opacity levels).
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[2]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
@@ -191,5 +263,217 @@ describe('ArrowNode', () => {
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
     expect(updater([{ id: 'arrow-1' }, { id: 'keep' }])).toEqual([{ id: 'keep' }]);
+  });
+
+  it('hides the endpoint handles for a locked arrow even when selected', () => {
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected />
+    );
+    expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
+  });
+
+  // A locked line's menu now offers only Unlock, so recolouring one is no
+  // longer reachable through the menu.
+  it('offers a locked arrow no style controls at all, only unlock', () => {
+    const { notifyChange } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: true }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(document.querySelector('.context-menu-delete')).toBeNull();
+    expect(document.querySelector('.context-menu-unlock')).toBeTruthy();
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  // The lock can land between opening the menu and clicking a swatch — a
+  // remote `annotation_updated` arriving mid-interaction. `patchData` reads
+  // `n.data` from live state rather than the render-time `data` prop
+  // precisely so the write respects the lock that arrived in between, the
+  // same stale-lock race "ignores an in-flight endpoint move once the arrow
+  // becomes locked" documents for moveEndpoint. This case is the only guard
+  // on the `!nextData.locked` term in patchData's draggable expression, and
+  // on patchData reading `n.data` from live state rather than the
+  // render-time prop: with either removed, this case fails and nothing else
+  // in the suite does.
+  it('keeps the arrow non-draggable when a lock lands between menu-open and click', () => {
+    renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: false }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    fireEvent.click(document.querySelectorAll('.color-button')[1]);
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    // State has since been locked by the incoming remote op.
+    const result = updater([
+      { id: 'arrow-1', data: { dx: 160, dy: 0, locked: true }, draggable: false },
+    ]);
+    expect(result[0].data.locked).toBe(true);
+    expect(result[0].draggable).toBe(false);
+  });
+
+  it('stays draggable after a style change on an unlocked, unanchored arrow', () => {
+    renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, locked: false }} selected={false} />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    const colorButtons = document.querySelectorAll('.color-button');
+    fireEvent.click(colorButtons[1]);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    const result = updater([
+      { id: 'arrow-1', data: { dx: 160, dy: 0, locked: false }, draggable: true },
+    ]);
+    expect(result[0].draggable).toBe(true);
+  });
+
+  it('ignores an in-flight endpoint move once the arrow becomes locked', () => {
+    renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    const [startHandle] = document.querySelectorAll('circle.graph-arrow-handle');
+    fireEvent.pointerDown(startHandle, { clientX: 0, clientY: 0 });
+    const moveEvent = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 5,
+    });
+    window.dispatchEvent(moveEvent);
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    // Simulate a realtime lock landing between drag-start and this move: the
+    // updater reads the fresh node from state, not the (now stale) render-time
+    // `data` prop, and must refuse to touch its geometry.
+    const lockedNode = {
+      id: 'arrow-1',
+      position: { x: 0, y: 0 },
+      data: { dx: 160, dy: 0, locked: true },
+    };
+    const result = updater([lockedNode]);
+    expect(result[0]).toBe(lockedNode);
+  });
+});
+
+describe('remote edit-lease exclusivity (task-annotation-exclusive-edit-leases)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('NoteNode: refuses a text commit while another client holds the edit lease', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    // Blocked at the double-click too: no textarea is offered to type into.
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: refuses to open the menu (so a colour change is unreachable) while another client holds the lease', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: refuses to open the menu (so delete is unreachable) while another client holds the lease', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: edits normally once no claim is present', () => {
+    const { notifyChange } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x' }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    fireEvent.blur(screen.getByRole('textbox'));
+    expect(notifyChange).toHaveBeenCalledWith('text');
+  });
+
+  it('NoteNode: a mere remoteSelection (no edit lease) never refuses entering edit mode', () => {
+    // task-annotation-exclusive-edit-leases: selection alone must never
+    // acquire or steal an edit lease.
+    const { notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: a mere remoteSelection (no edit lease) never refuses opening the menu', () => {
+    const { notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    expect(document.querySelectorAll('.color-button').length).toBeGreaterThan(0);
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
+  it('LabelNode: refuses a text commit while another client holds the claim', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <LabelNode id="label-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('ArrowNode: refuses to open the menu (so a colour change is unreachable) while another client holds the lease', () => {
+    const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
+      <ArrowNode
+        id="arrow-1"
+        data={{ dx: 160, dy: 0, remoteLease: REMOTE_CLAIM }}
+        selected={false}
+      />
+    );
+    fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(notifyChange).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('ArrowNode: hides endpoint handles while another client holds the claim, even when selected', () => {
+    const { container } = renderWithContext(
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, remoteLease: REMOTE_CLAIM }} selected />
+    );
+    expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
+  });
+
+  it('ArrowNode: ignores an in-flight endpoint move once a remote claim lands mid-drag', () => {
+    // Mirrors the existing "becomes locked" case above: the drag starts while
+    // unclaimed (the handle is present and armable), then a claim from
+    // another client lands before the next move — moveEndpoint reads the
+    // fresh node from state, not the stale render-time `data` prop, and must
+    // refuse to touch its geometry.
+    renderWithContext(<ArrowNode id="arrow-1" data={{ dx: 160, dy: 0 }} selected />);
+    const [startHandle] = document.querySelectorAll('circle.graph-arrow-handle');
+    fireEvent.pointerDown(startHandle, { clientX: 0, clientY: 0 });
+    const moveEvent = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 5,
+    });
+    window.dispatchEvent(moveEvent);
+    expect(hoisted.setNodes).toHaveBeenCalledTimes(1);
+    const updater = hoisted.setNodes.mock.calls[0][0];
+    const remotelyLockedNode = {
+      id: 'arrow-1',
+      position: { x: 0, y: 0 },
+      data: { dx: 160, dy: 0, remoteLease: REMOTE_CLAIM },
+    };
+    const result = updater([remotelyLockedNode]);
+    expect(result[0]).toBe(remotelyLockedNode);
   });
 });

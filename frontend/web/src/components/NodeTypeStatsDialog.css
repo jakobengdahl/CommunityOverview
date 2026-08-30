@@ -25,7 +25,7 @@
   background: #2a2a2a;
   border: 1px solid #444;
   border-radius: 12px;
-  width: 340px;
+  width: 520px;
   max-width: 90vw;
   max-height: 70vh;
   display: flex;
@@ -99,6 +99,17 @@
   border-bottom: none;
 }
 
+.nts-dialog-section-title {
+  color: #f3f3f3;
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin: 8px 0 6px;
+}
+
+.nts-dialog-section-spaced {
+  margin-top: 18px;
+}
+
 .nts-dialog-dot {
   width: 9px;
   height: 9px;
@@ -115,6 +126,27 @@
   color: #888;
   font-weight: 500;
   font-size: 0.82rem;
+}
+
+.nts-dialog-relationship-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(140px, 1fr);
+  gap: 6px 12px;
+  padding: 8px 0;
+  font-size: 0.82rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.nts-dialog-rule {
+  color: #aaa;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.nts-dialog-description {
+  grid-column: 1 / -1;
+  color: #888;
+  line-height: 1.35;
 }
 
 .nts-dialog-footer {

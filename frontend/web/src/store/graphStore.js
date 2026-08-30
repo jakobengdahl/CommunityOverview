@@ -4,6 +4,48 @@ const FEDERATION_DEPTH_STORAGE_KEY = 'federation_depth';
 const SHOW_MINIMAP_STORAGE_KEY = 'show_minimap';
 const NODE_PREVIEW_STORAGE_KEY = 'node_preview_enabled';
 const CANVAS_LOCKED_STORAGE_KEY = 'canvas_locked';
+const CHAT_PANEL_OPEN_STORAGE_KEY = 'chat_panel_open';
+export const AI_ASSISTANT_COLLAPSED_STORAGE_KEY = 'community-graph:ui:ai-assistant-collapsed';
+
+// Returns the visitor's own explicit open/collapsed choice, or null when none
+// has been made yet — distinct from loadInitialChatPanelOpen's boolean return
+// so setConfig can tell "no override" apart from "explicitly chose open".
+function loadStoredChatPanelOpen() {
+  try {
+    const stored = window?.localStorage?.getItem(CHAT_PANEL_OPEN_STORAGE_KEY);
+    if (stored !== null) return stored === 'true';
+    const collapsed = window?.localStorage?.getItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY);
+    if (collapsed === 'true') return false;
+    if (collapsed === 'false') return true;
+  } catch {
+    // ignore storage errors and use default
+  }
+  return null;
+}
+
+function persistChatPanelOpen(open) {
+  try {
+    window?.localStorage?.setItem(CHAT_PANEL_OPEN_STORAGE_KEY, String(open));
+    window?.localStorage?.setItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY, String(!open));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function configuredChatPanelOpen(presentation) {
+  const stored = loadStoredChatPanelOpen();
+  if (stored !== null) return stored;
+  return !(
+    presentation?.default_chat_collapsed || presentation?.ui?.ai_assistant?.default_collapsed
+  );
+}
+
+function loadInitialChatPanelOpen() {
+  const stored = loadStoredChatPanelOpen();
+  // Falls back to open (the historical hardcoded default) until the backend
+  // config default arrives — setConfig reconciles this once it does.
+  return stored !== null ? stored : true;
+}
 
 function loadInitialShowMinimap() {
   try {
@@ -94,10 +136,12 @@ function navNameType(node, fallbackId) {
   };
 }
 
-// Both updateVisualization and clearVisualization raise clearGroupsFlag and then
-// lower it after a short delay. A single shared timer means a second call within
-// that window cancels the earlier timer instead of letting it lower the flag
-// prematurely on the later call, which would make ReactFlow miss the signal.
+// clearVisualization raises clearGroupsFlag and then lowers it after a short
+// delay. A single shared timer means a second call within that window cancels
+// the earlier timer instead of letting it lower the flag prematurely on the
+// later call, which would make ReactFlow miss the signal. updateVisualization
+// deliberately does NOT touch this flag (see its own comment) — only a genuine
+// wholesale replace should drop the canvas's groups and annotations.
 let clearGroupsResetTimer = null;
 function scheduleClearGroupsReset(set) {
   if (clearGroupsResetTimer) clearTimeout(clearGroupsResetTimer);
@@ -223,6 +267,14 @@ const useGraphStore = create((set, get) => ({
   highlightedNodeIds: [],
   hiddenNodeIds: [],
   hiddenEdgeIds: [],
+  // Session-local focus (task-session-focus-dimming-controls): dimmed ids
+  // stay on the canvas (unlike hidden*) but render at reduced prominence.
+  // edgeIntensity is the session's global baseline opacity for every
+  // non-dimmed edge (1 = full prominence). All three are session-document
+  // state, synced like hidden*Ids — never a per-browser localStorage default.
+  dimmedNodeIds: [],
+  dimmedEdgeIds: [],
+  edgeIntensity: 1.0,
   nodeMarks: {},
   // Transient per-node pulse state driven by external trigger URLs (design:
   // external pulse-trigger). Maps nodeId -> { style, color, seq }; each entry is
@@ -236,7 +288,10 @@ const useGraphStore = create((set, get) => ({
   editingEdge: null, // Edge to show in the edge-edit dialog
   deleteDialog: null, // Pending node-delete confirmation ({ nodeId | nodeIds, ... })
   contextMenu: null,
-  clearGroupsFlag: false, // Signal to clear groups in visualization
+  // Signal to GraphCanvas to drop its manual groups/annotations. Raised only by
+  // clearVisualization (a genuine wholesale replace or session clear) — see the
+  // comment above updateVisualization for why that action must not raise it.
+  clearGroupsFlag: false,
   // Monotonic counter bumped every time the canvas contents are replaced
   // wholesale (clearVisualization): a saved view loaded into the running
   // session, an agent's replace/load, a search that swaps the view, the
@@ -252,12 +307,12 @@ const useGraphStore = create((set, get) => ({
   focusNodeId: null, // Node ID to zoom/pan to
   // Session-scoped, newest-first trail of nodes added to the visualization or
   // navigated to, so the user can jump back through what happened. Distinct from
-  // the backend graph-mutation log (RecentActivityDrawer) and from the canvas
+  // the backend graph-mutation log (ActivityDrawer's Graph tab) and from the canvas
   // position undo/redo (useCanvasHistory). Cleared on session switch / clear.
   navHistory: [],
   pendingGroups: null, // Groups to restore from a saved view
   pendingAnnotations: null, // Note/label/arrow annotations to restore from a session
-  chatPanelOpen: true, // Chat panel expanded vs minimized
+  chatPanelOpen: loadInitialChatPanelOpen(), // Chat panel expanded vs minimized (persisted)
   showMinimap: loadInitialShowMinimap(), // Minimap visibility (persisted)
   nodePreviewEnabled: loadInitialNodePreview(), // Hover info popup on/off (persisted)
   canvasLocked: loadInitialCanvasLocked(), // Navigation-menu lock guarding the board (persisted)
@@ -333,16 +388,20 @@ const useGraphStore = create((set, get) => ({
     // recorded as 'added' here — a full replace is a baseline, not the
     // incremental user additions the trail captures (those come through
     // addNodesToVisualization).
+    // Deliberately does not touch clearGroupsFlag: every caller either performs
+    // an in-place edit of the current contents (edge retype, node edit, node
+    // removal, chat's update_in_visualization) that must leave groups and
+    // annotations on the canvas untouched, or is a genuine replace that calls
+    // clearVisualization on the line before — which already raises the flag.
+    // Raising it unconditionally here used to wipe every group/annotation on an
+    // ordinary node edit, and the loss then persisted through autosave.
     const presentIds = new Set(uniqueNodes.map((n) => n.id));
     set((state) => ({
       nodes: uniqueNodes,
       edges: uniqueEdges,
       highlightedNodeIds: highlightIds,
-      clearGroupsFlag: true, // Signal to clear groups
       navHistory: state.navHistory.filter((e) => presentIds.has(e.id)),
     }));
-    // Reset flag after a short delay
-    scheduleClearGroupsReset(set);
   },
 
   addNodesToVisualization: (newNodes, newEdges = []) => {
@@ -420,6 +479,9 @@ const useGraphStore = create((set, get) => ({
       highlightedNodeIds: [],
       hiddenNodeIds: [],
       hiddenEdgeIds: [],
+      dimmedNodeIds: [],
+      dimmedEdgeIds: [],
+      edgeIntensity: 1.0,
       nodeMarks: {},
       pulsedNodeIds: {},
       pendingGroups: null,
@@ -497,6 +559,35 @@ const useGraphStore = create((set, get) => ({
   },
 
   setHiddenEdgeIds: (ids) => set({ hiddenEdgeIds: ids }),
+
+  // Dim/restore a set of nodes or edges at once — the bulk primitive every
+  // context-menu dim/restore action (single or multi-selection) reduces to.
+  // Session-local focus only: never touches graph data.
+  dimNodes: (nodeIds) => {
+    const { dimmedNodeIds } = get();
+    set({ dimmedNodeIds: Array.from(new Set([...dimmedNodeIds, ...nodeIds])) });
+  },
+  restoreNodes: (nodeIds) => {
+    const drop = new Set(nodeIds);
+    set((state) => ({ dimmedNodeIds: state.dimmedNodeIds.filter((id) => !drop.has(id)) }));
+  },
+  setDimmedNodeIds: (ids) => set({ dimmedNodeIds: ids }),
+
+  dimEdges: (edgeIds) => {
+    const { dimmedEdgeIds } = get();
+    set({ dimmedEdgeIds: Array.from(new Set([...dimmedEdgeIds, ...edgeIds])) });
+  },
+  restoreEdges: (edgeIds) => {
+    const drop = new Set(edgeIds);
+    set((state) => ({ dimmedEdgeIds: state.dimmedEdgeIds.filter((id) => !drop.has(id)) }));
+  },
+  setDimmedEdgeIds: (ids) => set({ dimmedEdgeIds: ids }),
+
+  setEdgeIntensity: (value) => {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized)) return;
+    set({ edgeIntensity: Math.max(0, Math.min(1, normalized)) });
+  },
 
   setSelectedNodeId: (nodeId) => set({ selectedNodeId: nodeId }),
 
@@ -589,13 +680,20 @@ const useGraphStore = create((set, get) => ({
 
   setConfig: (schema, presentation, t, language) => {
     const welcomeMessage = createWelcomeMessage(presentation, t, language);
-    set({
+    const patch = {
       schema,
       presentation,
       chatMessages: [welcomeMessage],
       configLoaded: true,
       availableExperts: presentation?.expert_agents || [],
-    });
+    };
+    // Apply the backend's configured startup state only when the visitor has
+    // not made their own explicit open/collapse choice yet — an explicit
+    // choice always takes precedence, matching the default_language pattern.
+    if (loadStoredChatPanelOpen() === null) {
+      patch.chatPanelOpen = configuredChatPanelOpen(presentation);
+    }
+    set(patch);
   },
 
   // Get node color from schema/presentation
@@ -649,6 +747,27 @@ const useGraphStore = create((set, get) => ({
       type: name,
       ...config,
     }));
+  },
+
+  isRelationshipTypeApplicable: (relationshipType, sourceType, targetType) => {
+    const { schema } = get();
+    const config = schema?.relationship_types?.[relationshipType];
+    // Unconfigured relationship types are allowed for backward compatibility.
+    if (!config) return true;
+    const sourceTypes = Array.isArray(config.source_types) ? config.source_types : [];
+    const targetTypes = Array.isArray(config.target_types) ? config.target_types : [];
+    const sourceAllowed =
+      sourceTypes.length === 0 || sourceTypes.includes('*') || sourceTypes.includes(sourceType);
+    const targetAllowed =
+      targetTypes.length === 0 || targetTypes.includes('*') || targetTypes.includes(targetType);
+    return sourceAllowed && targetAllowed;
+  },
+
+  getRelationshipTypesForNodes: (sourceType, targetType) => {
+    const { getRelationshipTypes, isRelationshipTypeApplicable } = get();
+    return getRelationshipTypes().filter((rt) =>
+      isRelationshipTypeApplicable(rt.type, sourceType, targetType)
+    );
   },
 
   // Clear highlights after a delay
@@ -804,9 +923,38 @@ const useGraphStore = create((set, get) => ({
     }
   },
 
-  // Chat panel actions
-  toggleChatPanel: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
-  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
+  // Chat panel actions.
+  // toggleChatPanel is wired to the panel's own header/minimized-bar click —
+  // a genuine explicit choice — so it persists and then overrides the
+  // configured default on every later visit (see setConfig above and
+  // resetChatPanelToDefault below). Transient setters deliberately do NOT
+  // persist: GuideOverlay and MobileShell use them to stage/minimize the panel
+  // without treating that surface choreography as the visitor expressing a
+  // real preference or silently clobbering one they already made.
+  toggleChatPanel: () =>
+    set((state) => {
+      const next = !state.chatPanelOpen;
+      persistChatPanelOpen(next);
+      return { chatPanelOpen: next };
+    }),
+  setChatPanelOpen: (open) => {
+    persistChatPanelOpen(open);
+    set({ chatPanelOpen: open });
+  },
+  setChatPanelOpenTransient: (open) => set({ chatPanelOpen: open }),
+  toggleChatPanelTransient: () => set((state) => ({ chatPanelOpen: !state.chatPanelOpen })),
+  // Clears the visitor's stored choice and falls back to the configured
+  // application default again.
+  resetChatPanelToDefault: () =>
+    set((state) => {
+      try {
+        window?.localStorage?.removeItem(CHAT_PANEL_OPEN_STORAGE_KEY);
+        window?.localStorage?.removeItem(AI_ASSISTANT_COLLAPSED_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      return { chatPanelOpen: configuredChatPanelOpen(state.presentation) };
+    }),
 
   // Guide actions
   startGuide: (guideDefinition) =>

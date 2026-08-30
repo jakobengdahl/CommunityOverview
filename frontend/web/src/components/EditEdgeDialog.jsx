@@ -17,7 +17,7 @@ function clampThickness(value) {
 }
 
 function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
-  const { getRelationshipTypes } = useGraphStore();
+  const { getRelationshipTypes, getRelationshipTypesForNodes } = useGraphStore();
   const { t } = useI18n();
   const [view, setView] = useState('details');
   const [formData, setFormData] = useState({
@@ -33,13 +33,23 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
     animated: false,
   });
 
-  const relationshipTypes = getRelationshipTypes?.() || [];
-
   // Find source and target node names for display
   const sourceNode = nodes?.find((n) => n.id === edge?.source);
   const targetNode = nodes?.find((n) => n.id === edge?.target);
   const sourceName = sourceNode?.name || sourceNode?.data?.name || edge?.source || '';
   const targetName = targetNode?.name || targetNode?.data?.name || edge?.target || '';
+  const sourceType = sourceNode?.type || sourceNode?.data?.type || '';
+  const targetType = targetNode?.type || targetNode?.data?.type || '';
+  const applicableRelationshipTypes =
+    sourceType && targetType && getRelationshipTypesForNodes
+      ? getRelationshipTypesForNodes(sourceType, targetType)
+      : getRelationshipTypes?.() || [];
+  // Preserve the current edge type even if it is not explicitly configured in the schema.
+  const currentType = edge?.type || edge?.label || '';
+  const relationshipTypes =
+    currentType && !applicableRelationshipTypes.some((rt) => (rt.type || rt) === currentType)
+      ? [{ type: currentType, description: '' }, ...applicableRelationshipTypes]
+      : applicableRelationshipTypes;
 
   useEffect(() => {
     if (edge) {
@@ -147,7 +157,11 @@ function EditEdgeDialog({ edge, nodes, onClose, onSave, onDelete }) {
           <div className="edit-dialog-header-title">
             <h2>{t('edit_edge.title')}</h2>
           </div>
-          <button className="close-button" onClick={onClose}>
+          <button
+            className="close-button"
+            onClick={onClose}
+            aria-label={t('common.close') || 'Close'}
+          >
             x
           </button>
         </header>

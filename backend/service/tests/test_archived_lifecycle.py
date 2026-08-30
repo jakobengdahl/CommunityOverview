@@ -316,3 +316,21 @@ class TestArchivedAnchorTraversal:
         service.archive_nodes(["anchor"])
         result = service.get_related_nodes(node_id="anchor", depth=1)
         assert "e-self" in {e["id"] for e in result["edges"]}
+
+    def test_get_node_details_on_archived_anchor_keeps_edge_to_visible_peer(self):
+        # get_node_details is documented to still return an archived node on a
+        # direct lookup (unlike search/traversal). Its incident-edges filter
+        # needs the same anchor exemption as _neighbor_blocked: an edge from the
+        # archived anchor to a fully visible peer must not be dropped just
+        # because the anchor end happens to be archived.
+        service = _service(
+            [
+                Node(id="anchor", type=NodeType.ACTOR, name="Anchor"),
+                Node(id="peer", type=NodeType.ACTOR, name="Peer"),
+            ],
+            [Edge(id="e-anchor-peer", source="anchor", target="peer")],
+        )
+        service.archive_nodes(["anchor"])
+        result = service.get_node_details("anchor")
+        assert result["success"] is True
+        assert "e-anchor-peer" in {e["id"] for e in result["edges"]}

@@ -1,16 +1,13 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { GraphCanvas } from '@community-graph/ui-graph-canvas';
+import { GraphCanvas, CANVAS_ANNOTATION_TYPES } from '@community-graph/ui-graph-canvas';
 import '@community-graph/ui-graph-canvas/styles';
 import useGraphStore from './store/graphStore';
 import { useI18n } from './i18n';
-import FloatingHeader from './components/FloatingHeader';
-import FloatingToolbar from './components/FloatingToolbar';
-import FloatingSearch from './components/FloatingSearch';
-import ChatPanel from './components/ChatPanel';
+import DesktopShell from './components/DesktopShell';
+import MobileShell from './components/MobileShell';
 import CollectKioskView from './components/CollectKioskView';
 import GuideOverlay from './components/GuideOverlay';
-import SessionDrawer from './components/SessionDrawer';
-import RecentActivityDrawer from './components/RecentActivityDrawer';
+import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
@@ -18,18 +15,37 @@ import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
   annotationsToGroups,
-  groupsToAnnotations,
   annotationsToOverlays,
-  overlaysToAnnotations,
+  annotationDocumentToLegacyMetadata,
+  legacyMetadataToAnnotationDocument,
+  savedViewMetadataToCanvasMetadata,
 } from './utils/sessionAnnotations';
 import { serverStateToMirror, useSharedSession } from './hooks/useSharedSession';
+import { DEFAULT_REQUEST_TIMEOUT_MS as SYNC_REQUEST_TIMEOUT_MS } from './services/sessionSyncClient';
 import { useSyncConnection } from './hooks/useSyncConnection';
 import { useToolResultCommands } from './hooks/useToolResultCommands';
 import { useViewportMode } from './hooks/useViewportMode';
+import { useFullscreenCanvas } from './hooks/useFullscreenCanvas';
+import FullscreenExitButton from './components/FullscreenExitButton';
 import { decideClearAction } from './utils/clearBoard';
 import { dropIntoFreshSession, receiveRemoteSessionDeleted } from './utils/sessionLifecycle';
 import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEdits';
+import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
+import { createSelfEchoDedup } from './utils/selfEchoDedup';
+import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
+import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import './App.css';
+
+// Ceiling on how long resyncFromServer's api.getSession() call may stay
+// in flight before its reentrancy guard self-heals. api.js's fetch carries
+// no timeout (unlike SessionSyncClient's own outbound ops POST, which bounds
+// itself against exactly this: "SSE deployments commonly sit behind Cloud
+// Run / an ingress that can hold a half-open request open indefinitely" —
+// sessionSyncClient.js), so a hung reload must not permanently disable
+// reconnect recovery for the rest of the session (review round 3). Reuses
+// that same request's own timeout value (imported, not duplicated — a
+// hardcoded copy could silently drift out of sync, review round 6).
+const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -56,6 +72,9 @@ function App() {
     highlightedNodeIds,
     hiddenNodeIds,
     hiddenEdgeIds,
+    dimmedNodeIds,
+    dimmedEdgeIds,
+    edgeIntensity,
     clearGroupsFlag,
     canvasBaselineEpoch,
     addNodesToVisualization,
@@ -64,6 +83,13 @@ function App() {
     toggleEdgeVisibility,
     setHiddenNodeIds,
     setHiddenEdgeIds,
+    dimNodes,
+    restoreNodes,
+    setDimmedNodeIds,
+    dimEdges,
+    restoreEdges,
+    setDimmedEdgeIds,
+    setEdgeIntensity,
     stats,
     setStats,
     llmAvailable,
@@ -113,6 +139,13 @@ function App() {
   const urlViewLoadedRef = useRef(false);
   const latestViewport = useRef(null);
   const dialogOpenRef = useRef(false);
+  const appRef = useRef(null);
+  // Image annotation ids this browser has already rendered optimistically
+  // (handleImageIngest below); see createSelfEchoDedup for why the confirming
+  // SSE echo of the same op must be swallowed, not reapplied.
+  const selfIngestedImageAnnotationIdsRef = useRef(createSelfEchoDedup());
+  const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
+    useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
@@ -149,6 +182,23 @@ function App() {
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
   // the other (e.g. a touch-enabled laptop is coarse but not mobile-width).
   const { isMobile, isCoarsePointer } = useViewportMode();
+  // The mobile annotate sheet's content DOM node (MobileShell renders it,
+  // GraphCanvas portals AnnotationToolbox into it) — see MobileShell.jsx's
+  // component doc comment and GraphCanvas's annotationToolboxPortalContainer
+  // prop. null whenever the sheet is closed or MobileShell isn't mounted.
+  const [mobileAnnotationContainer, setMobileAnnotationContainer] = useState(null);
+  // The EDIT-time counterpart of mobileAnnotationContainer above
+  // (task-annotation-responsive-bottom-toolbox): the mobile Edit sheet's own
+  // content DOM node, and the `{open, close}` pair MobileShell hands up so a
+  // node component deep inside GraphCanvas can ask MobileShell's own
+  // `useSurfaceManager` instance to open/close the `'detail'` surface — see
+  // MobileShell.jsx's component doc comment. Starts `null` (not stable
+  // no-ops): GraphCanvas's `editSheet.capable` is gated on this being
+  // present, so a node's Edit button correctly falls back to the floating
+  // menu rather than silently no-op'ing during the one-paint window between
+  // MobileShell mounting and its own ready-effect actually firing.
+  const [mobileAnnotationEditContainer, setMobileAnnotationEditContainer] = useState(null);
+  const [detailSheetController, setDetailSheetController] = useState(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
@@ -188,9 +238,36 @@ function App() {
     setRoster,
     remoteSelections,
     setRemoteSelections,
+    remoteLeases,
+    setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
+  // Guards resyncFromServer against overlapping reconnects (review round 2):
+  // a flaky connection can drop and reconnect more than once before a slow
+  // reload request settles, and running two resyncs concurrently would
+  // replay the same pending ops twice and show a duplicate recovery toast.
+  // resyncGuardTokenRef lets a request that eventually settles after its own
+  // timeout guard already self-cleared (review round 3 — api.js's fetch has
+  // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
+  // GET must not wedge reconnect recovery forever) recognise it is no longer
+  // the current owner and not stomp on a newer resync that started meanwhile.
+  const resyncInFlightRef = useRef(false);
+  const resyncGuardTokenRef = useRef(0);
+  // Ops the sync client has told us (via onDropped) were terminally rejected
+  // by the server — 400/413/404/410, never retryable — since the current
+  // resyncFromServer call captured its `pendingOpsBefore` snapshot (review
+  // round 10). A drop concurrent with a resync's own getSession() wait can
+  // otherwise resurrect the rejected content: the op is gone from a second
+  // capture taken after the wait (so a plain "union the two reads" keeps it
+  // only via the *first* capture, which predates the drop), gets folded into
+  // the sync baseline as if it had synced successfully, and gets replayed
+  // onto the canvas — silently undoing the very rejection the "change not
+  // saved" notice just reported. The reentrancy guard suppresses onDropped's
+  // *own* resync call while one is already in flight, so the in-flight call
+  // is the only thing that will ever act on this — it reads and clears this
+  // set for itself right before finalising which ops to fold/replay.
+  const recentlyDroppedOpsRef = useRef(new Set());
   // MCP tool-result push application (external AI agent commands → canvas) and
   // the legacy SSE push stream. The op-stream `command` events are wired below
   // through syncHandlersRef and route through these same appliers. Pulse
@@ -205,6 +282,42 @@ function App() {
   // touches only the entities the op names, so a concurrent local edit is never
   // clobbered (unlike a wholesale reload). The sync client has already folded
   // the op into its baseline, so the store changes here do not echo back out.
+  // The actual canvas-mutating half of an annotation create/update — shared by
+  // applyRemoteOp's claim-gated case below (a genuine remote op, or one of an
+  // image ingest's two racing deliveries — see createSelfEchoDedup) and by
+  // onLocalAnnotationsApplied (this client's own op just acked with a fresh
+  // server version — see sessionSyncClient.js's _flush). The two callers must
+  // NOT share the claim() gate: onLocalAnnotationsApplied's id was never
+  // markPending'd for an image-ingest race (that mechanism is scoped to the
+  // dedicated ingest endpoint, never the ops queue this ack comes from), but
+  // claim() cannot tell "an id that happens to collide with an unrelated
+  // in-flight ingest race" apart from "the second half of that race" — routing
+  // an ack through claim() risks consuming a marker the real echo still needs
+  // (e.g. an image annotation moved immediately after being pasted, before its
+  // own echo has arrived), silently reverting that move when the stale echo
+  // then lands unguarded.
+  const applyAnnotationUpsertToCanvas = useCallback(
+    (ann) => {
+      if (!ann || !ann.id) return false;
+      if (ann.kind === 'group') {
+        const [group] = annotationsToGroups([ann]).groups;
+        setRemoteAnnotationOps((prev) => [
+          ...(prev || []),
+          { action: 'upsert-group', group, members: ann.member_node_ids || [] },
+        ]);
+      } else {
+        const [overlay] = annotationsToOverlays([ann]);
+        if (overlay)
+          setRemoteAnnotationOps((prev) => [
+            ...(prev || []),
+            { action: 'upsert-overlay', overlay },
+          ]);
+      }
+      return true;
+    },
+    [setRemoteAnnotationOps]
+  );
+
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -213,6 +326,12 @@ function App() {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
           if (!missing.length) break;
+          // The only case here with an internal await, so the only one where
+          // the active session can change out from under it (a session
+          // switch mid-fetch, review round 5): capture which session this op
+          // is for and re-check before writing to the store below, which is
+          // not itself session-scoped.
+          const sessionAtStart = syncRef.current?.sessionId;
           const addNodes = [];
           const addEdges = [];
           await Promise.all(
@@ -228,6 +347,7 @@ function App() {
               }
             })
           );
+          if (syncRef.current?.sessionId !== sessionAtStart) break; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -289,6 +409,29 @@ function App() {
           setHiddenEdgeIds((store.hiddenEdgeIds || []).filter((id) => !drop.has(id)));
           break;
         }
+        case 'nodes_dimmed':
+          setDimmedNodeIds(
+            Array.from(new Set([...(store.dimmedNodeIds || []), ...(op.node_ids || [])]))
+          );
+          break;
+        case 'nodes_undimmed': {
+          const drop = new Set(op.node_ids || []);
+          setDimmedNodeIds((store.dimmedNodeIds || []).filter((id) => !drop.has(id)));
+          break;
+        }
+        case 'edges_dimmed':
+          setDimmedEdgeIds(
+            Array.from(new Set([...(store.dimmedEdgeIds || []), ...(op.edge_ids || [])]))
+          );
+          break;
+        case 'edges_undimmed': {
+          const drop = new Set(op.edge_ids || []);
+          setDimmedEdgeIds((store.dimmedEdgeIds || []).filter((id) => !drop.has(id)));
+          break;
+        }
+        case 'edge_intensity_set':
+          if (typeof op.value === 'number') setEdgeIntensity(op.value);
+          break;
         case 'node_moved':
           // Merge, don't replace: a burst of moves in one tick must not lose all
           // but the last node's position.
@@ -317,22 +460,39 @@ function App() {
         case 'annotation_created':
         case 'annotation_updated': {
           const ann = op.annotation;
-          if (!ann || !ann.id) break;
-          if (ann.kind === 'group') {
-            const [group] = annotationsToGroups([ann]).groups;
-            setRemoteAnnotationOps((prev) => [
-              ...(prev || []),
-              { action: 'upsert-group', group, members: ann.member_node_ids || [] },
-            ]);
-          } else {
-            const [overlay] = annotationsToOverlays([ann]);
-            if (overlay)
-              setRemoteAnnotationOps((prev) => [
-                ...(prev || []),
-                { action: 'upsert-overlay', overlay },
-              ]);
-          }
-          break;
+          if (!ann || !ann.id) return false;
+          // No version check here on purpose (smallfix-applyremoteop-canvas-
+          // no-version-guard, round 5): a stale/reordered broadcast for this
+          // annotation is already filtered out before it ever reaches this
+          // function. Ops arrive here from three places — onRemoteOps
+          // (sessionSyncClient.js's `_handleEvent` now suppresses delivery
+          // for a stale annotation_created/annotation_updated the same
+          // `isAnnotationOpStale` check keeps out of its own sync baseline,
+          // so a genuine remote broadcast that gets here is never stale
+          // relative to what this canvas already shows); resyncFromServer's
+          // replay of this client's own not-yet-confirmed local ops (never
+          // "stale" — they are this client's own pending edits); and
+          // handleImageIngest's direct optimistic apply of a brand-new
+          // annotation this client just created (nothing to be stale
+          // relative to). Adding a second, separately-maintained version
+          // check here would risk it drifting from the one upstream rather
+          // than adding real protection — see sessionSyncClient.js's
+          // `isAnnotationOpStale` docstring.
+          //
+          // This function is the one shared place both of an image ingest's
+          // two deliveries end up — this browser's own direct optimistic
+          // apply (handleImageIngest) and its confirming SSE echo (via
+          // onRemoteOps below) — so whichever of the two got here first for
+          // this id renders it, and the other is a no-op (see
+          // createSelfEchoDedup for why "whichever is second" cannot be
+          // assumed to always be the echo). The return value tells the
+          // direct-apply caller whether *this* call was the one that won,
+          // so it knows whether to also fold the op into the sync baseline
+          // (see handleImageIngest / SessionSyncClient.foldLocalOp) — the
+          // loser must not, since the winner (or the winner's own baseline
+          // fold, for the echo case) already did.
+          if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) return false;
+          return applyAnnotationUpsertToCanvas(ann);
         }
         case 'annotation_deleted':
           if (op.annotation_id)
@@ -358,30 +518,203 @@ function App() {
       updateEdgeData,
       setHiddenNodeIds,
       setHiddenEdgeIds,
+      setDimmedNodeIds,
+      setDimmedEdgeIds,
+      setEdgeIntensity,
       setRemotePositions,
       setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
+      applyAnnotationUpsertToCanvas,
     ]
   );
 
-  // Reconnect / catch-up path (missed ops after a disconnect): reload the whole
-  // session from the server and reset the baseline. Destructive, but a resync
-  // only fires after a dropped stream, when the local user was not editing.
+  // Reconnect / catch-up path (missed ops after a disconnect, or a delayed op
+  // finally landing): reload the whole session from the server — the
+  // authoritative source for node/edge visibility — and reset the sync
+  // baseline. The reload itself is a wholesale replace, but it would silently
+  // discard whatever this client edited while offline (queued ops the server
+  // never received) if nothing put them back: capture them before the reload
+  // and replay each through applyRemoteOp afterwards, which — like any remote
+  // op — touches only the entities it names rather than clobbering the fresh
+  // server state (task fbd32fc9). Replaying does not touch the sync client's
+  // own queue, so the same ops still flush to the server exactly once normal
+  // delivery would; a concurrent edit to the same entity resolves the same
+  // way any two racing ops already do (last write wins), which is the
+  // existing idempotent-op contract, not something new this adds.
+  // Returns the number of local ops recovered this way, so the caller can
+  // report the recovery back to the user.
   const resyncFromServer = useCallback(
     async (targetId) => {
-      let payload;
+      // A flaky connection can drop and reconnect more than once before a
+      // slow reload below settles; without this guard a second resync would
+      // replay the same still-pending ops a second time and the caller would
+      // show a duplicate recovery toast (review round 2). The in-flight
+      // resync already reloads current server truth, so skipping a
+      // concurrent one loses nothing a later op/resync wouldn't also catch —
+      // including onDropped's own resync call, whose "converge back to
+      // server truth" goal an already-in-flight resync accomplishes anyway.
+      if (resyncInFlightRef.current) return 0;
+      resyncInFlightRef.current = true;
+      // A token, not just the boolean: if the guard timer below fires (its
+      // request never settles) while a *later* resync has since legitimately
+      // taken over, this call's eventual finally must not clear a flag it no
+      // longer owns (review round 3). Every checkpoint below that could run
+      // after an arbitrarily long await (the reload, and each recovered
+      // nodes_added's node fetch inside the replay loop) re-checks this same
+      // token, not just the session id — so if the timer ever does fire
+      // *while this call is still legitimately running* (merely slow, not
+      // actually hung) and a newer resync starts, this call notices at its
+      // very next checkpoint and stops, instead of continuing to apply now-
+      // superseded results on top of what the newer resync already
+      // established (review round 7).
+      const myToken = ++resyncGuardTokenRef.current;
+      // Spans the *whole* call, not just the initial reload request (reverted
+      // from round 5's narrower scoping — review round 7): api.js's fetch has
+      // no timeout of its own, and that is equally true of the replay loop's
+      // own per-op api.getNodeDetails calls (applyRemoteOp, below) as of the
+      // initial api.getSession reload — a hang in either must not wedge
+      // reconnect recovery forever. The per-checkpoint token re-checks above
+      // are what keep this safe against the failure mode round 5 originally
+      // found in a whole-call timer (a false self-heal firing mid-legitimate-
+      // run letting a redundant resync start): they stop this call from
+      // acting on stale state instead of preventing the timer from firing.
+      const guardTimer = setTimeout(() => {
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+      }, RESYNC_GUARD_TIMEOUT_MS);
       try {
-        payload = await api.getSession(targetId, { resolve: true });
-      } catch {
-        return;
+        // Selection claims are excluded from every capture below:
+        // `_readvertiseSelection()` re-queues one on every reconnect whenever
+        // the user merely has something selected, regardless of whether
+        // anything was actually edited offline, and applyRemoteOp has no
+        // case for it (a no-op) — counting it would misreport a reconnect
+        // with zero real edits as a recovery (review round 1).
+        const capturePendingOps = () =>
+          (syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []).filter(
+            (op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released'
+          );
+        // Read whatever is already queued *before* the network round-trip
+        // below, not only after: SessionSyncClient arms its own flush
+        // (_flushSoon) right after the onResync handler it called this from
+        // returns, so an `await` ahead of this first read would race that
+        // flush — it can splice the very ops we want to capture out of the
+        // queue first (review round 1; SessionSyncClient's own in-flight
+        // tracking, added in round 5, means a second read below no longer
+        // loses ops that race is finished spliced into, but reading once
+        // before starting the request is still the only way to see an op
+        // that flushes and gets fully confirmed *during* that request).
+        const pendingOpsBefore = capturePendingOps();
+        let payload;
+        try {
+          payload = await api.getSession(targetId, { resolve: true });
+        } catch {
+          return 0;
+        }
+        // Also bail if the guard timeout already fired and a newer resync
+        // now owns it (review round 4): the token check above only stops
+        // *this* stale call from clearing a flag it no longer owns — without
+        // this check here too, a call that finally resolves after its own
+        // timeout would still go on to apply its now-outdated payload/replay
+        // over whatever the newer resync already established, silently
+        // reintroducing the very data loss this PR fixes.
+        if (resyncGuardTokenRef.current !== myToken) return 0;
+        if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
+        // Capture again, right before the destructive reload below: an op
+        // enqueued *during* the getSession request above is not reflected in
+        // `payload` either, and without this second read it would be
+        // silently wiped by the reload with nothing to bring it back (review
+        // round 6). An op present only in the first read (delivered and
+        // confirmed by the server while we waited) is harmless to keep too —
+        // replaying an already-confirmed op is redundant, never wrong, under
+        // the same idempotent-op contract this whole function already relies
+        // on (see this function's opening comment), so the union below errs
+        // on the side of including rather than trying to guess which read is
+        // more current.
+        const pendingOpsAfter = capturePendingOps();
+        const seenBefore = new Set(pendingOpsBefore);
+        const unionedOps = pendingOpsBefore.concat(
+          pendingOpsAfter.filter((op) => !seenBefore.has(op))
+        );
+        // Drop anything the server terminally rejected while we were waiting
+        // above (review round 10) — kept in `pendingOpsBefore` by the union's
+        // own "err on the side of including" rule (it cannot tell "confirmed
+        // delivered" apart from "rejected" just from a second op-queue read),
+        // but onDropped already recorded it. Consumed here, not left for a
+        // later call: what this resync doesn't act on now, nothing else will.
+        const pendingOps = unionedOps.filter((op) => !recentlyDroppedOpsRef.current.has(op));
+        recentlyDroppedOpsRef.current.clear();
+        applyServerSessionRef.current?.(payload);
+        const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
+        syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        // A full reload re-hydrates every annotation from server truth, so any
+        // image-ingest race this browser was still waiting to resolve (see
+        // createSelfEchoDedup) is moot — drop it rather than let it linger and
+        // wrongly veto an unrelated later update for the same id.
+        //
+        // Accepted narrow edge case: a resync landing in the brief window
+        // between markPending(id) and either delivery reaching claim() (an
+        // upload genuinely in flight when the stream drops) clears that
+        // reservation too, so both deliveries would then render unguarded —
+        // the second one, if the annotation was already edited in between,
+        // would revert that edit.
+        selfIngestedImageAnnotationIdsRef.current.clear();
+        // Fold every recovered op into the sync baseline *before* replaying
+        // any of them onto the canvas. Two consequences of skipping this
+        // (review round 3): the next auto-save's diff would see the baseline
+        // as if these ops never happened and re-send every one of them again
+        // (our own echo for them never arrives to fold it in later, since the
+        // client skips its own echoes by design); and nodes_added's
+        // position-seed lookup (baselinePosition, below) would not see a
+        // node_moved for the same id that is later in this same batch, so
+        // the recovered node would settle at an auto-layout spot instead of
+        // where it was actually left. Folding the whole batch first — rather
+        // than interleaved with replay — means that lookup already sees it.
+        //
+        // foldOpIntoBaseline, not foldLocalOp (review round 7): these ops
+        // flush under this client's own id, so their eventual echo is always
+        // filtered by the "echo of our own op" check before it could reach
+        // foldLocalOp's dedup marker — setting that marker here would leak
+        // it forever and could wrongly swallow a different collaborator's
+        // later genuine edit to the same annotation. See foldLocalOp's own
+        // docstring for the full reasoning; foldLocalOp itself stays correct
+        // for its original caller (handleImageIngest), whose op is broadcast
+        // under a shared, non-personal client id specifically so its own
+        // echo is *not* filtered there.
+        for (const op of pendingOps) {
+          syncRef.current.foldOpIntoBaseline(op);
+        }
+        // Sequential, not Promise.all: ops must replay in their original order
+        // (e.g. nodes_added before a node_moved for the same id), not race.
+        // Re-checked every iteration, not just once before the loop (review
+        // round 5): applyRemoteOp awaits a network call for nodes_added, and
+        // the canvas store it writes to is not scoped by session — if the
+        // user switches to a different session while that await is pending,
+        // this session's recovered op would otherwise land on the newly
+        // loaded session's canvas instead. The token is re-checked too
+        // (review round 7): if the guard timer fired mid-replay because this
+        // call was merely slow, not hung, and a newer resync has since taken
+        // over, stop here rather than keep applying this call's now-stale
+        // ops on top of what the newer one already established — that newer
+        // resync's own return value is the one the caller should act on.
+        let appliedCount = 0;
+        for (const op of pendingOps) {
+          if (resyncGuardTokenRef.current !== myToken) return 0;
+          if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
+          await applyRemoteOp(op);
+          appliedCount += 1;
+        }
+        // Not pendingOps.length unconditionally (review round 7): a session
+        // switch mid-replay (the break above) can stop this short of the
+        // full batch, and reporting the full count either as "recovered" (a
+        // misleading toast in the session the user has since left) or a
+        // basis for double-counting would both be wrong.
+        return appliedCount;
+      } finally {
+        clearTimeout(guardTimer);
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
       }
-      if (!syncRef.current || syncRef.current.sessionId !== targetId) return; // switched away
-      applyServerSessionRef.current?.(payload);
-      const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-      syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
     },
-    [syncRef]
+    [syncRef, applyRemoteOp]
   );
 
   // Callbacks waiting for the next canvas snapshot (positions/groups arrive
@@ -657,14 +990,37 @@ function App() {
           return n.data || n;
         });
       setSelectedGraphNodes(selectedWithData);
-      // Advertise the local selection as advisory soft-locks so collaborators see
-      // colored markers on the graph nodes this user is working with (design 3.5).
-      // Only real graph nodes carry markers, so annotations/groups are excluded.
-      const claimIds = selectedNodes.filter((n) => n.type === 'custom').map((n) => n.id);
+      // Advertise the local selection as selection claims so collaborators see
+      // colored markers on the elements this user is working with (design 3.5).
+      // Extended to every annotation kind, not just graph nodes. Purely
+      // cosmetic (task-annotation-exclusive-edit-leases): selecting an
+      // annotation never blocks another client's dragging or editing of it —
+      // only an actual edit-lease acquisition (handleBeginEditing below) does.
+      const claimIds = selectedNodes
+        .filter((n) => n.type === 'custom' || CANVAS_ANNOTATION_TYPES.has(n.type))
+        .map((n) => n.id);
       syncRef.current?.setLocalSelection(claimIds);
     },
     [setSelectedGraphNodes]
   );
+
+  // GraphCanvas's edit-lease acquire/release pair (task-annotation-exclusive-
+  // edit-leases): every real edit-start entry point in the canvas package
+  // (text field open, geometry gesture, property editor, bulk mutation)
+  // calls these via AnnotationContext before mutating. Thin wrappers over
+  // the sync client so GraphCanvas never has to know about SessionSyncClient
+  // directly — mirrors how handleSelectionChange above wraps
+  // setLocalSelection. Optimistic-fail-open when no session is connected
+  // yet (nothing server-side could hold a competing lease before the
+  // session exists), matching SessionSyncClient.beginEditing's own
+  // reasoning.
+  const handleBeginEditing = useCallback(async (elementIds) => {
+    if (!syncRef.current) return { granted: elementIds || [], denied: {} };
+    return syncRef.current.beginEditing(elementIds);
+  }, []);
+  const handleEndEditing = useCallback((elementIds) => {
+    syncRef.current?.endEditing(elementIds);
+  }, []);
 
   // Callback: Double-click on node
   const handleNodeDoubleClick = useCallback(
@@ -675,9 +1031,7 @@ function App() {
           const nodeIds = nodeData.metadata?.node_ids || [];
           const positions = nodeData.metadata?.positions || {};
           const savedEdges = nodeData.metadata?.edges || [];
-          const savedGroups = nodeData.metadata?.groups || [];
-          const savedParentIds = nodeData.metadata?.parentIds || {};
-          const savedAnnotations = nodeData.metadata?.annotations || [];
+          const savedViewAnnotations = savedViewMetadataToCanvasMetadata(nodeData.metadata || {});
           if (nodeIds.length > 0) {
             clearVisualization();
             const details = await Promise.all(
@@ -711,11 +1065,14 @@ function App() {
               }
               const edgeMap = new Map(edgesToLoad.map((e) => [e.id, e]));
               addNodesToVisualization(loadedNodes, Array.from(edgeMap.values()));
-              if (savedGroups.length > 0) {
-                setPendingGroups({ groups: savedGroups, parentIds: savedParentIds });
+              if (savedViewAnnotations.groups.length > 0) {
+                setPendingGroups({
+                  groups: savedViewAnnotations.groups,
+                  parentIds: savedViewAnnotations.parentIds,
+                });
               }
-              if (savedAnnotations.length > 0) {
-                setPendingAnnotations(savedAnnotations);
+              if (savedViewAnnotations.annotations.length > 0) {
+                setPendingAnnotations(savedViewAnnotations.annotations);
               }
             }
           }
@@ -835,6 +1192,42 @@ function App() {
       showNotification('info', 'Edge hidden');
     },
     [toggleEdgeVisibility, showNotification]
+  );
+
+  // Dim/restore actions (task-session-focus-dimming-controls): session-local
+  // focus, never a graph edit. Bulk primitives — a single node/edge context
+  // menu action passes a one-element array, a multi-selection or an
+  // incident-edges action passes the whole set.
+  const handleDimNodes = useCallback(
+    (nodeIds) => {
+      dimNodes(nodeIds);
+      showNotification('info', t('history.desc.nodes_dimmed', { count: nodeIds.length }));
+    },
+    [dimNodes, showNotification, t]
+  );
+
+  const handleRestoreNodes = useCallback(
+    (nodeIds) => {
+      restoreNodes(nodeIds);
+      showNotification('info', t('history.desc.nodes_undimmed', { count: nodeIds.length }));
+    },
+    [restoreNodes, showNotification, t]
+  );
+
+  const handleDimEdges = useCallback(
+    (edgeIds) => {
+      dimEdges(edgeIds);
+      showNotification('info', t('history.desc.edges_dimmed', { count: edgeIds.length }));
+    },
+    [dimEdges, showNotification, t]
+  );
+
+  const handleRestoreEdges = useCallback(
+    (edgeIds) => {
+      restoreEdges(edgeIds);
+      showNotification('info', t('history.desc.edges_undimmed', { count: edgeIds.length }));
+    },
+    [restoreEdges, showNotification, t]
   );
 
   // Callback: Delete edge (from backend and visualization)
@@ -1013,7 +1406,26 @@ function App() {
       const targetId = sessionId;
       // Suppress only while the session has never materialised server-side: an
       // empty, never-edited session must not register (D13).
-      if (state.nodes.length === 0 && !isSessionMaterialized()) return;
+      //
+      // "Empty" has to mean the whole canvas, not just the graph. Annotations
+      // and group boxes live only in ReactFlow's own node state — never in the
+      // graph store — so asking `state.nodes.length` alone declared a session
+      // holding nothing but annotations to be empty and dropped every save.
+      // A canvas used purely for annotating (a blank session, notes and
+      // shapes on it, no graph nodes at all) therefore persisted nothing, and
+      // the annotations vanished the moment the session was switched away and
+      // back. `viewData` is the snapshot being written and already carries
+      // both lists, so the question can simply be asked correctly here.
+      if (
+        !shouldPersistSnapshot({
+          isMaterialized: isSessionMaterialized(),
+          graphNodeCount: state.nodes.length,
+          annotationCount: viewData?.annotations?.length ?? 0,
+          groupCount: viewData?.groups?.length ?? 0,
+        })
+      ) {
+        return;
+      }
       const positions = {};
       const parentIds = {};
       (viewData?.nodes || []).forEach((n) => {
@@ -1023,15 +1435,21 @@ function App() {
       // Annotations carry group boxes plus the free-floating overlays (notes,
       // labels, arrows) the canvas collects in viewData.annotations. All kinds
       // share one server-side annotation list (design 3.1).
+      const annotationDocument = legacyMetadataToAnnotationDocument({
+        groups: viewData?.groups || [],
+        parentIds,
+        annotations: viewData?.annotations || [],
+      });
       const nextState = {
         node_refs: state.nodes.map((n) => n.id),
         positions,
         hidden_node_ids: state.hiddenNodeIds || [],
         hidden_edge_ids: state.hiddenEdgeIds || [],
-        annotations: [
-          ...groupsToAnnotations(viewData?.groups || [], parentIds),
-          ...overlaysToAnnotations(viewData?.annotations || []),
-        ],
+        dimmed_node_ids: state.dimmedNodeIds || [],
+        dimmed_edge_ids: state.dimmedEdgeIds || [],
+        edge_intensity: typeof state.edgeIntensity === 'number' ? state.edgeIntensity : 1.0,
+        annotation_schema_version: annotationDocument.schema_version,
+        annotations: annotationDocument.annotations,
       };
       // Emit the change as incremental ops (design step 6, replacing step 4's
       // full-state PUT). Connecting here — the first non-empty save — materialises
@@ -1043,6 +1461,97 @@ function App() {
       setSessionsVersion((v) => v + 1);
     },
     [sessionId, ensureSyncConnected, isSessionMaterialized]
+  );
+
+  // Human clipboard-paste / file-upload image creation (GraphCanvas's
+  // onImageIngest). The server validates, optimizes and embeds the image (the
+  // same pipeline the MCP create_image_annotation tool uses) and returns the
+  // finished annotation, which applyIngestedImageOptimistically applies to
+  // the canvas — through the same call site every other remote/self-authored
+  // annotation change goes through (applyRemoteOp) — rather than waiting on
+  // this browser's own SSE subscription to deliver it back. It also folds
+  // the op into the sync client's baseline directly (foldLocalOp), so a
+  // snapshot save triggered before the echo arrives (e.g. the user
+  // repositions the annotation right away) diffs against a baseline that
+  // already has it, instead of re-emitting a redundant create. The SSE
+  // subscription still exists and still receives this op (attributed to a
+  // dedicated server client id rather than this browser's own, precisely so
+  // sessionSyncClient.js does not drop it as an echo of a self-authored op —
+  // see backend/service/rest_api.py's ingest_session_image): whichever of
+  // {this direct call, that echo} reaches applyRemoteOp first is the one that
+  // actually renders it (createSelfEchoDedup.claim, consulted inside
+  // applyRemoteOp's annotation_created/updated case) — the other is a no-op,
+  // since the two are not guaranteed to arrive in a fixed order. `whenReady()`
+  // waits for the same "session exists server-side" fact the op queue's own
+  // flush already guards on (D13/D14: a session is never created until its
+  // first real write), since this request bypasses that queue.
+  //
+  // The annotation id is generated *here*, client-side, and reserved in the
+  // dedup (markPending) before the request is even sent — passed through as
+  // `annotationId` so the server uses it rather than minting its own. This
+  // must happen before either of the two deliveries can possibly reach
+  // applyRemoteOp's claim() check, or that first delivery would find nothing
+  // reserved and treat itself as an ordinary, never-raced annotation.
+  const handleImageIngest = useCallback(
+    async (dataUrl, position) => {
+      const targetId = sessionId;
+      const sync = ensureSyncConnected(targetId);
+      const dedup = selfIngestedImageAnnotationIdsRef.current;
+      const annotationId = crypto.randomUUID();
+      dedup.markPending(annotationId);
+      let delivered = false;
+      try {
+        await sync?.whenReady();
+        if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
+        const result = await api.ingestSessionImage(targetId, {
+          x: position.x,
+          y: position.y,
+          imageData: dataUrl,
+          annotationId,
+        });
+        // Re-check after this second await too: the ingest POST is a real
+        // network round trip (server-side fetch/optimize included), long
+        // enough for the user to have switched to a different session while
+        // it was in flight. The annotation is real and correctly created for
+        // `targetId` server-side either way — only applying it to whatever
+        // session happens to be active *now* (a different one) would be
+        // wrong, since applyRemoteOp/foldLocalOp act on the current graph
+        // store and the current sync client, not on `targetId` specifically.
+        if (syncRef.current?.sessionId !== targetId) return; // switched sessions mid-flight
+        const carriedAnnotation = await applyIngestedImageOptimistically({
+          annotation: result?.annotation,
+          applyRemoteOp,
+          foldLocalOp: (op) => syncRef.current?.foldLocalOp(op),
+        });
+        // A 200 whose body carries no usable annotation is a failure, not a
+        // delivery. Marking it delivered here is how "I picked a file and
+        // nothing happened — no image, no error" used to arise: the canvas
+        // never changed and nothing said why. Throw into the same catch every
+        // other failure already uses, so it reports identically.
+        if (!carriedAnnotation) {
+          throw new Error(t('canvas.image_ingest_failed'));
+        }
+        delivered = true;
+        sessionStore.touchSession(targetId);
+        setSessionsVersion((v) => v + 1);
+      } catch (error) {
+        console.error('Error ingesting image:', error);
+        showNotification('error', error.message || t('canvas.image_ingest_failed'));
+      } finally {
+        // This attempt never resolved into a rendered-here annotation: either
+        // no server-side write ever happened at all (the request failed, or
+        // this bailed out before ever sending it — the first guard above), or
+        // one did but this browser gave up tracking it (switched sessions
+        // after the POST resolved — the second guard above; a switch caught
+        // by the first guard, before the POST, can never have a completed
+        // write behind it). Either way, forgetting the mark is correct: there
+        // is nothing left for *this* browser's own echo handling to resolve
+        // against, so nothing should stay reserved
+        // waiting for it.
+        if (!delivered) dedup.forget(annotationId);
+      }
+    },
+    [sessionId, ensureSyncConnected, syncRef, showNotification, t, applyRemoteOp]
   );
 
   // Ask GraphCanvas for a snapshot (positions + groups); the callback runs
@@ -1086,20 +1595,92 @@ function App() {
     }, 1500);
   }, [requestSessionSnapshot, isSessionMaterialized]);
 
+  // Realtime publish timing for annotation changes — the "accepted operation
+  // timing" from task-annotation-shared-session-realtime's slice_scope, split
+  // out from the generic 1500ms autosave debounce above (which stays as-is
+  // for graph-node positions and the local session-restore bookkeeping the
+  // effect below triggers on every store-level change). The actual
+  // immediate-vs-debounced decision lives in annotationChangeScheduler.js
+  // (framework-agnostic, unit-tested against fake timers); this is just its
+  // React wiring. `publishRef` carries the latest emptiness guard and
+  // `requestSessionSnapshot` so the scheduler (created once and kept for the
+  // component's lifetime) always calls through to the current session, not a
+  // stale one captured at creation time.
+  const publishRef = useRef(() => {});
+  publishRef.current = () => {
+    // No emptiness guard here, deliberately. This runs only for annotation
+    // changes, and an annotation change IS a real write — it is precisely the
+    // case D14's guard must not suppress. Mirroring scheduleAutoSave's
+    // graph-node count instead meant that on a canvas with no graph nodes,
+    // every annotation change was discarded before a snapshot was even
+    // requested. `persistSessionSnapshot` still applies the corrected
+    // whole-canvas guard at the end of the round trip, so a genuinely empty,
+    // never-materialised session still does not register (D13).
+    requestSessionSnapshot(null);
+  };
+  const annotationSchedulerRef = useRef(null);
+  if (!annotationSchedulerRef.current) {
+    annotationSchedulerRef.current = createAnnotationChangeScheduler({
+      publish: () => publishRef.current(),
+    });
+  }
+  const publishAnnotationChange = useCallback((kind) => {
+    annotationSchedulerRef.current.schedule(kind);
+  }, []);
+
+  // GraphCanvas's onAnnotationChange callback (see AnnotationContext's
+  // notifyChange doc comment for the kind vocabulary).
+  const handleAnnotationChange = useCallback(
+    (kind) => publishAnnotationChange(kind),
+    [publishAnnotationChange]
+  );
+
+  useEffect(() => {
+    return () => annotationSchedulerRef.current?.clearPending();
+  }, []);
+
+  // Position-change callback GraphCanvas's onNodePositionChange fires for
+  // both graph-node and annotation drags/moves alike. Graph node moves keep
+  // the existing 1500ms scheduleAutoSave debounce (unaffected by this task);
+  // annotation geometry publishes immediately at this release-time call.
+  const handleNodePositionChange = useCallback(
+    (_nodeId, _position, nodeType) => {
+      if (nodeType && CANVAS_ANNOTATION_TYPES.has(nodeType)) {
+        publishAnnotationChange('geometry');
+        return;
+      }
+      scheduleAutoSave();
+    },
+    [publishAnnotationChange, scheduleAutoSave]
+  );
+
   useEffect(() => {
     scheduleAutoSave();
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [nodes, edges, hiddenNodeIds, hiddenEdgeIds, scheduleAutoSave]);
+  }, [
+    nodes,
+    edges,
+    hiddenNodeIds,
+    hiddenEdgeIds,
+    dimmedNodeIds,
+    dimmedEdgeIds,
+    edgeIntensity,
+    scheduleAutoSave,
+  ]);
 
-  // Callback: Create group (called when group is created inside GraphCanvas)
+  // Callback: Create group (called when group is created inside GraphCanvas).
+  // A group box is itself an annotation kind (ANNOTATION_TYPES includes
+  // 'group'), so its creation publishes immediately like any other
+  // create/delete/style/geometry annotation change, not the generic 1500ms
+  // autosave debounce.
   const handleCreateGroup = useCallback(
     (position, groupNode) => {
       showNotification('success', 'Group created');
-      scheduleAutoSave();
+      publishAnnotationChange('create');
     },
-    [showNotification, scheduleAutoSave]
+    [showNotification, publishAnnotationChange]
   );
 
   // Confirm save view
@@ -1109,6 +1690,15 @@ function App() {
 
       setIsSavingView(true);
       try {
+        const parentIds = Object.fromEntries(
+          saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
+        );
+        const annotationDocument = legacyMetadataToAnnotationDocument({
+          groups: saveViewDialog.viewData.groups || [],
+          parentIds,
+          annotations: saveViewDialog.viewData.annotations || [],
+        });
+        const legacyAnnotationMetadata = annotationDocumentToLegacyMetadata(annotationDocument);
         const viewNode = {
           name,
           type: 'SavedView',
@@ -1119,13 +1709,13 @@ function App() {
             positions: Object.fromEntries(
               saveViewDialog.viewData.nodes.map((n) => [n.id, n.position])
             ),
-            parentIds: Object.fromEntries(
-              saveViewDialog.viewData.nodes.filter((n) => n.parentId).map((n) => [n.id, n.parentId])
-            ),
+            parentIds,
             edge_ids: (saveViewDialog.viewData.edges || []).map((e) => e.id),
             edges: saveViewDialog.viewData.edges || [],
-            groups: saveViewDialog.viewData.groups,
-            annotations: saveViewDialog.viewData.annotations || [],
+            annotation_schema_version: annotationDocument.schema_version,
+            annotation_document: annotationDocument,
+            groups: legacyAnnotationMetadata.groups,
+            annotations: legacyAnnotationMetadata.annotations,
           },
           communities: [],
         };
@@ -1391,6 +1981,9 @@ function App() {
     addNodesToVisualization,
     setHiddenNodeIds,
     setHiddenEdgeIds,
+    setDimmedNodeIds,
+    setDimmedEdgeIds,
+    setEdgeIntensity,
     setPendingGroups,
     setPendingAnnotations,
     ensureSyncConnected,
@@ -1407,12 +2000,37 @@ function App() {
   useEffect(() => {
     syncHandlersRef.current = {
       onReady: () => {},
-      onResync: () => resyncFromServer(sessionId),
+      // Report recovery status back to the user (task fbd32fc9): a resync
+      // that had to replay locally-queued ops means real, user-visible
+      // content survived a dropped connection — worth a confirmation rather
+      // than a silent reconciliation.
+      onResync: async () => {
+        const recovered = await resyncFromServer(sessionId);
+        if (recovered > 0) {
+          showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
+        }
+      },
       onRemoteOps: (ops) => {
         (ops || []).forEach((op) => applyRemoteOp(op));
       },
+      // This client's own annotation write just got acked with a fresh
+      // server version/field_versions (dec-annotation-field-patches-and-
+      // conflicts) — sessionSyncClient.js already folded it into its own
+      // sync baseline; thread it onto the *live canvas node* too, so the
+      // next local edit's autosave snapshot (which rebuilds from canvas node
+      // data, not from the sync baseline) carries the true version forward
+      // instead of the stale one from before this write. Without this, this
+      // client's own next edit to the same annotation would send a stale
+      // base_version and could spuriously conflict against nothing but its
+      // own prior write. Goes through applyAnnotationUpsertToCanvas directly
+      // rather than applyRemoteOp/its claim() gate — see that helper's own
+      // comment for why this ack must not touch the image-ingest dedup.
+      onLocalAnnotationsApplied: (ops) => {
+        (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
+      },
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
+      onLeases: (l) => setRemoteLeases(l),
       onSessionRenamed: (name) => {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
@@ -1445,8 +2063,37 @@ function App() {
       // stays in the local canvas but will never persist or reach
       // collaborators. Surface it and resync so the canvas converges back to
       // whatever the server actually holds instead of silently drifting (R9).
-      onDropped: () => {
-        showNotification('error', t('sessions.change_not_saved'));
+      // Record the dropped op(s) first (review round 10): a resync already
+      // in flight when this fires must know to exclude them from what it
+      // folds/replays, or it would resurrect content the server just
+      // permanently rejected.
+      //
+      // A 409 drop is the same "never retry this stale content" terminal
+      // handling, but two distinct causes now share the status code:
+      // LeaseConflict (task-annotation-exclusive-edit-leases) means another
+      // client holds a live edit lease on the annotation this op targeted;
+      // AnnotationFieldConflict (dec-annotation-field-patches-and-conflicts)
+      // means no lease was held at all, but this op's base_version was stale
+      // for a field someone else genuinely changed since. The two read very
+      // differently to a user, so the response body (parsed by
+      // sessionSyncClient.js only for a terminal drop) tells them apart —
+      // `error: 'field_conflict'` is the REST /ops 409's structured detail
+      // for the second cause; anything else (including LeaseConflict's plain
+      // string detail) falls back to the pre-existing lease notice, the same
+      // "someone else is editing this annotation" text the direct-acquire
+      // denial already uses (GraphCanvas.jsx's annotationRemoteLocked).
+      onDropped: (batch, status, body) => {
+        (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
+        if (status === 409) {
+          const detail = body && typeof body.detail === 'object' ? body.detail : null;
+          if (detail && detail.error === 'field_conflict') {
+            showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else {
+            showNotification('info', t('context_menu.annotation_remote_locked'));
+          }
+        } else {
+          showNotification('error', t('sessions.change_not_saved'));
+        }
         resyncFromServer(sessionId);
       },
     };
@@ -1454,6 +2101,7 @@ function App() {
     sessionId,
     resyncFromServer,
     applyRemoteOp,
+    applyAnnotationUpsertToCanvas,
     clearVisualization,
     resetSessionScopedUi,
     showNotification,
@@ -1463,6 +2111,7 @@ function App() {
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
+    setRemoteLeases,
   ]);
 
   // Switch working session: persist the current one first (ops via the snapshot
@@ -1739,9 +2388,61 @@ function App() {
     setDeleteSessionDialog,
   };
 
+  // The session drawer is non-modal (in either shell), so any dialog can be
+  // stacked on top of it; while one is open, Escape belongs to that dialog.
+  const suspendEscape = !!(
+    settingsOpen ||
+    connectDialogOpen ||
+    renameDialog ||
+    deleteSessionDialog ||
+    clearConfirm ||
+    createNodeType ||
+    editingNode ||
+    detailNode ||
+    editingEdge ||
+    deleteDialog ||
+    saveViewDialog ||
+    showSubscriptionDialog ||
+    showAgentDialog ||
+    showAgentRunsDialog ||
+    showAgentProposalsDialog ||
+    skillDialogType ||
+    showAKCDialog
+  );
+
+  const shellProps = {
+    sessionId,
+    sessions,
+    currentSessionId: sessionId,
+    onNewSession: handleNewSession,
+    onConnectSession: () => setConnectDialogOpen(true),
+    onSelectSession: handleSelectSession,
+    onRenameSession: (id) => {
+      const entry = sessions.find((s) => s.id === id);
+      setRenameDialog({ id, name: entry?.name || '' });
+    },
+    onDeleteSession: handleRequestDeleteSession,
+    onCopySessionLink: handleCopySessionLink,
+    onCopyTriggerUrl: handleCopyTriggerUrl,
+    onOpenSettings: () => setSettingsOpen(true),
+    canvasLocked,
+    onToggleLock: () => setCanvasLocked(!canvasLocked),
+    suspendEscape,
+    onCreateNodeForType: handleCreateNodeForType,
+    onCreateAgent: handleCreateAgent,
+    onCreateSubscription: handleCreateSubscription,
+    onSaveView: handleToolbarSaveView,
+    onCreateGroup: handleToolbarCreateGroup,
+    onCreateActiveKnowledgeCollection: handleCreateAKC,
+    llmAvailable,
+    akcShortName,
+    onEnterFullscreen: enterFullscreenCanvas,
+  };
+
   return (
     <div
-      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}`}
+      ref={appRef}
+      className={`app${drawerOpen ? ' session-drawer-open' : ''}${isMobile ? ' is-mobile' : ''}${isCoarsePointer ? ' is-touch' : ''}${fullscreenCanvasActive ? ' fullscreen-canvas-mode' : ''}`}
     >
       <div className="app-canvas" id="guide-target-canvas">
         <GraphCanvas
@@ -1750,6 +2451,9 @@ function App() {
           highlightedNodeIds={highlightedNodeIds}
           hiddenNodeIds={hiddenNodeIds}
           hiddenEdgeIds={hiddenEdgeIds}
+          dimmedNodeIds={dimmedNodeIds}
+          dimmedEdgeIds={dimmedEdgeIds}
+          edgeIntensity={edgeIntensity}
           nodeMarks={nodeMarks}
           pulsedNodeIds={pulsedNodeIds}
           clearGroupsFlag={clearGroupsFlag}
@@ -1761,15 +2465,20 @@ function App() {
           onHideMultiple={handleHideMultiple}
           onHideEdge={handleHideEdge}
           onDeleteEdge={handleDeleteEdge}
+          onDimNodes={handleDimNodes}
+          onRestoreNodes={handleRestoreNodes}
+          onDimEdges={handleDimEdges}
+          onRestoreEdges={handleRestoreEdges}
           onEditEdge={handleEditEdge}
           onSetEdgeType={handleSetEdgeType}
           onConnect={handleConnect}
           onCreateGroup={handleCreateGroup}
-          onNodePositionChange={scheduleAutoSave}
+          onNodePositionChange={handleNodePositionChange}
           onSaveView={handleSaveView}
           onCreateSubscription={handleCreateSubscription}
           onCreateAgent={handleCreateAgent}
           onDropCreateNode={handleDropCreateNode}
+          onImageIngest={handleImageIngest}
           onShowOnly={handleShowOnly}
           onSelectionChange={handleSelectionChange}
           onNodeDoubleClick={handleNodeDoubleClick}
@@ -1783,7 +2492,7 @@ function App() {
           onGroupsRestored={() => setPendingGroups(null)}
           annotationsToRestore={pendingAnnotations}
           onAnnotationsRestored={() => setPendingAnnotations(null)}
-          onAnnotationChange={scheduleAutoSave}
+          onAnnotationChange={handleAnnotationChange}
           remotePositions={remotePositions}
           onRemotePositionsApplied={() => setRemotePositions(null)}
           animatedLayout={animatedLayout}
@@ -1803,6 +2512,9 @@ function App() {
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}
+          remoteLeases={remoteLeases}
+          onBeginEditing={handleBeginEditing}
+          onEndEditing={handleEndEditing}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}
@@ -1813,6 +2525,13 @@ function App() {
           lazyLoadMoreLabel={t('canvas.lazy_load_more')}
           lazyLoadHiddenConnectionsLabel={t('canvas.lazy_hidden_connections')}
           showMinimap={showMinimap}
+          compactMode={isMobile ? 'on' : 'off'}
+          compactZoomInLabel={t('canvas.zoom_in')}
+          compactZoomOutLabel={t('canvas.zoom_out')}
+          compactFitViewLabel={t('canvas.fit_view')}
+          focusViewLabel={t('canvas.focus_view')}
+          exitFocusViewLabel={t('canvas.exit_focus_view')}
+          compactControlsLabel={t('canvas.controls_group')}
           nodePreviewEnabled={nodePreviewEnabled}
           schema={schema}
           onContextMenuAction={handleContextMenuAction}
@@ -1833,23 +2552,152 @@ function App() {
             organizeVertical: t('context_menu.organize_vertical'),
             organizeTree: t('context_menu.organize_tree'),
             organizeHint: t('context_menu.organize_hint'),
+            align: t('context_menu.align'),
+            alignLeft: t('context_menu.align_left'),
+            alignCenterHorizontal: t('context_menu.align_center_horizontal'),
+            alignRight: t('context_menu.align_right'),
+            alignTop: t('context_menu.align_top'),
+            alignCenterVertical: t('context_menu.align_center_vertical'),
+            alignBottom: t('context_menu.align_bottom'),
+            distribute: t('context_menu.distribute'),
+            distributeHorizontal: t('context_menu.distribute_horizontal'),
+            distributeVertical: t('context_menu.distribute_vertical'),
+            annotationAttachedSkipped: t('context_menu.annotation_attached_skipped'),
             hideAll: t('context_menu.hide_all'),
             deleteAll: t('context_menu.delete_all'),
+            dimNode: t('context_menu.dim_node'),
+            restoreNode: t('context_menu.restore_node'),
+            dimSelected: t('context_menu.dim_selected'),
+            restoreSelected: t('context_menu.restore_selected'),
+            dimIncidentEdges: t('context_menu.dim_incident_edges'),
+            restoreIncidentEdges: t('context_menu.restore_incident_edges'),
+            dimEdge: t('context_menu.dim_edge'),
+            restoreEdge: t('context_menu.restore_edge'),
             changeType: t('context_menu.change_type'),
             generalConnection: t('context_menu.general_connection'),
             addNote: t('context_menu.add_note'),
             addLabel: t('context_menu.add_label'),
             addArrow: t('context_menu.add_arrow'),
             annotationColor: t('context_menu.annotation_color'),
+            annotationFill: t('context_menu.annotation_fill'),
+            annotationBorder: t('context_menu.annotation_border'),
+            annotationTransparent: t('context_menu.annotation_transparent'),
             deleteAnnotation: t('context_menu.delete'),
+            unlockAnnotation: t('context_menu.annotation_unlock'),
+            duplicateAnnotation: t('context_menu.annotation_duplicate'),
             notePlaceholder: t('context_menu.note_placeholder'),
             labelPlaceholder: t('context_menu.label_placeholder'),
             annotationTextSize: t('context_menu.annotation_text_size'),
+            annotationTextAlign: t('context_menu.annotation_align'),
+            annotationAlignTop: t('context_menu.annotation_align_top'),
+            annotationAlignMiddle: t('context_menu.annotation_align_middle'),
+            annotationAlignBottom: t('context_menu.annotation_align_bottom'),
+            annotationAlignLeft: t('context_menu.annotation_align_left'),
+            annotationAlignCenter: t('context_menu.annotation_align_center'),
+            annotationAlignRight: t('context_menu.annotation_align_right'),
+            annotationFontFamily: t('context_menu.annotation_font'),
+            annotationFontDefault: t('context_menu.annotation_font_default'),
+            annotationFontFamilySerif: t('context_menu.annotation_font_serif'),
+            annotationFontFamilyMonospace: t('context_menu.annotation_font_monospace'),
+            annotationFontFamilyCursive: t('context_menu.annotation_font_cursive'),
             arrowStartHead: t('context_menu.arrow_start_head'),
             arrowEndHead: t('context_menu.arrow_end_head'),
+            annotationShape: t('context_menu.annotation_shape'),
+            annotationIcon: t('context_menu.annotation_icon'),
+            annotationRotation: t('context_menu.annotation_rotation'),
+            annotationRotateLeft: t('context_menu.annotation_rotate_left'),
+            annotationRotateRight: t('context_menu.annotation_rotate_right'),
+            annotationRotateReset: t('context_menu.annotation_rotate_reset'),
             undoNotification: t('context_menu.undo_notification'),
             redoNotification: t('context_menu.redo_notification'),
+            imageIngestFailed: t('canvas.image_ingest_failed'),
+            annotationRemoteLocked: t('context_menu.annotation_remote_locked'),
+            annotationLockedSkipped: t('context_menu.annotation_locked_skipped'),
+            annotationBroken: t('context_menu.annotation_broken'),
+            freehandColor: t('context_menu.freehand_color'),
+            freehandWidth: t('context_menu.freehand_width'),
+            freehandSmoothing: t('context_menu.freehand_smoothing'),
+            freehandOpacity: t('context_menu.freehand_opacity'),
+            freehandDrawingHint: t('canvas.freehand_drawing_hint'),
+            freehandConcurrentInputBlocked: t('canvas.freehand_concurrent_input_blocked'),
+            annotationLayer: t('context_menu.annotation_layer'),
+            annotationLayerFront: t('context_menu.annotation_layer_front'),
+            annotationLayerBack: t('context_menu.annotation_layer_back'),
+            groupLayer: t('context_menu.group_layer'),
+            groupLayerFront: t('context_menu.group_layer_front'),
+            groupLayerBack: t('context_menu.group_layer_back'),
+            annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
+            annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
+            annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
+            annotationNearbyText: t('context_menu.annotation_nearby_text'),
+            annotationOpacity: t('context_menu.annotation_opacity'),
+            editAnnotation: t('context_menu.edit_annotation'),
+            ariaKindNote: t('context_menu.aria_kind_note'),
+            ariaKindLabel: t('context_menu.aria_kind_label'),
+            ariaKindText: t('context_menu.aria_kind_text'),
+            ariaKindShape: t('context_menu.aria_kind_shape'),
+            ariaKindIcon: t('context_menu.aria_kind_icon'),
+            ariaKindVoteDot: t('context_menu.aria_kind_vote_dot'),
+            ariaKindImage: t('context_menu.aria_kind_image'),
+            ariaKindArrow: t('context_menu.aria_kind_arrow'),
+            ariaKindFreehand: t('context_menu.aria_kind_freehand'),
+            ariaKindGroup: t('context_menu.aria_kind_group'),
+            annotationWidth: t('context_menu.annotation_width'),
+            annotationHeight: t('context_menu.annotation_height'),
+            annotationSize: t('context_menu.annotation_size'),
+            annotationMoreActions: t('context_menu.annotation_more_actions'),
+            annotationApplySize: t('context_menu.annotation_apply_size'),
+            annotationAttachTo: t('context_menu.annotation_attach_to'),
+            annotationDetach: t('context_menu.annotation_detach'),
+            annotationAttachToHint: t('context_menu.annotation_attach_to_hint'),
+            annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
+            annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
+            annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
           }}
+          annotationToolboxLabels={{
+            toggleExpand: t('annotation_toolbox.toggle_expand'),
+            toggleCollapse: t('annotation_toolbox.toggle_collapse'),
+            note: t('annotation_toolbox.note'),
+            text: t('annotation_toolbox.text'),
+            label: t('annotation_toolbox.label'),
+            shapeRectangle: t('annotation_toolbox.shape_rectangle'),
+            shapeCircle: t('annotation_toolbox.shape_circle'),
+            shapeTriangle: t('annotation_toolbox.shape_triangle'),
+            shapeRhombus: t('annotation_toolbox.shape_rhombus'),
+            shapeHexagon: t('annotation_toolbox.shape_hexagon'),
+            shapeProcessArrow: t('annotation_toolbox.shape_process_arrow'),
+            shapePickerOpen: t('annotation_toolbox.shape_picker_open'),
+            shapePicker: t('annotation_toolbox.shape_picker'),
+            icon: t('annotation_toolbox.icon'),
+            iconPickerOpen: t('annotation_toolbox.icon_picker_open'),
+            iconPicker: t('annotation_toolbox.icon_picker'),
+            voteDot: t('annotation_toolbox.vote_dot'),
+            image: t('annotation_toolbox.image'),
+            freehand: t('annotation_toolbox.freehand'),
+            noteHint: t('annotation_toolbox.note_hint'),
+            textHint: t('annotation_toolbox.text_hint'),
+            labelHint: t('annotation_toolbox.label_hint'),
+            shapeRectangleHint: t('annotation_toolbox.shape_rectangle_hint'),
+            shapeCircleHint: t('annotation_toolbox.shape_circle_hint'),
+            shapeTriangleHint: t('annotation_toolbox.shape_triangle_hint'),
+            shapeRhombusHint: t('annotation_toolbox.shape_rhombus_hint'),
+            shapeHexagonHint: t('annotation_toolbox.shape_hexagon_hint'),
+            shapeProcessArrowHint: t('annotation_toolbox.shape_process_arrow_hint'),
+            iconHint: t('annotation_toolbox.icon_hint'),
+            voteDotHint: t('annotation_toolbox.vote_dot_hint'),
+            imageHint: t('annotation_toolbox.image_hint'),
+            freehandHint: t('annotation_toolbox.freehand_hint'),
+            select: t('annotation_toolbox.select'),
+            eraser: t('annotation_toolbox.eraser'),
+            voteDotPickerOpen: t('annotation_toolbox.vote_dot_picker_open'),
+            voteDotPicker: t('annotation_toolbox.vote_dot_picker'),
+            selectHint: t('annotation_toolbox.select_hint'),
+            eraserHint: t('annotation_toolbox.eraser_hint'),
+          }}
+          annotationToolboxPortalContainer={isMobile ? mobileAnnotationContainer : null}
+          annotationEditSheetPortalContainer={isMobile ? mobileAnnotationEditContainer : null}
+          onRequestAnnotationEditSheet={isMobile ? (detailSheetController?.open ?? null) : null}
+          onCloseAnnotationEditSheet={isMobile ? (detailSheetController?.close ?? null) : null}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
           onViewportChange={(vp) => {
@@ -1858,60 +2706,40 @@ function App() {
         />
       </div>
 
-      <FloatingHeader
+      {isMobile ? (
+        <MobileShell
+          {...shellProps}
+          onClear={() => requestClear('button')}
+          onOpenActivity={() => setActivityOpen(true)}
+          onAnnotationSheetContainerChange={setMobileAnnotationContainer}
+          onAnnotationEditSheetContainerChange={setMobileAnnotationEditContainer}
+          onDetailSheetControllerReady={setDetailSheetController}
+        />
+      ) : (
+        <DesktopShell
+          {...shellProps}
+          roster={roster}
+          currentClientId={api.getClientId()}
+          onClear={() => requestClear('button')}
+          drawerOpen={drawerOpen}
+          onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onOpenActivity={() => {
+            setDrawerOpen(false);
+            setActivityOpen(true);
+          }}
+        />
+      )}
+      {fullscreenCanvasActive && (
+        <FullscreenExitButton onExit={exitFullscreenCanvas} label={t('fullscreen.exit')} />
+      )}
+      <ActivityDrawer
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
         sessionId={sessionId}
-        roster={roster}
         currentClientId={api.getClientId()}
-        onClear={() => requestClear('button')}
-        onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
+        roster={roster}
       />
-      <SessionDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        sessions={sessions}
-        currentSessionId={sessionId}
-        onNewSession={handleNewSession}
-        onConnectSession={() => setConnectDialogOpen(true)}
-        onSelectSession={handleSelectSession}
-        onRenameSession={(id) => {
-          const entry = sessions.find((s) => s.id === id);
-          setRenameDialog({ id, name: entry?.name || '' });
-        }}
-        onDeleteSession={handleRequestDeleteSession}
-        onCopySessionLink={handleCopySessionLink}
-        onCopyTriggerUrl={handleCopyTriggerUrl}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenActivity={() => {
-          setDrawerOpen(false);
-          setActivityOpen(true);
-        }}
-        canvasLocked={canvasLocked}
-        onToggleLock={() => setCanvasLocked(!canvasLocked)}
-        suspendEscape={
-          !!(
-            // The drawer is non-modal, so any dialog can be stacked on top of
-            // it; while one is open, Escape belongs to that dialog.
-            settingsOpen ||
-            connectDialogOpen ||
-            renameDialog ||
-            deleteSessionDialog ||
-            clearConfirm ||
-            createNodeType ||
-            editingNode ||
-            detailNode ||
-            editingEdge ||
-            deleteDialog ||
-            saveViewDialog ||
-            showSubscriptionDialog ||
-            showAgentDialog ||
-            showAgentRunsDialog ||
-            showAgentProposalsDialog ||
-            skillDialogType ||
-            showAKCDialog
-          )
-        }
-      />
-      <RecentActivityDrawer open={activityOpen} onClose={() => setActivityOpen(false)} />
       {clearConfirm && (
         <ConfirmDialog
           title={
@@ -1937,16 +2765,6 @@ function App() {
           {t('federation.depth_indicator', { current: federationDepth, max: maxFederationDepth })}
         </div>
       )}
-      <FloatingSearch />
-      <FloatingToolbar
-        onCreateNode={handleCreateNodeForType}
-        onCreateAgent={handleCreateAgent}
-        onCreateSubscription={handleCreateSubscription}
-        onSaveView={handleToolbarSaveView}
-        onCreateGroup={handleToolbarCreateGroup}
-        onCreateActiveKnowledgeCollection={handleCreateAKC}
-      />
-      {llmAvailable && <ChatPanel collectionShortName={akcShortName || undefined} />}
       <NodeHistoryPanel />
 
       {notification && (

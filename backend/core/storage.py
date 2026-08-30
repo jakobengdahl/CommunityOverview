@@ -588,6 +588,55 @@ class GraphStorage:
         """Get all edges in the graph"""
         return list(self.edges.values())
 
+    def _validate_edge_applicability(self, edge: Edge) -> None:
+        source_node = self.nodes.get(edge.source)
+        target_node = self.nodes.get(edge.target)
+        if source_node is None or target_node is None:
+            return
+
+        from backend.config import config_loader
+
+        decision = config_loader.relationship_type_allows_node_types(
+            edge.type_str, source_node.type_str, target_node.type_str
+        )
+        if not decision.get("allowed"):
+            raise ValueError(decision.get("message") or "Relationship type not allowed")
+
+    def audit_relationship_applicability(self) -> List[Dict[str, Any]]:
+        """Return existing edges that violate configured relationship applicability."""
+        violations = []
+        for edge in self.edges.values():
+            source_node = self.nodes.get(edge.source)
+            target_node = self.nodes.get(edge.target)
+            if source_node is None or target_node is None:
+                violations.append(
+                    {
+                        "edge_id": edge.id,
+                        "type": edge.type_str,
+                        "source": edge.source,
+                        "target": edge.target,
+                        "source_type": source_node.type_str if source_node else None,
+                        "target_type": target_node.type_str if target_node else None,
+                        "message": "Edge references a missing source or target node.",
+                    }
+                )
+                continue
+            try:
+                self._validate_edge_applicability(edge)
+            except ValueError as exc:
+                violations.append(
+                    {
+                        "edge_id": edge.id,
+                        "type": edge.type_str,
+                        "source": edge.source,
+                        "target": edge.target,
+                        "source_type": source_node.type_str,
+                        "target_type": target_node.type_str,
+                        "message": str(exc),
+                    }
+                )
+        return violations
+
     def get_related_nodes(
         self,
         node_id: str,
@@ -724,6 +773,8 @@ class GraphStorage:
                             success=False,
                             message=f"Edge with ID {edge.id} already exists",
                         )
+
+                    self._validate_edge_applicability(edge)
 
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
@@ -1133,6 +1184,11 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}",
                 )
 
+    def get_node_count(self) -> int:
+        """Total node count, for callers that only need a count and should not
+        pay for building the full per-type breakdown get_stats() computes."""
+        return len(self.nodes)
+
     def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
         # Count nodes per type
@@ -1143,10 +1199,19 @@ class GraphStorage:
             )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
+        # Count edges per type, for the metamodel explorer's relationship counts.
+        edges_by_type = {}
+        for edge in self.edges.values():
+            type_name = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
+            edges_by_type[type_name] = edges_by_type.get(type_name, 0) + 1
+
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
+            edges_by_type=edges_by_type,
             last_updated=datetime.now(timezone.utc),
         )
 
@@ -1216,11 +1281,18 @@ class GraphStorage:
 
             # Update allowed fields
             allowed_fields = {"type", "label", "metadata"}
+            candidate = edge.to_dict()
             for key, value in updates.items():
                 if key in allowed_fields:
                     if key == "type" and (value is None or value == ""):
                         value = "RELATES_TO"
-                    setattr(edge, key, value)
+                    candidate[key] = value
+
+            validated_edge = Edge.from_dict(candidate)
+            self._validate_edge_applicability(validated_edge)
+
+            for key in allowed_fields:
+                setattr(edge, key, getattr(validated_edge, key))
 
             # Save
             self.save()
@@ -1430,6 +1502,8 @@ class GraphStorage:
 
             if edge.id in self.edges:
                 return None
+
+            self._validate_edge_applicability(edge)
 
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)

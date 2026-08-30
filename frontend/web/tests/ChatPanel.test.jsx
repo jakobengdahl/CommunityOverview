@@ -27,6 +27,7 @@ describe('ChatPanel', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.removeItem('chat_panel_open');
   });
 
   describe('Rendering', () => {
@@ -65,6 +66,24 @@ describe('ChatPanel', () => {
       expect(
         screen.queryByPlaceholderText(/question|fråga|action|åtgärd/i)
       ).not.toBeInTheDocument();
+      expect(localStorage.getItem('community-graph:ui:ai-assistant-collapsed')).toBe('true');
+    });
+
+    it('persists an explicit collapse choice so it survives a reload', () => {
+      render(<ChatPanel />);
+
+      fireEvent.click(screen.getByTitle('Minimize'));
+
+      expect(window.localStorage.getItem('chat_panel_open')).toBe('false');
+    });
+
+    it('persists an explicit re-expand choice from the minimized bar', () => {
+      useGraphStore.setState({ chatPanelOpen: false });
+      render(<ChatPanel />);
+
+      fireEvent.click(screen.getByText('Graph assistant'));
+
+      expect(window.localStorage.getItem('chat_panel_open')).toBe('true');
     });
   });
 
@@ -88,6 +107,7 @@ describe('ChatPanel', () => {
     });
 
     it('sends message and displays response', async () => {
+      const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       api.sendChatMessage.mockResolvedValueOnce({
         content: 'I found 3 nodes.',
         toolUsed: 'search_graph',
@@ -110,6 +130,7 @@ describe('ChatPanel', () => {
       await waitFor(() => {
         expect(screen.getByText('I found 3 nodes.')).toBeInTheDocument();
       });
+      expect(consoleLogSpy).not.toHaveBeenCalled();
     });
 
     it('shows loading state while processing', async () => {

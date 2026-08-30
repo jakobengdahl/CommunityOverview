@@ -15,6 +15,7 @@ from backend.core import (
     NodeType,
     RelationshipType,
 )
+from backend.core import storage_search
 
 
 @pytest.fixture
@@ -158,6 +159,96 @@ class TestGraphStorageCRUD:
         assert result.success is True
         assert len(result.added_node_ids) == 2
         assert len(result.added_edge_ids) == 1
+
+    def test_add_edge_rejects_relationship_type_for_wrong_source_type(
+        self, temp_storage
+    ):
+        """Single edge writes enforce directed source/target applicability."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        legislation = Node(id="law", type=NodeType.LEGISLATION, name="Law")
+        temp_storage.add_nodes([actor, legislation], [])
+
+        with pytest.raises(ValueError, match="IMPLEMENTS"):
+            temp_storage.add_edge(
+                Edge(source="actor", target="law", type=RelationshipType.IMPLEMENTS)
+            )
+
+        assert len(temp_storage.edges) == 0
+
+    def test_add_nodes_rejects_relationship_type_for_wrong_target_type(
+        self, temp_storage
+    ):
+        """Batch/import-style writes enforce relationship applicability."""
+        initiative = Node(id="initiative", type=NodeType.INITIATIVE, name="Initiative")
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        edge = Edge(
+            source="initiative", target="actor", type=RelationshipType.IMPLEMENTS
+        )
+
+        result = temp_storage.add_nodes([initiative, actor], [edge])
+
+        assert result.success is False
+        assert "target type 'Actor' is not allowed" in result.message
+        assert len(temp_storage.edges) == 0
+
+    def test_update_edge_rejects_inapplicable_type_change(self, temp_storage):
+        """Changing an edge type is blocked when the endpoints do not apply."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        legislation = Node(id="law", type=NodeType.LEGISLATION, name="Law")
+        temp_storage.add_nodes([actor, legislation], [])
+        edge_id = temp_storage.add_edge(
+            Edge(source="actor", target="law", type=RelationshipType.RELATES_TO)
+        )
+
+        with pytest.raises(ValueError, match="source type 'Actor' is not allowed"):
+            temp_storage.update_edge(edge_id, {"type": "IMPLEMENTS"})
+
+        assert temp_storage.edges[edge_id].type_str == "RELATES_TO"
+
+    def test_relationship_type_without_rules_remains_global(self, temp_storage):
+        """Relationship types with no source/target rules preserve legacy behavior."""
+        actor = Node(id="actor", type=NodeType.ACTOR, name="Actor")
+        initiative = Node(id="initiative", type=NodeType.INITIATIVE, name="Initiative")
+        result = temp_storage.add_nodes(
+            [actor, initiative],
+            [
+                Edge(
+                    source="actor",
+                    target="initiative",
+                    type=RelationshipType.BELONGS_TO,
+                )
+            ],
+        )
+
+        assert result.success is True
+        assert len(result.added_edge_ids) == 1
+
+    def test_audit_relationship_applicability_reports_legacy_violations(self):
+        """Loading legacy data is permissive; the audit reports violations read-only."""
+        data = {
+            "nodes": [
+                {"id": "actor", "type": "Actor", "name": "Actor"},
+                {"id": "law", "type": "Legislation", "name": "Law"},
+            ],
+            "edges": [
+                {
+                    "id": "legacy-edge",
+                    "source": "actor",
+                    "target": "law",
+                    "type": "IMPLEMENTS",
+                }
+            ],
+            "metadata": {"version": "1.0"},
+        }
+        storage = GraphStorage(persistence_backend=InMemoryPersistenceBackend(data))
+
+        violations = storage.audit_relationship_applicability()
+
+        assert len(violations) == 1
+        assert violations[0]["edge_id"] == "legacy-edge"
+        assert "source type 'Actor' is not allowed" in violations[0]["message"]
+        assert "legacy-edge" in storage.edges
+        storage.flush()
 
     def test_add_edge_by_name(self, temp_storage):
         """Test that edges can reference nodes by name"""
@@ -417,6 +508,69 @@ class TestGraphStorageSearch:
         temp_storage.update_node("ec", {"aliases": ["EC"]})
         assert temp_storage.nodes["ec"].aliases == ["EC"]
         assert any(n.id == "ec" for n in temp_storage.search_nodes("EC"))
+
+    def test_any_term_caps_distinct_terms_after_ordered_deduplication(
+        self, temp_storage
+    ):
+        """Only the first capped distinct terms participate in any_term matching."""
+        cap = storage_search.MAX_ANY_TERM_TERMS
+        ordered_terms = [f"term{i:02d}x" for i in range(cap + 1)]
+        query = "  " + " \n ".join(
+            [ordered_terms[0], ordered_terms[1], ordered_terms[0], *ordered_terms[2:]]
+        )
+        nodes = [
+            Node(
+                id="within-cap",
+                type=NodeType.THEME,
+                name="Within cap",
+                description=f"matches {ordered_terms[cap - 1]}",
+            ),
+            Node(
+                id="past-cap",
+                type=NodeType.THEME,
+                name="Past cap",
+                description=f"matches {ordered_terms[cap]}",
+            ),
+        ]
+
+        temp_storage.add_nodes(nodes, [])
+        results = temp_storage.search_nodes(
+            query, match_mode=storage_search.MATCH_MODE_ANY_TERM
+        )
+
+        assert [node.id for node in results] == ["within-cap"]
+
+    def test_any_term_cap_does_not_change_substring_or_match_all(self, temp_storage):
+        """The term cap is only for non-wildcard any_term queries."""
+        cap = storage_search.MAX_ANY_TERM_TERMS
+        long_query = " ".join(f"term{i:02d}x" for i in range(cap + 1))
+        nodes = [
+            Node(id="one", type=NodeType.THEME, name="One"),
+            Node(id="two", type=NodeType.ACTOR, name="Two"),
+            Node(
+                id="phrase",
+                type=NodeType.THEME,
+                name="Phrase",
+                description=long_query,
+            ),
+        ]
+
+        temp_storage.add_nodes(nodes, [])
+
+        assert [
+            node.id
+            for node in temp_storage.search_nodes(
+                long_query, match_mode=storage_search.MATCH_MODE_SUBSTRING
+            )
+        ] == ["phrase"]
+        assert (
+            len(
+                temp_storage.search_nodes(
+                    "*", match_mode=storage_search.MATCH_MODE_ANY_TERM
+                )
+            )
+            == 3
+        )
 
 
 class TestSearchRanking:
@@ -767,6 +921,10 @@ class TestGraphStorageSimilarity:
 class TestGraphStorageStats:
     """Tests for statistics"""
 
+    def test_get_node_count(self, storage_with_data):
+        """get_node_count returns the plain total without building per-type breakdowns."""
+        assert storage_with_data.get_node_count() == 4
+
     def test_get_stats(self, storage_with_data):
         """Test getting graph statistics"""
         stats = storage_with_data.get_stats()
@@ -782,6 +940,16 @@ class TestGraphStorageStats:
 
         assert "Theme" in stats.nodes_by_type
         assert stats.nodes_by_type["Theme"] == 1
+
+    def test_get_stats_counts_edges_by_type(self, storage_with_data):
+        """Test that stats include edge counts by relationship type."""
+        stats = storage_with_data.get_stats()
+
+        assert stats.edges_by_type == {
+            "BELONGS_TO": 1,
+            "RELATES_TO": 1,
+            "PART_OF": 1,
+        }
 
 
 class TestGraphStorageSubtypes:
@@ -886,6 +1054,26 @@ class TestGraphStorageSubtypes:
         assert stats.nodes_by_type.get("EventSubscription") == 1
         assert stats.nodes_by_type.get("Agent") == 1
         assert stats.nodes_by_type.get("Actor") == 1
+
+    def test_get_stats_with_string_typed_edges_does_not_crash(self, temp_storage):
+        """get_stats must not crash when edges have config-defined string types.
+
+        Mirrors test_get_stats_with_string_typed_nodes_does_not_crash: a
+        relationship type defined only in schema_config.json (not the
+        RelationshipType enum) is stored as a plain string.
+        """
+        nodes = [
+            Node(id="agent-1", type="Agent", name="My Agent"),
+            Node(id="skill-1", type="Skill", name="My Skill"),
+        ]
+        edges = [
+            Edge(id="edge-1", source="agent-1", target="skill-1", type="USES_SKILL"),
+        ]
+        temp_storage.add_nodes(nodes, edges)
+
+        stats = temp_storage.get_stats()
+
+        assert stats.edges_by_type.get("USES_SKILL") == 1
 
 
 class TestGraphStoragePersistence:
