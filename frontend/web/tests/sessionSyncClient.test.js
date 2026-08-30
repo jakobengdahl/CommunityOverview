@@ -3,6 +3,8 @@ import {
   computeOps,
   normalizeMirror,
   applyOpToMirror,
+  predictAnnotationVersionsForSend,
+  foldAckedAnnotationOp,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
@@ -1976,5 +1978,342 @@ describe('two-client same-field race through the real browser pipeline (smallfix
 
     // A's write genuinely stands — the server-side store still holds A's text.
     expect(store.get('shape-1').text).toBe('A wins');
+  });
+});
+
+// dec-annotation-field-patches-and-conflicts / round 2 review: the two-client
+// tests above cover a stale `base_version` from a genuinely different
+// collaborator. This describe block covers the narrower, same-client race the
+// round-2 reviewer found: annotationChangeScheduler.js publishes
+// style/geometry/create/delete immediately (no debounce), so a single user
+// can fire two rapid edits to the *same* field of the *same* annotation
+// before the first op's round trip completes. Before the fix, both edits are
+// computed while `this._baseline` still carries the pre-first-edit version
+// (syncState assigned it straight from the canvas snapshot, whose own copy of
+// `version`/`field_versions` only catches up asynchronously through the ack),
+// so both carry the identical, now-stale `base_version` — the server refuses
+// the batch as a conflict against no one but this client's own prior write.
+describe('same-client self-conflict race (round 2 follow-up to smallfix-annotation-version-dropped-by-browser-pipeline)', () => {
+  // Unlike makeFieldVersionServer above (which short-circuits a batch on the
+  // first conflicting op, leaving any earlier op in that same request already
+  // committed to `store`), this fake stages every op in the request against a
+  // scratch copy and only commits it to `store` if every op in the batch
+  // succeeds — mirroring session_manager.py's apply_ops: a mid-batch
+  // AnnotationFieldConflict rolls back the *whole* request, including an
+  // earlier op in it that would otherwise have applied cleanly. Getting this
+  // right matters here specifically: the bug this test drives at reproduces
+  // as two same-client ops landing in one batch, and a fake that quietly lets
+  // the first one through regardless of the second would pass for the wrong
+  // reason.
+  function makeSequentialAnnotationServer(initialAnnotations = []) {
+    const store = new Map(initialAnnotations.map((a) => [a.id, { ...a }]));
+    const changedFieldsOf = (incoming, target) =>
+      Object.keys(incoming).filter(
+        (k) =>
+          !['id', 'type', 'kind'].includes(k) &&
+          JSON.stringify(incoming[k]) !== JSON.stringify(target[k])
+      );
+    const fetchImpl = vi.fn(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      // Scratch copy: only merged into `store` once every op below succeeds.
+      const staged = new Map([...store].map(([id, a]) => [id, { ...a }]));
+      const applied = [];
+      for (const op of body.ops) {
+        if (op.op === 'annotation_created') {
+          const incoming = op.annotation;
+          const existing = staged.get(incoming.id);
+          if (existing) {
+            const changed = changedFieldsOf(incoming, existing);
+            const newVersion = (existing.version || 1) + 1;
+            const target = { ...existing, ...incoming, version: newVersion };
+            target.field_versions = { ...(existing.field_versions || {}) };
+            for (const f of changed) target.field_versions[f] = newVersion;
+            staged.set(target.id, target);
+            applied.push({ op: 'annotation_created', annotation: { ...target } });
+          } else {
+            const target = { ...incoming, version: 1, field_versions: {} };
+            staged.set(target.id, target);
+            applied.push({ op: 'annotation_created', annotation: { ...target } });
+          }
+          continue;
+        }
+        if (op.op !== 'annotation_updated') continue;
+        const target = staged.get(op.annotation.id);
+        const changed = changedFieldsOf(op.annotation, target);
+        if (op.base_version != null) {
+          const conflicts = {};
+          for (const field of changed) {
+            const fieldVersion = (target.field_versions || {})[field] ?? 1;
+            if (fieldVersion > op.base_version) conflicts[field] = fieldVersion;
+          }
+          if (Object.keys(conflicts).length) {
+            // Whole batch refused — `staged` is discarded, nothing this
+            // request touched (including an earlier, otherwise-valid op in
+            // it) reaches `store`.
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({
+                detail: {
+                  error: 'field_conflict',
+                  annotation_id: target.id,
+                  conflicting_fields: conflicts,
+                  server_version: target.version,
+                  message: 'conflict',
+                },
+              }),
+            };
+          }
+        }
+        const newVersion = (target.version || 1) + 1;
+        const merged = { ...target, ...op.annotation, version: newVersion };
+        merged.field_versions = { ...(target.field_versions || {}) };
+        for (const f of changed) merged.field_versions[f] = newVersion;
+        staged.set(merged.id, merged);
+        applied.push({ op: 'annotation_updated', annotation: { ...merged } });
+      }
+      for (const [id, a] of staged) store.set(id, a);
+      return { ok: true, status: 200, json: async () => ({ applied, seq: 1 }) };
+    });
+    return { fetchImpl, store };
+  }
+
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return client;
+  }
+
+  // `text` and `position` are the two fields to drive these edits through:
+  // both survive `annotationsToOverlays`/the shape overlay translator with
+  // the *same* name and shape as the server-side annotation (see
+  // `genericAnnotationToOverlay` — `overlay.text = a.text`, `overlay.position
+  // = a.position`), unlike e.g. a shape's fill colour (server `style.fill`
+  // vs. overlay `fill`, a rename this fake server's plain field-name diff
+  // does not need to know about, matching the existing hydrated-overlay
+  // tests above which use `text` for the same reason).
+  function makeShapeAnnotation(overrides = {}) {
+    return {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      text: 'orig',
+      z: 0,
+      locked: false,
+      version: 1,
+      field_versions: {},
+      ...overrides,
+    };
+  }
+
+  it('two rapid same-field edits (a fast double edit, e.g. two quick color picks) both land instead of the second spuriously conflicting with the first', async () => {
+    const serverAnnotation = makeShapeAnnotation();
+    const { fetchImpl, store } = makeSequentialAnnotationServer([serverAnnotation]);
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const client = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [overlay] });
+
+    // Two edits to the SAME field, both computed before either op's ack
+    // lands — annotationChangeScheduler.js publishes most annotation field
+    // changes immediately (no debounce), so a fast double edit produces
+    // exactly this.
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 1' }] });
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 2' }] });
+    await flush();
+
+    // Both ops went out together in one batch...
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOps = JSON.parse(fetchImpl.mock.calls[0][1].body).ops;
+    expect(sentOps).toHaveLength(2);
+    expect(sentOps[0].base_version).toBe(1);
+    // ...and the second op's base_version reflects the optimistic bump from
+    // the first — NOT the stale pre-send value of 1 (the bug: both ops
+    // would otherwise carry an identical base_version and the server would
+    // refuse the whole batch as a same-annotation conflict).
+    expect(sentOps[1].base_version).toBe(2);
+
+    // Nothing was dropped, and the second (most recent) edit genuinely won.
+    expect(store.get('shape-1').text).toBe('edit 2');
+    expect(store.get('shape-1').version).toBe(3);
+  });
+
+  it('three rapid edits, interleaving a different field in between, all land (closes the general class, not just the two-edit case)', async () => {
+    const serverAnnotation = makeShapeAnnotation();
+    const { fetchImpl, store } = makeSequentialAnnotationServer([serverAnnotation]);
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const onDropped = vi.fn();
+    const client = makeReadyClient(fetchImpl, { handlers: { onDropped } });
+    client.setBaseline({ annotations: [overlay] });
+
+    // text -> position -> text again, all before any ack. The third op
+    // re-touches the field the first op already touched, with an unrelated
+    // field's edit interleaved in between — the case a fix that only
+    // special-cases two back-to-back edits to the same field would miss.
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 1' }] });
+    client.syncState({
+      annotations: [{ ...overlay, text: 'edit 1', position: { x: 40, y: 0 } }],
+    });
+    client.syncState({
+      annotations: [{ ...overlay, text: 'edit 2', position: { x: 40, y: 0 } }],
+    });
+    await flush();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOps = JSON.parse(fetchImpl.mock.calls[0][1].body).ops;
+    expect(sentOps).toHaveLength(3);
+    expect(sentOps.map((op) => op.base_version)).toEqual([1, 2, 3]);
+
+    expect(onDropped).not.toHaveBeenCalled();
+    const finalAnnotation = store.get('shape-1');
+    expect(finalAnnotation.text).toBe('edit 2');
+    expect(finalAnnotation.position.x).toBe(40);
+    expect(finalAnnotation.version).toBe(4);
+  });
+});
+
+// Pure-function coverage for the two building blocks the tests above drive
+// end-to-end. These pin the invariants precisely (including a scenario that
+// is impractical to force deterministically through the full async
+// send/flush/ack pipeline) rather than only exercising them incidentally.
+describe('predictAnnotationVersionsForSend', () => {
+  it('advances a touched annotation by one version and bumps only the fields the outgoing patch touches', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'red' },
+          geometry: { x: 0 },
+          version: 2,
+          field_versions: { style: 2 },
+        },
+      ],
+    };
+    const next = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'blue' },
+          geometry: { x: 0 },
+          version: 2,
+          field_versions: { style: 2 },
+        },
+      ],
+    };
+    const ops = computeOps(baseline, next);
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3);
+    expect(a.field_versions).toEqual({ style: 3 }); // geometry untouched, not bumped
+  });
+
+  it('predicts version 1 and empty field_versions for a brand new annotation_created', () => {
+    const baseline = { annotations: [] };
+    const next = { annotations: [{ id: 'new', type: 'note', kind: 'note', text: 'hi' }] };
+    const ops = computeOps(baseline, next);
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'new');
+    expect(a.version).toBe(1);
+    expect(a.field_versions).toEqual({});
+  });
+
+  it('keeps the baseline version for an annotation not touched this round, even when the canvas snapshot still carries a stale one', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: {},
+          version: 5,
+          field_versions: { style: 5 },
+        },
+      ],
+    };
+    // `next` (the live canvas snapshot) has not yet learned about a prior
+    // edit's ack — its version/field_versions are still what they were on
+    // load.
+    const next = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: {}, version: 1, field_versions: {} },
+      ],
+    };
+    const ops = computeOps(baseline, next); // content unchanged -> no ops
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(5);
+    expect(a.field_versions).toEqual({ style: 5 });
+  });
+});
+
+describe('foldAckedAnnotationOp', () => {
+  it('never regresses a version/field_versions the client has already optimistically predicted past this ack', () => {
+    // The baseline already predicts version 3 (a later, still-unacked local
+    // op already advanced it via predictAnnotationVersionsForSend) — the ack
+    // being folded here is only authoritative as of an EARLIER op (version
+    // 2, and it only ever touched 'style').
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'red' },
+          geometry: { x: 10 },
+          version: 3,
+          field_versions: { style: 2, geometry: 3 },
+        },
+      ],
+    };
+    const ackOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: { fill: 'red' },
+        geometry: { x: 0 }, // stale — as of the acked op, before geometry moved
+        version: 2,
+        field_versions: { style: 2 },
+      },
+    };
+    const result = foldAckedAnnotationOp(baseline, ackOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3); // not regressed to the ack's 2
+    // geometry:3 survives even though this ack's field_versions never
+    // mentions 'geometry' at all.
+    expect(a.field_versions).toEqual({ style: 2, geometry: 3 });
+  });
+
+  it('adopts the ack when it is newer than anything the client already knew', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: {}, version: 1, field_versions: {} },
+      ],
+    };
+    const ackOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: { fill: 'red' },
+        version: 2,
+        field_versions: { style: 2 },
+      },
+    };
+    const result = foldAckedAnnotationOp(baseline, ackOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(2);
+    expect(a.field_versions).toEqual({ style: 2 });
   });
 });

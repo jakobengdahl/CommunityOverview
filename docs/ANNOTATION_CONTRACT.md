@@ -829,6 +829,45 @@ carry `version`/`field_versions` through unconditionally (the same envelope
 treatment `z`/`locked`/`rotation` already got), so the "A real (post-fix)
 browser" claim above is accurate as of this fix, not before it.
 
+**Update — a *single* real client can still race its own prior write, not
+just a second collaborator (round 2 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+same-client self-conflict follow-up).** `annotationChangeScheduler.js`
+publishes most annotation field changes (style, geometry, create, delete)
+immediately, with no debounce — only `text` coalesces over ~300 ms — so one
+user can fire two rapid edits to the *same* field of the *same* annotation
+(two quick color picks, say) before the first op's round trip completes.
+`sessionSyncClient.js`'s `syncState` used to assign its internal baseline
+straight from the live canvas snapshot on every call; the canvas's own copy
+of `version`/`field_versions` only catches up asynchronously, through the
+first op's ack round-tripping back onto the canvas node
+(`onLocalAnnotationsApplied`) — so the second edit, computed before that ack
+landed, read back the identical pre-send version and sent an identical,
+already-stale `base_version`. The server correctly refused the resulting
+batch with `field_conflict` — there genuinely was a `field_versions` entry
+newer than what the op claimed — but the only client the write conflicted
+with was itself: a single browser tab, no second collaborator anywhere in
+the picture, seeing its own most recent edit rejected and reverted by
+`onDropped`'s resync, under a notice worded for a two-client conflict.
+
+The fix (`predictAnnotationVersionsForSend`/`foldAckedAnnotationOp` in
+`sessionSyncClient.js`) has the client predict, the moment an op is sent
+rather than only once its ack arrives, the `version`/`field_versions` the
+server is expected to bump a touched annotation to — mirroring
+`session_store.py`'s own bump exactly, so a same-field re-edit computed
+before the first ack lands already carries a fresh `base_version` instead of
+a stale one. The prediction is reconciled against the server's authoritative
+ack afterwards without ever regressing a *later*, still-unacked local
+prediction on the same annotation (the ack is only authoritative as of the
+earlier op it is acking) — closing the general case, not only the
+back-to-back two-edit one: three or more rapid same-field edits, and a
+same-field re-edit with a different field's edit interleaved in between, are
+all covered by the same mechanism and test-covered
+(`frontend/web/tests/sessionSyncClient.test.js`, "same-client self-conflict
+race"). This is purely a client-side prediction; nothing about the server's
+`AnnotationFieldConflict` check, the wire shape, or a *genuine* two-client
+race (the matrix below) changes.
+
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
 category on both sides (e.g. both edit text) or a different one (e.g. A edits
