@@ -959,7 +959,11 @@ def _register_session_endpoints(
         SessionNotFound,
         UndoConflict,
     )
-    from backend.core.session_store import OpError, is_valid_session_id
+    from backend.core.session_store import (
+        AnnotationFieldConflict,
+        OpError,
+        is_valid_session_id,
+    )
 
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
@@ -1081,6 +1085,25 @@ def _register_session_endpoints(
             raise HTTPException(status_code=413, detail="op batch too large")
         except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except AnnotationFieldConflict as exc:
+            # Same 409 status as LeaseConflict (both mean "this write raced a
+            # concurrent edit, don't retry it as-is" — sessionSyncClient.js's
+            # terminal-rejection handling is shared for the whole class), but
+            # a structured `detail` object rather than a bare string: the
+            # browser distinguishes the two causes (a live edit lease vs. a
+            # genuine field-version race) to show an accurate notice instead
+            # of always claiming "someone else is editing this" — see
+            # App.jsx's onDropped.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "field_conflict",
+                    "annotation_id": exc.annotation_id,
+                    "conflicting_fields": exc.conflicts,
+                    "server_version": exc.server_version,
+                    "message": str(exc),
+                },
+            )
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 

@@ -58,6 +58,12 @@ from .session_store import (
     is_valid_session_id,
 )
 
+# AnnotationFieldConflict is raised by SessionStore.apply_state_op and
+# propagates through this module's write paths unchanged; callers import it
+# straight from session_store (`from backend.core.session_store import
+# AnnotationFieldConflict, OpError`), matching how OpError itself is already
+# imported there rather than re-exported here.
+
 CLAIM_OPS = {"selection_claimed", "selection_released"}
 # Edit-lease acquisition/release — task-annotation-exclusive-edit-leases. Kept
 # distinct from CLAIM_OPS: claim ops are LWW and never fail, while an acquire
@@ -1361,6 +1367,7 @@ class SessionManager:
         patch: Dict[str, Any],
         *,
         expected_revision: Optional[int] = None,
+        base_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Patch one existing annotation **synchronously** (MCP write path).
 
@@ -1370,6 +1377,19 @@ class SessionManager:
         still carry forward any nested field (e.g. ``geometry``) it does not
         want overwritten with a partial value. Shares ``apply_layout``'s
         atomicity contract; see its docstring for the ``LayoutBusy`` rationale.
+
+        ``base_version`` is the field-level counterpart of ``expected_revision``
+        (dec-annotation-field-patches-and-conflicts): where ``expected_revision``
+        rejects the whole write the instant *anything* in the session has
+        changed, ``base_version`` only rejects it when a field this ``patch``
+        actually changes has itself changed server-side since the caller last
+        read this annotation — a concurrent edit to an unrelated field on the
+        same annotation still merges silently. Give the annotation's current
+        ``version`` (from a prior read/write's ``annotation.version``) to opt
+        in; omitted, this write applies unconditionally the same way it always
+        has (see ``AnnotationFieldConflict`` for exactly what that trades
+        away). Raises ``AnnotationFieldConflict`` — a 409 in every HTTP-facing
+        caller, alongside ``LeaseConflict`` — when the check fails.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1396,6 +1416,8 @@ class SessionManager:
             "annotation": patch,
             "client_id": client_id,
         }
+        if base_version is not None:
+            op["base_version"] = base_version
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationNotFound(patch["id"])

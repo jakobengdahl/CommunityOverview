@@ -143,15 +143,66 @@ function canonical(value) {
   return value;
 }
 
+// Server-owned bookkeeping (dec-annotation-field-patches-and-conflicts,
+// session_store.py's _ANNOTATION_META_FIELDS): never diffed as "content" —
+// `version`/`field_versions` change on every remote op regardless of what
+// this client edited, and `updated_at`/`created_by` were already excluded
+// for the same reason. Diffing them would make every incoming remote update
+// look like a further local change and re-publish a no-op patch forever.
+const ANNOTATION_META_FIELDS = new Set([
+  'id',
+  'type',
+  'kind',
+  'version',
+  'field_versions',
+  'updated_at',
+  'created_by',
+]);
+
 function annotationsEqual(a, b, { ignoreMembers = false } = {}) {
   const strip = (ann) => {
     const copy = { ...ann };
     delete copy.updated_at;
     delete copy.created_by;
+    delete copy.version;
+    delete copy.field_versions;
     if (ignoreMembers) delete copy.member_node_ids;
     return copy;
   };
   return JSON.stringify(canonical(strip(a))) === JSON.stringify(canonical(strip(b)));
+}
+
+/**
+ * Compute the field-level patch that turns `before` (the last-synced
+ * baseline) into `next` (the current local canvas value) — only the keys
+ * that actually differ, plus the id/type/kind every `annotation_updated` op
+ * must carry to identify and validate its target.
+ *
+ * This is the fix for the whole-annotation clobber
+ * (smallfix-whole-annotation-clobber-on-concurrent-different-field-edit):
+ * the browser previously always resent the *whole* `next` object on any
+ * change, so a field this client never touched — but whose local mirror
+ * simply had not yet caught up with a concurrent peer's edit — rode along
+ * and silently overwrote that peer's change. Sending only genuinely-changed
+ * keys means an untouched field is never in the outgoing patch at all, so
+ * there is nothing for it to clobber. Paired with `base_version` (the
+ * annotation's version as of `before`), the server can additionally tell a
+ * field this client is *trying* to change apart from one merely present —
+ * see docs/ANNOTATION_CONTRACT.md's "Two-client conflict matrix".
+ */
+export function diffAnnotationFields(before, next, { ignoreMembers = false } = {}) {
+  const patch = { id: next.id, type: next.type, kind: next.kind };
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(next || {})]);
+  for (const key of keys) {
+    if (ANNOTATION_META_FIELDS.has(key)) continue;
+    if (ignoreMembers && key === 'member_node_ids') continue;
+    const beforeValue = canonical(before ? before[key] : undefined);
+    const nextValue = canonical(next[key]);
+    if (JSON.stringify(beforeValue) !== JSON.stringify(nextValue)) {
+      patch[key] = next[key];
+    }
+  }
+  return patch;
 }
 
 /**
@@ -229,10 +280,18 @@ export function computeOps(prevState, nextState) {
         ops.push({ op: 'group_membership_changed', group_id: id, member_node_ids: nextMembers });
       }
       if (!annotationsEqual(before, ann, { ignoreMembers: true })) {
-        ops.push({ op: 'annotation_updated', annotation: ann });
+        ops.push({
+          op: 'annotation_updated',
+          annotation: diffAnnotationFields(before, ann, { ignoreMembers: true }),
+          base_version: before.version,
+        });
       }
     } else if (!annotationsEqual(before, ann)) {
-      ops.push({ op: 'annotation_updated', annotation: ann });
+      ops.push({
+        op: 'annotation_updated',
+        annotation: diffAnnotationFields(before, ann),
+        base_version: before.version,
+      });
     }
   }
   for (const id of prevAnn.keys()) {
@@ -1231,7 +1290,16 @@ export class SessionSyncClient {
           // `finally`'s own filter is then a harmless no-op for a batch
           // already removed.
           this._removeInFlight(batch);
-          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
+          // Parsed only to let onDropped tell apart the two distinct 409
+          // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
+          // different-field-edit): a live edit lease (LeaseConflict) vs. a
+          // genuine field-version race (AnnotationFieldConflict) read very
+          // differently to a user — "someone else is editing this" is wrong
+          // when no one held a lease at all. Best-effort: a body that fails
+          // to parse (or isn't JSON) still drops the op exactly as before,
+          // just without the extra detail.
+          const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
+          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
       } else {

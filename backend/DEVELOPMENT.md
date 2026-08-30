@@ -1104,9 +1104,23 @@ docs/ANNOTATION_CONTRACT.md's acceptance matrix), so do not read a stored
 rotation on those two as something a viewer can see.
 
 `update_annotation` is a partial update over that same envelope plus
-`content`; `reorder_annotation` and
+`content`. It also accepts an optional `base_version` — read from a prior
+`list_annotations`/write result's `annotation.version` — for field-level
+conflict detection finer than `expected_revision`: a concurrent change to a
+*different* field of the same annotation since `base_version` still merges
+silently, and only a genuine change to a field *this* call is itself trying
+to set raises `field_conflict` (`{success: false, error: "field_conflict",
+conflicting_fields, server_version, annotation}` — the current server value,
+so a caller can re-derive a fresh patch instead of blindly retrying the
+rejected one). Omitted, the write applies unconditionally as it always has
+(docs/ANNOTATION_CONTRACT.md's [Field-level patches and
+base_version](ANNOTATION_CONTRACT.md#field-level-patches-and-base_version)
+has the full wire contract and the tests that pin it).
+`reorder_annotation` and
 `set_annotation_lock` are single-purpose wrappers over `z` and `locked`
-respectively; `duplicate_annotation` copies an existing annotation
+respectively — narrow enough that the whole-annotation clobber this
+mechanism exists for was never their exposure, so neither accepts
+`base_version` yet; `duplicate_annotation` copies an existing annotation
 (including its `content`/`style`) to a new id at an optional offset,
 translating a `line`'s endpoints and a `freehand` stroke's `points` by the
 same `dx`/`dy` as the envelope so the copy keeps its shape instead of the

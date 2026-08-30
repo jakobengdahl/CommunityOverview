@@ -101,6 +101,13 @@ _RESERVED_ANNOTATION_KEYS = {
     "updated_at",
     "created_by",
     "updated_by",
+    # Server-owned versioning bookkeeping (dec-annotation-field-patches-and-
+    # conflicts) — see session_store.py's _ANNOTATION_META_FIELDS. Never
+    # caller-settable; "version" is surfaced read-only by project_note/
+    # project_annotation so a caller can supply it back as base_version, but
+    # neither belongs inside a content/patch payload.
+    "version",
+    "field_versions",
 }
 
 # The `content.shape` variants a `shape` annotation accepts
@@ -395,6 +402,11 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "rotation": geometry.get("rotation", 0),
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
+        # Read-only: pass straight back as update_annotation's base_version
+        # to opt into field-level conflict checking on a later write
+        # (dec-annotation-field-patches-and-conflicts). Defaults to 1 for an
+        # annotation stored before this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),
@@ -921,6 +933,11 @@ def project_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
         "content": content,
+        # Read-only: pass straight back as update_annotation's base_version
+        # to opt into field-level conflict checking on a later write
+        # (dec-annotation-field-patches-and-conflicts). Defaults to 1 for an
+        # annotation stored before this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),

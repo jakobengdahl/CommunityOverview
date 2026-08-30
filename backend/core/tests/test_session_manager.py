@@ -15,6 +15,7 @@ from backend.core import image_ingest
 from backend.core.session_annotations import build_annotation, build_annotation_patch
 from backend.core.session_hub import InProcessEventBus, LeaseMap
 from backend.core.session_store import (
+    AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
@@ -972,10 +973,20 @@ class TestConflictMatrixTwoClients:
     slice's tests never exercised, plus one representative case per other
     mutation category (style, lock) two clients can race on. "no claim held"
     below now means "no lease held" — a lease closes the collision window
-    these clobber cases fall into; it does not itself add field-level
-    granularity (that is dec-annotation-field-patches-and-conflicts' separate,
-    still-open scope), so the *held* cells below prove the write is refused
-    outright rather than partially merged.
+    these clobber cases fall into.
+
+    ``dec-annotation-field-patches-and-conflicts`` closed the field-level gap
+    a lease does not cover: an op that names ``base_version`` (what
+    ``sessionSyncClient.js``'s ``diffAnnotationFields`` now always sends, and
+    what an opted-in MCP caller can pass to ``update_annotation``) is checked
+    per field it actually touches, not per whole annotation —
+    ``TestFieldVersionedPatches`` below is the matrix for that. The
+    same-field/different-field tests in *this* class that omit
+    ``base_version`` altogether still describe the older, unprotected
+    whole-object behaviour deliberately: that is the documented fallback for
+    a caller that has not opted in (an older cached browser bundle, or an
+    MCP tool call that omits it) — see ``AnnotationFieldConflict``'s
+    docstring — not a regression left unfixed.
     """
 
     async def _seeded_shape(self, mgr, ann_id="shape-1"):
@@ -1000,7 +1011,10 @@ class TestConflictMatrixTwoClients:
         )
         return s
 
-    # --- Same-field, no lease held: whole-annotation resend is last-write-wins ---
+    # --- Same-field, no lease held, no base_version: the documented legacy
+    # fallback (AnnotationFieldConflict's docstring) is still last-write-wins
+    # — see TestFieldVersionedPatches for the same race *with* base_version,
+    # where it is now an explicit conflict instead.
     async def test_same_field_text_edits_without_a_lease_second_writer_wins(self):
         mgr = _manager()
         s = await self._seeded_shape(mgr)
@@ -1037,22 +1051,21 @@ class TestConflictMatrixTwoClients:
         stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
         assert stored["text"] == "B's edit"
 
-    # --- Different-field, no lease held: a documented finding, not a designed
-    # guarantee — see the new ANNOTATION_CONTRACT.md section this test backs.
-    # apply_state_op's `annotation_updated` handler does target.update(incoming)
-    # (session_store.py), and the browser always resends the WHOLE annotation
-    # object on every publish (sessionSyncClient.js's diffState/syncState), not
-    # a per-field delta — so a client whose own local copy has not yet caught
-    # up on a concurrent peer's text edit clobbers that edit as a side effect
-    # of publishing its own, unrelated geometry change, because its outgoing
-    # "geometry update" is really a whole-annotation resend carrying its own
-    # (stale) copy of every other field too.
-    async def test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit(
+    # --- Different-field, no lease held, no base_version: the pre-fix
+    # behaviour, preserved here as the documented legacy fallback (a caller
+    # that never adopts field-diffing or base_version — see
+    # AnnotationFieldConflict's docstring) rather than silently dropped. A
+    # real browser no longer produces an op shaped like this one (see the
+    # very next test) — sessionSyncClient.js's diffAnnotationFields only ever
+    # sends fields that actually changed locally, so it would never carry a
+    # stale copy of "text" at all — but a raw ops-batch write that (still)
+    # resends the whole object, the way this test constructs one by hand,
+    # keeps exactly the old whole-document-LWW semantics.
+    async def test_legacy_whole_object_write_without_base_version_still_clobbers(
         self,
     ):
         mgr = _manager()
         s = await self._seeded_shape(mgr)
-        # A publishes a text-only change...
         await mgr.apply_ops(
             s.id,
             "c1",
@@ -1068,11 +1081,6 @@ class TestConflictMatrixTwoClients:
                 }
             ],
         )
-        # ...but B's outgoing "geometry" op is really its own whole local copy
-        # of the annotation, captured before B's client received A's update
-        # (in-flight SSE, or B simply committed a fraction of a second sooner
-        # than A's edit reached it) — so it still carries the pre-edit "orig"
-        # text alongside its own new geometry.
         await mgr.apply_ops(
             s.id,
             "c2",
@@ -1091,10 +1099,65 @@ class TestConflictMatrixTwoClients:
         )
         stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
         assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
-        # A's text edit is gone — clobbered by B's stale resend, not merged
-        # around it. This is the whole-document-LWW property documented in
-        # ANNOTATION_CONTRACT.md's "Two-client conflict matrix" section.
         assert stored["text"] == "orig"
+
+    # --- The fix (dec-annotation-field-patches-and-conflicts): the same
+    # geometry-vs-text race PR #523 proved as a clobber, now driven the way a
+    # real (post-fix) browser actually publishes — a field-diff patch (only
+    # the keys that genuinely changed locally) plus base_version, exactly
+    # what sessionSyncClient.js's diffAnnotationFields + computeOps produce.
+    # B never touched "text" locally, so it is simply absent from B's patch
+    # — there is nothing left for it to clobber, independent of whether B's
+    # base_version happens to be stale relative to A's edit.
+    async def test_geometry_edit_from_a_stale_client_no_longer_clobbers_a_concurrent_text_edit(
+        self,
+    ):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        # A publishes a text-only change...
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        # ...B never received A's update yet (in-flight SSE, or B simply
+        # committed a fraction of a second sooner), but its own outgoing
+        # patch was computed as a genuine local diff — it only names the one
+        # field B actually changed, "geometry" — and base_version=1 reflects
+        # what B itself last synced, same starting point as A.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        # Both survive: B's geometry change applied, and A's text edit is
+        # untouched — the independent-field merge this task exists for.
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+        assert stored["text"] == "A's edit"
+        assert stored["version"] == 3  # create(1) -> A's update(2) -> B's update(3)
 
     # --- A lease blocks a DIFFERENT-field edit too, not only a same-field one:
     # the lease check is on the annotation id, not on which fields an op
@@ -1218,6 +1281,356 @@ class TestConflictMatrixTwoClients:
                 [{"op": "annotation_deleted", "annotation_id": "shape-1"}],
             )
         assert any(a["id"] == "shape-1" for a in s.state["annotations"])
+
+
+class TestFieldVersionedPatches:
+    """``base_version``-gated per-field conflict checking
+    (task-smallfix-whole-annotation-clobber-on-concurrent-different-field-edit,
+    dec-annotation-field-patches-and-conflicts): the protection layer for
+    when no edit lease is held (or not yet acquired) — see ``LeaseConflict``'s
+    docstring for how leases and this layer divide the work.
+
+    ``TestConflictMatrixTwoClients`` above already covers the independent-
+    field-merge case (a real client's field-diffed patch just never mentions
+    a field it did not touch, so there is nothing left to conflict over).
+    This class covers what a ``base_version`` mismatch on a field the patch
+    *does* touch does: an explicit, structured conflict rather than a
+    silent overwrite — plus that the mechanism survives reconnect/catch-up
+    and undo unchanged.
+    """
+
+    async def _seeded_shape(self, mgr, ann_id="shape-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {
+                        "id": ann_id,
+                        "type": "shape",
+                        "shape": "rectangle",
+                        "text": "orig",
+                        "geometry": {"x": 0, "y": 0, "w": 160, "h": 96},
+                        "style": {"fill": "#94a3b8"},
+                    },
+                }
+            ],
+        )
+        return s
+
+    async def test_created_annotation_starts_at_version_one(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        stored = s.state["annotations"][0]
+        assert stored["version"] == 1
+        assert stored["field_versions"] == {}
+
+    async def test_same_field_conflict_is_explicit_not_a_silent_overwrite(self):
+        """The exact scenario a lease would otherwise close: two clients
+        editing the SAME field with no lease held. With base_version, this
+        is now a raised, structured conflict — never a silent last-write-
+        wins — and the losing write's effect never reaches stored state, so
+        there is nothing to roll back: the caller's own draft (whatever it
+        holds locally) is simply never overwritten server-side, mirroring
+        how a rejected lease-conflict write leaves an editor's draft alone.
+        """
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        with pytest.raises(AnnotationFieldConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "B's edit",
+                        },
+                        "base_version": 1,  # stale: A already moved "text" to v2
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "shape-1"
+        assert exc_info.value.conflicts == {"text": 2}
+        assert exc_info.value.server_version == 2
+        assert exc_info.value.server_annotation["text"] == "A's edit"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit"
+        assert stored["version"] == 2  # B's rejected attempt never bumped it
+
+    async def test_stale_write_is_rejected_then_succeeds_after_rederiving(self):
+        """ "Do not silently retry a stale value against a newer version"
+        (dec-annotation-field-patches-and-conflicts): B's first attempt is
+        refused; re-reading current state and retrying at the fresh version
+        is a deliberate override, not a stale clobber, so it succeeds."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        with pytest.raises(AnnotationFieldConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "B's edit",
+                        },
+                        "base_version": 1,
+                    }
+                ],
+            )
+        fresh_version = exc_info.value.server_version
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "B's edit",
+                    },
+                    "base_version": fresh_version,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "B's edit"
+        assert stored["version"] == 3
+
+    async def test_a_resend_of_the_unchanged_current_value_never_conflicts(self):
+        """A patch that names a field but whose value already equals the
+        stored one (e.g. a client that still sends its whole local copy)
+        does not count as "touching" that field — only a genuine value
+        change is conflict-checked. This is what keeps an imperfect/legacy
+        payload from tripping a spurious conflict on fields it never
+        actually meant to change."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        # B's patch still mentions "text", but with the value already stored
+        # (a coincidence, or a client resending its full local copy) — not a
+        # real change, so base_version=1 must not be treated as stale for it.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit"
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+
+    async def test_non_integer_base_version_is_rejected(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "A's edit",
+                        },
+                        "base_version": "not-a-number",
+                    }
+                ],
+            )
+
+    async def test_caller_supplied_version_and_field_versions_are_ignored(self):
+        """version/field_versions are server-owned bookkeeping (session_
+        store.py's _ANNOTATION_META_FIELDS) — a payload cannot smuggle a
+        forged value through to corrupt future conflict checks."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                        "version": 999,
+                        "field_versions": {"text": 999},
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["version"] == 2
+        assert stored["field_versions"] == {"text": 2}
+
+    async def test_catch_up_snapshot_carries_version_and_field_versions(self):
+        """Reconnect/catch-up (item 6): both the ring-buffer replay path and
+        the full-snapshot fallback already carry the *whole* post-update
+        annotation (session_store.py's applied["annotation"] = target, true
+        before and after this task) — so a reconnecting client's mirror
+        naturally picks up version/field_versions with no protocol change on
+        this side, only on what a client subsequently publishes."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        snapshot = mgr.catch_up(s.id, None)
+        assert snapshot["type"] == "snapshot"
+        ann = next(
+            a
+            for a in snapshot["session"]["state"]["annotations"]
+            if a["id"] == "shape-1"
+        )
+        assert ann["version"] == 2
+        assert ann["field_versions"] == {"text": 2}
+
+        missed = mgr.catch_up(s.id, 1)  # since_seq=1: client already has the create
+        assert missed["type"] == "catch_up"
+        op = next(o for o in missed["ops"] if o["op"] == "annotation_updated")
+        assert op["annotation"]["version"] == 2
+
+    async def test_undo_restores_content_and_still_advances_version_forward(self):
+        """Undo (item 6) replays the stored full-object inverse op under
+        trusted_replay, which skips the base_version check entirely (the
+        restored content is this session's own prior state, not caller
+        input) — but version keeps moving forward, never backward, so a
+        client's base_version bookkeeping stays monotonic across an undo."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        before_undo = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert before_undo["version"] == 2
+
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "orig"
+        assert stored["version"] == 3  # forward, not back to 1
+        assert stored["field_versions"]["text"] == 3
+
+        # And the annotation is still writable afterwards, at the new version.
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit again",
+                    },
+                    "base_version": stored["version"],
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit again"
 
 
 class TestPerKindReconnectCatchUpAndLocks:

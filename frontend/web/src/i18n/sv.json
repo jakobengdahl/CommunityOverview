@@ -505,6 +505,7 @@
     "undo_notification": "Flytt ångrad",
     "redo_notification": "Flytt återställd",
     "annotation_remote_locked": "Någon annan redigerar denna annotering",
+    "annotation_field_conflict": "Någon annan ändrade denna annotering samtidigt — din ändring sparades inte",
     "annotation_locked_skipped": "Den annoteringen är låst — lås upp den först",
     "annotation_layer": "Lager",
     "annotation_layer_front": "Lägg överst",

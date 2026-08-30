@@ -157,10 +157,76 @@ describe('computeOps', () => {
     };
     const ops = computeOps(prev, next);
     expect(ops.some((o) => o.op === 'group_membership_changed')).toBe(false);
+    // member_node_ids is deliberately absent: it did not change (unlike
+    // label), and group membership always goes through its own op — a
+    // field-diff patch never re-sends a field it did not touch, even one
+    // that happens to still be present on the full local object.
     expect(ops).toContainEqual({
       op: 'annotation_updated',
-      annotation: { id: 'g1', kind: 'group', label: 'New', member_node_ids: ['a'] },
+      annotation: { id: 'g1', kind: 'group', label: 'New' },
+      base_version: undefined,
     });
+  });
+
+  // --- Field patches (smallfix-whole-annotation-clobber-on-concurrent-
+  // different-field-edit, dec-annotation-field-patches-and-conflicts): the
+  // browser now diffs by field, not by whole-object equality, and carries
+  // base_version — see diffAnnotationFields below and
+  // docs/ANNOTATION_CONTRACT.md's "Two-client conflict matrix".
+  it('emits annotation_updated with only the fields that actually changed, plus base_version', () => {
+    const prev = {
+      annotations: [
+        {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          text: 'orig',
+          geometry: { x: 0, y: 0, w: 160, h: 96 },
+          style: { fill: '#94a3b8' },
+          version: 3,
+        },
+      ],
+    };
+    // The local canvas still carries every field (its own full copy) — only
+    // geometry actually moved; text/style are untouched, possibly even
+    // stale relative to a concurrent peer's edit this client has not
+    // received yet.
+    const next = {
+      annotations: [
+        {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          text: 'orig',
+          geometry: { x: 40, y: 40, w: 160, h: 96 },
+          style: { fill: '#94a3b8' },
+          version: 3,
+        },
+      ],
+    };
+    const ops = computeOps(prev, next);
+    expect(ops).toEqual([
+      {
+        op: 'annotation_updated',
+        annotation: {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          geometry: { x: 40, y: 40, w: 160, h: 96 },
+        },
+        base_version: 3,
+      },
+    ]);
+  });
+
+  it('omits base_version when the baseline annotation has no version yet', () => {
+    const prev = { annotations: [{ id: 'n1', kind: 'note', text: 'hi' }] };
+    const next = { annotations: [{ id: 'n1', kind: 'note', text: 'bye' }] };
+    const [op] = computeOps(prev, next);
+    // JSON.stringify drops an `undefined`-valued key entirely, so this
+    // never reaches the server as a literal null/0 that could be mistaken
+    // for a real version.
+    expect(JSON.parse(JSON.stringify(op))).not.toHaveProperty('base_version');
   });
 
   it('ignores updated_at churn on annotations', () => {

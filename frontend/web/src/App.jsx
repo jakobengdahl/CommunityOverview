@@ -1967,19 +1967,28 @@ function App() {
       // permanently rejected.
       //
       // A 409 drop is the same "never retry this stale content" terminal
-      // handling, but a different cause: LeaseConflict
-      // (task-annotation-exclusive-edit-leases) means another client holds a
-      // live edit lease on the annotation this op targeted, not that the op
-      // itself is malformed. Show the same "someone else is editing this
-      // annotation" notice the direct-acquire denial already uses
-      // (GraphCanvas.jsx's annotationRemoteLocked) instead of the generic
-      // sync-error text, so the queued-op path — the actual enforcement point
-      // for most real edits per useAnnotationEditLease's own docstring — tells
-      // the user why their change didn't apply rather than staying silent.
-      onDropped: (batch, status) => {
+      // handling, but two distinct causes now share the status code:
+      // LeaseConflict (task-annotation-exclusive-edit-leases) means another
+      // client holds a live edit lease on the annotation this op targeted;
+      // AnnotationFieldConflict (dec-annotation-field-patches-and-conflicts)
+      // means no lease was held at all, but this op's base_version was stale
+      // for a field someone else genuinely changed since. The two read very
+      // differently to a user, so the response body (parsed by
+      // sessionSyncClient.js only for a terminal drop) tells them apart —
+      // `error: 'field_conflict'` is the REST /ops 409's structured detail
+      // for the second cause; anything else (including LeaseConflict's plain
+      // string detail) falls back to the pre-existing lease notice, the same
+      // "someone else is editing this annotation" text the direct-acquire
+      // denial already uses (GraphCanvas.jsx's annotationRemoteLocked).
+      onDropped: (batch, status, body) => {
         (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
         if (status === 409) {
-          showNotification('info', t('context_menu.annotation_remote_locked'));
+          const detail = body && typeof body.detail === 'object' ? body.detail : null;
+          if (detail && detail.error === 'field_conflict') {
+            showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else {
+            showNotification('info', t('context_menu.annotation_remote_locked'));
+          }
         } else {
           showNotification('error', t('sessions.change_not_saved'));
         }
