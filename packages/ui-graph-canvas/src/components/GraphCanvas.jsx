@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useEffect, useState, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import ReactFlow, {
   Background,
   Controls,
@@ -293,6 +294,18 @@ function GraphCanvasInner({
   nodePreviewEnabled = true,
   contextMenuLabels = {},
   annotationToolboxLabels = {},
+  // The mobile shared-surface integration point (task-annotation-responsive-
+  // bottom-toolbox): when set, the compact/mobile toolbox below is portaled
+  // into this host-owned DOM node (typically a BottomSheet's content area)
+  // instead of rendering as its own fixed-position element, so annotation
+  // creation joins the same "at most one bottom surface open" system as
+  // search/create/chat/menu rather than floating unmanaged above them. Null
+  // (the default, and what DesktopShell leaves it) means "no mobile portal
+  // wiring" - compact mode then renders nothing here at all rather than
+  // falling back to the old always-on compact strip, since that strip is
+  // exactly the second, uncoordinated bottom surface this prop exists to
+  // replace. Desktop (isCompact false) never consults this prop.
+  annotationToolboxPortalContainer = null,
   // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
   // package has no access to the host app's viewport-mode hook, so
   // detection must be self-contained. 'on'/'off' force the mode (mainly for
@@ -552,6 +565,23 @@ function GraphCanvasInner({
   // effect below; the rest are refs since they only matter inside that
   // effect's own event handlers, not to rendering.
   const [freehandActive, setFreehandActive] = useState(false);
+  // The mobile annotate sheet unmounts the toolbox on close (its portal
+  // container goes from a real node back to null - see
+  // annotationToolboxPortalContainer above), which would otherwise strand
+  // freehand armed with no visible toolbox button left to disarm it and the
+  // canvas silently still eating pointer gestures as strokes. Only the
+  // container-present -> container-null transition (the sheet actually
+  // closing) disarms it; every other render (including toggling isCompact,
+  // or the container simply not being wired at all) leaves freehandActive
+  // alone, matching desktop's unchanged behaviour.
+  const prevAnnotationPortalContainerRef = useRef(null);
+  useEffect(() => {
+    const wasOpen = !!prevAnnotationPortalContainerRef.current;
+    prevAnnotationPortalContainerRef.current = annotationToolboxPortalContainer;
+    if (isCompact && wasOpen && !annotationToolboxPortalContainer) {
+      setFreehandActive(false);
+    }
+  }, [annotationToolboxPortalContainer, isCompact]);
   const freehandCaptureRef = useRef(null);
   const freehandPrimaryPointerIdRef = useRef(null);
   const freehandPreviewPathRef = useRef(null);
@@ -3547,12 +3577,24 @@ function GraphCanvasInner({
               so an annotation created here would be silently dropped by the
               next reconcile - hide the toolbox rather than let it create
               something that disappears. */}
-          {!activeFocusRootId && (
+          {/* Desktop (isCompact false) is entirely unchanged: the toolbox
+              always renders here, in its own fixed-position wrapper, exactly
+              as before this prop existed. Compact/mobile no longer renders
+              that always-on strip at all - it is either portaled into the
+              host's mobile-shell annotate sheet (when the host wired
+              annotationToolboxPortalContainer, e.g. App.jsx's MobileShell) or
+              not rendered anywhere, so a host that has not wired the portal
+              still gets no second, uncoordinated bottom surface fighting the
+              mobile bottom nav for space - the bug this integration exists to
+              close. Either way it is the same AnnotationToolbox instance and
+              the same onCreate/onDragCreate handlers below; only where its
+              DOM lands, and its variant, differ. */}
+          {!activeFocusRootId && !isCompact && (
             <AnnotationToolbox
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               onDragCreate={handleAnnotationDragCreate}
               labels={atl}
-              compact={isCompact}
+              compact={false}
               // Distinct from `compact`, which is a viewport-WIDTH signal
               // (COMPACT_MEDIA_QUERY) and so captions the wrong people in both
               // directions. This is the pointer signal, and it covers what the
@@ -3563,6 +3605,20 @@ function GraphCanvasInner({
               activeKind={freehandActive ? 'freehand' : null}
             />
           )}
+          {!activeFocusRootId &&
+            isCompact &&
+            annotationToolboxPortalContainer &&
+            createPortal(
+              <AnnotationToolbox
+                onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+                onDragCreate={handleAnnotationDragCreate}
+                labels={atl}
+                variant="sheet"
+                touch={isTouchMode}
+                activeKind={freehandActive ? 'freehand' : null}
+              />,
+              annotationToolboxPortalContainer
+            )}
           {/* Backs the toolbox's image item and is otherwise invisible; the
               file-upload half of image ingest (paste is a document-level
               listener above). Kept mounted unconditionally so its ref is

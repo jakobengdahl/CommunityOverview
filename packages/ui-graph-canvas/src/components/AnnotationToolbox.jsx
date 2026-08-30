@@ -195,8 +195,19 @@ function AnnotationToolbox({
   compact = false,
   touch = false,
   activeKind = null,
+  // 'toolbar' (default): the collapsible pill this component has always
+  // been, own toggle button, starts collapsed. 'sheet': hosted inside a
+  // dedicated BottomSheet (see GraphCanvas's annotationToolboxPortalContainer)
+  // whose own header/close button is already the collapse affordance, so this
+  // variant renders no toggle of its own and is always expanded - matching
+  // FloatingToolbar's variant="sheet" (frontend/web), the same established
+  // idiom for "the same component, laid out for a full-width mobile sheet
+  // instead of a floating rail/pill".
+  variant = 'toolbar',
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const isSheet = variant === 'sheet';
+  const [expandedState, setExpandedState] = useState(false);
+  const expanded = isSheet ? true : expandedState;
   const [currentShape, setCurrentShape] = useToolSlotSelection(
     SHAPE_SLOT_STORAGE_KEY,
     SHAPE_VARIANT_KEYS,
@@ -730,23 +741,25 @@ function AnnotationToolbox({
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
         compact ? ' annotation-toolbox--compact' : ''
-      }${touch ? ' annotation-toolbox--touch' : ''}`}
+      }${touch ? ' annotation-toolbox--touch' : ''}${isSheet ? ' annotation-toolbox--sheet' : ''}`}
       data-testid="annotation-toolbox"
       role="toolbar"
       aria-label={lbl.toggleExpand}
     >
-      <button
-        type="button"
-        className="annotation-toolbox-toggle"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-        aria-label={expanded ? lbl.toggleCollapse : lbl.toggleExpand}
-      >
-        <span className="annotation-toolbox-toggle-glyph" aria-hidden="true">
-          {expanded ? '▾' : '▴'}
-        </span>
-        <span className="annotation-toolbox-toggle-label">{lbl.toggleExpand}</span>
-      </button>
+      {!isSheet && (
+        <button
+          type="button"
+          className="annotation-toolbox-toggle"
+          onClick={() => setExpandedState((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={expanded ? lbl.toggleCollapse : lbl.toggleExpand}
+        >
+          <span className="annotation-toolbox-toggle-glyph" aria-hidden="true">
+            {expanded ? '▾' : '▴'}
+          </span>
+          <span className="annotation-toolbox-toggle-label">{lbl.toggleExpand}</span>
+        </button>
+      )}
 
       {expanded && (
         <div className="annotation-toolbox-items">

@@ -181,6 +181,11 @@ function App() {
   // width breakpoint, isCoarsePointer is an input-type signal; neither implies
   // the other (e.g. a touch-enabled laptop is coarse but not mobile-width).
   const { isMobile, isCoarsePointer } = useViewportMode();
+  // The mobile annotate sheet's content DOM node (MobileShell renders it,
+  // GraphCanvas portals AnnotationToolbox into it) — see MobileShell.jsx's
+  // component doc comment and GraphCanvas's annotationToolboxPortalContainer
+  // prop. null whenever the sheet is closed or MobileShell isn't mounted.
+  const [mobileAnnotationContainer, setMobileAnnotationContainer] = useState(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
@@ -2506,6 +2511,7 @@ function App() {
             imageHint: t('annotation_toolbox.image_hint'),
             freehandHint: t('annotation_toolbox.freehand_hint'),
           }}
+          annotationToolboxPortalContainer={isMobile ? mobileAnnotationContainer : null}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
           onViewportChange={(vp) => {
@@ -2519,6 +2525,7 @@ function App() {
           {...shellProps}
           onClear={() => requestClear('button')}
           onOpenActivity={() => setActivityOpen(true)}
+          onAnnotationSheetContainerChange={setMobileAnnotationContainer}
         />
       ) : (
         <DesktopShell
