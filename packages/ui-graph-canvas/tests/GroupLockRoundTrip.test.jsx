@@ -207,8 +207,7 @@ describe('group lock/layer round trip through the canvas', () => {
     render(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
     for (const call of hoisted.setNodes.mock.calls) {
       const updater = call[0];
-      const result =
-        typeof updater === 'function' ? updater(hoisted.seededNodes) : updater;
+      const result = typeof updater === 'function' ? updater(hoisted.seededNodes) : updater;
       if (!Array.isArray(result)) continue;
       const group = result.find((n) => n?.type === 'group');
       if (group) expect(group.draggable).toBe(false);

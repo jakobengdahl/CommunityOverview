@@ -2,7 +2,12 @@ import { memo, useState, useRef, useEffect, useContext, useCallback } from 'reac
 import { createPortal } from 'react-dom';
 import { AnnotationContext } from './AnnotationContext';
 import { useReactFlow } from 'reactflow';
-import { findSnapTarget, isArrowAnchored, isRemoteLocked, remoteEditBadge } from '../utils/annotations';
+import {
+  findSnapTarget,
+  isArrowAnchored,
+  isRemoteLocked,
+  remoteEditBadge,
+} from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';

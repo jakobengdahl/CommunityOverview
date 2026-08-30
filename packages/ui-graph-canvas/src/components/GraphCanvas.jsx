@@ -1590,9 +1590,7 @@ function GraphCanvasInner({
   // round trip.
   const acquireLeasesForOverlayMove = useCallback(
     (movable) => {
-      const overlayIds = movable
-        .filter((n) => ANNOTATION_TYPES.has(n.type))
-        .map((n) => n.id);
+      const overlayIds = movable.filter((n) => ANNOTATION_TYPES.has(n.type)).map((n) => n.id);
       if (overlayIds.length) beginEditing(overlayIds).then(() => endEditing(overlayIds));
     },
     [beginEditing, endEditing]
@@ -2050,9 +2048,7 @@ function GraphCanvasInner({
       // already started the visual drag by the time this fires — an
       // annotation already refused via `draggable` in isAnnotationDraggable
       // never reaches here at all) and released in onNodeDragStop below.
-      const draggedAnnotationIds = set
-        .filter((n) => ANNOTATION_TYPES.has(n.type))
-        .map((n) => n.id);
+      const draggedAnnotationIds = set.filter((n) => ANNOTATION_TYPES.has(n.type)).map((n) => n.id);
       if (draggedAnnotationIds.length) beginEditing(draggedAnnotationIds);
 
       // Alt+drag: arm "move node together with its directly connected

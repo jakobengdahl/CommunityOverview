@@ -82,8 +82,11 @@ export function useAnnotationDuplicate(id, data) {
     // marker, or a duplicate taken while its source happened to carry a
     // stale `remoteLease` would render as remote-locked from its very first
     // frame, until the next reconcile effect corrects it.
-    const { remoteSelection: _remoteSelection, remoteLease: _remoteLease, ...restData } =
-      source.data || {};
+    const {
+      remoteSelection: _remoteSelection,
+      remoteLease: _remoteLease,
+      ...restData
+    } = source.data || {};
     const newId = `${source.type}-${Date.now()}`;
     const position = source.position || { x: 0, y: 0 };
     const newData = { ...restData, locked: false };

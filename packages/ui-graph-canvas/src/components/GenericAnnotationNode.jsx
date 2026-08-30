@@ -338,8 +338,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           : DEFAULT_COLOR
       : data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, beginEditing, endEditing } =
-    useContext(AnnotationContext);
+  const {
+    notifyChange,
+    notifyRemoteLockedAttempt,
+    labels,
+    attachNearby,
+    beginEditing,
+    endEditing,
+  } = useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live edit lease
   // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);

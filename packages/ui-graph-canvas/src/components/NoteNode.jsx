@@ -40,8 +40,14 @@ function NoteNode({ id, data = {}, selected }) {
   // through this note's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, beginEditing, endEditing } =
-    useContext(AnnotationContext);
+  const {
+    notifyChange,
+    notifyRemoteLockedAttempt,
+    labels,
+    attachNearby,
+    beginEditing,
+    endEditing,
+  } = useContext(AnnotationContext);
   // Another client's live edit lease (task-annotation-exclusive-edit-leases,
   // acquired only when real editing starts — never on mere selection):
   // every mutation below refuses to run while it is held, surfacing the

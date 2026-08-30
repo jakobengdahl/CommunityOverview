@@ -150,7 +150,11 @@ describe('useEditableText', () => {
   it('startEditing acquires the edit lease in the background rather than gating entry on it', () => {
     const beginEditing = vi.fn().mockResolvedValue({ granted: ['n1'], denied: {} });
     const { result } = renderHook(() => useEditableText('n1', { text: 'Hello' }), {
-      wrapper: makeWrapper({ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn(), beginEditing }),
+      wrapper: makeWrapper({
+        notifyChange: vi.fn(),
+        notifyRemoteLockedAttempt: vi.fn(),
+        beginEditing,
+      }),
     });
     act(() => result.current.startEditing({ stopPropagation: () => {} }));
     // Entered edit mode immediately — no round trip before the textarea
