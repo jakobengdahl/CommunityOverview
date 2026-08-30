@@ -80,9 +80,33 @@ describe('GraphCanvas annotation toolbox - mobile shared-surface integration', (
   });
 
   describe('mobile (compact) with no portal container wired', () => {
-    it('renders no toolbox at all - not the old always-on compact strip', () => {
+    it('falls back to the inline compact strip - a non-integrated host (e.g. the widget embed) must never lose the toolbox', () => {
       render(<GraphCanvas nodes={[]} edges={[]} compactMode="on" />);
-      expect(screen.queryByTestId('annotation-toolbox')).not.toBeInTheDocument();
+
+      // Present, inline, in the compact (not sheet) strip...
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      expect(toolbox).toHaveClass('annotation-toolbox--compact');
+      expect(toolbox).not.toHaveClass('annotation-toolbox--sheet');
+      // ...and never portaled anywhere, since no portal container was given.
+      expect(portalContainer.querySelector('[data-testid="annotation-toolbox"]')).toBeNull();
+    });
+
+    it('creates annotations from the fallback compact strip exactly as the desktop one does', () => {
+      const onAnnotationChange = vi.fn();
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          compactMode="on"
+          onAnnotationChange={onAnnotationChange}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+      fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+      expect(onAnnotationChange).toHaveBeenCalled();
+      expect(findCreatedNode('note')).toBeTruthy();
     });
   });
 

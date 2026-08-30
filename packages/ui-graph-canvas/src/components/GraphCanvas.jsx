@@ -300,11 +300,12 @@ function GraphCanvasInner({
   // instead of rendering as its own fixed-position element, so annotation
   // creation joins the same "at most one bottom surface open" system as
   // search/create/chat/menu rather than floating unmanaged above them. Null
-  // (the default, and what DesktopShell leaves it) means "no mobile portal
-  // wiring" - compact mode then renders nothing here at all rather than
-  // falling back to the old always-on compact strip, since that strip is
-  // exactly the second, uncoordinated bottom surface this prop exists to
-  // replace. Desktop (isCompact false) never consults this prop.
+  // (the default) means "no mobile portal wiring" - compact mode then falls
+  // back to the pre-integration always-on compact strip, rendered inline
+  // here, so a host that has not opted into the shared-surface system (e.g.
+  // the standalone widget embed, which has no BottomSheet to portal into)
+  // still gets a working annotation toolbox rather than losing it silently.
+  // Desktop (isCompact false) never consults this prop.
   annotationToolboxPortalContainer = null,
   // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
   // package has no access to the host app's viewport-mode hook, so
@@ -3579,22 +3580,27 @@ function GraphCanvasInner({
               something that disappears. */}
           {/* Desktop (isCompact false) is entirely unchanged: the toolbox
               always renders here, in its own fixed-position wrapper, exactly
-              as before this prop existed. Compact/mobile no longer renders
-              that always-on strip at all - it is either portaled into the
-              host's mobile-shell annotate sheet (when the host wired
-              annotationToolboxPortalContainer, e.g. App.jsx's MobileShell) or
-              not rendered anywhere, so a host that has not wired the portal
-              still gets no second, uncoordinated bottom surface fighting the
-              mobile bottom nav for space - the bug this integration exists to
-              close. Either way it is the same AnnotationToolbox instance and
-              the same onCreate/onDragCreate handlers below; only where its
-              DOM lands, and its variant, differ. */}
-          {!activeFocusRootId && !isCompact && (
+              as before this prop existed - a container prop is irrelevant on
+              desktop. Compact/mobile has two hosts to serve: a host that has
+              wired annotationToolboxPortalContainer (e.g. App.jsx's
+              MobileShell) gets the toolbox portaled into its mobile-shell
+              annotate sheet instead, so it never becomes a second,
+              uncoordinated bottom surface fighting the mobile bottom nav for
+              space - the bug this integration exists to close. A host that
+              has NOT wired the portal (e.g. the standalone widget embed,
+              which has no MobileShell to portal into) falls back to the
+              pre-integration behaviour: the toolbox renders inline here in
+              its own always-on compact strip, exactly as it did before this
+              prop existed - never nothing. Either way it is the same
+              AnnotationToolbox instance and the same onCreate/onDragCreate
+              handlers below; only where its DOM lands, and its variant,
+              differ. */}
+          {!activeFocusRootId && !(isCompact && annotationToolboxPortalContainer) && (
             <AnnotationToolbox
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
               onDragCreate={handleAnnotationDragCreate}
               labels={atl}
-              compact={false}
+              compact={isCompact}
               // Distinct from `compact`, which is a viewport-WIDTH signal
               // (COMPACT_MEDIA_QUERY) and so captions the wrong people in both
               // directions. This is the pointer signal, and it covers what the

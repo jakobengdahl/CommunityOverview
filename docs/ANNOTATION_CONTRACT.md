@@ -130,7 +130,11 @@ MCP. The required entry points are:
   `FloatingToolbar`'s own `variant="sheet"` for graph-node creation), laid
   out with `variant="sheet"` — always expanded, no collapse toggle, larger
   grid cells — rather than the narrower always-visible compact strip
-  `compact` alone produces on a non-integrated host.
+  `compact` alone produces on a non-integrated host: a `GraphCanvas`
+  consumer that hasn't wired `annotationToolboxPortalContainer` (currently
+  `frontend/widget`, which mounts `GraphCanvas` directly with no
+  `MobileShell` to portal into) still gets that compact strip, rendered
+  inline, on a narrow viewport — never no toolbox at all.
 
 ### Desktop wireframe
 
