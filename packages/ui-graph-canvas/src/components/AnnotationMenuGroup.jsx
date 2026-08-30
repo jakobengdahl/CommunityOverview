@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 
 /**
  * One collapsed group in an annotation's property bar
@@ -39,6 +39,7 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
   // a no-op for the case it broke.
   const wasOpenRef = useRef(false);
   const groupRef = useRef(null);
+  const panelRef = useRef(null);
   // Whether focus was last seen INSIDE this group. Tracked with `focusin`
   // while open rather than read from `document.activeElement` at close time:
   // by the time the close effect runs the panel is already unmounted, so its
@@ -74,6 +75,42 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
       document.removeEventListener('focusin', onDocumentFocusIn);
     };
   }, [open]);
+
+  // Keep the open panel inside the viewport.
+  //
+  // This cannot be done from the menu's own clamp: the panel is absolutely
+  // positioned, so it contributes nothing to the menu's `getBoundingClientRect`
+  // and the clamp is blind to it. It cannot be done in CSS either — the
+  // previous attempt keyed off DOM order (`nth-last-child`), which stops
+  // tracking visual order the moment the bar wraps. Measuring the panel itself
+  // is the only thing that actually knows where it landed.
+  //
+  // Two independent corrections: flip below the trigger when opening upward
+  // would go off the top (the default is upward, so a menu near the top of the
+  // window put every panel out of reach), and shift horizontally when the
+  // panel runs past either side.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!open || !panel) return;
+    panel.style.top = '';
+    panel.style.bottom = '';
+    panel.style.left = '';
+    panel.style.right = '';
+    panel.style.marginLeft = '';
+
+    const rect = panel.getBoundingClientRect();
+    if (!rect.width && !rect.height) return; // no layout (jsdom)
+    const margin = 8;
+
+    if (rect.top < margin) {
+      panel.style.bottom = 'auto';
+      panel.style.top = 'calc(100% + 6px)';
+    }
+    const overflowRight = rect.right - (window.innerWidth - margin);
+    const overflowLeft = margin - rect.left;
+    if (overflowRight > 0) panel.style.marginLeft = `${-overflowRight}px`;
+    else if (overflowLeft > 0) panel.style.marginLeft = `${overflowLeft}px`;
+  }, [open, children]);
 
   useEffect(() => {
     if (wasOpenRef.current && !open && heldFocusRef.current) {
@@ -117,7 +154,7 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
         )}
       </button>
       {open && (
-        <div className="annotation-menu-group-panel" role="group" aria-label={label}>
+        <div ref={panelRef} className="annotation-menu-group-panel" role="group" aria-label={label}>
           {children}
         </div>
       )}

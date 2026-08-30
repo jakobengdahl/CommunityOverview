@@ -13,9 +13,16 @@ vi.mock('reactflow', () => {
     store.handlers = props;
     return (
       <div data-testid="react-flow" className="react-flow">
-        {/* The placement gesture only starts on empty canvas, which it checks
-            for by looking for this class on the event target. */}
-        <div data-testid="pane" className="react-flow__pane" />
+        {/* ReactFlow's real nesting: the nodes live INSIDE the pane
+            (.react-flow__pane > .react-flow__viewport > .react-flow__nodes).
+            Rendering them as siblings made "a press on a node must not place"
+            pass against a DOM that does not exist — the guard it covered was
+            inert in production. Node stand-ins are appended to `viewport`. */}
+        <div data-testid="pane" className="react-flow__pane">
+          <div data-testid="viewport" className="react-flow__viewport">
+            <div className="react-flow__nodes" />
+          </div>
+        </div>
         {props.children}
       </div>
     );
@@ -122,6 +129,23 @@ function selectShapeVariant(name) {
   fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
   const picker = screen.getByRole('group', { name: /^shapes$/i });
   fireEvent.click(within(picker).getByRole('button', { name }));
+}
+
+// A node stand-in mounted where ReactFlow actually mounts nodes: inside the
+// pane's viewport. jsdom gives every element a zero-size rect; the eraser
+// measures the element it just removed to know what area to ignore, so the
+// test has to supply a real one.
+function mountNodeElement(id, rect = { left: 0, top: 0, right: 120, bottom: 80 }) {
+  const el = document.createElement('div');
+  el.className = 'react-flow__node';
+  el.setAttribute('data-id', id);
+  el.getBoundingClientRect = () => ({
+    ...rect,
+    width: rect.right - rect.left,
+    height: rect.bottom - rect.top,
+  });
+  screen.getByTestId('viewport').appendChild(el);
+  return el;
 }
 
 function countOf(type) {
@@ -288,6 +312,13 @@ describe('GraphCanvas annotation tool modes', () => {
       const shape = store.nodes.find((n) => n.type === 'shape');
       expect(shape.style.width).toBeGreaterThanOrEqual(40);
       expect(shape.style.height).toBeGreaterThanOrEqual(40);
+      // And still equal-sided. Flooring the two dimensions independently
+      // also satisfies the two assertions above — it produced a 40x40
+      // "triangle", which NodeResizer's keepAspectRatio then locked in. The
+      // ratio is what the re-proportioning exists to preserve, so it is what
+      // has to be asserted.
+      const aspect = 2 / Math.sqrt(3);
+      expect(shape.style.width / shape.style.height).toBeCloseTo(aspect, 1);
     });
 
     it('does not commit anything from a second contact during a pinch', () => {
@@ -305,10 +336,14 @@ describe('GraphCanvas annotation tool modes', () => {
         pane.dispatchEvent(
           pointerEvent('pointerdown', { pointerId: 2, clientX: 150, clientY: 60 })
         );
-        // A third contact while the pinch is still in progress.
+        // The first finger lifts BEFORE the third contact. That ordering is
+        // what makes this bite: with the suspension keyed on a pointerup's
+        // `buttons` — 0 on every pointerup, so the guard never fired — it
+        // cleared here, and the third contact then started a fresh
+        // placement that committed on release.
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
         pane.dispatchEvent(pointerEvent('pointerdown', { pointerId: 3, clientX: 90, clientY: 90 }));
         pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 3, clientX: 90, clientY: 90 }));
-        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
         pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 2, clientX: 150, clientY: 60 }));
       });
 
@@ -335,22 +370,65 @@ describe('GraphCanvas annotation tool modes', () => {
       expect(store.nodes.filter((n) => n.type === 'shape')).toHaveLength(1);
     });
 
+    it('swallows the click the gesture synthesizes, so the new object stays selected', () => {
+      // Blocking `mousedown` (to stop the canvas panning under the drag) means
+      // the canvas never records a press position, so its own click handler
+      // cannot tell the gesture's trailing click from a plain one and falls
+      // through to clearing the selection — deselecting the annotation just
+      // created and focused.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      const pane = document.querySelector('.react-flow__pane');
+      dragOnPane(100, 100, 200, 180);
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+      act(() => {
+        pane.dispatchEvent(click);
+      });
+
+      expect(click.defaultPrevented).toBe(true);
+    });
+
     it('never starts a placement from a press that landed on an existing node', () => {
       // An armed tool must not make the rest of the canvas unusable: pressing
-      // an object still selects and drags it.
+      // an object still selects and drags it. The node stand-in is mounted
+      // INSIDE the pane, which is where ReactFlow actually puts it — as a
+      // sibling this passed while the production guard did nothing.
       store.nodes = [{ id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
       render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
       openToolbox();
       arm(/^rectangle$/i);
 
-      const nodeEl = document.createElement('div');
-      nodeEl.className = 'react-flow__node';
-      nodeEl.setAttribute('data-id', 'note-1');
-      screen.getByTestId('react-flow').appendChild(nodeEl);
+      const nodeEl = mountNodeElement('note-1');
       act(() => {
         nodeEl.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
         nodeEl.dispatchEvent(pointerEvent('pointerup', { clientX: 10, clientY: 10 }));
       });
+
+      expect(store.nodes.find((n) => n.type === 'shape')).toBeUndefined();
+    });
+
+    it('never starts a placement from a press on an edge or a control', () => {
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      const viewport = screen.getByTestId('viewport');
+      const edgeEl = document.createElement('div');
+      edgeEl.className = 'react-flow__edge';
+      edgeEl.setAttribute('data-testid', 'rf__edge-edge-1');
+      viewport.appendChild(edgeEl);
+      const handle = document.createElement('div');
+      handle.className = 'react-flow__resize-control handle';
+      viewport.appendChild(handle);
+
+      for (const el of [edgeEl, handle]) {
+        act(() => {
+          el.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+          el.dispatchEvent(pointerEvent('pointerup', { clientX: 10, clientY: 10 }));
+        });
+      }
 
       expect(store.nodes.find((n) => n.type === 'shape')).toBeUndefined();
     });
@@ -374,22 +452,6 @@ describe('GraphCanvas annotation tool modes', () => {
       } finally {
         document.elementFromPoint = original;
       }
-    }
-
-    function mountNodeElement(id, rect = { left: 0, top: 0, right: 120, bottom: 80 }) {
-      const el = document.createElement('div');
-      el.className = 'react-flow__node';
-      el.setAttribute('data-id', id);
-      // jsdom gives every element a zero-size rect; the eraser measures the
-      // element it just removed to know what area to ignore, so the test has
-      // to supply a real one.
-      el.getBoundingClientRect = () => ({
-        ...rect,
-        width: rect.right - rect.left,
-        height: rect.bottom - rect.top,
-      });
-      screen.getByTestId('react-flow').appendChild(el);
-      return el;
     }
 
     it('deletes an annotation dragged over while the eraser tool is armed', () => {

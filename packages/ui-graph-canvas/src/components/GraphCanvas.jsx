@@ -3395,12 +3395,17 @@ function GraphCanvasInner({
         // its figure.
         const cx = clientX;
         const cy = clientY;
-        return {
+        const box = {
           left: Math.max(rect.left, cx - ERASE_BLOCK_MAX_PX),
           right: Math.min(rect.right, cx + ERASE_BLOCK_MAX_PX),
           top: Math.max(rect.top, cy - ERASE_BLOCK_MAX_PX),
           bottom: Math.min(rect.bottom, cy + ERASE_BLOCK_MAX_PX),
         };
+        // `closest` can return an ancestor whose box does not contain the
+        // pointer (a child overflowing it — rotated content, handles), which
+        // would invert the clamp and leave a box that blocks nothing.
+        if (box.left > box.right || box.top > box.bottom) return null;
+        return box;
       }
       return {
         left: clientX - ERASE_RESTEP_PX,
@@ -3609,11 +3614,25 @@ function GraphCanvasInner({
         hidePreview();
         return;
       }
-      // Only a press on empty canvas starts a placement. Landing on an
-      // existing node (or on a control) has to keep meaning what it already
-      // means — selecting, dragging, pressing a button — or an armed tool
-      // would make the rest of the canvas unusable.
-      if (!event.target?.closest?.('.react-flow__pane')) return;
+      // Only a press on EMPTY canvas starts a placement. Landing on an
+      // existing node, an edge or a control has to keep meaning what it
+      // already means — selecting, dragging, pressing a button — or an armed
+      // tool makes the rest of the canvas unusable, and since these tools are
+      // sticky that is the resting state rather than a moment.
+      //
+      // Tested by exclusion, not by requiring `.react-flow__pane`: in
+      // ReactFlow the nodes live INSIDE the pane
+      // (.react-flow__pane > .react-flow__viewport > .react-flow__nodes >
+      // .react-flow__node), so a "did this land in the pane?" check is
+      // satisfied by every node too and let a press on an existing annotation
+      // create a second one on top of it.
+      const target = event.target;
+      if (!target?.closest) return;
+      if (target.closest('.react-flow__node, .react-flow__edge, .react-flow__resize-control')) {
+        return;
+      }
+      if (target.closest('button, input, textarea, select, [role="button"]')) return;
+      if (!target.closest('.react-flow__pane')) return;
 
       placementRef.current = {
         pointerId: event.pointerId,
@@ -3656,9 +3675,10 @@ function GraphCanvasInner({
     const swallowSyntheticClick = (event) => {
       if (!pendingPlacementClickRef.current) return;
       pendingPlacementClickRef.current = false;
-      // Only the pane's own click. The toolbox lives inside this wrapper too,
-      // so an unscoped swallow ate the user's NEXT button press — arming a
-      // different tool right after drawing silently did nothing.
+      // Only a click on the canvas surface. The toolbox lives inside this
+      // wrapper too, so an unscoped swallow ate the user's NEXT button press —
+      // arming a different tool right after drawing silently did nothing.
+      if (event.target?.closest?.('button, input, textarea, select, [role="button"]')) return;
       if (!event.target?.closest?.('.react-flow__pane')) return;
       event.preventDefault();
       event.stopPropagation();
@@ -3782,6 +3802,13 @@ function GraphCanvasInner({
     wrapper.addEventListener('pointerdown', trackPointerDown, true);
     wrapper.addEventListener('pointerup', clearSuspension, true);
     wrapper.addEventListener('pointercancel', clearSuspension, true);
+    // A release the wrapper never sees (pen or mouse let go outside the
+    // window) would otherwise leave the id in `livePointers` forever, so the
+    // set never empties and the suspension never lifts — placement would be
+    // silently dead for the rest of the session. The erase gesture above
+    // carries the same backstop for the same reason.
+    window.addEventListener('pointerup', clearSuspension, true);
+    window.addEventListener('pointercancel', clearSuspension, true);
     wrapper.addEventListener('mousedown', blockCanvasGesture, true);
     wrapper.addEventListener('click', swallowSyntheticClick, true);
     wrapper.addEventListener('touchstart', blockCanvasGesture, { capture: true, passive: false });
@@ -3793,6 +3820,8 @@ function GraphCanvasInner({
       wrapper.removeEventListener('pointerdown', trackPointerDown, true);
       wrapper.removeEventListener('pointerup', clearSuspension, true);
       wrapper.removeEventListener('pointercancel', clearSuspension, true);
+      window.removeEventListener('pointerup', clearSuspension, true);
+      window.removeEventListener('pointercancel', clearSuspension, true);
       wrapper.removeEventListener('mousedown', blockCanvasGesture, true);
       wrapper.removeEventListener('click', swallowSyntheticClick, true);
       wrapper.removeEventListener('touchstart', blockCanvasGesture, { capture: true });
