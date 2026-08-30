@@ -6,6 +6,7 @@ presence/claim lifecycle on connect/disconnect.
 """
 
 import asyncio
+import copy
 import json
 import threading
 
@@ -19,6 +20,7 @@ from backend.core.session_store import (
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
+    Session,
     SessionStore,
 )
 from backend.core.session_manager import (
@@ -645,9 +647,10 @@ class TestLeaseEnforcement:
     (task-annotation-exclusive-edit-leases' server-side-lease-enforcement
     slice, superseding the old advisory-ClaimMap-based enforcement). Covers
     both browser write paths — the ``apply_ops`` batch and
-    ``undo_last_action`` — while the last test in this class documents that
-    the synchronous MCP write path is deliberately left unaffected pending
-    ``task-mcp-annotation-human-edit-guard``.
+    ``undo_last_action`` — while the last test in this class pins the
+    matching guarantee for the synchronous MCP write path, now covered by
+    ``task-mcp-annotation-human-edit-guard`` (see
+    ``TestSyncMcpWritePathsAndLeases`` below for the full per-method suite).
     """
 
     async def _seeded(self, mgr, ann_id="note-1"):
@@ -930,30 +933,501 @@ class TestLeaseEnforcement:
             )
         assert s.state["node_refs"] == []
 
-    async def test_mcp_write_path_is_unaffected_by_a_live_lease(self):
-        """Deliberately unenforced in v1 — see LeaseConflict's docstring and
-        dec-mcp-agent-ops-vs-annotation-claimmap.
+    async def test_group_membership_change_is_blocked_by_a_live_lease_too(self):
+        """_claimed_annotation_target now covers group_membership_changed
+        (task-mcp-annotation-human-edit-guard) — the group annotation itself
+        is the thing a lease protects, the same way a note's edit lease
+        protects it against annotation_updated. This closes a gap that
+        predates this task: the browser's own group-membership panel sends
+        group_membership_changed through this same apply_ops batch path
+        (sessionSyncClient.js), and it was not lease-checked at all before
+        this change."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "group-1", "type": "group"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["group-1"]}]
+        )
+        with pytest.raises(LeaseConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "group_membership_changed",
+                        "group_id": "group-1",
+                        "member_node_ids": ["n1"],
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "group-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("member_node_ids") is None
 
-        upsert_annotation/update_annotation/delete_annotation are the
-        synchronous MCP tool write path (mcp_tools.py, all keyed to the
-        shared 'mcp-agent' client id) and never go through apply_ops, so
-        they are not checked against LeaseMap at all — an MCP write still
-        silently overrides a live human edit lease. Covering that is
-        task-mcp-annotation-human-edit-guard's separate, deliberately-
-        sequenced-after scope; this test documents and pins the current
-        (unaffected) behaviour rather than guessing at it.
+    async def test_group_membership_change_conflict_rolls_back_the_whole_mixed_batch(
+        self,
+    ):
+        """Same all-or-nothing guarantee as
+        test_a_conflicting_op_rolls_back_the_whole_batch, for the newly
+        covered op type: an earlier op in the same batch as a leased
+        group_membership_changed must not have taken effect either."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "group-1", "type": "group"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["group-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["n1"]},
+                    {
+                        "op": "group_membership_changed",
+                        "group_id": "group-1",
+                        "member_node_ids": ["n1"],
+                    },
+                ],
+            )
+        assert s.state["node_refs"] == []
+
+    async def test_mcp_write_path_is_now_blocked_by_a_live_lease(self):
+        """As of task-mcp-annotation-human-edit-guard: upsert_annotation/
+        update_annotation/delete_annotation/upsert_image_annotation/
+        set_group_members are the synchronous MCP tool write path
+        (mcp_tools.py, all keyed to the shared 'mcp-agent' client id) and
+        never go through apply_ops, but each now checks the same live
+        LeaseMap immediately before its own mutation — see
+        SessionManager._reject_if_leased and LeaseConflict's docstring.
+        TestSyncMcpWritePathsAndLeases below is the full per-method suite;
+        this test (renamed from test_mcp_write_path_is_unaffected_by_a_live_
+        lease) keeps pinning the specific regression this task closed.
         """
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
             s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        result = mgr.update_annotation(
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id,
+                "mcp-agent",
+                {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("text") != "agent wrote anyway"
+
+
+class TestSyncMcpWritePathsAndLeases:
+    """task-mcp-annotation-human-edit-guard: the synchronous MCP write path
+    (``upsert_annotation``/``upsert_image_annotation``/``update_annotation``/
+    ``delete_annotation``/``set_group_members`` — ``mcp_tools.py``, all keyed
+    to the shared ``'mcp-agent'`` client id) never goes through ``apply_ops``,
+    so each method now checks the live lease itself, immediately before its
+    own mutation (``SessionManager._reject_if_leased``). This is the
+    per-method counterpart of ``TestLeaseEnforcement``, one method's write
+    path per section below.
+
+    "Same client already holds the lease" is deliberately not tested here.
+    An MCP write is always attributed to the shared ``'mcp-agent'`` client
+    id, and none of these five methods ever calls ``self.leases.acquire`` —
+    an MCP caller only ever *checks* against a lease, per
+    ``dec-mcp-agent-ops-vs-annotation-claimmap`` ("agents do not acquire,
+    reserve or take over human edit leases in v1"). So ``'mcp-agent'``
+    holding its own lease is not a state this guard, or anything else in the
+    system, can ever produce — asserting it would test a scenario the design
+    makes unreachable rather than real behaviour. What *is* tested
+    (``TestSyncMcpWriteLeaseRaceSafety`` below) is that the check cannot be
+    raced by a lease that becomes live between an earlier read and the
+    mutation.
+    """
+
+    async def _lease_held_by_browser(
+        self, mgr: SessionManager, session: Session, *, ann_id: str, holder: str = "c1"
+    ) -> None:
+        res = await mgr.apply_ops(
+            session.id,
+            holder,
+            0,
+            [{"op": "edit_lease_acquired", "element_ids": [ann_id]}],
+        )
+        assert res["applied"][0]["element_ids"] == [ann_id]  # sanity: actually granted
+
+    async def _release_lease(
+        self, mgr: SessionManager, session: Session, *, ann_id: str, holder: str = "c1"
+    ) -> None:
+        await mgr.apply_ops(
+            session.id,
+            holder,
+            0,
+            [{"op": "edit_lease_released", "element_ids": [ann_id]}],
+        )
+
+    # ---- upsert_annotation ----
+
+    async def test_upsert_annotation_replace_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        before = copy.deepcopy(s.state)
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before  # provably unchanged, not just "returned an error"
+
+    async def test_upsert_annotation_fresh_create_ignores_a_lease_on_the_same_id(self):
+        """Mirrors TestLeaseEnforcement.test_a_new_annotation_id_has_no_lease_
+        to_protect: a lease on an id that does not exist yet in this
+        session's annotations protects nothing."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        res = mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        assert res["annotation"]["id"] == "note-1"
+
+    async def test_upsert_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        await self._release_lease(mgr, s, ann_id="note-1")
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "now free"}
+        )
+        assert res["annotation"]["text"] == "now free"
+
+    async def test_upsert_annotation_retry_succeeds_after_the_lease_expires(self):
+        clock = {"t": 0.0}
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()),
+            leases=LeaseMap(ttl=30.0, time_fn=lambda: clock["t"]),
+        )
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        clock["t"] += 31.0  # past the 30s TTL
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "expired lease"}
+        )
+        assert res["annotation"]["text"] == "expired lease"
+
+    # ---- upsert_image_annotation ----
+
+    async def test_upsert_image_annotation_replace_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
             s.id,
             "mcp-agent",
-            {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
         )
-        assert result["annotation"]["text"] == "agent wrote anyway"
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        before = copy.deepcopy(s.state)
+        replacement = _image_annotation("img-1", data_bytes=64)
+        replacement["alt"] = "hijacked"
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.upsert_image_annotation(
+                s.id, "mcp-agent", replacement, optimized_image_bytes=64
+            )
+        assert exc_info.value.annotation_id == "img-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before
+
+    async def test_upsert_image_annotation_fresh_create_ignores_a_lease_on_the_same_id(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
+        )
+        assert res["annotation"]["id"] == "img-1"
+
+    async def test_upsert_image_annotation_retry_succeeds_after_the_lease_is_released(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        replacement = _image_annotation("img-1", data_bytes=64)
+        replacement["alt"] = "hijacked"
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_image_annotation(
+                s.id, "mcp-agent", replacement, optimized_image_bytes=64
+            )
+        await self._release_lease(mgr, s, ann_id="img-1")
+        replacement2 = _image_annotation("img-1", data_bytes=64)
+        replacement2["alt"] = "now free"
+        res = mgr.upsert_image_annotation(
+            s.id, "mcp-agent", replacement2, optimized_image_bytes=64
+        )
+        assert res["annotation"]["alt"] == "now free"
+
+    # ---- update_annotation ----
+
+    async def test_update_annotation_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        before = copy.deepcopy(s.state)
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before
+
+    async def test_update_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        await self._release_lease(mgr, s, ann_id="note-1")
+        res = mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "now free"}
+        )
+        assert res["annotation"]["text"] == "now free"
+
+    async def test_update_annotation_lease_check_precedes_the_field_version_check(self):
+        """LeaseConflict is raised before AnnotationFieldConflict gets a
+        chance to fire — the lease check runs first, mirroring apply_ops' own
+        ordering (lease check before the store's own state-level checks).
+        A stale base_version behind a live lease is reported as the lease
+        conflict, not the (also-true) field conflict."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.update_annotation(
+                s.id,
+                "mcp-agent",
+                {"id": "note-1", "type": "note", "text": "v2"},
+                base_version=999,
+            )
+
+    # ---- delete_annotation ----
+
+    async def test_delete_annotation_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert len(s.state["annotations"]) == 1  # still there
+
+    async def test_delete_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        await self._release_lease(mgr, s, ann_id="note-1")
+        mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        assert s.state["annotations"] == []
+
+    # ---- set_group_members ----
+
+    async def test_set_group_members_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        await self._lease_held_by_browser(mgr, s, ann_id="group-1")
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        assert exc_info.value.annotation_id == "group-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("member_node_ids") is None
+
+    async def test_set_group_members_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        await self._lease_held_by_browser(mgr, s, ann_id="group-1")
+        with pytest.raises(LeaseConflict):
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        await self._release_lease(mgr, s, ann_id="group-1")
+        res = mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        assert res["annotation"]["member_node_ids"] == ["n1"]
+
+    async def test_set_group_members_on_a_missing_group_still_raises_op_error_not_lease_conflict(
+        self,
+    ):
+        """No annotation exists at group_id, so _claimed_annotation_target
+        reports no target — there is nothing to lease-check yet, and the
+        store's own existence check still fires exactly as before this
+        task (TestSetGroupMembers.test_missing_group_raises_op_error)."""
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.set_group_members(s.id, "mcp-agent", "ghost", ["n1"])
+
+
+class TestSyncMcpWriteLeaseRaceSafety:
+    """Proves the check happens at the mutation boundary itself, not from an
+    earlier-cached snapshot — the exact race
+    ``task-mcp-annotation-human-edit-guard`` names: "a concurrent lease
+    acquisition cannot race a preflight-only check".
+
+    Each of the five guarded methods never awaits (``apply_layout``'s
+    docstring documents the same property for the layout write path), so
+    once one starts running on the single-threaded event loop nothing else
+    can interleave until it returns. That leaves exactly two windows where a
+    lease could conceivably race one of these calls:
+
+    1. Before the call starts — covered by the ordinary blocked-write tests
+       in ``TestSyncMcpWritePathsAndLeases`` (the lease already exists in
+       ``self.leases`` by the time the method runs).
+    2. While an ``apply_ops`` batch holds the per-session lock mid-flight
+       (genuinely awaiting, e.g. during its persist step) and is about to
+       grant a lease as part of that same batch: the guarded method must not
+       run against the pre-batch (lease-free) state — it refuses with
+       ``LayoutBusy`` instead, the same protection ``apply_layout`` already
+       relies on, so by the time it *does* run (lock free), ``self.leases``
+       already reflects whatever that batch actually committed.
+
+    There is no third window: nothing between ``_reject_if_leased``'s
+    ``self.leases.snapshot`` read and the following ``_apply_op_sync`` call
+    ever awaits, so a lease cannot be acquired in that gap no matter how a
+    concurrent ``apply_ops`` batch is scheduled.
+    """
+
+    async def test_a_lease_granted_mid_persist_by_a_real_concurrent_batch_is_never_missed(
+        self,
+    ):
+        """Real concurrency (``asyncio.gather`` via ``asyncio.create_task``),
+        mirroring ``TestApplyLayout.
+        test_refuses_during_real_inflight_batch_and_preserves_seq_order``'s
+        proof style: a batch that both grants a lease on ``note-1`` *and*
+        mutates state (so it genuinely awaits mid-persist, holding the
+        per-session lock) is stalled there with a blocking persist hook. An
+        MCP write attempted in that exact window must not proceed against
+        the pre-batch, lease-free view — it refuses with ``LayoutBusy``.
+        Once the batch completes and the lock frees, the very next attempt
+        sees the lease the batch actually granted and is refused with
+        ``LeaseConflict`` — the state the lease exists to protect is never
+        touched by either attempt.
+        """
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = store.persist_snapshot
+
+        def slow_persist(snapshot):
+            entered.set()
+            proceed.wait(timeout=2)
+            original(snapshot)
+
+        store.persist_snapshot = slow_persist
+        apply_task = asyncio.create_task(
+            mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {"op": "edit_lease_acquired", "element_ids": ["note-1"]},
+                    {"op": "nodes_added", "node_ids": ["a"]},
+                ],
+            )
+        )
+        # Wait off the loop thread until the batch is inside persist with the
+        # per-session lock held and the lease grant not yet committed.
+        await asyncio.to_thread(entered.wait, 2)
+
+        assert mgr.leases.snapshot(s.id) == {}  # not committed yet
+        with pytest.raises(LayoutBusy):
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert s.state["annotations"][0]["text"] == "v1"
+
+        proceed.set()
+        await apply_task
+
+        # The lease is real now — the very next attempt sees it, not a stale
+        # lease-free view, and is refused for the right reason.
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c1"}
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0]["text"] == "v1"
 
 
 class TestConflictMatrixTwoClients:

@@ -684,20 +684,53 @@ mutation on the round trip; the server-side `LeaseConflict` check above
 remains the authoritative backstop for the rare case where that background
 acquisition loses a race.
 
-**Remaining gap:** the exclusive edit lease is scoped to browser-originated
-writes only. The synchronous MCP write path (`upsert_annotation`/
-`update_annotation`/`delete_annotation`/`apply_layout`/`add_node_refs`, all
-keyed to the shared `mcp-agent` client id — `backend/service/mcp_tools.py`)
-never goes through `apply_ops` and does not acquire or check leases at all in
-v1: an MCP agent still silently overrides a live human edit lease exactly as
-before, the same way it already bypasses the client-side exclusivity UI and
-the `locked` flag today. This is a deliberate v1 boundary, not an oversight —
-`dec-mcp-agent-ops-vs-annotation-claimmap` (accepted 2026-08-30) decided
-human edit leases are exclusive while leaving MCP writes unchanged for now;
-making MCP-issued writes respect a live human lease (never acquiring one of
-its own — v1 has no per-agent identity to make that meaningful) is
-`task-mcp-annotation-human-edit-guard`'s separate, deliberately-sequenced-after
-scope. Actor-scoped conditional undo *is* implemented
+**Gap closed (`task-mcp-annotation-human-edit-guard`).** The synchronous MCP
+write path — every `SessionManager` method that can mutate an existing
+annotation and that a `mcp_tools.py` tool calls directly rather than through
+`apply_ops` (`upsert_annotation`, `upsert_image_annotation`,
+`update_annotation`, `delete_annotation`, `set_group_members`; all keyed to
+the shared `mcp-agent` client id) — now checks the same live `LeaseMap`
+immediately before its own mutation and raises the same `LeaseConflict` a
+browser write does (`SessionManager._reject_if_leased`). This covers every
+generic/note/group/image MCP tool that ends up calling one of those five: 13
+tools currently wrap them, including `create_sticky_note`/`update_sticky_note`/
+`delete_sticky_note`, `create_annotation`/`update_annotation`/
+`delete_annotation`/`reorder_annotation`/`set_annotation_lock`/
+`duplicate_annotation`, `create_image_annotation` (and, on the human side, the
+`POST /sessions/{id}/annotations/image` ingest endpoint the task description
+calls out by name — both routes end at the one authoritative check inside
+`upsert_image_annotation`), and `create_group_annotation`/
+`update_group_members`/`delete_group_annotation` (`group_membership_changed`
+is now itself a lease-checkable op — see `_claimed_annotation_target` — which
+closes the same gap for the **browser's own** group-membership panel too,
+since it sends that op through the identical `apply_ops` batch path).
+`apply_layout`/`add_node_refs`/`rename_session_sync`/`delete_session_sync`
+stay unguarded because none of their ops can mutate an annotation at all —
+out of scope by construction, not merely unaddressed. Each MCP tool surfaces
+the refusal as `{"success": false, "error": "lease_conflict", "annotation_id",
+"held_by"}`, the MCP-tool-layer mirror of the REST/`LeaseConflict` 409.
+
+**What this guard is, and is not.** It is a *refusal*, checked at the actual
+mutation boundary (immediately before the write, after every other
+precondition — revision, existence, budget checks — so a conflict leaves
+state completely unchanged) and safe against the same "preflight races a
+concurrent acquisition" failure mode a check taken earlier and cached would
+have: nothing between the lease read and the mutation ever awaits, and while
+an `apply_ops` batch is genuinely mid-flight the guarded method refuses with
+`LayoutBusy` instead of running against a pre-commit view. It is **not**
+authorization or identity verification: `client_id` — on either side of the
+check — is caller-supplied and unauthenticated, so `held_by` names whichever
+string currently holds the lease, not a verified human. An MCP agent never
+acquires, renews, releases or takes over a lease itself in v1 — it only ever
+checks against one — matching `dec-mcp-agent-ops-vs-annotation-claimmap`
+("agents do not acquire, reserve or take over human edit leases in v1").
+After a `lease_conflict`, an agent must re-read current state (e.g.
+`list_annotations`) before retrying rather than blindly resubmitting the same
+write; the retry succeeds once the lease is released or its 30 s TTL expires.
+Full per-agent identities and agent-to-agent leases remain out of scope for
+v1; field-level conflict protection for *unleased* concurrent edits is the
+separate `dec-annotation-field-patches-and-conflicts` mechanism described
+below, not this one. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
 ### Two-client conflict matrix
@@ -2017,7 +2050,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — no text, no title anywhere in its markup |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to `alt` when set, empty otherwise — never says "image annotation" |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps as every other kind; accessible name is **empty** — pure SVG path(s), no text or title |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path still bypasses `LeaseMap` entirely, by deliberate sequencing rather than an open decision — that is `task-mcp-annotation-human-edit-guard`'s own scope ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered; the whole-document-last-write-wins finding it originally recorded for concurrent different-field edits with no lease held is now fixed by field-level patches and per-field `base_version` checking (`dec-annotation-field-patches-and-conflicts`, [Field-level patches and base_version](#field-level-patches-and-base_version)) — a legacy caller that supplies no `base_version` at all keeps the old unprotected behaviour as a documented fallback, not a live gap for a real client; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path's own bypass is now closed too (`task-mcp-annotation-human-edit-guard`): every synchronous MCP write method that can mutate an existing annotation checks the same `LeaseMap` at its own mutation boundary and never acquires one itself ([gap closed](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered; the whole-document-last-write-wins finding it originally recorded for concurrent different-field edits with no lease held is now fixed by field-level patches and per-field `base_version` checking (`dec-annotation-field-patches-and-conflicts`, [Field-level patches and base_version](#field-level-patches-and-base_version)) — a legacy caller that supplies no `base_version` at all keeps the old unprotected behaviour as a documented fallback, not a live gap for a real client; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
 
 ## Downstream closure rule
 

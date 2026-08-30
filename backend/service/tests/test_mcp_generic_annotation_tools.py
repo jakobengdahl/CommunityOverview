@@ -665,6 +665,28 @@ class TestCreateAnnotation:
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, annotation_tools):
+        """task-mcp-annotation-human-edit-guard: a create-by-id targeting an
+        annotation another (browser) client holds a live edit lease on is
+        refused, mirroring the revision_conflict shape above."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, annotation_id="ann-1"
+        )
+        manager.leases.acquire(session.id, "browser-1", ["ann-1"])
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=9, y=9, annotation_id="ann-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "ann-1"
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert after["x"] == created["annotation"]["x"]
+
     def test_busy_when_lock_held(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -848,6 +870,29 @@ class TestUpdateAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
+
+    def test_lease_conflict_is_reported_and_does_not_mutate(self, annotation_tools):
+        """task-mcp-annotation-human-edit-guard: a live human edit lease
+        blocks this MCP write, and the annotation is left untouched — not
+        just "an error came back"."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["update_annotation"](
+            session_id=session.id, annotation_id=ann_id, x=99
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == ann_id
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert after["x"] == 0
 
     # --- base_version / field-level conflicts (task-smallfix-whole-
     # annotation-clobber-on-concurrent-different-field-edit,
@@ -1183,6 +1228,24 @@ class TestReorderAnnotation:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_reorder(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["reorder_annotation"](
+            session_id=session.id, annotation_id=ann_id, z=7
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
+        assert session.state["annotations"][0].get("z") != 7
+
 
 class TestSetAnnotationLock:
     def test_locks_and_unlocks(self, annotation_tools):
@@ -1305,6 +1368,26 @@ class TestSetAnnotationLock:
 
         assert unlocked["annotation"]["locked"] is False
         assert unlocked["annotation"]["content"].get("attachment") is None
+
+    def test_lease_conflict_is_reported_and_does_not_toggle_the_lock(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
+        assert session.state["annotations"][0].get("locked") is not True
 
 
 class TestDuplicateAnnotation:
@@ -1677,6 +1760,24 @@ class TestDeleteAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
+        assert len(session.state["annotations"]) == 1
+
+    def test_lease_conflict_is_reported_and_does_not_delete(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["delete_annotation"](
+            session_id=session.id, annotation_id=ann_id
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
         assert len(session.state["annotations"]) == 1
 
 

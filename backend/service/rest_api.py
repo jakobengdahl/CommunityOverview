@@ -1248,6 +1248,12 @@ def _register_session_endpoints(
                 _HUMAN_IMAGE_INGEST_CLIENT_ID,
                 annotation,
                 optimized_image_bytes=len(optimized.data),
+                # The lease check inside upsert_image_annotation must judge
+                # this against the real posting browser's identity, not the
+                # marker above — see lease_client_id's docstring. Without
+                # this, a browser replacing an image it holds its own lease
+                # on would be rejected as if a stranger held it.
+                lease_client_id=request.client_id,
                 # Throttle by request source, not by the marker above (which is
                 # the same string for every human upload server-wide, so it
                 # would put every user in one bucket) and not by the caller's

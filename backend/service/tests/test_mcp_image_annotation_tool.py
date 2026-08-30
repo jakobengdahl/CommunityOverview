@@ -421,6 +421,34 @@ class TestCreateImageAnnotationConcurrencyAndBudgets:
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, image_tools):
+        """task-mcp-annotation-human-edit-guard: replacing an existing image
+        another (browser) client holds a live edit lease on is refused."""
+        tools_map, manager = image_tools
+        session = manager.create_session()
+        tools_map["create_image_annotation"](
+            session_id=session.id,
+            x=0,
+            y=0,
+            image_data=_png_data_url(),
+            annotation_id="img-1",
+        )
+        manager.leases.acquire(session.id, "browser-1", ["img-1"])
+
+        result = tools_map["create_image_annotation"](
+            session_id=session.id,
+            x=9,
+            y=9,
+            image_data=_png_data_url(),
+            annotation_id="img-1",
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "img-1"
+        assert result["held_by"] == "browser-1"
+        assert session.state["annotations"][0]["geometry"]["x"] == 0
+
     def test_busy_when_lock_held(self, image_tools):
         tools_map, manager = image_tools
         session = manager.create_session()

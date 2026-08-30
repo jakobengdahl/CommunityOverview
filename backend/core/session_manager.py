@@ -213,24 +213,46 @@ class LeaseConflict(Exception):
     ``dec-mcp-agent-ops-vs-annotation-claimmap``,
     ``task-annotation-exclusive-edit-leases``).
 
-    Raised from the two ``SessionManager`` paths that check live leases: the
+    Raised from the ``SessionManager`` paths that check live leases: the
     ``apply_ops`` batch (the REST ``/ops`` endpoint — this also covers a
     denied ``edit_lease_acquired`` attempt targeting an id another client
     already holds, reported in that op's own ``denied`` result rather than by
-    raising, since an acquire denial must not abort the rest of the batch)
-    and ``undo_last_action`` (``/undo``), which replays a stored inverse op
-    and is reachable from the browser only — no MCP tool calls it. A third
-    browser write path is gated too without raising this class: the
-    image-ingest endpoint (``POST /sessions/{id}/annotations/image``)
-    replaces an annotation directly rather than through ``apply_ops``, so it
-    checks the same lease snapshot itself and only borrows this class to
-    format its 409 detail. The synchronous MCP write path
-    (``upsert_annotation``/``update_annotation``/``delete_annotation``/
-    ``apply_layout``/``add_node_refs``, all keyed to the shared ``mcp-agent``
-    client id — see ``mcp_tools.py``) never calls ``apply_ops`` and does not
-    acquire or check leases in v1 — see ``dec-mcp-agent-ops-vs-annotation-
-    claimmap``; covering it is ``task-mcp-annotation-human-edit-guard``'s
-    separate, deliberately-sequenced-after scope, not this class's.
+    raising, since an acquire denial must not abort the rest of the batch),
+    ``undo_last_action`` (``/undo``), which replays a stored inverse op and
+    is reachable from the browser only — no MCP tool calls it — and, since
+    ``task-mcp-annotation-human-edit-guard``, every synchronous MCP write
+    method that can mutate an existing annotation: ``upsert_annotation``,
+    ``upsert_image_annotation``, ``update_annotation``, ``delete_annotation``
+    and ``set_group_members`` (all keyed to the shared ``mcp-agent`` client
+    id — see ``mcp_tools.py``). Each of those five checks
+    ``self.leases.snapshot(session_id)`` against ``_claimed_annotation_target``
+    of the op it is about to hand to ``_apply_op_sync`` — the same pattern
+    ``undo_last_action`` uses — immediately before that call and after every
+    other precondition (revision check, existence check, budget check), so a
+    conflict is raised before anything is mutated and closes the same
+    preflight-vs-mutation race the image-ingest endpoint's own pre-check
+    (below) does not fully close on its own. None of the five ever calls
+    ``self.leases.acquire`` — an MCP write only ever checks against a lease,
+    it never takes, renews or releases one; agents do not hold edit leases in
+    v1 (``dec-mcp-agent-ops-vs-annotation-claimmap``). This is a
+    collaboration-courtesy refusal, not an authorization or identity
+    mechanism: ``client_id`` is caller-supplied and unauthenticated, so
+    ``held_by`` names who currently holds the lease, not a verified identity.
+    A fourth, purely-browser write path is gated too without raising this
+    class as its check's own outcome: the image-ingest endpoint
+    (``POST /sessions/{id}/annotations/image``) replaces an annotation
+    directly rather than through ``apply_ops``, so it checks the same lease
+    snapshot itself *before* the (awaited) fetch/optimize step as a
+    fail-fast UX nicety and only borrows this class to format that 409's
+    detail — the authoritative check is the one inside
+    ``upsert_image_annotation`` itself, below, which both the REST endpoint
+    and the MCP ``create_image_annotation`` tool ultimately call.
+    ``apply_layout``, ``add_node_refs``, ``rename_session_sync`` and
+    ``delete_session_sync`` stay unguarded: none of their ops
+    (``layout_applied``/``nodes_added``/``session_renamed``, or no op at all)
+    can mutate an annotation, so ``_claimed_annotation_target`` always
+    reports no target for them — out of scope by construction, not merely
+    unaddressed.
     """
 
     def __init__(self, annotation_id: str, held_by: str) -> None:
@@ -300,13 +322,16 @@ def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional
     """Return the id of the *existing* annotation ``op`` would mutate, if any.
 
     Used to check an op against the live edit-lease snapshot before applying
-    it — a batch op in ``apply_ops``, or the stored inverse op
-    ``undo_last_action`` is about to replay. Only
-    ``annotation_updated``/``annotation_deleted`` always target an existing
-    annotation; ``annotation_created`` targets one only when its id already
-    exists in the session (the upsert-as-replace case) — a genuinely new id
-    has no prior lease to protect. Every other state op type (node/edge/
-    layout/rename ops) is out of scope for this check — see
+    it — a batch op in ``apply_ops``, the stored inverse op
+    ``undo_last_action`` is about to replay, or the op one of the synchronous
+    MCP write methods (``upsert_annotation``/``upsert_image_annotation``/
+    ``update_annotation``/``delete_annotation``/``set_group_members``) is
+    about to hand to ``_apply_op_sync``. Only ``annotation_updated``/
+    ``annotation_deleted``/``group_membership_changed`` always target an
+    existing annotation; ``annotation_created`` targets one only when its id
+    already exists in the session (the upsert-as-replace case) — a genuinely
+    new id has no prior lease to protect. Every other state op type (node/
+    edge/layout/rename ops) is out of scope for this check — see
     ``LeaseConflict``'s docstring for why annotations only, for now.
     """
     op_type = op.get("op")
@@ -318,6 +343,12 @@ def _claimed_annotation_target(op: Dict[str, Any], session: Session) -> Optional
     elif op_type == "annotation_created":
         annotation = op.get("annotation")
         ann_id = annotation.get("id") if isinstance(annotation, dict) else None
+    elif op_type == "group_membership_changed":
+        # The group annotation itself is the thing being mutated (its
+        # `member_node_ids`), not the member nodes it references — a live
+        # lease on the group protects this the same way one on a note
+        # protects `annotation_updated` against it.
+        ann_id = op.get("group_id")
     else:
         return None
     if not isinstance(ann_id, str):
@@ -1178,6 +1209,12 @@ class SessionManager:
         lock (an ``apply_ops`` batch mid-flight) means ``LayoutBusy`` rather than a
         seq assigned out of broadcast order.
 
+        When ``annotation["id"]`` matches an existing annotation (the
+        upsert-as-replace case), a live human edit lease on that id blocks
+        this write with ``LeaseConflict`` — see ``_reject_if_leased`` and
+        ``LeaseConflict``'s docstring. A genuinely new id has no prior lease
+        to protect.
+
         ``annotation_created`` is already an upsert in ``SessionStore`` when
         ``annotation["id"]`` matches one already in the session (idempotent
         client retries), so create and upsert share this one op and this one
@@ -1245,6 +1282,7 @@ class SessionManager:
             "annotation": annotation,
             "client_id": client_id,
         }
+        self._reject_if_leased(session, session_id, client_id, op)
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationRecentlyDeleted(annotation.get("id"))
@@ -1262,14 +1300,35 @@ class SessionManager:
         *,
         optimized_image_bytes: int,
         rate_limit_key: Optional[str] = None,
+        lease_client_id: Optional[str] = None,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         expected_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one `image` annotation (MCP write path).
 
-        Shares ``upsert_annotation``'s shape and atomicity contract, but a
-        single optimized image (up to a few MB by default — see
+        Shares ``upsert_annotation``'s shape, atomicity contract and lease
+        check: a replace-by-id targeting an annotation another client
+        currently holds a live edit lease on raises ``LeaseConflict`` — see
+        ``_reject_if_leased``. This is the *authoritative* lease check for
+        both this method's callers (the REST image-ingest endpoint and the
+        MCP ``create_image_annotation`` tool); the REST endpoint's own
+        earlier pre-check exists only to fail fast before the (awaited)
+        fetch/optimize step and does not substitute for the check here.
+
+        ``lease_client_id`` separates *whose lease this checks against* from
+        *who the op is attributed to* (``client_id``) — the same split
+        ``rate_limit_key`` already makes for throttling, and for the same
+        underlying reason: the REST image-ingest endpoint always attributes
+        the op to the shared ``_HUMAN_IMAGE_INGEST_CLIENT_ID`` marker (so the
+        posting browser's own SSE subscription does not drop it as a
+        self-echo — see that constant's docstring), but the *lease* check
+        must use the posting browser's real ``client_id`` or that browser
+        would be unable to replace an image it holds its own lease on. When
+        omitted (the MCP path, where attribution and identity are the same
+        fixed marker) the lease check falls back to ``client_id``.
+
+        A single optimized image (up to a few MB by default — see
         ``image_ingest.py``) is already far bigger than
         ``_max_op_batch_bytes`` (256KB, sized for reference-only ops — see
         its definition above), so this method does not apply that cap at
@@ -1351,6 +1410,19 @@ class SessionManager:
             "annotation": annotation,
             "client_id": client_id,
         }
+        # Checked here, not by the caller (rest_api.py's own pre-check runs
+        # earlier, before the awaited fetch/optimize step, purely as a
+        # fail-fast UX nicety) — this is the authoritative check, taken fresh
+        # and immediately before the mutation, so a lease acquired during
+        # that earlier await cannot slip through. See _reject_if_leased and
+        # lease_client_id's docstring for why the identity checked here can
+        # differ from client_id (the op's broadcast attribution).
+        self._reject_if_leased(
+            session,
+            session_id,
+            lease_client_id if lease_client_id is not None else client_id,
+            op,
+        )
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationRecentlyDeleted(annotation.get("id"))
@@ -1377,6 +1449,9 @@ class SessionManager:
         still carry forward any nested field (e.g. ``geometry``) it does not
         want overwritten with a partial value. Shares ``apply_layout``'s
         atomicity contract; see its docstring for the ``LayoutBusy`` rationale.
+        A live human edit lease on ``patch["id"]`` blocks this write with
+        ``LeaseConflict``, checked immediately before the mutation — see
+        ``_reject_if_leased``.
 
         ``base_version`` is the field-level counterpart of ``expected_revision``
         (dec-annotation-field-patches-and-conflicts): where ``expected_revision``
@@ -1418,6 +1493,7 @@ class SessionManager:
         }
         if base_version is not None:
             op["base_version"] = base_version
+        self._reject_if_leased(session, session_id, client_id, op)
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationNotFound(patch["id"])
@@ -1441,7 +1517,10 @@ class SessionManager:
         unconditionally, present or not), this checks existence first so a
         delete of an id that is not there is reported to the caller rather than
         silently advancing the revision. Shares ``apply_layout``'s atomicity
-        contract; see its docstring for the ``LayoutBusy`` rationale.
+        contract; see its docstring for the ``LayoutBusy`` rationale. A live
+        human edit lease on ``annotation_id`` blocks this write with
+        ``LeaseConflict``, checked immediately before the mutation — see
+        ``_reject_if_leased``.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
@@ -1477,6 +1556,7 @@ class SessionManager:
             "annotation_id": annotation_id,
             "client_id": client_id,
         }
+        self._reject_if_leased(session, session_id, client_id, op)
         applied = self._apply_op_sync(session, session_id, client_id, op)
         return {"applied": applied, "revision": session.seq}
 
@@ -1499,7 +1579,11 @@ class SessionManager:
         pre-check that itself, matching how ``update_annotation``/
         ``delete_annotation`` above let the store be the single place that
         judges existence. Shares ``apply_layout``'s atomicity contract; see
-        its docstring for the ``LayoutBusy`` rationale.
+        its docstring for the ``LayoutBusy`` rationale. A live human edit
+        lease on ``group_id`` blocks this write with ``LeaseConflict``,
+        checked immediately before the mutation (and, since a missing
+        ``group_id`` has no lease to protect, only after existence is
+        implicitly established) — see ``_reject_if_leased``.
 
         Unlike the annotation write methods above, ``group_membership_changed``
         is deliberately outside ``session_activity.UNDOABLE_OPS`` (see that
@@ -1536,6 +1620,7 @@ class SessionManager:
             "member_node_ids": member_node_ids,
             "client_id": client_id,
         }
+        self._reject_if_leased(session, session_id, client_id, op)
         applied = self._apply_op_sync(session, session_id, client_id, op)
         group = next(
             (
@@ -1672,6 +1757,34 @@ class SessionManager:
             "applied": applied,
             "revision": session.seq,
         }
+
+    def _reject_if_leased(
+        self, session: Session, session_id: str, client_id: str, op: Dict[str, Any]
+    ) -> None:
+        """Raise ``LeaseConflict`` if ``op`` would mutate an annotation a
+        *different* client currently holds a live edit lease on.
+
+        Shared by every synchronous MCP write method that can mutate an
+        existing annotation (``upsert_annotation``/``upsert_image_annotation``/
+        ``update_annotation``/``delete_annotation``/``set_group_members``) —
+        each calls this immediately before its own ``_apply_op_sync``, after
+        every other precondition (revision/existence/budget checks), so a
+        conflict is raised before anything is mutated. Reads
+        ``self.leases.snapshot`` fresh at call time rather than an
+        earlier-cached view, and this method's caller never awaits between
+        that read and the ``_apply_op_sync`` call that follows it — on the
+        single-threaded event loop, no other coroutine can interleave a
+        lease acquisition into that gap, closing the same race a
+        preflight-only check (e.g. one run before an ``await``ed fetch) would
+        leave open. Mirrors the check ``undo_last_action`` and ``apply_ops``
+        already do — see ``LeaseConflict``'s docstring for the full picture,
+        including why an MCP caller never *acquires* a lease here.
+        """
+        conflict_id = _claimed_annotation_target(op, session)
+        if conflict_id is not None:
+            holder = self.leases.snapshot(session_id).get(conflict_id)
+            if holder is not None and holder != client_id:
+                raise LeaseConflict(conflict_id, holder)
 
     def _apply_op_sync(
         self,

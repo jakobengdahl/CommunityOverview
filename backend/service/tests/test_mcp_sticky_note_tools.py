@@ -190,6 +190,27 @@ class TestCreateStickyNote:
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, note_tools):
+        """task-mcp-annotation-human-edit-guard: create-by-id targeting a note
+        another (browser) client holds a live edit lease on is refused."""
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="v1", annotation_id="note-1"
+        )
+        manager.leases.acquire(session.id, "browser-1", ["note-1"])
+
+        result = tools_map["create_sticky_note"](
+            session_id=session.id, x=9, y=9, text="hijacked", annotation_id="note-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "note-1"
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_sticky_notes"](session_id=session.id)["notes"][0]
+        assert after["text"] == "v1"
+
     def test_busy_when_lock_held(self, note_tools):
         tools_map, manager = note_tools
         session = manager.create_session()
@@ -417,6 +438,26 @@ class TestUpdateStickyNote:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_mutate(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="v1"
+        )
+        note_id = created["note"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [note_id])
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, text="hijacked"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == note_id
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_sticky_notes"](session_id=session.id)["notes"][0]
+        assert after["text"] == "v1"
+
     def test_invalid_session_id(self, note_tools):
         tools_map, _ = note_tools
         result = tools_map["update_sticky_note"](
@@ -615,6 +656,23 @@ class TestDeleteStickyNote:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
         # The rejected delete left the note in place.
+        assert len(session.state["annotations"]) == 1
+
+    def test_lease_conflict_is_reported_and_does_not_delete(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [note_id])
+
+        result = tools_map["delete_sticky_note"](
+            session_id=session.id, annotation_id=note_id
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == note_id
+        assert result["held_by"] == "browser-1"
         assert len(session.state["annotations"]) == 1
 
     def test_invalid_session_id(self, note_tools):
