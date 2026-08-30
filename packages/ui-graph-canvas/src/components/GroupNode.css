@@ -108,6 +108,37 @@
   border-color: white;
 }
 
+/* Group backgrounds relative to each other only
+   (dec-annotation-group-background-layering). Mirrors
+   .graph-annotation-context-menu .context-menu-layer/.layer-button
+   (NoteNode.css) — the generic bring-to-front/send-to-back row every other
+   annotation menu shares — but this menu has its own class prefix, so the
+   rule cannot simply be shared, the same reason .context-menu-unlock above
+   is redefined here rather than reused. */
+.graph-group-context-menu .context-menu-layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-group-context-menu .layer-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .layer-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
 .graph-group-context-menu .context-menu-delete {
   width: 100%;
   background: transparent;

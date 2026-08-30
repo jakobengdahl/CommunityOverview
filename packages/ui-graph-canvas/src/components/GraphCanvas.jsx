@@ -110,6 +110,21 @@ import './GraphCanvas.css';
  * ReactFlow requires this ordering for parent-child relationships to work.
  * Groups are placed first so they render behind regular nodes in the DOM,
  * allowing clicks to reach the custom nodes on top.
+ *
+ * Within that groups-first bucket, groups are further ordered against EACH
+ * OTHER by their own `data.z` (ascending — a lower z paints earlier, i.e.
+ * further back among group backgrounds), never against any other bucket:
+ * every group still precedes every non-group node regardless of z, so this
+ * sort can only change which group backdrop sits closest to the front of
+ * the group layer, not whether a group sits behind regular content
+ * (dec-annotation-group-background-layering; see utils/groupLayers.js for
+ * the arithmetic behind the layer-row click that writes this z, and its own
+ * docstring for why a group's z is a separate space from an overlay's
+ * CSS-facing `zIndex`). The sort is stable on ties via the explicit index
+ * tie-break below (not relying on Array.prototype.sort's own stability),
+ * so the overwhelmingly common case — every group still at the shared
+ * default z of 0, nobody having used the new control — keeps exactly the
+ * relative order this function already produced before this sort existed.
  */
 export function reorderNodesForParentChild(nodes) {
   const groups = [];
@@ -126,7 +141,12 @@ export function reorderNodesForParentChild(nodes) {
     }
   }
 
-  return [...groups, ...nonGroupWithoutParent, ...withParent];
+  const orderedGroups = groups
+    .map((n, index) => ({ n, index, z: Number.isFinite(n.data?.z) ? n.data.z : 0 }))
+    .sort((a, b) => a.z - b.z || a.index - b.index)
+    .map(({ n }) => n);
+
+  return [...orderedGroups, ...nonGroupWithoutParent, ...withParent];
 }
 
 /**
@@ -416,6 +436,13 @@ function GraphCanvasInner({
     annotationLayer: 'Layer',
     annotationLayerFront: 'Bring to front',
     annotationLayerBack: 'Send to back',
+    // Group backgrounds relative to each other only
+    // (dec-annotation-group-background-layering) — a separate control from
+    // the annotationLayer* row above, not a relabelling of it. See
+    // GroupNode.jsx and utils/groupLayers.js.
+    groupLayer: 'Group order',
+    groupLayerFront: 'Bring forward',
+    groupLayerBack: 'Send backward',
     annotationNearbyMenu: 'Add nearby',
     annotationNearbyLabel: 'Label',
     annotationNearbyIcon: 'Icon',
@@ -776,6 +803,9 @@ function GraphCanvasInner({
         layer: cml.annotationLayer,
         layerFront: cml.annotationLayerFront,
         layerBack: cml.annotationLayerBack,
+        groupLayer: cml.groupLayer,
+        groupLayerFront: cml.groupLayerFront,
+        groupLayerBack: cml.groupLayerBack,
         brokenAnnotation: cml.annotationBroken,
         nearbyMenu: cml.annotationNearbyMenu,
         nearbyLabel: cml.annotationNearbyLabel,
@@ -826,6 +856,9 @@ function GraphCanvasInner({
       cml.annotationLayer,
       cml.annotationLayerFront,
       cml.annotationLayerBack,
+      cml.groupLayer,
+      cml.groupLayerFront,
+      cml.groupLayerBack,
       cml.annotationBroken,
       cml.annotationNearbyMenu,
       cml.annotationNearbyLabel,

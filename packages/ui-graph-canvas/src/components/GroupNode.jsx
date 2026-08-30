@@ -4,6 +4,8 @@ import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { isRemoteLocked, remoteEditBadge } from '../utils/annotations';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { GROUP_LAYER_FRONT, GROUP_LAYER_BACK, resolveGroupOrderZ } from '../utils/groupLayers';
+import { reorderNodesForParentChild } from './GraphCanvas';
 import './GroupNode.css';
 
 /**
@@ -22,7 +24,7 @@ function GroupNode({ id, data, selected }) {
   const inputRef = useRef(null);
   const groupRef = useRef(null);
   const contextMenuRef = useRef(null);
-  const { setNodes } = useReactFlow();
+  const { setNodes, getNodes } = useReactFlow();
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
@@ -237,6 +239,51 @@ function GroupNode({ id, data, selected }) {
     notifyChange('style');
   };
 
+  // Reorders this group among OTHER group backgrounds only — group-vs-group
+  // is the only thing dec-annotation-group-background-layering leaves
+  // editable; a group background's position behind every graph node and
+  // every other annotation kind is structural (reorderNodesForParentChild's
+  // own bucketing plus GroupNode.css's `.react-flow__node-group` z-index
+  // pin — see utils/groupLayers.js's module docstring) and nothing this
+  // handler does can move it out of that bucket. Never touches membership,
+  // member position or member z — only this group node's own `data.z`.
+  // Mirrors AnnotationLayerControls' useAnnotationLayer guard order exactly:
+  // a live remote edit lease refuses and surfaces the attempt; the
+  // persisted lock refuses silently (the menu already withholds this
+  // section on a locked group below — this is the hook-level backstop the
+  // same way useAnnotationLayer's own comment describes for the generic
+  // row, so no future call site can reintroduce the hole by rendering the
+  // buttons without their own locked branch).
+  const handleChangeGroupLayer = (direction) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    if (locked) return;
+    const z = resolveGroupOrderZ(getNodes(), id, direction);
+    if (z === null) {
+      // Already alone at that end among groups (or the only group on the
+      // canvas) — a no-op, not an error, matching resolveLayerZ's own
+      // no-op contract.
+      setContextMenu(null);
+      return;
+    }
+    setNodes((nds) =>
+      reorderNodesForParentChild(
+        nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, z } } : n))
+      )
+    );
+    setContextMenu(null);
+    notifyChange('style');
+    if (beginEditing) {
+      beginEditing([id]).then(({ denied } = {}) => {
+        if (denied?.[id]) notifyRemoteLockedAttempt();
+        endEditing?.([id]);
+      });
+    }
+  };
+
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
   const groupBadge = remoteEditBadge(data);
 
@@ -313,11 +360,12 @@ function GroupNode({ id, data, selected }) {
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The unlocked menu has exactly two other
-              // actions — recolour, which is an edit, and Delete Group, which
-              // destroys the box — so there is nothing a lock could allow
-              // through. Anything added to the unlocked menu later has to be
-              // decided against this branch as well, not just dropped in.
+              // every other kind. The unlocked menu has exactly three other
+              // actions — recolour and the group-order row, both edits, and
+              // Delete Group, which destroys the box — so there is nothing a
+              // lock could allow through. Anything added to the unlocked
+              // menu later has to be decided against this branch as well,
+              // not just dropped in.
               <button type="button" className="context-menu-unlock" onClick={unlock}>
                 🔓 {labels.unlock}
               </button>
@@ -333,6 +381,34 @@ function GroupNode({ id, data, selected }) {
                       onClick={() => handleChangeColor(c)}
                     />
                   ))}
+                </div>
+                {/* Group backgrounds relative to each other only — see
+                    handleChangeGroupLayer above. Always rendered, like the
+                    generic AnnotationLayerControls row: a click is a silent
+                    no-op when there is nothing to order this group against
+                    (the only group on the canvas, or already at that end),
+                    rather than the control disappearing depending on how
+                    many other groups happen to exist. */}
+                <div className="context-menu-title">{labels.groupLayer}</div>
+                <div className="context-menu-layer">
+                  <button
+                    type="button"
+                    className="layer-button"
+                    aria-label={labels.groupLayerBack}
+                    title={labels.groupLayerBack}
+                    onClick={() => handleChangeGroupLayer(GROUP_LAYER_BACK)}
+                  >
+                    ⤓
+                  </button>
+                  <button
+                    type="button"
+                    className="layer-button"
+                    aria-label={labels.groupLayerFront}
+                    title={labels.groupLayerFront}
+                    onClick={() => handleChangeGroupLayer(GROUP_LAYER_FRONT)}
+                  >
+                    ⤒
+                  </button>
                 </div>
                 <button className="context-menu-delete" onClick={handleDeleteGroup}>
                   🗑️ Delete Group
