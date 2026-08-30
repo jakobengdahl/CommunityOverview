@@ -944,14 +944,21 @@ On a phone-sized screen (roughly 768 px wide and below) the canvas swaps its
 desktop chrome — the header, search bar, toolbar, chat panel and session
 menu — for a layout that fits a thumb.
 
-**Navigation.** A compact top bar replaces the desktop header, and a five-slot
+**Navigation.** A compact top bar replaces the desktop header, and a six-slot
 bottom navigation bar replaces the toolbar and the hamburger menu:
 
 | Slot | Effect |
 |------|--------|
 | **Graph** | Closes any open panel and returns to the full-screen canvas |
 | **Search** | Opens the graph search in a sheet that slides up from the bottom |
-| **Create** | Opens the node-type picker in the same bottom sheet |
+| **Create** | Opens the node-type picker in the same bottom sheet, for adding a
+graph node (an Actor, Initiative, and so on) |
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
+shapes, icons, vote dots, images and freehand drawing — in its own bottom
+sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
+mark on the canvas, not a graph node, and the two creation flows stay visually
+and behaviorally distinct even though both live behind the same style of
+sheet |
 | **Chat** | Opens the AI assistant (only shown when it is available) |
 | **Menu** | Opens the session menu — the same panel described in
 [section 5](#5-session-menu-and-settings), as a full-width overlay with a
@@ -959,7 +966,10 @@ dimmed scrim behind it on a phone, rather than the narrower panel desktop
 uses. Tap the scrim, tap the **✕**, or press **Escape** to close it. |
 
 Only one of these is ever open at a time — opening one closes whatever else was
-open, so the canvas is never covered by more than one panel at once.
+open, so the canvas is never covered by more than one panel at once. On a phone
+the annotation toolbox is *only* reachable through the **Annotate** slot; unlike
+on desktop, it does not also float over the canvas as a small always-visible
+strip, so it never competes with the bottom navigation for space.
 
 **Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
 the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,
@@ -1037,7 +1047,8 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
 | `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
-| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
+| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the six-slot bottom navigation |
 | `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
+| `mobile-annotate-sheet.png` | pending | Phone viewport with the Annotate bottom sheet open, showing the expanded annotation toolbox grid |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |

@@ -119,6 +119,18 @@ MCP. The required entry points are:
   icon, text/heading, arrow) pre-wired to attach to that object.
 - **Mobile bottom sheet** — the touch equivalent of the toolbox: a sheet
   that slides up from the bottom, same type grouping, sized for thumb reach.
+  Reached from its own **Annotate** slot in the phone bottom navigation
+  (`frontend/web/src/components/MobileShell.jsx`), participating in the
+  app's shared "at most one mobile bottom surface open at a time" system
+  (`useSurfaceManager`) alongside Search/Create/Chat/Menu — not a
+  second, uncoordinated floating strip on top of that navigation. It hosts
+  the exact same `AnnotationToolbox` component and creation handlers as the
+  desktop toolbox (`GraphCanvas`'s `annotationToolboxPortalContainer` prop
+  portals it into the sheet's content, the cross-package equivalent of
+  `FloatingToolbar`'s own `variant="sheet"` for graph-node creation), laid
+  out with `variant="sheet"` — always expanded, no collapse toggle, larger
+  grid cells — rather than the narrower always-visible compact strip
+  `compact` alone produces on a non-integrated host.
 
 ### Desktop wireframe
 
