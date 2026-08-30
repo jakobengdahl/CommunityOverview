@@ -290,14 +290,24 @@ describe('GroupNode locked context menu', () => {
     expect(screen.getByRole('button', { name: /bring forward/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send backward/i })).toBeInTheDocument();
     const titles = [...document.querySelectorAll('.context-menu-title')].map((n) => n.textContent);
-    expect(titles).toEqual(['Group Color', 'Group order']);
+    // The third, empty title is AnnotationSizeControl's own
+    // `<div className="context-menu-title">{labels.width}</div>` — this
+    // suite's LABELS constant does not define `width`, so it renders empty
+    // rather than absent; still a real title slot, just an untranslated one
+    // in this test's fixture.
+    expect(titles).toEqual(['Group Color', 'Group order', '']);
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
     const menu = document.querySelector('.graph-group-context-menu');
     // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
     // working control that a role query reports as absent. Text sees it.
     expect(menu.textContent).not.toMatch(/hid(e|den|ing)/i);
-    // Six swatches, two group-order buttons and Delete Group, and no tenth.
-    expect(menu.querySelectorAll('button')).toHaveLength(9);
+    // Six swatches, two group-order buttons, the non-drag size control's
+    // Apply button (task-annotation-accessible-shared-controls'
+    // AnnotationSizeControl — its two <input type="number"> elements are not
+    // <button>s, so only this one adds to the count) and Delete Group — ten
+    // total, consciously updated from the pre-existing nine per this test's
+    // own comment above.
+    expect(menu.querySelectorAll('button')).toHaveLength(10);
   });
 
   it('unlocks the group and publishes the change', () => {

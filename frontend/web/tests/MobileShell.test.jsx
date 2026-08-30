@@ -262,6 +262,93 @@ describe('MobileShell', () => {
     });
   });
 
+  // task-annotation-responsive-bottom-toolbox: the Edit surface's own
+  // `useSurfaceManager` surface (`'detail'`). Unlike Search/Create/Annotate
+  // it has no bottom-nav slot — it opens only when something outside this
+  // component (a node's Edit button, deep inside GraphCanvas) calls the
+  // opener this component hands up via `onDetailSheetControllerReady`.
+  describe('Edit sheet (detail surface)', () => {
+    it('hands up a stable {open, close} controller on mount, before anything opens it', () => {
+      const onDetailSheetControllerReady = vi.fn();
+      render(<MobileShell {...baseProps({ onDetailSheetControllerReady })} />);
+      expect(onDetailSheetControllerReady).toHaveBeenCalledTimes(1);
+      const controller = onDetailSheetControllerReady.mock.calls[0][0];
+      expect(typeof controller.open).toBe('function');
+      expect(typeof controller.close).toBe('function');
+    });
+
+    it('opening it via the controller mounts a titled sheet with an empty portal container', () => {
+      const onDetailSheetControllerReady = vi.fn();
+      const onAnnotationEditSheetContainerChange = vi.fn();
+      render(
+        <MobileShell
+          {...baseProps({ onDetailSheetControllerReady, onAnnotationEditSheetContainerChange })}
+        />
+      );
+      const { open } = onDetailSheetControllerReady.mock.calls[0][0];
+      act(() => open());
+
+      expect(
+        screen.getByRole('dialog', { name: 'mobile_nav.edit_panel_title' })
+      ).toBeInTheDocument();
+      const container = screen.getByTestId('mobile-annotation-edit-sheet-container');
+      expect(container).toBeInTheDocument();
+      expect(container.children.length).toBe(0);
+      expect(onAnnotationEditSheetContainerChange.mock.calls.at(-1)[0]).toBe(container);
+    });
+
+    it('closing it via the controller releases the container (calls back with null)', () => {
+      const onDetailSheetControllerReady = vi.fn();
+      const onAnnotationEditSheetContainerChange = vi.fn();
+      render(
+        <MobileShell
+          {...baseProps({ onDetailSheetControllerReady, onAnnotationEditSheetContainerChange })}
+        />
+      );
+      const { open, close } = onDetailSheetControllerReady.mock.calls[0][0];
+      act(() => open());
+      onAnnotationEditSheetContainerChange.mockClear();
+      act(() => close());
+
+      expect(
+        screen.queryByTestId('mobile-annotation-edit-sheet-container')
+      ).not.toBeInTheDocument();
+      expect(onAnnotationEditSheetContainerChange).toHaveBeenCalledWith(null);
+    });
+
+    it('is mutually exclusive with Annotate in both directions', () => {
+      const onDetailSheetControllerReady = vi.fn();
+      render(<MobileShell {...baseProps({ onDetailSheetControllerReady })} />);
+      const { open } = onDetailSheetControllerReady.mock.calls[0][0];
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.annotate'));
+      expect(screen.getByTestId('mobile-annotate-sheet-container')).toBeInTheDocument();
+
+      act(() => open());
+      expect(screen.queryByTestId('mobile-annotate-sheet-container')).not.toBeInTheDocument();
+      expect(screen.getByTestId('mobile-annotation-edit-sheet-container')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.annotate'));
+      expect(
+        screen.queryByTestId('mobile-annotation-edit-sheet-container')
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId('mobile-annotate-sheet-container')).toBeInTheDocument();
+    });
+
+    it('the Graph nav item closes it like every other surface', () => {
+      const onDetailSheetControllerReady = vi.fn();
+      render(<MobileShell {...baseProps({ onDetailSheetControllerReady })} />);
+      const { open } = onDetailSheetControllerReady.mock.calls[0][0];
+      act(() => open());
+      expect(screen.getByTestId('mobile-annotation-edit-sheet-container')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText('mobile_nav.graph'));
+      expect(
+        screen.queryByTestId('mobile-annotation-edit-sheet-container')
+      ).not.toBeInTheDocument();
+    });
+  });
+
   describe('Chat bottom sheet', () => {
     it('is not mounted when chat is closed, and hosts ChatPanel in sheet variant when opened', () => {
       render(<MobileShell {...baseProps()} />);

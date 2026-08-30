@@ -17,12 +17,16 @@ import {
   TEXT_ALIGN_DEFAULT_BY_KIND,
   TEXT_ALIGN_STYLES,
   isAnnotationDraggable,
+  ATTACHABLE_OVERLAY_KINDS,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
@@ -343,6 +347,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyRemoteLockedAttempt,
     labels,
     attachNearby,
+    enterAttachMode,
     beginEditing,
     endEditing,
   } = useContext(AnnotationContext);
@@ -376,6 +381,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
   useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
   // Snapshot of {x, y, width, height} at the start of the current resize
   // gesture, read by handleResizeEnd to map the gesture's net delta back
   // through this annotation's rotation (resolveRotatedResizeGeometry).
@@ -559,6 +569,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
 
   const changeRotation = (deg) => {
     if (remoteLocked) {
@@ -581,6 +592,21 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
     notifyChange('delete');
+  };
+
+  // Non-drag detach (task-annotation-accessible-shared-controls) — see
+  // LabelNode's identical helper for why this stays local rather than a
+  // shared AnnotationContext function.
+  const detach = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, attachment: undefined } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
   };
 
   // Locking withholds everything except the two actions the capability
@@ -685,11 +711,47 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     </div>
   );
 
+  // Opacity (task-annotation-responsive-bottom-toolbox) applies to every
+  // generic kind alike, unlike colour (COLORABLE_KINDS) or the shape/icon
+  // pickers — see `opacityStyle` below for where it lands per kind.
+  const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
+  const opacityStyle = { opacity };
+
+  // The contextual "Edit" surface's visible entry point
+  // (task-annotation-responsive-bottom-toolbox) — see NoteNode's equivalent
+  // comment. Gated on EDITABLE_KINDS like `openContextMenu` itself, so a kind
+  // with no property editor at all (there is none today, but this mirrors
+  // that guard rather than assuming every future kind has one) never shows a
+  // button that would open nothing.
+  const editTrigger = selected && EDITABLE_KINDS.has(kind) && (
+    <button
+      ref={editButtonRef}
+      type="button"
+      className="annotation-edit-trigger nodrag nopan"
+      aria-label={labels.editAnnotation}
+      aria-haspopup="true"
+      aria-expanded={Boolean(contextMenu)}
+      onClick={(e) => {
+        if (remoteLocked) {
+          notifyRemoteLockedAttempt();
+          return;
+        }
+        openEditMenu(e);
+      }}
+    >
+      ✏️
+    </button>
+  );
+
   const currentRotation = data?.rotation ?? 0;
   const menu = contextMenu && (
     <ContextMenuPortal
       menuRef={contextMenuRef}
       position={contextMenu}
+      sheet={Boolean(contextMenu.sheet)}
+      sheetContainer={sheetContainer}
+      id={id}
+      data={data}
       kind={kind}
       shape={data.shape || 'rectangle'}
       icon={data.icon}
@@ -702,6 +764,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       textAlign={textAlign}
       fontSize={textFontSize}
       font={data?.font}
+      opacity={opacity}
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
       onChangeColor={changeColor}
@@ -712,6 +775,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       onChangeTextAlign={changeTextAlign}
       onChangeFontSize={changeFontSize}
       onChangeFont={changeFont}
+      onChangeOpacity={changeOpacity}
       onDelete={remove}
       onUnlock={unlock}
       onDuplicate={duplicate}
@@ -721,6 +785,15 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       // comment in utils/annotations.js) now that the former `frame` kind is
       // folded into `shape` rather than excluded as its own special case.
       onAttachNearby={(nearbyKind) => attachNearby(id, nearbyKind)}
+      onEnterAttachMode={
+        enterAttachMode
+          ? () => {
+              enterAttachMode(id);
+              setContextMenu(null);
+            }
+          : undefined
+      }
+      onDetach={detach}
     />
   );
 
@@ -770,6 +843,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             justifyContent: textAlignStyle.justifyContent,
             alignItems: textAlignStyle.alignItems,
             ...rotation,
+            ...opacityStyle,
           }}
           onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
@@ -780,6 +854,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             <span style={{ textAlign: textAlignStyle.textAlign }}>{data.text || ''}</span>
           )}
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -841,6 +916,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
               width: '100%',
               height: '100%',
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
+              ...opacityStyle,
             }}
           />
           {/* Sits on the halo (unclipped) rather than inside the shape div
@@ -857,6 +933,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
                 ...shapeTextInsetStyle(shape),
                 justifyContent: textAlignStyle.justifyContent,
                 alignItems: textAlignStyle.alignItems,
+                ...opacityStyle,
               }}
             >
               {isEditingText ? (
@@ -876,6 +953,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             </div>
           )}
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -891,12 +969,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       <>
         <div
           className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
-          style={{ borderColor: color, ...rotation }}
+          style={{ borderColor: color, ...rotation, ...opacityStyle }}
           title={data.icon}
           onContextMenu={openContextMenu}
         >
           {icon.text}
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -911,9 +990,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       <>
         <div
           className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
-          style={{ backgroundColor: color, ...rotation }}
+          style={{ backgroundColor: color, ...rotation, ...opacityStyle }}
           onContextMenu={openContextMenu}
         />
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -932,11 +1012,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             {resizer}
             <div
               className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
+              style={opacityStyle}
               onContextMenu={openContextMenu}
             >
               {data.alt || ''}
             </div>
           </div>
+          {editTrigger}
           {menu}
           {remoteBadge}
         </>
@@ -953,10 +1035,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             className={`graph-generic-annotation-node kind-image${selectedClass}`}
             src={url}
             alt={data.alt || ''}
-            style={{ width: '100%', height: '100%' }}
+            style={{ width: '100%', height: '100%', ...opacityStyle }}
             onContextMenu={openContextMenu}
           />
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -988,6 +1071,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 function ContextMenuPortal({
   menuRef,
   position,
+  sheet = false,
+  sheetContainer = null,
+  id,
+  data,
   kind,
   shape,
   icon,
@@ -1000,6 +1087,7 @@ function ContextMenuPortal({
   textAlign,
   fontSize,
   font,
+  opacity,
   onChangeShape,
   onChangeIcon,
   onChangeColor,
@@ -1010,32 +1098,37 @@ function ContextMenuPortal({
   onChangeTextAlign,
   onChangeFontSize,
   onChangeFont,
+  onChangeOpacity,
   onDelete,
   onUnlock,
   onDuplicate,
   onAttachNearby,
+  onEnterAttachMode,
+  onDetach,
 }) {
+  // The contextual "Edit" surface's mobile-sheet path
+  // (task-annotation-responsive-bottom-toolbox): the container may not have
+  // mounted yet even though `sheet` is true (the host's next render supplies
+  // it — see useAnnotationEditTrigger's own doc comment), so there is
+  // nothing to portal into until then.
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(menuRef);
+  const portalTarget = sheet ? sheetContainer : document.body;
+  if (!portalTarget) return null;
+  const menuClassName = `graph-annotation-context-menu${sheet ? ' sheet' : ''}`;
+  const menuStyle = sheet ? undefined : { left: position.x, top: position.y };
   if (locked) {
     return createPortal(
-      <div
-        ref={menuRef}
-        className="graph-annotation-context-menu"
-        style={{ left: position.x, top: position.y }}
-      >
+      <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
         <button type="button" className="context-menu-unlock" onClick={onUnlock}>
           🔓 {labels.unlock}
         </button>
         <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       </div>,
-      document.body
+      portalTarget
     );
   }
   return createPortal(
-    <div
-      ref={menuRef}
-      className="graph-annotation-context-menu"
-      style={{ left: position.x, top: position.y }}
-    >
+    <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
       {COLORABLE_KINDS.has(kind) && (
         <>
           <div className="context-menu-title">{labels.color}</div>
@@ -1221,14 +1314,42 @@ function ContextMenuPortal({
           ⟳
         </button>
       </div>
+      <AnnotationOpacityControl
+        labels={labels}
+        opacity={opacity}
+        onChangeOpacity={onChangeOpacity}
+      />
+      {/* Non-drag alternative to the NodeResizer handles `shape`/`image`
+          render above — task-annotation-accessible-shared-controls.
+          `text`/`icon`/`vote_dot` have no explicit box (RESIZABLE_KINDS
+          excludes them; see this component's own doc comment), so nothing
+          renders for those kinds — matching what the drag handles already
+          do (or rather, do not) offer them. */}
+      {RESIZABLE_KINDS.has(kind) && <AnnotationSizeControl id={id} data={data} labels={labels} />}
       <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
       <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
+      {/* Non-drag "Attach to…" target-tap mode
+          (task-annotation-accessible-shared-controls) — offered only for the
+          kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
+          `label` gets the identical pair in its own component). Unlike the
+          "Add nearby" section above (creates a NEW pre-attached annotation),
+          this attaches THIS existing one. */}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
+        <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
+          🧷 {labels.attachTo}
+        </button>
+      )}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && data?.attachment && (
+        <button type="button" className="context-menu-attach" onClick={onDetach}>
+          {labels.detach}
+        </button>
+      )}
       <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}
       </button>
     </div>,
-    document.body
+    portalTarget
   );
 }
 

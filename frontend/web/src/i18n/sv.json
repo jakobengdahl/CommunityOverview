@@ -521,7 +521,28 @@
     "annotation_nearby_menu": "Lägg till i närheten",
     "annotation_nearby_label": "Etikett",
     "annotation_nearby_icon": "Ikon",
-    "annotation_nearby_text": "Text"
+    "annotation_nearby_text": "Text",
+    "annotation_opacity": "Opacitet",
+    "edit_annotation": "Redigera",
+    "aria_kind_note": "Klisterlapp",
+    "aria_kind_label": "Etikett",
+    "aria_kind_text": "Text",
+    "aria_kind_shape": "form",
+    "aria_kind_icon": "ikon",
+    "aria_kind_vote_dot": "Röstprick",
+    "aria_kind_image": "Bild",
+    "aria_kind_arrow": "Pil",
+    "aria_kind_freehand": "Frihandsstreck",
+    "aria_kind_group": "Grupp",
+    "annotation_width": "Bredd",
+    "annotation_height": "Höjd",
+    "annotation_apply_size": "Använd storlek",
+    "annotation_attach_to": "Fäst vid…",
+    "annotation_detach": "Lossa",
+    "annotation_attach_to_hint": "Välj ett mål att fästa vid — Escape för att avbryta",
+    "annotation_attach_to_cancel": "Avbryt fästning",
+    "annotation_multi_select_mode": "Markera flera",
+    "annotation_overlap_picker_title": "Flera objekt här — välj ett"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",
@@ -676,6 +697,7 @@
     "search_panel_title": "Sök",
     "create_panel_title": "Skapa",
     "annotate_panel_title": "Kommentera",
+    "edit_panel_title": "Redigera annotering",
     "chat_panel_title": "Assistent"
   }
 }

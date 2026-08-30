@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Diagram3Fill,
   Search,
@@ -53,6 +53,18 @@ import './MobileShell.css';
  *    never more than one bottom surface competing for space with the nav
  *    below - see GraphCanvas.jsx's isCompact branch for the desktop-vs-mobile
  *    split.
+ *  - Edit (task-annotation-responsive-bottom-toolbox) shares the same
+ *    BottomSheet instance too, via `useSurfaceManager`'s pre-existing
+ *    `'detail'` surface — unlike Search/Create/Annotate it has no bottom-nav
+ *    slot of its own: it opens only contextually, when a node component deep
+ *    inside GraphCanvas calls the opener this component hands up via
+ *    `onDetailSheetControllerReady` (a `{open, close}` pair; see that prop's
+ *    own comment for why a callback is needed here where the other sheet
+ *    surfaces don't need one — they're opened by this component's own nav
+ *    buttons, this one is opened from outside it). Its content container
+ *    is handed up the same way Annotate's is
+ *    (`onAnnotationEditSheetContainerChange`), portaled into by GraphCanvas's
+ *    own `annotationEditSheetPortalContainer` prop.
  *  - Menu reuses SessionDrawer exactly as DesktopShell does. Its own slide-in
  *    overlay is an established, independently-tested surface in its own
  *    right, so it is driven directly by the surface manager's "menu" state
@@ -102,6 +114,18 @@ function MobileShell({
   // mounted, and with null once it unmounts (the sheet closing, or switching
   // to a different surface). See the component doc comment above.
   onAnnotationSheetContainerChange,
+  // The Edit surface's own content container — same callback-ref shape and
+  // purpose as onAnnotationSheetContainerChange above, one slot down (the
+  // `'detail'` surface rather than `'annotate'`).
+  onAnnotationEditSheetContainerChange,
+  // Called (via a memoized `{open, close}` object, so it fires once per real
+  // change rather than every render) with the functions that open/close the
+  // `'detail'` surface — GraphCanvas needs a way to ask THIS component's own
+  // `useSurfaceManager` instance to open Edit from a node's button, and
+  // unlike Search/Create/Annotate/Menu (all opened by this component's own
+  // nav clicks) that request originates outside it, so it has to be handed
+  // up rather than only down. See the component doc comment above.
+  onDetailSheetControllerReady,
 }) {
   const { t } = useI18n();
   const { chatPanelOpen, setChatPanelOpen, setChatPanelOpenTransient } = useGraphStore();
@@ -110,7 +134,31 @@ function MobileShell({
   const [chatSnapPoint, setChatSnapPoint] = useState('half');
 
   const sheetOpen =
-    surface.isOpen('search') || surface.isOpen('create') || surface.isOpen('annotate');
+    surface.isOpen('search') ||
+    surface.isOpen('create') ||
+    surface.isOpen('annotate') ||
+    surface.isOpen('detail');
+
+  // Destructured once so the callbacks below depend on these two plain
+  // bindings — each individually stable, `useSurfaceManager` wraps them in
+  // their own `useCallback([])` — rather than on the whole `surface` object,
+  // which is a fresh literal every render. Depending on `surface` itself
+  // would recreate `openDetailSheet` every render, which would recreate the
+  // memoized controller below every render, which would re-fire the
+  // ready-effect and re-run App.jsx's setState every render: an infinite
+  // loop, not just a wasted render.
+  const { open: openSurface, close: closeSurface } = surface;
+  const openDetailSheet = useCallback(() => {
+    setChatPanelOpenTransient(false);
+    openSurface('detail');
+  }, [openSurface, setChatPanelOpenTransient]);
+  const detailSheetController = useMemo(
+    () => ({ open: openDetailSheet, close: closeSurface }),
+    [openDetailSheet, closeSurface]
+  );
+  useEffect(() => {
+    onDetailSheetControllerReady?.(detailSheetController);
+  }, [detailSheetController, onDetailSheetControllerReady]);
 
   // ChatPanel's own minimized bubble (its established touch target, reused
   // as-is per the "do not fork" rule) calls the store's toggleChatPanel
@@ -232,7 +280,9 @@ function MobileShell({
             ? t('mobile_nav.search_panel_title')
             : surface.isOpen('create')
               ? t('mobile_nav.create_panel_title')
-              : t('mobile_nav.annotate_panel_title')
+              : surface.isOpen('detail')
+                ? t('mobile_nav.edit_panel_title')
+                : t('mobile_nav.annotate_panel_title')
         }
       >
         {surface.isOpen('search') && <FloatingSearch variant="sheet" />}
@@ -273,6 +323,20 @@ function MobileShell({
             ref={onAnnotationSheetContainerChange}
             className="mobile-shell-annotate-sheet-container"
             data-testid="mobile-annotate-sheet-container"
+          />
+        )}
+        {/* The Edit surface's own portal target
+            (task-annotation-responsive-bottom-toolbox) — same "no component
+            to mount here directly" reasoning as Annotate above: the property
+            editor lives inside whichever annotation node currently has it
+            open (NoteNode/LabelNode/ArrowNode/GenericAnnotationNode/
+            FreehandAnnotationNode, deep inside GraphCanvas), so this is only
+            ever a portal target, never a host of its own content. */}
+        {surface.isOpen('detail') && (
+          <div
+            ref={onAnnotationEditSheetContainerChange}
+            className="mobile-shell-annotation-edit-sheet-container"
+            data-testid="mobile-annotation-edit-sheet-container"
           />
         )}
       </BottomSheet>

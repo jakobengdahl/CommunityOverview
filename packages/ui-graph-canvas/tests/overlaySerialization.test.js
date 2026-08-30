@@ -45,6 +45,53 @@ describe('overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half)
+  // was previously freehand-only; every kind now round-trips it the same way.
+  it('round-trips opacity on a note, label and arrow', () => {
+    const note = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.5,
+      size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(note).data.opacity).toBe(0.5);
+    expect(flowNodeToOverlay(overlayToFlowNode(note))).toEqual(note);
+
+    const label = {
+      id: 'label-1',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.75,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(label).data.opacity).toBe(0.75);
+    expect(flowNodeToOverlay(overlayToFlowNode(label))).toEqual(label);
+
+    const arrow = {
+      id: 'arrow-1',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      opacity: 0.3,
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(arrow).data.opacity).toBe(0.3);
+    expect(flowNodeToOverlay(overlayToFlowNode(arrow))).toEqual(arrow);
+  });
+
   // z (layer order), locked (the canvas UI's own edit-lock convention, set
   // via the generic MCP annotation tools) and rotation are envelope fields on
   // every v1 annotation type. A translator that dropped them would, on the
@@ -308,6 +355,25 @@ describe('generic annotation overlay serialization', () => {
   // end-to-end "does not crash" coverage of exactly that stored shape.
   it('no longer registers frame as an overlay type', () => {
     expect(OVERLAY_TYPES.has('frame')).toBe(false);
+  });
+
+  it('round-trips opacity on every generic kind (text/shape/icon/vote_dot/image)', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
+      const overlay = {
+        id: `${kind}-1`,
+        kind,
+        position: { x: 0, y: 0 },
+        color: '#fff',
+        opacity: 0.5,
+        z: 0,
+        locked: false,
+        rotation: 0,
+        size: { w: 0, h: 0 },
+      };
+      const node = overlayToFlowNode(overlay);
+      expect(node.data.opacity).toBe(0.5);
+      expect(flowNodeToOverlay(node).opacity).toBe(0.5);
+    }
   });
 
   it('round-trips a text overlay (colour/font size)', () => {

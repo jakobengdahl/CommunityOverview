@@ -3,9 +3,12 @@ import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
 import { isRemoteLocked, remoteEditBadge } from '../utils/annotations';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { GROUP_LAYER_FRONT, GROUP_LAYER_BACK, resolveGroupOrderZ } from '../utils/groupLayers';
 import { reorderNodesForParentChild } from './GraphCanvas';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GroupNode.css';
 
 /**
@@ -39,6 +42,16 @@ function GroupNode({ id, data, selected }) {
   const locked = Boolean(data?.locked);
   useAnnotationEditLease(id, isEditing);
   useAnnotationEditLease(id, Boolean(contextMenu));
+  // task-annotation-accessible-shared-controls: `group` was the one kind the
+  // Edit-button/mobile-sheet work (task-annotation-responsive-bottom-toolbox)
+  // named as out of its scope — see docs/ANNOTATION_CONTRACT.md's audit —
+  // wired here the same way the other five kinds already are.
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -350,22 +363,46 @@ function GroupNode({ id, data, selected }) {
         </div>
         {data.description && <div className="graph-group-description">{data.description}</div>}
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected — the keyboard/tap-reachable entry point this
+          kind was missing (task-annotation-accessible-shared-controls). */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-group-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-group-context-menu graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The unlocked menu has exactly three other
-              // actions — recolour and the group-order row, both edits, and
-              // Delete Group, which destroys the box — so there is nothing a
-              // lock could allow through. Anything added to the unlocked
-              // menu later has to be decided against this branch as well,
-              // not just dropped in.
+              // every other kind. The unlocked menu has exactly four other
+              // actions — recolour, the group-order row, the non-drag size
+              // control, all edits, and Delete Group, which destroys the
+              // box — so there is nothing a lock could allow through.
+              // Anything added to the unlocked menu later has to be decided
+              // against this branch as well, not just dropped in.
               <button type="button" className="context-menu-unlock" onClick={unlock}>
                 🔓 {labels.unlock}
               </button>
@@ -410,13 +447,16 @@ function GroupNode({ id, data, selected }) {
                     ⤒
                   </button>
                 </div>
+                {/* Non-drag alternative to the NodeResizer handles above —
+                    task-annotation-accessible-shared-controls. */}
+                <AnnotationSizeControl id={id} data={data} labels={labels} />
                 <button className="context-menu-delete" onClick={handleDeleteGroup}>
                   🗑️ Delete Group
                 </button>
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

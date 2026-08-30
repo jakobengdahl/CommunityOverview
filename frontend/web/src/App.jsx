@@ -186,6 +186,18 @@ function App() {
   // component doc comment and GraphCanvas's annotationToolboxPortalContainer
   // prop. null whenever the sheet is closed or MobileShell isn't mounted.
   const [mobileAnnotationContainer, setMobileAnnotationContainer] = useState(null);
+  // The EDIT-time counterpart of mobileAnnotationContainer above
+  // (task-annotation-responsive-bottom-toolbox): the mobile Edit sheet's own
+  // content DOM node, and the `{open, close}` pair MobileShell hands up so a
+  // node component deep inside GraphCanvas can ask MobileShell's own
+  // `useSurfaceManager` instance to open/close the `'detail'` surface — see
+  // MobileShell.jsx's component doc comment. Starts `null` (not stable
+  // no-ops): GraphCanvas's `editSheet.capable` is gated on this being
+  // present, so a node's Edit button correctly falls back to the floating
+  // menu rather than silently no-op'ing during the one-paint window between
+  // MobileShell mounting and its own ready-effect actually firing.
+  const [mobileAnnotationEditContainer, setMobileAnnotationEditContainer] = useState(null);
+  const [detailSheetController, setDetailSheetController] = useState(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
@@ -2584,6 +2596,27 @@ function App() {
             annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
             annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
             annotationNearbyText: t('context_menu.annotation_nearby_text'),
+            annotationOpacity: t('context_menu.annotation_opacity'),
+            editAnnotation: t('context_menu.edit_annotation'),
+            ariaKindNote: t('context_menu.aria_kind_note'),
+            ariaKindLabel: t('context_menu.aria_kind_label'),
+            ariaKindText: t('context_menu.aria_kind_text'),
+            ariaKindShape: t('context_menu.aria_kind_shape'),
+            ariaKindIcon: t('context_menu.aria_kind_icon'),
+            ariaKindVoteDot: t('context_menu.aria_kind_vote_dot'),
+            ariaKindImage: t('context_menu.aria_kind_image'),
+            ariaKindArrow: t('context_menu.aria_kind_arrow'),
+            ariaKindFreehand: t('context_menu.aria_kind_freehand'),
+            ariaKindGroup: t('context_menu.aria_kind_group'),
+            annotationWidth: t('context_menu.annotation_width'),
+            annotationHeight: t('context_menu.annotation_height'),
+            annotationApplySize: t('context_menu.annotation_apply_size'),
+            annotationAttachTo: t('context_menu.annotation_attach_to'),
+            annotationDetach: t('context_menu.annotation_detach'),
+            annotationAttachToHint: t('context_menu.annotation_attach_to_hint'),
+            annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
+            annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
+            annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
@@ -2620,6 +2653,9 @@ function App() {
             freehandHint: t('annotation_toolbox.freehand_hint'),
           }}
           annotationToolboxPortalContainer={isMobile ? mobileAnnotationContainer : null}
+          annotationEditSheetPortalContainer={isMobile ? mobileAnnotationEditContainer : null}
+          onRequestAnnotationEditSheet={isMobile ? (detailSheetController?.open ?? null) : null}
+          onCloseAnnotationEditSheet={isMobile ? (detailSheetController?.close ?? null) : null}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
           onViewportChange={(vp) => {
@@ -2634,6 +2670,8 @@ function App() {
           onClear={() => requestClear('button')}
           onOpenActivity={() => setActivityOpen(true)}
           onAnnotationSheetContainerChange={setMobileAnnotationContainer}
+          onAnnotationEditSheetContainerChange={setMobileAnnotationEditContainer}
+          onDetailSheetControllerReady={setDetailSheetController}
         />
       ) : (
         <DesktopShell

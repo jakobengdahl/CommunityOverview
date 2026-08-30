@@ -12,9 +12,12 @@ import {
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './NoteNode.css';
 
 /**
@@ -55,10 +58,17 @@ function NoteNode({ id, data = {}, selected }) {
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
   const locked = Boolean(data?.locked);
   const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
     useEditableText(id, data);
   useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -187,6 +197,7 @@ function NoteNode({ id, data = {}, selected }) {
 
   const color = data.color || NOTE_COLORS[0];
   const fontSize = data.fontSize || DEFAULT_NOTE_FONT_SIZE;
+  const opacity = Number.isFinite(data.opacity) ? data.opacity : 1;
   // Cosmetic "who's here" marker, independent of the edit-lease check above:
   // prefers the active editor when there is one, else whoever merely has
   // this selected (task-annotation-exclusive-edit-leases — selection alone
@@ -221,6 +232,7 @@ function NoteNode({ id, data = {}, selected }) {
           className="graph-note-node"
           style={{
             backgroundColor: color,
+            opacity,
             outline: badge ? `2px solid ${badge.color}` : undefined,
             outlineOffset: badge ? '2px' : undefined,
           }}
@@ -264,14 +276,40 @@ function NoteNode({ id, data = {}, selected }) {
             </div>
           )}
         </div>
+        {/* The contextual "Edit" surface's visible entry point
+            (task-annotation-responsive-bottom-toolbox) — a real, focusable
+            button reachable by tap/click/Enter/Space, not only right-click or
+            a long-press. Shown only on a selected note, matching the
+            resizer's own `isVisible` condition just above. */}
+        {selected && (
+          <button
+            ref={editButtonRef}
+            type="button"
+            className="annotation-edit-trigger nodrag nopan"
+            aria-label={labels.editAnnotation}
+            aria-haspopup="true"
+            aria-expanded={Boolean(contextMenu)}
+            onClick={(e) => {
+              if (remoteLocked) {
+                notifyRemoteLockedAttempt();
+                return;
+              }
+              openEditMenu(e);
+            }}
+          >
+            ✏️
+          </button>
+        )}
       </div>
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:
@@ -338,6 +376,14 @@ function NoteNode({ id, data = {}, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationOpacityControl
+                  labels={labels}
+                  opacity={opacity}
+                  onChangeOpacity={changeOpacity}
+                />
+                {/* Non-drag alternative to the NodeResizer handles above —
+                    task-annotation-accessible-shared-controls. */}
+                <AnnotationSizeControl id={id} data={data} labels={labels} />
                 <AnnotationLayerControls
                   labels={labels}
                   locked={data.locked}
@@ -354,7 +400,7 @@ function NoteNode({ id, data = {}, selected }) {
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );
