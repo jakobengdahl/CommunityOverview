@@ -12,7 +12,7 @@ import {
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -32,7 +32,7 @@ function LabelNode({ id, data, selected }) {
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, enterAttachMode } =
     useContext(AnnotationContext);
   // See NoteNode's equivalent comment: another client's live edit lease
   // (task-annotation-exclusive-edit-leases) refuses every mutation below.
@@ -52,6 +52,7 @@ function LabelNode({ id, data, selected }) {
     setContextMenu,
     menuRef: contextMenuRef,
   });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -116,6 +117,25 @@ function LabelNode({ id, data, selected }) {
     setNodes((nds) => nds.filter((n) => n.id !== id));
     setContextMenu(null);
     notifyChange('delete');
+  };
+
+  // Non-drag detach (task-annotation-accessible-shared-controls): clears
+  // `data.attachment` without needing to drag the label away from its
+  // target, mirroring how a drag detaches once it clears
+  // ATTACH_SNAP_RADIUS. Local, not a shared AnnotationContext function like
+  // `enterAttachMode` below — it only ever touches this node's own data, the
+  // same shape every other single-node setter here (`changeColor`, `unlock`,
+  // …) already is.
+  const detach = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, attachment: undefined } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
   };
 
   // Locking withholds everything except the two actions the capability
@@ -224,6 +244,7 @@ function LabelNode({ id, data, selected }) {
             ref={contextMenuRef}
             className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:
@@ -304,6 +325,26 @@ function LabelNode({ id, data, selected }) {
                   labels={labels}
                   onAttach={(kind) => attachNearby(id, kind)}
                 />
+                {/* Non-drag "Attach to…" target-tap mode
+                    (task-annotation-accessible-shared-controls): `label` is
+                    one of ATTACHABLE_OVERLAY_KINDS, so — unlike the "Add
+                    nearby" section above, which creates a NEW pre-attached
+                    annotation — this attaches THIS existing one. */}
+                <button
+                  type="button"
+                  className="context-menu-attach"
+                  onClick={() => {
+                    enterAttachMode?.(id);
+                    setContextMenu(null);
+                  }}
+                >
+                  🧷 {labels.attachTo}
+                </button>
+                {data.attachment && (
+                  <button type="button" className="context-menu-attach" onClick={detach}>
+                    {labels.detach}
+                  </button>
+                )}
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}

@@ -99,11 +99,16 @@ describe('the Edit trigger button (task-annotation-responsive-bottom-toolbox)', 
     expect(document.activeElement).toBe(editButton);
   });
 
-  it('does NOT move/return focus for a menu opened the pre-existing way, by right-click', async () => {
+  it('ALSO moves focus into a menu opened by right-click, and restores it to whatever had focus before on close (task-annotation-accessible-shared-controls)', async () => {
     renderNote({ text: 'x' }, { selected: true });
     const before = document.activeElement;
     fireEvent.contextMenu(screen.getByText('x'));
-    expect(document.querySelector('.graph-annotation-context-menu')).not.toBeNull();
+    const menu = document.querySelector('.graph-annotation-context-menu');
+    expect(menu).not.toBeNull();
+    // One frame late, same as the button path — see the hook's own comment.
+    await waitFor(() => {
+      expect(menu.contains(document.activeElement)).toBe(true);
+    });
     // NoteNode's own dismiss-listener registration is deferred a tick (see
     // its `setTimeout(..., 0)`) so the contextmenu event that opened the menu
     // never immediately closes it — flush that before Escape, matching
@@ -111,9 +116,8 @@ describe('the Edit trigger button (task-annotation-responsive-bottom-toolbox)', 
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(document.querySelector('.graph-annotation-context-menu')).toBeNull();
-    // Right-click never routes through the button-triggered focus management
-    // this hook adds — activeElement is left exactly where the dismiss
-    // listener found it, same as before this task.
+    // Restored to whatever had focus before the right-click, not to the Edit
+    // button (which this menu was never opened through).
     expect(document.activeElement).toBe(before);
   });
 

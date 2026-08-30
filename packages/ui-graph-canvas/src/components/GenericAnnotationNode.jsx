@@ -17,11 +17,13 @@ import {
   TEXT_ALIGN_DEFAULT_BY_KIND,
   TEXT_ALIGN_STYLES,
   isAnnotationDraggable,
+  ATTACHABLE_OVERLAY_KINDS,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -345,6 +347,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyRemoteLockedAttempt,
     labels,
     attachNearby,
+    enterAttachMode,
     beginEditing,
     endEditing,
   } = useContext(AnnotationContext);
@@ -591,6 +594,21 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('delete');
   };
 
+  // Non-drag detach (task-annotation-accessible-shared-controls) — see
+  // LabelNode's identical helper for why this stays local rather than a
+  // shared AnnotationContext function.
+  const detach = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, attachment: undefined } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   // Locking withholds everything except the two actions the capability
   // baseline names for a locked object: unlock, and duplicate —
   // colour/rotation/shape/font-size/delete stay out of reach while `locked`
@@ -732,6 +750,8 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       position={contextMenu}
       sheet={Boolean(contextMenu.sheet)}
       sheetContainer={sheetContainer}
+      id={id}
+      data={data}
       kind={kind}
       shape={data.shape || 'rectangle'}
       icon={data.icon}
@@ -765,6 +785,15 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       // comment in utils/annotations.js) now that the former `frame` kind is
       // folded into `shape` rather than excluded as its own special case.
       onAttachNearby={(nearbyKind) => attachNearby(id, nearbyKind)}
+      onEnterAttachMode={
+        enterAttachMode
+          ? () => {
+              enterAttachMode(id);
+              setContextMenu(null);
+            }
+          : undefined
+      }
+      onDetach={detach}
     />
   );
 
@@ -1044,6 +1073,8 @@ function ContextMenuPortal({
   position,
   sheet = false,
   sheetContainer = null,
+  id,
+  data,
   kind,
   shape,
   icon,
@@ -1072,19 +1103,22 @@ function ContextMenuPortal({
   onUnlock,
   onDuplicate,
   onAttachNearby,
+  onEnterAttachMode,
+  onDetach,
 }) {
   // The contextual "Edit" surface's mobile-sheet path
   // (task-annotation-responsive-bottom-toolbox): the container may not have
   // mounted yet even though `sheet` is true (the host's next render supplies
   // it — see useAnnotationEditTrigger's own doc comment), so there is
   // nothing to portal into until then.
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(menuRef);
   const portalTarget = sheet ? sheetContainer : document.body;
   if (!portalTarget) return null;
   const menuClassName = `graph-annotation-context-menu${sheet ? ' sheet' : ''}`;
   const menuStyle = sheet ? undefined : { left: position.x, top: position.y };
   if (locked) {
     return createPortal(
-      <div ref={menuRef} className={menuClassName} style={menuStyle}>
+      <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
         <button type="button" className="context-menu-unlock" onClick={onUnlock}>
           🔓 {labels.unlock}
         </button>
@@ -1094,7 +1128,7 @@ function ContextMenuPortal({
     );
   }
   return createPortal(
-    <div ref={menuRef} className={menuClassName} style={menuStyle}>
+    <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
       {COLORABLE_KINDS.has(kind) && (
         <>
           <div className="context-menu-title">{labels.color}</div>
@@ -1285,8 +1319,31 @@ function ContextMenuPortal({
         opacity={opacity}
         onChangeOpacity={onChangeOpacity}
       />
+      {/* Non-drag alternative to the NodeResizer handles `shape`/`image`
+          render above — task-annotation-accessible-shared-controls.
+          `text`/`icon`/`vote_dot` have no explicit box (RESIZABLE_KINDS
+          excludes them; see this component's own doc comment), so nothing
+          renders for those kinds — matching what the drag handles already
+          do (or rather, do not) offer them. */}
+      {RESIZABLE_KINDS.has(kind) && <AnnotationSizeControl id={id} data={data} labels={labels} />}
       <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
       <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
+      {/* Non-drag "Attach to…" target-tap mode
+          (task-annotation-accessible-shared-controls) — offered only for the
+          kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
+          `label` gets the identical pair in its own component). Unlike the
+          "Add nearby" section above (creates a NEW pre-attached annotation),
+          this attaches THIS existing one. */}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
+        <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
+          🧷 {labels.attachTo}
+        </button>
+      )}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && data?.attachment && (
+        <button type="button" className="context-menu-attach" onClick={onDetach}>
+          {labels.detach}
+        </button>
+      )}
       <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}

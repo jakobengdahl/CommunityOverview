@@ -13,7 +13,8 @@ import {
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
@@ -67,6 +68,7 @@ function NoteNode({ id, data = {}, selected }) {
     setContextMenu,
     menuRef: contextMenuRef,
   });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -307,6 +309,7 @@ function NoteNode({ id, data = {}, selected }) {
             ref={contextMenuRef}
             className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:
@@ -378,6 +381,9 @@ function NoteNode({ id, data = {}, selected }) {
                   opacity={opacity}
                   onChangeOpacity={changeOpacity}
                 />
+                {/* Non-drag alternative to the NodeResizer handles above —
+                    task-annotation-accessible-shared-controls. */}
+                <AnnotationSizeControl id={id} data={data} labels={labels} />
                 <AnnotationLayerControls
                   labels={labels}
                   locked={data.locked}

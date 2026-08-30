@@ -281,8 +281,12 @@ describe('GroupNode locked context menu', () => {
     // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
     // working control that a role query reports as absent. Text sees it.
     expect(menu.textContent).not.toMatch(/hid(e|den|ing)/i);
-    // Six swatches and Delete Group, and no eighth button.
-    expect(menu.querySelectorAll('button')).toHaveLength(7);
+    // Six swatches, the non-drag size control's Apply button
+    // (task-annotation-accessible-shared-controls' AnnotationSizeControl —
+    // the two <input type="number"> elements are not <button>s, so only this
+    // one adds to the count) and Delete Group — eight total, consciously
+    // updated from the pre-existing seven per this test's own comment above.
+    expect(menu.querySelectorAll('button')).toHaveLength(8);
   });
 
   it('unlocks the group and publishes the change', () => {

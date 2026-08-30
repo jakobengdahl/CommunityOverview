@@ -11,6 +11,7 @@ import {
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './ArrowNode.css';
@@ -70,6 +71,7 @@ function ArrowNode({ id, data, selected }) {
     setContextMenu,
     menuRef: contextMenuRef,
   });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -396,6 +398,7 @@ function ArrowNode({ id, data, selected }) {
             ref={contextMenuRef}
             className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               <>

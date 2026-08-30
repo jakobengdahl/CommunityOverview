@@ -670,18 +670,109 @@ export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
 // on an internal field the user has no reason to remember they set. Keeping
 // `shape` uniformly attachable is the smaller, more predictable change, and
 // the more consistent one now that `frame` is no longer a distinct type.
+// Builds the `content.attachment` shape for a point attaching to `target`,
+// shared by computeDroppedAttachment (nearest-target-within-radius, for a
+// drag release) and computeAttachmentToTarget (an explicit, caller-chosen
+// target, for the non-drag "Attach to…" mode below) so the two attachment
+// entry points can never drift into two different field shapes.
+function buildAttachment(position, target) {
+  const center = target && nodeCenter(target);
+  if (!center) return null;
+  return {
+    target_id: target.id,
+    target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
+    offset: { x: position.x - center.x, y: position.y - center.y },
+  };
+}
+
 export function computeDroppedAttachment(position, nodes, excludeId) {
   const candidates = nodes.filter((n) => n.type !== 'group');
   const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
   if (!targetId) return null;
   const target = candidates.find((n) => n.id === targetId);
-  const center = target && nodeCenter(target);
-  if (!center) return null;
-  return {
-    target_id: targetId,
-    target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
-    offset: { x: position.x - center.x, y: position.y - center.y },
-  };
+  return buildAttachment(position, target);
+}
+
+// The non-drag "Attach to…" mode's own attachment computation
+// (task-annotation-accessible-shared-controls, closing the audit's
+// "attaching an EXISTING annotation to a target" gap): the caller has
+// already resolved an explicit target (via a target-tap/click, not a
+// proximity search), so this only has to build the attachment shape for it —
+// reusing buildAttachment rather than a second implementation. Keeps the
+// annotation's current on-screen offset from the target's centre (the
+// contract's "free fine adjustment"), the same behaviour a drop that snapped
+// onto this exact target would have produced, rather than jumping the
+// annotation onto the target's centre. `node` is the flow node being
+// attached (its own `.position`, not the target's); `group` targets are
+// rejected by the caller before this is reached (a group is a containment
+// construct, not an attachment target — see computeDroppedAttachment's own
+// comment), so this does not re-check it.
+export function computeAttachmentToTarget(node, target) {
+  const position = node?.position;
+  if (!position) return null;
+  return buildAttachment(position, target);
+}
+
+// Whether `node` is a valid target for the "Attach to…" mode: any node or
+// annotation except a group (a containment/visual construct, not an
+// attachment target — matches computeDroppedAttachment's own candidate
+// filter) or the annotation being attached itself.
+export function isEligibleAttachTarget(node, selfId) {
+  return Boolean(node) && node.id !== selfId && node.type !== 'group';
+}
+
+// Per-kind screen-reader accessible name (dec-annotation-v1-accessibility-
+// and-touch's bar: "role + accessible name per annotation, e.g. 'sticky
+// note, Budget Q3'" — a name that SAYS WHAT THE THING IS, not merely
+// whatever an accname algorithm happens to fall back to). One shared
+// function rather than ten per-kind fixes, per the accessibility audit's own
+// root-cause note (docs/ANNOTATION_CONTRACT.md's "Keyboard, touch and
+// screen-reader controls audit" section): every caller that builds or
+// hydrates a ReactFlow node writes this onto `node.ariaLabel`, the only field
+// ReactFlow itself ever reads for a node's `aria-label` (`@reactflow/core`'s
+// `NodeRenderer`).
+//
+// `labels` carries the kind words with English defaults, following this
+// package's own props-with-defaults i18n rule (see AnnotationContext.js) —
+// never a bare English literal, so a host with Swedish `labels` gets a
+// Swedish accessible name too. Shape subtype names (`rectangle`, `process_
+// arrow`, …) and icon names are left untranslated, matching the existing
+// precedent of GenericAnnotationNode.jsx's own shape/icon picker buttons
+// (`aria-label={name}`) — this file adds no new translation surface for
+// vocabulary that was already untranslated elsewhere in the same menu.
+export function computeAnnotationAriaLabel(kind, data, labels = {}) {
+  const d = data || {};
+  const withDetail = (kindWord, detail) => (detail ? `${kindWord}, ${detail}` : kindWord);
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
+  switch (kind) {
+    case 'note':
+      return withDetail(labels.ariaKindNote || 'Sticky note', text(d.text));
+    case 'label':
+      return withDetail(labels.ariaKindLabel || 'Label', text(d.text));
+    case 'text':
+      return withDetail(labels.ariaKindText || 'Text', text(d.text));
+    case 'shape': {
+      const shapeName = (d.shape || 'rectangle').replace(/_/g, ' ');
+      const kindWord = `${shapeName} ${labels.ariaKindShape || 'shape'}`;
+      return withDetail(kindWord, text(d.text));
+    }
+    case 'icon': {
+      const kindWord = labels.ariaKindIcon || 'icon';
+      return d.icon ? `${d.icon} ${kindWord}` : kindWord;
+    }
+    case 'vote_dot':
+      return labels.ariaKindVoteDot || 'Vote dot';
+    case 'image':
+      return withDetail(labels.ariaKindImage || 'Image', text(d.alt));
+    case 'arrow':
+      return labels.ariaKindArrow || 'Arrow';
+    case 'freehand':
+      return labels.ariaKindFreehand || 'Freehand stroke';
+    case 'group':
+      return withDetail(labels.ariaKindGroup || 'Group', text(d.label));
+    default:
+      return '';
+  }
 }
 
 // Recompute an attached overlay's position from its target's current centre
@@ -692,6 +783,46 @@ export function computeDroppedAttachment(position, nodes, excludeId) {
 // yet loaded, or deleted): the overlay keeps its last resolved position rather
 // than being recomputed or reset (contract: "detaches and keeps its last
 // resolved model-space geometry").
+// Fallback hit-box half-size (flow px) for a kind with no explicit
+// style.width/height (icon/vote_dot's fixed intrinsic size, and arrow/text/
+// freehand's boxless geometry) — see nodesAtPoint's own comment for why a
+// zero-size box would otherwise never register as "clicked".
+const POINTLESS_KIND_HIT_RADIUS = 16;
+
+// Every node whose box contains `point` (flow coordinates) — the overlap-
+// object picker's own hit test (task-annotation-accessible-shared-controls,
+// closing the audit's "Overlapping objects: a visible way to choose which
+// one you mean | MISSING" row). Deliberately independent of ReactFlow's own
+// pointer-event hit testing (which already resolved one specific node before
+// a click handler ever sees it, by DOM z-order): this recomputes candidacy
+// geometrically so a caller can tell "exactly one node here" (nothing to
+// disambiguate) apart from "several nodes here" (offer a picker) using the
+// same `nodes` array GraphCanvas already holds.
+//
+// Uses each node's *stored* box (nodeSize/position), not its rotated visual
+// outline — a rotated annotation's axis-aligned bounding box is a
+// conservative approximation of what it actually paints, not a pixel-exact
+// hit test. `group` is excluded: a group is a containment/visual backdrop
+// almost always larger than whatever sits on it, so including it would
+// nearly always "overlap" and defeat the picker's purpose of disambiguating
+// genuinely stacked objects.
+export function nodesAtPoint(nodes, point) {
+  if (!point) return [];
+  return nodes.filter((n) => {
+    if (n.type === 'group') return false;
+    const pos = n.positionAbsolute || n.position;
+    if (!pos) return false;
+    const { w, h } = nodeSize(n);
+    if (!w || !h) {
+      const r = POINTLESS_KIND_HIT_RADIUS;
+      return (
+        point.x >= pos.x - r && point.x <= pos.x + r && point.y >= pos.y - r && point.y <= pos.y + r
+      );
+    }
+    return point.x >= pos.x && point.x <= pos.x + w && point.y >= pos.y && point.y <= pos.y + h;
+  });
+}
+
 export function resolveAttachedPosition(node, centers) {
   const targetId = node.data?.attachment?.target_id;
   if (!targetId) return null;

@@ -12,7 +12,7 @@ import {
 import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
-import { NearbyObjectMenuSection } from './ContextMenus';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './FreehandAnnotationNode.css';
@@ -111,6 +111,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
     setContextMenu,
     menuRef: contextMenuRef,
   });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -320,6 +321,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
             ref={contextMenuRef}
             className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
             style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:

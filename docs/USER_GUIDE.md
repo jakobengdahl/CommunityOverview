@@ -247,13 +247,42 @@ session (so everyone sharing the session sees them) and never change the underly
 and edge data. Select an annotation and press **Delete** to remove it.
 
 **Editing an existing annotation.** Right-click still opens the property menu described
-below, but selecting any annotation also shows a small round **✎ Edit** button in its
-corner — a visible way in that works by click or tap alone, and by keyboard: Tab to the
-button and press Enter or Space. It opens the exact same menu right-click does, positioned
-next to the button instead of at a pointer position. On a phone (or any narrow,
+below, but selecting any annotation — a group box included — also shows a small round
+**✎ Edit** button in its corner — a visible way in that works by click or tap alone, and by
+keyboard: Tab to the button and press Enter or Space, or press **Shift+F10** (or the
+keyboard's Menu key) while the annotation itself is focused. It opens the exact same menu
+right-click does, positioned next to the button instead of at a pointer position, and moves
+keyboard focus into the menu — closing it (Escape, an outside click, or picking an action)
+returns focus to wherever it was before. Inside an open menu, **arrow keys** move between
+its options and **Tab** cycles within it rather than leaving it. On a phone (or any narrow,
 touch screen), tapping it opens the annotation's editor in the same bottom sheet the
 **Annotate** slot uses for creating one (see [9. On a phone](#9-on-a-phone)) — no need to
 long-press, which has always been unreliable across browsers and is never the *only* way in.
+
+A freshly created annotation (from the toolbox, the right-click "add" menu, or a
+drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
+without having to click or tap to find it first.
+
+Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
+device with no fine pointer:
+
+- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+  handle) also get a numeric width and height in their menu, with an **Apply** button, so
+  resizing doesn't require dragging a corner handle precisely.
+- **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
+  or another annotation) get an **Attach to…** button. Choosing it puts the canvas into a
+  "pick a target" mode (a banner names it, with its own Cancel button, and Escape also
+  backs out); tapping or clicking any eligible node or annotation next attaches the one you
+  started from to it, keeping it exactly where it currently sits relative to the target —
+  the same result dragging it there would have given. Once attached, the same menu offers
+  **Detach**.
+- **Multiple objects here** — if you tap or click a point where more than one annotation
+  overlaps, a small list appears naming each one so you can pick which you meant, instead of
+  only ever getting whichever one happens to be drawn on top.
+- **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
+  toggles a mode where tapping adds each node to the selection instead of replacing it — the
+  touch equivalent of holding Shift or Ctrl while clicking. Tap empty canvas to clear the
+  selection.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:

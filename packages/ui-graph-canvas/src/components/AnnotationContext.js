@@ -115,5 +115,26 @@ export const AnnotationContext = createContext({
     nearbyText: 'Text',
     opacity: 'Opacity',
     editAnnotation: 'Edit',
+    // Accessible-name kind words (task-annotation-accessible-shared-controls) —
+    // see utils/annotations.js's computeAnnotationAriaLabel.
+    ariaKindNote: 'Sticky note',
+    ariaKindLabel: 'Label',
+    ariaKindText: 'Text',
+    ariaKindShape: 'shape',
+    ariaKindIcon: 'icon',
+    ariaKindVoteDot: 'Vote dot',
+    ariaKindImage: 'Image',
+    ariaKindArrow: 'Arrow',
+    ariaKindFreehand: 'Freehand stroke',
+    ariaKindGroup: 'Group',
+    // Non-drag geometry (task-annotation-accessible-shared-controls).
+    width: 'Width',
+    height: 'Height',
+    applySize: 'Apply size',
+    // Non-drag "Attach to…" target-tap mode.
+    attachTo: 'Attach to…',
+    attachToCancel: 'Cancel attaching',
+    detach: 'Detach',
+    attachToHint: 'Choose a target to attach to — Escape to cancel',
   },
 });

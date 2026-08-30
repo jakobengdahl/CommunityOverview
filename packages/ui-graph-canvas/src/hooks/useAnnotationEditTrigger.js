@@ -42,16 +42,19 @@ const NOOP_EDIT_SHEET = {
  * instead, mirroring PR #525's `AnnotationToolbox` `variant="sheet"` pattern
  * for creation.
  *
- * Focus management applies ONLY to the button-triggered path: a menu opened
- * by right-click is completely unaffected (same `setContextMenu({x, y})`
- * call every kind's `onContextMenu` already made, untouched by this hook),
- * so this is a pure addition, not a change to existing behaviour. Full
- * arrow-key roving navigation within the open menu, and generalising
- * focus-trap/-restore to the right-click path too, are
- * `task-annotation-accessible-shared-controls`' scope (see
- * docs/ANNOTATION_CONTRACT.md's accessibility audit) — this hook closes the
- * "correct focus return" half of the accepted decision's acceptance
- * criteria for the path it adds, not a general accessibility overhaul.
+ * Focus move-in-on-open/restore-on-close now applies to BOTH entry paths
+ * (task-annotation-accessible-shared-controls, generalising what used to be
+ * button-only — see `previousFocusRef`'s own doc comment above for the
+ * right-click path's restore target): opening a menu, however it opened,
+ * moves focus to its first item; closing it restores focus to the Edit
+ * button for the button path, or to whatever had focus immediately
+ * beforehand for the right-click path (mirroring `ContextMenus.jsx`'s
+ * `useMenuOpenFocus`, the graph-node/pane menu system's equivalent). Arrow-
+ * key roving navigation and a Tab focus trap within the open menu are a
+ * separate, per-caller addition — `useAnnotationMenuKeyNav`
+ * (`ContextMenus.jsx`), wired onto the menu container's own `onKeyDown` —
+ * kept out of this hook because it operates on `menuRef`'s DOM content
+ * directly and has no dependency on the open/close state machine below.
  *
  * @param {object} params
  * @param {object|null} params.contextMenu - the caller's own menu descriptor
@@ -68,10 +71,25 @@ export function useAnnotationEditTrigger({ contextMenu, setContextMenu, menuRef 
   const editButtonRef = useRef(null);
   // Whether the CURRENTLY open menu (if any) was opened via this hook's own
   // button, as opposed to the pre-existing right-click path calling the
-  // caller's `setContextMenu` directly. Only that path gets focus management
-  // and the sheet-close call below.
+  // caller's `setContextMenu` directly. Only the button path restores focus
+  // to a specific, known element (the button itself) on close and gets the
+  // sheet-close call below; the right-click path still gets its own,
+  // generic restore — see `previousFocusRef` below.
   const openedViaButtonRef = useRef(false);
   const prevRef = useRef({ open: false, sheet: false });
+  // Whatever had focus immediately before a right-click-opened menu appeared
+  // — mirrors ContextMenus.jsx's `useMenuOpenFocus` (the graph-node/pane menu
+  // system's own version of the same idea), generalising this hook's
+  // existing button-path focus-move-in/-restore-out to the right-click path
+  // too (task-annotation-accessible-shared-controls, closing the
+  // accessibility audit's "Focus restored to the object on close" and
+  // "Keyboard way IN to the property editor" gaps: a right-click-opened menu
+  // now also moves focus into itself, so a keyboard/screen-reader user who
+  // somehow triggers `onContextMenu` — e.g. the Shift+F10 handler
+  // GraphCanvas.jsx wires below onto this same button — lands inside the
+  // menu with the button path's own restore-on-close, not just for the
+  // button entry point).
+  const previousFocusRef = useRef(null);
 
   // Whether a real, non-null `editSheet.container` has been observed during
   // the CURRENT sheet-mode open cycle. Reset in `openEditMenu` below, right
@@ -115,10 +133,12 @@ export function useAnnotationEditTrigger({ contextMenu, setContextMenu, menuRef 
     const wasSheet = prevRef.current.sheet;
     prevRef.current = { open: isOpen, sheet: Boolean(contextMenu?.sheet) };
     if (isOpen) {
-      if (!openedViaButtonRef.current) return undefined;
+      previousFocusRef.current = document.activeElement;
       // One frame late: the menu portal (and, in sheet mode, the host's
       // BottomSheet content) has to actually mount before there is anything
-      // to focus.
+      // to focus. Applies to both entry paths now — see previousFocusRef's
+      // doc comment above for why the right-click path is no longer
+      // excluded.
       const raf = requestAnimationFrame(() => {
         menuRef.current?.querySelector('button:not([disabled])')?.focus();
       });
@@ -128,7 +148,13 @@ export function useAnnotationEditTrigger({ contextMenu, setContextMenu, menuRef 
     const openedViaButton = openedViaButtonRef.current;
     openedViaButtonRef.current = false;
     if (wasSheet) editSheet.requestClose?.();
-    if (openedViaButton) editButtonRef.current?.focus();
+    if (openedViaButton && editButtonRef.current) {
+      editButtonRef.current.focus();
+    } else {
+      const prev = previousFocusRef.current;
+      if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+    }
+    previousFocusRef.current = null;
     return undefined;
   }, [contextMenu, menuRef, editSheet]);
 

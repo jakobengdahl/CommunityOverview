@@ -501,6 +501,12 @@ body.graph-suppress-selection * {
   color: #ffffff;
 }
 
+.graph-compact-control.active {
+  border-color: #6366f1;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
 /* Phone widths: the minimap is suppressed here (see GraphCanvas.jsx), so the
    224px dodge that kept the depth control clear of it no longer buys anything
    and only pushes the control off a 390px screen. Each surface gets its own
@@ -670,6 +676,111 @@ body.graph-suppress-selection * {
   font-weight: 500;
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* Non-drag "Attach to…" target-tap mode's own status banner
+   (task-annotation-accessible-shared-controls) — the same shape as the
+   freehand drawing hint above, but with `pointer-events: auto` and a real
+   Cancel button: unlike freehand's own one-shot pointer-capture gesture,
+   this mode is exited by a follow-up click/tap (on a target, or on this
+   button), not only by finishing a drawing motion. */
+.graph-attach-mode-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #b45309;
+  background: rgba(120, 53, 15, 0.92);
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.graph-attach-mode-hint button {
+  border: 1px solid #fde68a;
+  background: transparent;
+  color: #fde68a;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* The overlap-object picker (task-annotation-accessible-shared-controls) —
+   reuses `.graph-context-menu`'s base box/button styling (position: fixed,
+   dark menu chrome, hover state) via that shared class, added alongside
+   this one on the same element. */
+.graph-overlap-picker {
+  min-width: 180px;
+}
+
+/* Non-drag width/height inputs (task-annotation-accessible-shared-controls). */
+.context-menu-size-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 8px;
+}
+
+.context-menu-size-input {
+  width: 56px;
+  background: #1f2937;
+  border: 1px solid #4b5563;
+  border-radius: 4px;
+  color: #e5e7eb;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.context-menu-size-separator {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.context-menu-apply-size {
+  width: auto;
+  background: #374151;
+  border: 1px solid #4b5563;
+  border-radius: 4px;
+  color: #e6edf3;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.context-menu-apply-size:hover {
+  border-color: #666;
+  background: #4b5563;
+}
+
+/* Non-drag "Attach to…"/Detach buttons (task-annotation-accessible-shared-
+   controls) — same visual weight as `.context-menu-toggle`. */
+.context-menu-attach {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 6px;
+  transition: all 0.2s;
+}
+
+.context-menu-attach:hover {
+  border-color: #666;
+  background: #333;
 }
 
 @media (prefers-color-scheme: light) {
