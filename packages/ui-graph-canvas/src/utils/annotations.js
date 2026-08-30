@@ -393,6 +393,15 @@ export function overlayToFlowNode(overlay) {
   // that dropped it would diff back out on the next autosave as a rotation
   // reset, silently overwriting whatever an agent or collaborator had set.
   const rotation = overlay.rotation ?? 0;
+  // `version`/`field_versions` are server-owned same-field-conflict bookkeeping
+  // (dec-annotation-field-patches-and-conflicts), carried the same envelope way
+  // as z/locked/rotation rather than defaulted — an annotation that has never
+  // round-tripped through the server (a brand-new local creation) legitimately
+  // has neither yet, and inventing 0/{} here would make a later diff think the
+  // server had already assigned one. Read-only from this file's point of view:
+  // nothing here ever changes them, only carries whatever was last read.
+  const version = overlay.version;
+  const fieldVersions = overlay.field_versions;
   if (overlay.kind === 'note') {
     return {
       ...base,
@@ -402,6 +411,8 @@ export function overlayToFlowNode(overlay) {
         fontSize: overlay.fontSize,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       style: overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
@@ -420,13 +431,15 @@ export function overlayToFlowNode(overlay) {
         attachment: overlay.attachment,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       draggable: !locked,
       zIndex,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
-    const data = { locked, rotation };
+    const data = { locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
@@ -458,6 +471,8 @@ export function overlayToFlowNode(overlay) {
     endArrow: overlay.endArrow ?? true,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
@@ -486,6 +501,11 @@ export function flowNodeToOverlay(node) {
   const z = node.zIndex ?? 0;
   const locked = Boolean(node.data?.locked);
   const rotation = node.data?.rotation ?? 0;
+  // Mirrors overlayToFlowNode's version/field_versions handling above: read
+  // whatever the live node carries, default to nothing (never invent a
+  // version an annotation hasn't actually been assigned server-side yet).
+  const version = node.data?.version;
+  const fieldVersions = node.data?.field_versions;
   if (node.type === 'note') {
     return {
       ...base,
@@ -496,6 +516,8 @@ export function flowNodeToOverlay(node) {
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (node.type === 'label') {
@@ -508,10 +530,12 @@ export function flowNodeToOverlay(node) {
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
-    const out = { ...base, z, locked, rotation };
+    const out = { ...base, z, locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
@@ -533,6 +557,8 @@ export function flowNodeToOverlay(node) {
     z,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;

@@ -684,20 +684,53 @@ mutation on the round trip; the server-side `LeaseConflict` check above
 remains the authoritative backstop for the rare case where that background
 acquisition loses a race.
 
-**Remaining gap:** the exclusive edit lease is scoped to browser-originated
-writes only. The synchronous MCP write path (`upsert_annotation`/
-`update_annotation`/`delete_annotation`/`apply_layout`/`add_node_refs`, all
-keyed to the shared `mcp-agent` client id — `backend/service/mcp_tools.py`)
-never goes through `apply_ops` and does not acquire or check leases at all in
-v1: an MCP agent still silently overrides a live human edit lease exactly as
-before, the same way it already bypasses the client-side exclusivity UI and
-the `locked` flag today. This is a deliberate v1 boundary, not an oversight —
-`dec-mcp-agent-ops-vs-annotation-claimmap` (accepted 2026-08-30) decided
-human edit leases are exclusive while leaving MCP writes unchanged for now;
-making MCP-issued writes respect a live human lease (never acquiring one of
-its own — v1 has no per-agent identity to make that meaningful) is
-`task-mcp-annotation-human-edit-guard`'s separate, deliberately-sequenced-after
-scope. Actor-scoped conditional undo *is* implemented
+**Gap closed (`task-mcp-annotation-human-edit-guard`).** The synchronous MCP
+write path — every `SessionManager` method that can mutate an existing
+annotation and that a `mcp_tools.py` tool calls directly rather than through
+`apply_ops` (`upsert_annotation`, `upsert_image_annotation`,
+`update_annotation`, `delete_annotation`, `set_group_members`; all keyed to
+the shared `mcp-agent` client id) — now checks the same live `LeaseMap`
+immediately before its own mutation and raises the same `LeaseConflict` a
+browser write does (`SessionManager._reject_if_leased`). This covers every
+generic/note/group/image MCP tool that ends up calling one of those five: 13
+tools currently wrap them, including `create_sticky_note`/`update_sticky_note`/
+`delete_sticky_note`, `create_annotation`/`update_annotation`/
+`delete_annotation`/`reorder_annotation`/`set_annotation_lock`/
+`duplicate_annotation`, `create_image_annotation` (and, on the human side, the
+`POST /sessions/{id}/annotations/image` ingest endpoint the task description
+calls out by name — both routes end at the one authoritative check inside
+`upsert_image_annotation`), and `create_group_annotation`/
+`update_group_members`/`delete_group_annotation` (`group_membership_changed`
+is now itself a lease-checkable op — see `_claimed_annotation_target` — which
+closes the same gap for the **browser's own** group-membership panel too,
+since it sends that op through the identical `apply_ops` batch path).
+`apply_layout`/`add_node_refs`/`rename_session_sync`/`delete_session_sync`
+stay unguarded because none of their ops can mutate an annotation at all —
+out of scope by construction, not merely unaddressed. Each MCP tool surfaces
+the refusal as `{"success": false, "error": "lease_conflict", "annotation_id",
+"held_by"}`, the MCP-tool-layer mirror of the REST/`LeaseConflict` 409.
+
+**What this guard is, and is not.** It is a *refusal*, checked at the actual
+mutation boundary (immediately before the write, after every other
+precondition — revision, existence, budget checks — so a conflict leaves
+state completely unchanged) and safe against the same "preflight races a
+concurrent acquisition" failure mode a check taken earlier and cached would
+have: nothing between the lease read and the mutation ever awaits, and while
+an `apply_ops` batch is genuinely mid-flight the guarded method refuses with
+`LayoutBusy` instead of running against a pre-commit view. It is **not**
+authorization or identity verification: `client_id` — on either side of the
+check — is caller-supplied and unauthenticated, so `held_by` names whichever
+string currently holds the lease, not a verified human. An MCP agent never
+acquires, renews, releases or takes over a lease itself in v1 — it only ever
+checks against one — matching `dec-mcp-agent-ops-vs-annotation-claimmap`
+("agents do not acquire, reserve or take over human edit leases in v1").
+After a `lease_conflict`, an agent must re-read current state (e.g.
+`list_annotations`) before retrying rather than blindly resubmitting the same
+write; the retry succeeds once the lease is released or its 30 s TTL expires.
+Full per-agent identities and agent-to-agent leases remain out of scope for
+v1; field-level conflict protection for *unleased* concurrent edits is the
+separate `dec-annotation-field-patches-and-conflicts` mechanism described
+below, not this one. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
 ### Two-client conflict matrix
@@ -722,42 +755,252 @@ second writer is still refused, `409`, with the first writer's edit standing)
 — what changed is *how* the first writer comes to hold it (editing must have
 actually started, not merely been selected) and *what* the server checks
 (`LeaseConflict` against `LeaseMap`, not `ClaimConflict` against `ClaimMap`).
-The **"no lease held" column and the whole-annotation-clobber finding below
-are unaffected by this task** — a lease narrows the collision window (two
-clients can no longer race to edit the same annotation with neither one
-protected) but does not add field-level granularity; the clobber case, and
-its fix (per-field patches), remain `dec-annotation-field-patches-and-
-conflicts`' separate, still-open scope. Do not read this task as having
-closed that finding — it has not.
+**Update for `dec-annotation-field-patches-and-conflicts` (accepted
+2026-08-30).** The "no lease held" column and the whole-annotation-clobber
+finding below were exactly the open item that decision closed — a lease
+narrows the collision window (two clients can no longer race to edit the
+same annotation with neither one protected) but never added field-level
+granularity on its own; field-level patches plus per-field version checking
+is the complementary layer for whenever a lease is not (yet) held. Both
+mechanisms stay in place and do not compete: a live lease still refuses the
+whole write outright the instant one is held, unchanged by this update; the
+matrix below shows what changed only in the unleased column.
 
-**The mechanism the matrix rests on.** Two facts, each already documented
-elsewhere in this file, combine into a property that is not obvious from
-either alone:
+**The mechanism the matrix rested on, before the fix.** Two facts, each
+already documented elsewhere in this file, used to combine into a property
+that was not obvious from either alone:
 
-1. The browser always re-sends the **whole** annotation object on every
-   publish — text, geometry, style and all — never a per-field delta
-   (`sessionSyncClient.js`'s `diffState`/`syncState`; already noted above for
-   images, but it is true of every field on every kind).
-2. `SessionStore.apply_state_op`'s `annotation_updated` handler applies an
+1. The browser re-sent the **whole** annotation object on every publish —
+   text, geometry, style and all — never a per-field delta.
+2. `SessionStore.apply_state_op`'s `annotation_updated` handler applied an
    incoming write as `target.update(incoming)` — a shallow, **top-level**
-   merge of whatever keys `incoming` happens to carry.
+   merge of whatever keys `incoming` happened to carry.
 
-Combined: an `annotation_updated` op is not "patch this one field" so much as
-"replace every top-level key my own local copy currently holds" — and a
+Combined: an `annotation_updated` op was not "patch this one field" so much
+as "replace every top-level key my own local copy currently holds" — and a
 client's local copy is only ever as fresh as the last remote op it has
 actually received. Two clients editing genuinely *different* fields of the
-same annotation therefore do **not** safely merge the way the mechanism might
-suggest at a glance: whichever op lands second overwrites every top-level key
-its sender's local copy held at commit time, including one the *other* client
-changed in the meantime and this client hasn't caught up on yet. This is
-whole-annotation last-write-wins, not field-level last-write-wins — a real,
-verified property, not a guess, and surprising enough relative to "merges
-rather than replaces" (this file's own words for the same code, describing a
-different scenario — a single client's own successive writes, where it is
-true) that it is called out here explicitly rather than left to be inferred.
-**This is a documented finding of this slice, not a bug fixed by it**: fixing
-it would mean moving to per-field patches, a bigger design change out of this
-slice's scope — see this section's closing paragraph.
+same annotation therefore did **not** safely merge the way the mechanism
+might suggest at a glance: whichever op landed second overwrote every
+top-level key its sender's local copy held at commit time, including one the
+*other* client changed in the meantime and this client hadn't caught up on
+yet. This was whole-annotation last-write-wins, not field-level
+last-write-wins — surprising enough relative to "merges rather than
+replaces" (this file's own words for the same code, describing a different
+scenario — a single client's own successive writes, where it is true) that
+it was called out explicitly. `dec-annotation-field-patches-and-conflicts`
+(accepted 2026-08-30, realised by
+`task-smallfix-whole-annotation-clobber-on-concurrent-different-field-edit`)
+closed it; the fix is described next, and its effect on the matrix follows.
+
+**The fix.** Two changes, deliberately kept to a simpler versioned-patch-
+with-explicit-conflict model rather than a general-purpose CRDT/operational-
+transform editor (out of scope — see "What this does not change" below):
+
+1. **Field-diffed publish.** `sessionSyncClient.js`'s `computeOps` now
+   computes the field-level difference between the last-synced baseline and
+   the current local value (`diffAnnotationFields`) before emitting an
+   `annotation_updated` op — a field this client never touched is simply
+   absent from the outgoing patch, so there is nothing left for it to
+   clobber, independent of whether the sender's local mirror has caught up
+   with a concurrent peer's edit to that field. This alone closes the
+   different-field cell of the matrix below, with no version bookkeeping
+   involved at all.
+2. **Per-field version checking.** Every annotation now carries a
+   server-owned `version` (an integer, bumped by one on every applied
+   `annotation_created`-as-upsert or `annotation_updated`) and
+   `field_versions` (the `version` at which each individual content field
+   last actually changed — never touched by a client, always recomputed by
+   the server from a real *value* diff, so resending a field's current,
+   unchanged value never marks it as "touched"). An op can additionally
+   carry `base_version`: the annotation `version` the sender last synced.
+   `SessionStore.apply_state_op` checks, only for the fields the incoming
+   patch genuinely changes, whether that field's `field_versions` entry is
+   newer than `base_version` — an unrelated field changing in between never
+   blocks the write; only a field the patch is itself trying to move to a
+   different value, that someone else has *also* moved since, is a real
+   conflict. See [Field-level patches and
+   base_version](#field-level-patches-and-base_version) below for the exact
+   wire shape and the all-or-nothing-per-op rule.
+
+**A caller that supplies no `base_version` at all** — an older cached browser
+bundle, or an MCP tool call that has not opted in (see the MCP subsection
+below for which tools do) — keeps the pre-fix whole-object shallow-merge
+behaviour verbatim: `target.update(incoming)`, unconditionally, no conflict
+ever raised. This is the documented, deliberate fallback
+(`AnnotationFieldConflict`'s docstring in `session_store.py`), not an
+oversight left open by this task: a legacy full-object write is not made any
+*more* dangerous by this change, it simply does not participate in the new
+protection. A real (post-fix) browser never produces an op shaped like that
+any more — `computeOps` always emits a field-diffed patch with `base_version`
+set — so this fallback is now purely a compatibility path, not the default.
+
+**Update — this was not actually true for a real browser until
+smallfix-annotation-version-dropped-by-browser-pipeline (fixed after
+`dec-annotation-field-patches-and-conflicts` was accepted).** `computeOps`
+itself always did the right thing — `diffAnnotationFields` correctly excludes
+`version`/`field_versions` from the outgoing content diff and reads
+`before.version` for `base_version` (see `sessionSyncClient.js` and its own
+tests) — but every annotation the *rest* of the browser pipeline handed to it
+had already lost both fields before `computeOps` ever saw them:
+`useSharedSession.js`'s `serverStateToMirror` (session hydration),
+`sessionAnnotations.js`'s `annotationsToOverlays`/`overlaysToAnnotations`, the
+live-canvas round trip in `packages/ui-graph-canvas/src/utils/annotations.js`
+(`overlayToFlowNode`/`flowNodeToOverlay`), and `createAnnotation` in
+`annotationModel.js` all built or read their output from a fixed field
+whitelist that did not include `version`/`field_versions`. The result: a real
+browser's `base_version` was `undefined` on *every* `annotation_updated` op it
+ever sent — `JSON.stringify` drops the key entirely — so every real
+browser-originated write landed on exactly the legacy fallback this paragraph
+says a real browser "never produces... any more". The matrix row below and the
+"A real client" language throughout this section describe the *protocol* as
+verified against `SessionManager.update_annotation` directly
+(`TestFieldVersionedPatches`, `test_session_manager.py`) with a hand-supplied
+`base_version` — correct for that path, but not a description of what a real
+browser tab was actually sending before this fix. Both translator layers now
+carry `version`/`field_versions` through unconditionally (the same envelope
+treatment `z`/`locked`/`rotation` already got), so the "A real (post-fix)
+browser" claim above is accurate as of this fix, not before it.
+
+**Update — a *single* real client can still race its own prior write, not
+just a second collaborator (round 2 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+same-client self-conflict follow-up).** `annotationChangeScheduler.js`
+publishes most annotation field changes (style, geometry, create, delete)
+immediately, with no debounce — only `text` coalesces over ~300 ms — so one
+user can fire two rapid edits to the *same* field of the *same* annotation
+(two quick color picks, say) before the first op's round trip completes.
+`sessionSyncClient.js`'s `syncState` used to assign its internal baseline
+straight from the live canvas snapshot on every call; the canvas's own copy
+of `version`/`field_versions` only catches up asynchronously, through the
+first op's ack round-tripping back onto the canvas node
+(`onLocalAnnotationsApplied`) — so the second edit, computed before that ack
+landed, read back the identical pre-send version and sent an identical,
+already-stale `base_version`. The server correctly refused the resulting
+batch with `field_conflict` — there genuinely was a `field_versions` entry
+newer than what the op claimed — but the only client the write conflicted
+with was itself: a single browser tab, no second collaborator anywhere in
+the picture, seeing its own most recent edit rejected and reverted by
+`onDropped`'s resync, under a notice worded for a two-client conflict.
+
+The fix (`predictAnnotationVersionsForSend`/`foldAckedAnnotationOp` in
+`sessionSyncClient.js`) has the client predict, the moment an op is sent
+rather than only once its ack arrives, the `version`/`field_versions` the
+server is expected to bump a touched annotation to — mirroring
+`session_store.py`'s own bump exactly, so a same-field re-edit computed
+before the first ack lands already carries a fresh `base_version` instead of
+a stale one. The prediction is reconciled against the server's authoritative
+ack afterwards without ever regressing a *later*, still-unacked local
+prediction on the same annotation (the ack is only authoritative as of the
+earlier op it is acking) — closing the general case, not only the
+back-to-back two-edit one: three or more rapid same-field edits, and a
+same-field re-edit with a different field's edit interleaved in between, are
+all covered by the same mechanism and test-covered
+(`frontend/web/tests/sessionSyncClient.test.js`, "same-client self-conflict
+race"). This is purely a client-side prediction; nothing about the server's
+`AnnotationFieldConflict` check, the wire shape, or a *genuine* two-client
+race (the matrix below) changes.
+
+**Update — a genuinely different collaborator's own EARLIER write could still
+regress this client's baseline, via the SSE broadcast channel rather than the
+POST-ack channel (round 3 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+remote-broadcast-reordering follow-up).** The fix above closes the race
+between *this client's own* predicted and acked versions of the *same*
+op-in-flight. It left a related, genuinely two-client gap open: this client's
+own POST-ack channel and its SSE `'op'` broadcast stream are two independent
+HTTP connections with no cross-ordering guarantee (`sessionSyncClient.js`'s
+own `_appliedSeq` comment documents this as an accepted architectural
+property — a concurrent op's broadcast can still be in flight when this
+client's own later op's ack has already landed). So a genuinely different
+collaborator B's broadcast for a chronologically **earlier** op could arrive
+*after* this client A's own already-acked **later** op on the same
+annotation. Before this fix, `_handleEvent`'s `'op'` case folded every remote
+broadcast into the baseline unconditionally (`applyOpToMirror`, no guard at
+all) — so B's late, stale broadcast would silently regress both
+`version`/`field_versions` and content back to B's pre-A-edit snapshot. A's
+*next* edit would then diff against that reverted baseline and send a stale
+`base_version`, which the server correctly refuses as `field_conflict` — the
+exact same class of spurious conflict the round-2 fix closed, this time from
+a genuine two-client interleaving rather than a same-client race, and
+untouched by that fix since it only ever guarded the ack path.
+
+The fix (`foldRemoteAnnotationOp` in `sessionSyncClient.js`, used only by
+`_handleEvent`'s `'op'` case for an op attributed to a different client)
+rejects a stale/reordered remote broadcast atomically — both its
+`version`/`field_versions` and its content — whenever its `version` is lower
+than what the baseline already holds for that annotation, rather than
+`foldAckedAnnotationOp`'s own approach of merging `version`/`field_versions`
+to the higher value while still taking content from the incoming op
+unconditionally. That merge-not-reject approach is correct for the ack path
+(the ack is always this client's own trustworthy write, just possibly behind
+a further not-yet-confirmed local prediction) but would be wrong for a
+remote broadcast: since the server hands back the *whole* annotation record
+on every `annotation_created`/`annotation_updated` op (`session_store.py`
+mutates the one shared server-side object in place, never emits a diff), a
+lower-versioned broadcast is a strictly older, already-superseded snapshot in
+full — accepting even one of its fields would produce a version number and a
+content field from two different points in time that no real server
+snapshot ever actually was. Dropping the whole stale op is also safe: the
+server applies ops for one annotation strictly in sequence against that same
+shared object, so whichever of two ops landed first server-side is already
+folded into whichever landed second — nothing a rejected stale broadcast
+could have contributed is ever permanently lost, because this client's own
+next ack (always a full, cumulative snapshot too) recovers it if needed.
+Test-covered end-to-end through the real `SessionSyncClient`/`_handleEvent`
+path with a genuine simulated SSE `'op'` event
+(`frontend/web/tests/sessionSyncClient.test.js`, "remote broadcast reordering
+vs. an already-acked own write"), plus pure-function coverage for
+`foldRemoteAnnotationOp` itself. A version tie or a genuinely newer broadcast
+still applies normally — this guard only ever changes behaviour for an
+actual regression.
+
+**Update — the related canvas-layer gap this fix originally left open is now
+closed (round 5, smallfix-applyremoteop-canvas-no-version-guard).** An
+earlier revision of this section recorded a "known related gap" here:
+`App.jsx`'s `applyRemoteOp` (the handler `onRemoteOps` invokes) applied an
+annotation broadcast's content straight onto the *live canvas* React store
+unconditionally, with no version check of its own, so a stale broadcast this
+guard correctly kept out of `sessionSyncClient.js`'s internal baseline could
+still flash onto the canvas itself via that separate path. That revision
+described the canvas as "self-healing once this client's own ack (or a
+later, genuinely newer broadcast) lands" — that framing oversold the actual
+risk and was corrected once traced through in full: nothing *automatically*
+corrects a wrongly-applied stale annotation. A remote apply alone triggers no
+save (`GraphCanvas.jsx`'s remote-annotation-ops effect only clears the queue,
+via `onRemoteAnnotationsApplied`), so the stale content simply sits on the
+canvas until the *next*, entirely unrelated autosave trigger (a node drag, a
+different annotation edit, Save View). That autosave builds its outgoing
+snapshot from whatever the canvas currently shows — the stale, reverted
+content, never corrected — and diffs it against the sync baseline, which
+(thanks to this same guard) is correctly still at the true higher version.
+`predictAnnotationVersionsForSend` computes a valid-looking `base_version`
+for the resulting patch, the server has no way to distinguish this from a
+genuine edit and accepts it as a new version, and a collaborator's confirmed
+change is silently overwritten and re-broadcast to everyone as real — the
+same data-loss class this whole four-round chain exists to close, reachable
+through ordinary two-collaborator editing, not only a narrow race window a
+self-heal could plausibly outrun.
+
+The fix reuses this guard's own comparison rather than adding a second,
+independently-maintained version check at the canvas layer: `_handleEvent`'s
+`'op'` case now computes `isAnnotationOpStale` (the same predicate
+`foldRemoteAnnotationOp` above acts on, factored out as its own pure
+function) against the pre-fold baseline and, when the incoming
+`annotation_created`/`annotation_updated` broadcast is stale, never invokes
+`onRemoteOps` for it at all. `App.jsx`'s `applyRemoteOp`/
+`applyAnnotationUpsertToCanvas` are consequently never called with a stale
+annotation broadcast in the first place — the canvas and the sync baseline
+are now gated by the exact same decision, computed once, so the two cannot
+independently drift into disagreeing with each other the way two separately
+maintained checks could. A brand-new annotation (no baseline entry yet)
+still applies unconditionally, and a genuinely newer broadcast still reaches
+the canvas normally — this only ever changes behaviour for an actual
+regression. Test-covered at the sync-client layer (`frontend/web/tests/
+sessionSyncClient.test.js`, the "remote broadcast reordering" describe block
+now also asserts on `onRemoteOps`) and end-to-end through the real
+`SessionSyncClient`/`sessionAnnotations.js`/`GraphCanvas` chain
+(`frontend/web/tests/annotationRemoteCanvasVersionGuard.test.jsx`).
 
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
@@ -774,41 +1017,150 @@ generic kinds plus `note`.
 
 | A's edit | B's edit (no lease held by A) | Outcome, no lease | B's edit (A holds the lease) | Outcome, A holds the lease |
 |---|---|---|---|---|
-| text | text (same field) | Accepted — B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_lease_second_writer_wins`) | text | 409 `LeaseConflict`; A's edit stands (`TestLeaseEnforcement.test_non_holder_update_is_rejected`) |
-| text | geometry (different field) | Accepted, but B's write silently **clobbers A's text** back to whatever B's stale local copy held — the documented finding above (`test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit`) | geometry | 409 `LeaseConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a leased annotation (`test_lease_blocks_a_different_field_edit_too_not_only_same_field`) |
-| (any) | style | Accepted, same whole-document LWW as the text/text row — an unrelated style write can clobber a concurrent edit the same way | style | 409 `LeaseConflict` (`test_non_holder_style_edit_is_rejected_while_leased`) |
-| (any) | lock toggle | Accepted, same mechanism — `locked` is an ordinary field on an `annotation_updated` op, not a separate op type | lock toggle | 409 `LeaseConflict` (`test_non_holder_lock_toggle_is_rejected_while_leased`) — a non-holder cannot lock out from under the lease holder either |
-| (any) | delete | Accepted — the annotation is gone; no field survives to clobber | delete | 409 `LeaseConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_leased`, mirroring the existing `note` case) |
+| text | text (same field) | A **real client**: 409 `field_conflict`, explicit — never a silent overwrite (`TestFieldVersionedPatches.test_same_field_conflict_is_explicit_not_a_silent_overwrite`); B re-derives from the conflict's own `server_annotation`/`server_version` and its retry then succeeds (`test_stale_write_is_rejected_then_succeeds_after_rederiving`). A **legacy caller with no `base_version`**: unchanged, B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_lease_second_writer_wins`) | text | 409 `LeaseConflict`; A's edit stands (`TestLeaseEnforcement.test_non_holder_update_is_rejected`) |
+| text | geometry (different field) | A **real client**: both survive — B's field-diffed patch never even mentions "text" at all, so there is nothing to check or clobber, independent of `base_version` (`test_geometry_edit_from_a_stale_client_no_longer_clobbers_a_concurrent_text_edit`). A **legacy full-object write**: still clobbers exactly as before this task (`test_legacy_whole_object_write_without_base_version_still_clobbers`) | geometry | 409 `LeaseConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a leased annotation (`test_lease_blocks_a_different_field_edit_too_not_only_same_field`) |
+| (any) | style | Same rule as the different-field row above — merges for a field-diffed write, still whole-document LWW for a legacy no-`base_version` write | style | 409 `LeaseConflict` (`test_non_holder_style_edit_is_rejected_while_leased`) |
+| (any) | lock toggle | Same rule — `locked` is an ordinary field, checked/versioned like any other on an `annotation_updated` op, not a separate op type | lock toggle | 409 `LeaseConflict` (`test_non_holder_lock_toggle_is_rejected_while_leased`) — a non-holder cannot lock out from under the lease holder either |
+| (any) | delete | Unaffected by this task — `annotation_deleted` has no field-level granularity to protect; still just removes the annotation, no field survives to clobber | delete | 409 `LeaseConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_leased`, mirroring the existing `note` case) |
 
-Reading the matrix: the **leased** column is the safe one for every row —
-holding the lease protects every field of the annotation, not merely the one
-the holder itself is editing, because the check is per-annotation-id, not
-per-field. The **unleased** column is whole-document last-write-wins for
-every row, including the different-field (text/geometry) row where that is
-easy to mis-read as a safe merge. In practice that unleased race is narrow — a
-remote op is folded into a connected client's own baseline as soon as its SSE
-delivery arrives (typically well under the round trip a human drag/keystroke
-takes), so the window is bounded by network latency, not by anything in this
-document's control — but it is real, not eliminated, and this section exists
-so nobody has to rediscover it under a poor network to learn it. A live edit
-lease closes the window only for the annotation it was actually acquired
-on — it does not retroactively protect a write that never went through a
-lease-acquiring entry point, and it does not make the *leased* column's own
-per-field granularity any finer than before.
+Reading the matrix: the **leased** column is unchanged by this task and
+remains the safe one for every row regardless of `base_version` — holding the
+lease protects every field of the annotation, not merely the one the holder
+itself is editing, because the check is per-annotation-id, not per-field. The
+**unleased** column now depends on whether B's write opted into the new
+protocol: a real (field-diffed, `base_version`-carrying) write merges
+independent fields silently and surfaces a genuine same-field race as an
+explicit `field_conflict` instead of ever silently overwriting it; the
+documented legacy fallback (no `base_version` at all) keeps the old
+whole-document-LWW behaviour verbatim, unprotected exactly as before. A live
+edit lease still closes the window outright for the annotation it was
+actually acquired on, unaffected by either case above — it does not
+retroactively protect a write that never went through a lease-acquiring
+entry point, and field-level patches do not change what the *leased* column
+enforces.
 
-**What this does not change.** No code changed for `task-annotation-shared-
-session-realtime`'s original run of this section — only tests and
-documentation; `task-annotation-exclusive-edit-leases` later changed the
-enforcement mechanism itself (advisory selection claim → exclusive edit
-lease, see [Operation timing and leases](#operation-timing-and-leases)) but
-did **not** touch this clobber finding. The clobber case is a property of the
-existing whole-annotation-resend/shallow-merge design (both already shipped,
-both individually reasonable), not a regression either slice introduced or
-should quietly patch. Closing it for real would mean per-field patch ops
-instead of whole-annotation resends — a bigger design change tracked as
-`dec-annotation-field-patches-and-conflicts`, separate from and not resolved
-by the edit-lease work above. It is recorded here as a finding rather than
-fixed.
+**What this does not change.** The edit-lease mechanism itself (`LeaseMap`,
+[Operation timing and leases](#operation-timing-and-leases)) is untouched by
+`dec-annotation-field-patches-and-conflicts` — the two layers are
+complementary, not overlapping: a lease still refuses a write outright the
+instant one is held, and field-level patches only ever apply in the unleased
+window a lease does not (yet) cover. This is deliberately **not** a
+general-purpose CRDT or operational-transform editor — no automatic
+character-level text merge, no arbitrary multi-field 3-way merge inside one
+op. A single `annotation_updated` op is still all-or-nothing: if any field it
+touches genuinely conflicts, the whole op is refused, even when other fields
+in the same patch do not conflict, and the caller re-derives a smaller/fresher
+patch rather than the server attempting a partial apply. That scope decision
+is recorded in `dec-annotation-field-patches-and-conflicts` itself.
+
+### Field-level patches and base_version
+
+**Stored/broadcast shape.** Every annotation carries two server-owned
+bookkeeping fields, alongside its ordinary content — never caller-settable
+(a payload that supplies either is silently overwritten, not merged in):
+
+- `version` (int, starts at `1` on create) — bumped by one on every applied
+  `annotation_updated` and on an `annotation_created` upsert-in-place
+  (a same-id create retry); read-only, returned in every read/write
+  (`list_annotations`/`list_sticky_notes`, `create_annotation`,
+  `update_annotation`'s result) as `annotation.version`.
+- `field_versions` (`{field_name: version}`) — the `version` at which each
+  individual content field last actually *changed value* (never merely
+  present in an incoming payload with the same value it already held).
+  Internal bookkeeping only, not projected to MCP callers or the browser's
+  content payload — a caller only ever needs `version`, to hand straight
+  back as `base_version` on its next write.
+
+**The `annotation_updated` op.** `annotation` carries only the fields the
+sender actually changed, plus the `id`/`type`/`kind` identifying/validating
+triple every update must carry regardless. `base_version`, alongside
+`annotation`, is optional:
+
+```json
+{
+  "op": "annotation_updated",
+  "annotation": { "id": "shape-1", "type": "shape", "kind": "shape",
+                   "geometry": { "x": 40, "y": 40, "w": 160, "h": 96 } },
+  "base_version": 3
+}
+```
+
+- **Given:** for each field the patch is genuinely changing (a value diff
+  against current stored state, computed server-side — a field whose
+  incoming value already matches what is stored is never "touched", however
+  it got there), the server compares that field's `field_versions` entry to
+  `base_version`. A field with no entry defaults to the annotation's
+  creation version (`1`). If every touched field's version is `<=
+  base_version`, the op applies and bumps `version` + the touched fields'
+  `field_versions` to the new value. If **any** touched field's version is
+  `> base_version`, the whole op is refused with `AnnotationFieldConflict` —
+  never a partial apply (see "What this does not change" above).
+- **Omitted:** the pre-fix, unconditional whole-object shallow merge
+  (`target.update(incoming)`) — the documented legacy fallback.
+
+**The conflict response.** `AnnotationFieldConflict` surfaces as HTTP 409
+wherever a browser or MCP write can raise it:
+
+- `POST /sessions/{id}/ops` (`rest_api.py`): `detail` is a structured object
+  — `{"error": "field_conflict", "annotation_id", "conflicting_fields":
+  {field: server_version}, "server_version", "message"}` — distinct from
+  `LeaseConflict`'s plain-string `detail` on the same status code, so
+  `sessionSyncClient.js`'s terminal-rejection handling (already shared for
+  every 409, per [Operation timing and leases](#operation-timing-and-leases))
+  can tell the two apart for an accurate notice (`App.jsx`'s `onDropped`:
+  "someone else changed this at the same time", not the lease-specific
+  "someone else is editing this").
+- The `update_annotation` MCP tool (`backend/service/mcp_tools.py`) accepts
+  an optional `base_version` argument and, on conflict, returns
+  `{"success": false, "error": "field_conflict", "conflicting_fields",
+  "server_version", "annotation": <current server value>}` — the same
+  information, MCP-shaped.
+
+**Re-derive, never blindly retry** ("do not silently retry a stale value
+against a newer version" — `dec-annotation-field-patches-and-conflicts`'s own
+words): a client that gets `field_conflict` reads the conflict response's own
+current annotation/`server_version` and computes a fresh patch from that,
+rather than resending the same rejected content once whatever blocked it has
+changed again. `sessionSyncClient.js` inherits this for free from the
+pre-existing 409/`LeaseConflict` terminal-rejection path
+(`task-annotation-exclusive-edit-leases`): a dropped op is removed from the
+outbound queue and never automatically resent — the *next* local edit
+computes an entirely new field diff against the (now resynced) baseline
+rather than replaying the stale one.
+
+**MCP path parity — which tools opt in.** `SessionManager.update_annotation`
+(the shared chokepoint every MCP annotation-patch tool calls into, exactly
+like the browser's `POST /ops`) accepts `base_version` uniformly, so the
+version/conflict semantics are identical for both entry points, not a
+separate mechanism. The generic `update_annotation` MCP tool exposes
+`base_version` to its caller, and so does `update_sticky_note` (added by
+smallfix-annotation-version-dropped-by-browser-pipeline): a note's
+`build_note_patch` still resends the whole `geometry` sub-object on any
+position/size/rotation change (see that function's shallow-merge note above),
+so without `base_version` a position-only move silently clobbered a
+concurrent geometry-subfield edit — e.g. a resize — with no conflict raised,
+exactly the class of bug this section otherwise closes. `reorder_annotation`
+and `set_annotation_lock` still omit `base_version` and so stay on the
+documented legacy-fallback (unconditional merge) path; each of those two
+patches exactly one field it alone manages (`z`, `locked`), so there is no
+second field in the same patch for a concurrent edit to race against, unlike
+`update_sticky_note`'s combined geometry write. Widening those two to accept
+`base_version` too is straightforward follow-up, not a correctness gap this
+task leaves open.
+
+**Reconnect/catch-up and undo.** Neither needed a protocol change:
+`SessionStore.apply_state_op` already returns (and always did) the **whole**
+post-update annotation as the applied op's `annotation` — the ring buffer
+(`ops_since`, used for `catch_up`) and the full-state `snapshot` path both
+therefore already carry `version`/`field_versions` through to a reconnecting
+client with no code change on that side; only what a client *publishes* had
+to change. `undo_last_action` replays a stored full-object inverse op under
+`trusted_replay=True`, which skips `base_version` checking entirely — the
+replayed content is this session's own recorded prior state, not fresh
+caller input, so there is nothing to conflict-check against. `version` still
+only ever moves forward on an undo (never restored to its pre-edit value),
+so a client's `base_version` bookkeeping stays monotonic across an undo the
+same way `updated_at` already did before this task.
 
 ## Attachment and detach behavior
 
@@ -1052,6 +1404,11 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 / `annotation_deleted`) and share its optimistic-concurrency contract
 (`expected_revision` / `revision_conflict`) — see
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
+`update_sticky_note` additionally accepts the same optional `base_version` as
+the generic `update_annotation` tool, rejecting a stale same-field write with
+`field_conflict` instead of silently merging it — see [Field-level patches and
+base_version](#field-level-patches-and-base_version) and "MCP path parity"
+above.
 
 The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
 accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
@@ -1059,7 +1416,14 @@ accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation`, over the same session op protocol and
-optimistic-concurrency contract. This includes `freehand`: an earlier
+optimistic-concurrency contract. `update_annotation` additionally accepts an
+optional `base_version` (read from a prior `list_annotations`/write result's
+`annotation.version`) for the finer-grained, per-field conflict check
+described in [Field-level patches and
+base_version](#field-level-patches-and-base_version) — omitted, this tool
+and every other write in this section keep the coarser
+`expected_revision`/session-wide contract this paragraph already describes,
+unchanged. This includes `freehand`: an earlier
 revision of this document claimed it had no MCP tool at all, but
 `freehand` has been a member of `GENERIC_ANNOTATION_TYPES`
 (`backend/core/session_annotations.py`) since the type was added (#422),
@@ -1686,7 +2050,7 @@ rule](#downstream-closure-rule).
 | `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — no text, no title anywhere in its markup |
 | `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to `alt` when set, empty otherwise — never says "image annotation" |
 | `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps as every other kind; accessible name is **empty** — pure SVG path(s), no text or title |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path still bypasses `LeaseMap` entirely, by deliberate sequencing rather than an open decision — that is `task-mcp-annotation-human-edit-guard`'s own scope ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered, including a whole-document-last-write-wins finding for concurrent different-field edits when neither side holds the lease; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path's own bypass is now closed too (`task-mcp-annotation-human-edit-guard`): every synchronous MCP write method that can mutate an existing annotation checks the same `LeaseMap` at its own mutation boundary and never acquires one itself ([gap closed](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered; the whole-document-last-write-wins finding it originally recorded for concurrent different-field edits with no lease held is now fixed by field-level patches and per-field `base_version` checking (`dec-annotation-field-patches-and-conflicts`, [Field-level patches and base_version](#field-level-patches-and-base_version)) — a legacy caller that supplies no `base_version` at all keeps the old unprotected behaviour as a documented fallback, not a live gap for a real client; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
 
 ## Downstream closure rule
 

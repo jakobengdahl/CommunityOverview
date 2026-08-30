@@ -143,15 +143,66 @@ function canonical(value) {
   return value;
 }
 
+// Server-owned bookkeeping (dec-annotation-field-patches-and-conflicts,
+// session_store.py's _ANNOTATION_META_FIELDS): never diffed as "content" —
+// `version`/`field_versions` change on every remote op regardless of what
+// this client edited, and `updated_at`/`created_by` were already excluded
+// for the same reason. Diffing them would make every incoming remote update
+// look like a further local change and re-publish a no-op patch forever.
+const ANNOTATION_META_FIELDS = new Set([
+  'id',
+  'type',
+  'kind',
+  'version',
+  'field_versions',
+  'updated_at',
+  'created_by',
+]);
+
 function annotationsEqual(a, b, { ignoreMembers = false } = {}) {
   const strip = (ann) => {
     const copy = { ...ann };
     delete copy.updated_at;
     delete copy.created_by;
+    delete copy.version;
+    delete copy.field_versions;
     if (ignoreMembers) delete copy.member_node_ids;
     return copy;
   };
   return JSON.stringify(canonical(strip(a))) === JSON.stringify(canonical(strip(b)));
+}
+
+/**
+ * Compute the field-level patch that turns `before` (the last-synced
+ * baseline) into `next` (the current local canvas value) — only the keys
+ * that actually differ, plus the id/type/kind every `annotation_updated` op
+ * must carry to identify and validate its target.
+ *
+ * This is the fix for the whole-annotation clobber
+ * (smallfix-whole-annotation-clobber-on-concurrent-different-field-edit):
+ * the browser previously always resent the *whole* `next` object on any
+ * change, so a field this client never touched — but whose local mirror
+ * simply had not yet caught up with a concurrent peer's edit — rode along
+ * and silently overwrote that peer's change. Sending only genuinely-changed
+ * keys means an untouched field is never in the outgoing patch at all, so
+ * there is nothing for it to clobber. Paired with `base_version` (the
+ * annotation's version as of `before`), the server can additionally tell a
+ * field this client is *trying* to change apart from one merely present —
+ * see docs/ANNOTATION_CONTRACT.md's "Two-client conflict matrix".
+ */
+export function diffAnnotationFields(before, next, { ignoreMembers = false } = {}) {
+  const patch = { id: next.id, type: next.type, kind: next.kind };
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(next || {})]);
+  for (const key of keys) {
+    if (ANNOTATION_META_FIELDS.has(key)) continue;
+    if (ignoreMembers && key === 'member_node_ids') continue;
+    const beforeValue = canonical(before ? before[key] : undefined);
+    const nextValue = canonical(next[key]);
+    if (JSON.stringify(beforeValue) !== JSON.stringify(nextValue)) {
+      patch[key] = next[key];
+    }
+  }
+  return patch;
 }
 
 /**
@@ -229,10 +280,18 @@ export function computeOps(prevState, nextState) {
         ops.push({ op: 'group_membership_changed', group_id: id, member_node_ids: nextMembers });
       }
       if (!annotationsEqual(before, ann, { ignoreMembers: true })) {
-        ops.push({ op: 'annotation_updated', annotation: ann });
+        ops.push({
+          op: 'annotation_updated',
+          annotation: diffAnnotationFields(before, ann, { ignoreMembers: true }),
+          base_version: before.version,
+        });
       }
     } else if (!annotationsEqual(before, ann)) {
-      ops.push({ op: 'annotation_updated', annotation: ann });
+      ops.push({
+        op: 'annotation_updated',
+        annotation: diffAnnotationFields(before, ann),
+        base_version: before.version,
+      });
     }
   }
   for (const id of prevAnn.keys()) {
@@ -349,6 +408,230 @@ export function applyOpToMirror(mirrorState, op) {
   return m;
 }
 
+/**
+ * Return `nextState` with every annotation's `version`/`field_versions` set
+ * to what this client will treat as current once `ops` (about to be
+ * enqueued — see `syncState`) are sent.
+ *
+ * A touched annotation (one `ops` carries an `annotation_created` or
+ * `annotation_updated` for) gets the version the server is expected to bump
+ * it to — mirroring `session_store.py`'s own bump exactly: new version =
+ * the baseline's prior version + 1; `field_versions[k]` = that new version
+ * for every key the outgoing patch actually touches, never one it does not.
+ * A brand new `annotation_created` (no baseline entry for the id yet)
+ * predicts version 1 / empty `field_versions`, matching the server's
+ * fresh-annotation branch — `group_membership_changed` never bumps version
+ * server-side and is not one of the two op types this function acts on.
+ *
+ * This closes the same-client self-conflict race (round 2 review,
+ * dec-annotation-field-patches-and-conflicts): `annotationChangeScheduler.js`
+ * publishes `style`/`geometry`/`create`/`delete` immediately, with no
+ * debounce, so two rapid edits to the *same* field both get computed before
+ * either's ack lands. Assigning `this._baseline = nextState` verbatim (the
+ * pre-fix behaviour) would leave the baseline's version/field_versions at
+ * whatever the *canvas* last had — which only learns the fresh value
+ * asynchronously, through the ack round-trip (`onLocalAnnotationsApplied`)
+ * — so the second edit would read back the same pre-send version and send
+ * an identical, already-stale `base_version`, and the server would refuse
+ * the batch as a conflict against no one but this client's own prior write.
+ *
+ * An annotation `ops` does *not* touch this round keeps the *baseline's*
+ * own version/field_versions rather than `nextState`'s: the internal
+ * baseline is updated synchronously the moment either a local send is
+ * predicted (this function, on the previous call) or a remote op arrives
+ * (`_handleEvent`'s `'op'` case), so it is always at least as current as the
+ * canvas for these two fields — taking the canvas's copy here instead would
+ * silently undo whatever an earlier call already predicted for it before
+ * the canvas caught up.
+ */
+export function predictAnnotationVersionsForSend(baselineState, nextState, ops) {
+  const baseline = normalizeMirror(baselineState);
+  const next = normalizeMirror(nextState);
+  const baselineAnn = new Map(baseline.annotations.filter((a) => a && a.id).map((a) => [a.id, a]));
+  const predicted = new Map();
+  for (const op of ops || []) {
+    if (op.op !== 'annotation_created' && op.op !== 'annotation_updated') continue;
+    const patch = op.annotation;
+    if (!patch || !patch.id) continue;
+    const before = baselineAnn.get(patch.id);
+    if (op.op === 'annotation_created' && !before) {
+      predicted.set(patch.id, { version: 1, field_versions: {} });
+      continue;
+    }
+    const version = (Number(before?.version) || 1) + 1;
+    const field_versions = { ...(before?.field_versions || {}) };
+    for (const key of Object.keys(patch)) {
+      if (key === 'id' || key === 'type' || key === 'kind') continue;
+      field_versions[key] = version;
+    }
+    predicted.set(patch.id, { version, field_versions });
+  }
+  next.annotations = next.annotations.map((a) => {
+    if (!a || !a.id) return a;
+    const override = predicted.get(a.id);
+    if (override) return { ...a, ...override };
+    const known = baselineAnn.get(a.id);
+    if (!known) return a;
+    return { ...a, version: known.version, field_versions: known.field_versions };
+  });
+  return next;
+}
+
+/**
+ * Fold one just-acked `annotation_created`/`annotation_updated` result onto
+ * the baseline the same way `applyOpToMirror` always has — except `version`
+ * and `field_versions` are merged to the *higher* of what the baseline
+ * already holds and what this ack reports, never regressed to the ack's
+ * value outright.
+ *
+ * A later, still-unacked local edit to the *same* annotation may already
+ * have advanced the baseline past what this ack knows about: the ack is
+ * only authoritative as of the *earlier* op it is acking, computed and sent
+ * before that later op existed (see `predictAnnotationVersionsForSend`,
+ * which is what put that further-advanced value there). Overwriting it here
+ * would wipe an already-baked, already-sent prediction — including a
+ * `field_versions` entry for a field only that later op touched, which this
+ * ack's response never mentions at all — and reintroduce the same
+ * self-conflict race this whole mechanism exists to close, once the later
+ * op's own ack arrives and the server's per-field check runs against a
+ * version this client had already moved past locally.
+ *
+ * Every other field (the annotation's actual content) is still taken from
+ * the ack as-is via `applyOpToMirror`, unchanged from before this function
+ * existed — a real content-ordering question `_flush`'s success branch
+ * already had before this task and out of this fix's scope.
+ */
+export function foldAckedAnnotationOp(mirrorState, op) {
+  const mirror = normalizeMirror(mirrorState);
+  const ann = op && op.annotation;
+  if (!ann || !ann.id) return applyOpToMirror(mirror, op);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return applyOpToMirror(mirror, op);
+  const version = Math.max(Number(current.version) || 0, Number(ann.version) || 0);
+  const field_versions = { ...(current.field_versions || {}) };
+  for (const [field, v] of Object.entries(ann.field_versions || {})) {
+    const nv = Number(v) || 0;
+    if (nv > (field_versions[field] || 0)) field_versions[field] = nv;
+  }
+  return applyOpToMirror(mirror, { ...op, annotation: { ...ann, version, field_versions } });
+}
+
+/**
+ * Whether an `annotation_created`/`annotation_updated` op is stale/reordered
+ * relative to what `mirrorState`'s baseline already holds for that
+ * annotation — the exact predicate `foldRemoteAnnotationOp` (below) uses to
+ * decide whether to drop an incoming remote op atomically, factored out on
+ * its own (round 5, smallfix-applyremoteop-canvas-no-version-guard) so
+ * `_handleEvent`'s `'op'` case can gate delivery to `onRemoteOps` — and so
+ * ultimately reach the *canvas* App.jsx renders from it — on the very same
+ * decision, rather than adding a second, independently-drifting
+ * reimplementation of this comparison at the canvas layer (a third one,
+ * after `foldAckedAnnotationOp`'s own differently-scoped merge, would have
+ * been a fourth-order repeat of the same bug class this whole four-round
+ * chain exists to close: two guards that *should* always agree but are
+ * free, by construction, to quietly stop agreeing).
+ *
+ * A non-annotation op, an op with no `annotation.id`, an id the mirror has
+ * no entry for yet (a fresh annotation — round 3's "no baseline entry"
+ * rule), or a version that cannot be compared as a finite number, all read
+ * as "not stale": the caller should apply normally. See
+ * `foldRemoteAnnotationOp`'s own docstring below for the full reasoning on
+ * why a strictly lower version means the whole incoming record — content
+ * included — is already superseded.
+ */
+export function isAnnotationOpStale(mirrorState, op) {
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') return false;
+  const ann = op.annotation;
+  if (!ann || !ann.id) return false;
+  const mirror = normalizeMirror(mirrorState);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return false;
+  const incomingVersion = Number(ann.version);
+  const currentVersion = Number(current.version) || 0;
+  return Number.isFinite(incomingVersion) && incomingVersion < currentVersion;
+}
+
+/**
+ * Apply a remote `annotation_created`/`annotation_updated` broadcast to the
+ * baseline, refusing to let it regress an annotation this client already
+ * has newer data for. Sole caller: `_handleEvent`'s `'op'` case, for an op
+ * attributed to a genuinely different client — never this client's own
+ * (that echo is filtered before reaching here, see the "echo of our own
+ * op" check just above that call site).
+ *
+ * Round 3 review, following the same-client race fix in
+ * `foldAckedAnnotationOp` (round 2): the SSE stream and this client's own
+ * POST-ack channel have no cross-ordering guarantee (see the R15 comment on
+ * `_appliedSeq` above — a concurrent op's broadcast can still be in flight
+ * on a separate HTTP connection when this client's own later op's ack
+ * already landed). So a genuinely different client's broadcast for a
+ * chronologically EARLIER op can arrive after this client's own
+ * already-acked LATER op on the same annotation, and — applied
+ * unconditionally via plain `applyOpToMirror`, as before this fix — would
+ * silently regress both `version`/`field_versions` and content back to that
+ * earlier point, reintroducing the exact spurious `field_conflict` the
+ * whole round-2 mechanism exists to close, this time from a genuine
+ * two-client interleaving rather than a same-client race.
+ *
+ * This function is deliberately NOT `foldAckedAnnotationOp` reused
+ * unmodified: that function max-merges `version`/`field_versions` but still
+ * overwrites content unconditionally (documented in its own docstring as an
+ * accepted, separately-tracked gap for the ack path, where the content is
+ * always this client's own trustworthy write). Reusing it here would fix
+ * the version regression but still let a stale broadcast's stale content
+ * overwrite fresher confirmed fields — version:3 but a field's value
+ * reverted to its version-2 content, an internally inconsistent record.
+ * Every `annotation_created`/`annotation_updated` op the server emits
+ * carries the FULL current record (`session_store.py` mutates the one
+ * server-side object in place and hands back the whole thing, never a
+ * diff — see `applied["annotation"] = target`), so a lower `version` than
+ * the baseline already holds means the ENTIRE incoming record is already a
+ * strictly older, superseded snapshot: there is no field in it the
+ * baseline's newer snapshot does not already have at least as current,
+ * because the server applies ops for one annotation strictly in sequence
+ * against that single shared object — whichever of two ops actually landed
+ * first server-side is already folded into whichever landed second. So
+ * rejecting the whole stale op atomically (rather than merging it in
+ * field-by-field against its own `field_versions`) is not just simpler but
+ * more correct here: a per-field merge would compare the incoming op's
+ * server-assigned version numbers against a baseline that can itself be a
+ * locally *predicted*, not-yet-confirmed version
+ * (`predictAnnotationVersionsForSend`, possibly still in flight when this
+ * op arrives) — mixing fields from two different, not-necessarily-aligned
+ * numbering schemes risks synthesizing a record no real server snapshot
+ * ever actually was. Dropping the whole op instead only ever keeps a
+ * complete, real snapshot already applied; if the drop was itself
+ * over-cautious (this client's own predicted baseline overshot true server
+ * order), this client's own next ack — always a full, cumulative snapshot
+ * too, via `foldAckedAnnotationOp` — recovers anything the rejected
+ * broadcast would have contributed, for the same reason: full-object state
+ * for one annotation is cumulative, never lost by ignoring an earlier,
+ * already-superseded echo of it.
+ *
+ * A version tie, an annotation this baseline has no entry for yet (a fresh
+ * id), or an op whose version cannot be compared, all apply normally
+ * through the ordinary `applyOpToMirror` path — this only ever changes
+ * behaviour for a genuine regression. Non-annotation ops are untouched.
+ * The staleness test itself is `isAnnotationOpStale` (above) — kept as one
+ * pure predicate so `_handleEvent` can consult the exact same answer this
+ * function acts on, without recomputing its own version of it.
+ */
+export function foldRemoteAnnotationOp(mirrorState, op) {
+  const mirror = normalizeMirror(mirrorState);
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') {
+    return applyOpToMirror(mirror, op);
+  }
+  if (isAnnotationOpStale(mirror, op)) {
+    // Stale/reordered broadcast — this client's baseline is already at
+    // least this current for this annotation (see docstring above). Drop
+    // the whole op atomically rather than partially merge it in.
+    return mirror;
+  }
+  return applyOpToMirror(mirror, op);
+}
+
 export class SessionSyncClient {
   /**
    * @param {Object} opts
@@ -357,9 +640,19 @@ export class SessionSyncClient {
    * @param {string|null} [opts.displayName]
    * @param {string} opts.streamUrl  Full SSE URL (query appended by the client).
    * @param {string} opts.opsUrl     Full POST URL for op batches.
-   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
-   *   onSelections, onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped, onCommand.
+   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps (never
+   *   called for a stale/reordered annotation_created/annotation_updated
+   *   broadcast — `isAnnotationOpStale`/`foldRemoteAnnotationOp` reject it at
+   *   the same point they keep it out of the internal sync baseline, so a
+   *   caller applying these ops straight onto a live canvas, as App.jsx
+   *   does, is protected by construction rather than needing its own version
+   *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
+   *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
+   *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
+   *   with the acked annotation_created/annotation_updated `applied` entries
+   *   after this client's own op batch lands, so the caller can thread the
+   *   server's confirmed version/field_versions back onto the live canvas —
+   *   see `_flush`'s success branch).
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
    * @param {Function} [opts.EventSourceImpl]
@@ -995,11 +1288,18 @@ export class SessionSyncClient {
    * Diff a full host-state snapshot against the baseline and enqueue the
    * resulting ops. The baseline advances optimistically; transient POST
    * failures are retried so it never claims un-delivered state.
+   *
+   * Annotation `version`/`field_versions` are predicted for this send rather
+   * than taken verbatim from `state` — see `predictAnnotationVersionsForSend`
+   * for why: `state` is the live canvas snapshot, whose copy of those two
+   * fields only catches up asynchronously after this op's ack round-trips
+   * back (`onLocalAnnotationsApplied`), so a second rapid edit computed
+   * before that would otherwise read the same stale, pre-send version.
    */
   syncState(state) {
     const next = normalizeMirror(state);
     const ops = computeOps(this._baseline, next);
-    this._baseline = next;
+    this._baseline = predictAnnotationVersionsForSend(this._baseline, next, ops);
     if (ops.length) this._enqueue(ops);
   }
 
@@ -1191,6 +1491,53 @@ export class SessionSyncClient {
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
+        // A successful annotation_created/annotation_updated bumps `version`/
+        // `field_versions` server-side (dec-annotation-field-patches-and-
+        // conflicts) — the acked `body.applied` entry carries the full
+        // merged annotation with the new value, not just the patch this
+        // client sent. Fold it into the baseline the same way a remote op's
+        // echo would (no dedup marker needed — this is this client's own op,
+        // so its SSE echo is already filtered by the "echo of our own op"
+        // check in _handleEvent and will never reach here a second time).
+        // Without this, this client's OWN next edit to the same annotation
+        // would still read the pre-write version out of the baseline and
+        // send it back as `base_version`, which the server would then judge
+        // stale against the bump this very write just made — a spurious
+        // field_conflict against no one but itself.
+        //
+        // foldAckedAnnotationOp, not the plain foldOpIntoBaseline (round 2
+        // follow-up, same decision): this ack is only authoritative as of
+        // the op it is acking, and a *later*, still-unacked local edit to
+        // this same annotation may already have predicted the baseline
+        // further ahead (predictAnnotationVersionsForSend, called from
+        // syncState for every local edit, including ones enqueued while this
+        // request was in flight). A blind overwrite here would revert that
+        // already-baked, already-sent prediction — reintroducing the very
+        // self-conflict race this mechanism exists to close, the next time
+        // that later op's own ack round-trips.
+        const appliedAnnotations = [];
+        for (const entry of body.applied || []) {
+          if (
+            (entry?.op === 'annotation_created' || entry?.op === 'annotation_updated') &&
+            entry.annotation?.id
+          ) {
+            this._baseline = foldAckedAnnotationOp(this._baseline, entry);
+            appliedAnnotations.push(entry);
+          }
+        }
+        // Also hand these to the host so the *live canvas* node — not just
+        // this internal baseline — picks up the fresh version: syncState()
+        // rebuilds its next baseline wholesale from the canvas snapshot on
+        // every call (see its own docstring), so a version corrected only
+        // here would be overwritten by the canvas's still-stale value on
+        // the very next snapshot. onRemoteOps already knows how to turn an
+        // annotation_created/updated op into a canvas node update
+        // (App.jsx's applyRemoteOp) — this reuses that exact path rather
+        // than adding a second one, the same way handleImageIngest already
+        // reuses it for its own direct-apply case.
+        if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
+          this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
+        }
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
       } else if (
         resp &&
@@ -1231,7 +1578,16 @@ export class SessionSyncClient {
           // `finally`'s own filter is then a harmless no-op for a batch
           // already removed.
           this._removeInFlight(batch);
-          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status);
+          // Parsed only to let onDropped tell apart the two distinct 409
+          // causes (task-smallfix-whole-annotation-clobber-on-concurrent-
+          // different-field-edit): a live edit lease (LeaseConflict) vs. a
+          // genuine field-version race (AnnotationFieldConflict) read very
+          // differently to a user — "someone else is editing this" is wrong
+          // when no one held a lease at all. Best-effort: a body that fails
+          // to parse (or isn't JSON) still drops the op exactly as before,
+          // just without the extra detail.
+          const body = typeof resp.json === 'function' ? await resp.json().catch(() => null) : null;
+          if (this.handlers.onDropped) this.handlers.onDropped(batch, resp.status, body);
           if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
         }
       } else {
@@ -1374,11 +1730,50 @@ export class SessionSyncClient {
         // directly (image ingest's own delivery won the race against this
         // echo — see foldLocalOp): re-folding this now-possibly-stale
         // creation-time content would revert any edit made since.
+        //
+        // foldRemoteAnnotationOp, not the plain applyOpToMirror (round 3
+        // review): this SSE delivery and this client's own POST-ack channel
+        // have no cross-ordering guarantee (R15, above), so a genuinely
+        // different client's broadcast for a chronologically earlier op can
+        // arrive after this client's own already-acked later op on the same
+        // annotation — an unconditional fold would silently regress the
+        // baseline's version/field_versions and content back to that
+        // earlier point, reintroducing the same spurious field_conflict the
+        // round-2 self-conflict-race fix closed, this time via a genuine
+        // two-client interleaving. See foldRemoteAnnotationOp's own
+        // docstring for why the guard rejects a stale op atomically rather
+        // than merging it in field-by-field.
+        //
+        // `staleRemoteAnnotation` is computed from the SAME pre-fold
+        // baseline `foldRemoteAnnotationOp` is about to consult (round 5,
+        // smallfix-applyremoteop-canvas-no-version-guard) and gates whether
+        // `onRemoteOps` fires below at all. Before this, a stale op the fold
+        // just rejected still reached `onRemoteOps` unconditionally — and
+        // from there App.jsx's `applyRemoteOp`/`applyAnnotationUpsertToCanvas`
+        // wrote it straight onto the live canvas with no version check of
+        // its own, so the exact broadcast this guard was keeping out of the
+        // *baseline* still flashed onto the *canvas*. A later, unrelated
+        // autosave then diffed the canvas's now-reverted content against the
+        // (correctly un-regressed) baseline, computed a valid-looking
+        // `base_version`, and the server accepted it as a genuine new write —
+        // silently overwriting a collaborator's confirmed edit. Suppressing
+        // delivery here, at the single point that already knows the answer,
+        // means every consumer of `onRemoteOps` (App.jsx's canvas; the XR
+        // frontend's `sceneSession.js`, which imports this same class) is
+        // protected by construction — there is no second, independently
+        // maintained "is this stale" check anywhere else that could quietly
+        // stop agreeing with this one. Left `false` (apply normally) in the
+        // locally-folded-echo branch just below: that branch does not mean
+        // "stale", it means "already handled via foldLocalOp" (image
+        // ingest), and its own delivery must still reach the canvas the same
+        // way it always has (see foldLocalOp's docstring).
         const foldedId = op?.annotation?.id;
+        let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
-          this._baseline = applyOpToMirror(this._baseline, op);
+          staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
+          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
-        if (this.handlers.onRemoteOps)
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation)
           this.handlers.onRemoteOps([op], { clientId: data.client_id });
         break;
       }

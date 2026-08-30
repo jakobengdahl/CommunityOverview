@@ -2385,6 +2385,13 @@ function GraphCanvasInner({
           // flag revert on the next autosave, whatever the translators did.
           z: g.data.z ?? 0,
           locked: Boolean(g.data.locked),
+          // Same envelope treatment as z/locked above, for the same reason:
+          // server-owned same-field-conflict bookkeeping
+          // (dec-annotation-field-patches-and-conflicts) that must survive
+          // the canvas leg unchanged, not be dropped and re-invented on the
+          // next autosave.
+          version: g.data.version,
+          field_versions: g.data.field_versions,
         })),
       annotations: viewNodes
         .filter((n) => OVERLAY_TYPES.has(n.type))
@@ -3008,6 +3015,8 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            version: g.version,
+            field_versions: g.field_versions,
           },
           style: g.style || { width: 300, height: 200 },
           // A locked group box stays selectable but cannot be dragged; its
@@ -3274,6 +3283,8 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            version: g.version,
+            field_versions: g.field_versions,
           },
           style: g.style || { width: 300, height: 200 },
           draggable: g.locked ? false : undefined,

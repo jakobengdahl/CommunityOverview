@@ -20,12 +20,17 @@ from typing import List, Optional, Dict, Any, Callable
 
 from backend.core.session_auto_add import AutoAddRuleError
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
-from backend.core.session_store import OpError, is_valid_session_id
+from backend.core.session_store import (
+    AnnotationFieldConflict,
+    OpError,
+    is_valid_session_id,
+)
 from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
     ImageBudgetExceeded,
     LayoutBusy,
+    LeaseConflict,
     OpBatchTooLarge,
     RateLimited,
     RevisionConflict,
@@ -2019,7 +2024,7 @@ def register_mcp_tools(
             Dict with success, the created/replaced note, and the new revision.
             On a concurrency clash returns success=false with the current
             revision so the caller can re-read and retry. Retryable errors:
-            revision_conflict, busy, rate_limited; change the request for
+            revision_conflict, lease_conflict, busy, rate_limited; change the request for
             wrong_type or a validation error.
         """
         if session_manager is None:
@@ -2076,6 +2081,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationRecentlyDeleted:
             return {
@@ -2138,6 +2151,7 @@ def register_mcp_tools(
         z: Optional[float] = None,
         locked: Optional[bool] = None,
         expected_revision: Optional[int] = None,
+        base_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update a sticky note's content, style, position, size, rotation, layer
@@ -2170,13 +2184,28 @@ def register_mcp_tools(
             expected_revision: If given, the write is rejected unless it equals
                 the session's current ``revision`` (optimistic concurrency).
                 Read it from ``list_sticky_notes`` first. Omit for last-write-wins.
+            base_version: If given, the write is rejected with a
+                field_conflict — rather than silently overwriting — when one
+                of the fields you are changing here (text/color/font_size/
+                x/y/w/h/rotation/z/locked) was itself changed by someone else
+                since this version. Unlike expected_revision this does not
+                reject on an unrelated change elsewhere in the session or to
+                a different field of this same note. In particular, a
+                position-only move (x/y) still resends the note's current w/h
+                inside geometry (see build_note_patch), so without
+                base_version a concurrent resize is silently clobbered even
+                though only position was meant to change — this is exactly
+                what base_version protects against. Read it from this note's
+                ``version`` in ``list_sticky_notes``/a prior write's result.
+                Omit for the pre-existing unconditional-merge behaviour.
 
         Returns:
             Dict with success, the updated note, and the new revision. On a
             concurrency clash returns success=false with the current revision
             so the caller can re-read and retry. Retryable errors:
-            revision_conflict, busy, rate_limited; change the request for
-            not_found or a validation error.
+            revision_conflict, lease_conflict, busy, rate_limited; change the request for
+            not_found, or field_conflict (re-read list_sticky_notes and retry
+            with the fields that are still yours to set, at the new version).
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -2236,6 +2265,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 patch,
                 expected_revision=expected_revision,
+                base_version=base_version,
             )
         except RevisionConflict as exc:
             return {
@@ -2247,6 +2277,23 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except AnnotationFieldConflict as exc:
+            return {
+                "success": False,
+                "error": "field_conflict",
+                "message": str(exc),
+                "conflicting_fields": exc.conflicts,
+                "server_version": exc.server_version,
+                "note": project_note(exc.server_annotation),
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -2311,7 +2358,7 @@ def register_mcp_tools(
         Returns:
             Dict with success, deleted annotation_id, and the new revision. On a
             concurrency clash returns success=false with the current revision so
-            the caller can re-read and retry. Retryable errors: revision_conflict,
+            the caller can re-read and retry. Retryable errors: revision_conflict, lease_conflict,
             busy, rate_limited; change the request for not_found or a validation
             error.
         """
@@ -2359,6 +2406,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -2635,7 +2690,7 @@ def register_mcp_tools(
         Returns:
             Dict with success, the created/replaced annotation (same shape
             as `list_annotations`), and the new revision. Retryable errors:
-            revision_conflict, busy, rate_limited; change the request for
+            revision_conflict, lease_conflict, busy, rate_limited; change the request for
             invalid_type, invalid_content, wrong_type, or too_large.
         """
         if session_manager is None:
@@ -2761,6 +2816,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationRecentlyDeleted:
             return {
@@ -2888,7 +2951,7 @@ def register_mcp_tools(
         Returns:
             Dict with success, the created/replaced annotation (same shape
             as `list_annotations`), and the new revision. Retryable errors:
-            revision_conflict, busy, rate_limited; change the request for
+            revision_conflict, lease_conflict, busy, rate_limited; change the request for
             invalid_source, invalid_image, unsupported_type, fetch_failed,
             invalid_content, wrong_type or too_large.
         """
@@ -3003,6 +3066,14 @@ def register_mcp_tools(
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
             }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
+            }
         except AnnotationRecentlyDeleted:
             return {
                 "success": False,
@@ -3064,6 +3135,7 @@ def register_mcp_tools(
         content: Optional[Dict[str, Any]] = None,
         style: Optional[Dict[str, Any]] = None,
         expected_revision: Optional[int] = None,
+        base_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Update an annotation's content, style, and/or geometry.
@@ -3097,11 +3169,23 @@ def register_mcp_tools(
                 equals the session's current `revision` (optimistic
                 concurrency). Read it from `list_annotations` first. Omit
                 for last-write-wins.
+            base_version: If given, the write is rejected with a
+                field_conflict — rather than silently overwriting — when one
+                of the fields you are changing here (x/y/w/h/rotation →
+                geometry, content, style) was itself changed by someone else
+                since this version. Unlike expected_revision this does not
+                reject on an unrelated change elsewhere in the session or to
+                a different field of this same annotation. Read it from this
+                annotation's `version` in `list_annotations`/a prior write's
+                result. Omit for the pre-existing unconditional-merge
+                behaviour.
 
         Returns:
             Dict with success, the updated annotation, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
-            the request for not_found, invalid_content, or no_fields_to_update.
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
+            the request for not_found, invalid_content, no_fields_to_update,
+            or field_conflict (re-read list_annotations and retry with the
+            fields that are still yours to set, at the new version).
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -3172,6 +3256,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 patch,
                 expected_revision=expected_revision,
+                base_version=base_version,
             )
         except RevisionConflict as exc:
             return {
@@ -3183,6 +3268,23 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except AnnotationFieldConflict as exc:
+            return {
+                "success": False,
+                "error": "field_conflict",
+                "message": str(exc),
+                "conflicting_fields": exc.conflicts,
+                "server_version": exc.server_version,
+                "annotation": project_annotation(exc.server_annotation),
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -3250,7 +3352,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success, the updated annotation, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for not_found.
         """
         if session_manager is None:
@@ -3299,6 +3401,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -3376,7 +3486,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success, the updated annotation, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for not_found.
         """
         if session_manager is None:
@@ -3429,6 +3539,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -3506,7 +3624,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success, the new annotation, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for not_found or id_exists.
         """
         if session_manager is None:
@@ -3585,6 +3703,14 @@ def register_mcp_tools(
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
             }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
+            }
         except AnnotationRecentlyDeleted:
             return {
                 "success": False,
@@ -3655,7 +3781,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success, deleted annotation_id, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for not_found.
         """
         if session_manager is None:
@@ -3702,6 +3828,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {
@@ -3814,7 +3948,7 @@ def register_mcp_tools(
             Dict with success, the created/replaced group (same projected
             shape as `list_annotations`, with `label`/`description`/`color`/
             `member_node_ids` under `content`), and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for invalid_content, wrong_type, or too_large.
         """
         if session_manager is None:
@@ -3876,6 +4010,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationRecentlyDeleted:
             return {
@@ -3967,7 +4109,7 @@ def register_mcp_tools(
         Returns:
             Dict with success, the group (same projected shape as
             `list_annotations`), the resulting `member_node_ids`, and the new
-            revision. Retryable errors: revision_conflict, busy, rate_limited;
+            revision. Retryable errors: revision_conflict, lease_conflict, busy, rate_limited;
             change the request for invalid_content, not_found, or too_large.
         """
         if session_manager is None:
@@ -4049,6 +4191,14 @@ def register_mcp_tools(
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
             }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
+            }
         except LayoutBusy:
             return {
                 "success": False,
@@ -4125,7 +4275,7 @@ def register_mcp_tools(
 
         Returns:
             Dict with success, deleted group_id, and the new revision.
-            Retryable errors: revision_conflict, busy, rate_limited; change
+            Retryable errors: revision_conflict, lease_conflict, busy, rate_limited; change
             the request for not_found.
         """
         if session_manager is None:
@@ -4173,6 +4323,14 @@ def register_mcp_tools(
                 ),
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }
+        except LeaseConflict as exc:
+            return {
+                "success": False,
+                "error": "lease_conflict",
+                "message": str(exc),
+                "annotation_id": exc.annotation_id,
+                "held_by": exc.held_by,
             }
         except AnnotationNotFound:
             return {

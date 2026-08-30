@@ -256,7 +256,26 @@ export function createAnnotation(input = {}) {
     locked: Boolean(input.locked),
     ...payload,
   };
-  for (const key of ['created_by', 'updated_by', 'created_at', 'updated_at']) {
+  // `version`/`field_versions` are server-owned same-field-conflict bookkeeping
+  // (dec-annotation-field-patches-and-conflicts), not per-kind content — the
+  // same fixed-field copy-through `created_by`/`updated_by`/`created_at`/
+  // `updated_at` already get, not the per-kind `withTypePayload` whitelist
+  // above. Carried through unconditionally when present, never defaulted or
+  // invented: this file has no notion of "the server hasn't seen this yet"
+  // vs. "this is stale", so it must not manufacture a version an annotation
+  // was never actually assigned. Without this, every browser round trip
+  // (hydrate -> canvas -> autosave) silently dropped both fields, so a
+  // same-field conflict a collaborator's write should have caught instead
+  // merged unconditionally — the bug smallfix-annotation-version-dropped-by-
+  // browser-pipeline fixes.
+  for (const key of [
+    'created_by',
+    'updated_by',
+    'created_at',
+    'updated_at',
+    'version',
+    'field_versions',
+  ]) {
     if (input[key] !== undefined) annotation[key] = input[key];
   }
   return annotation;

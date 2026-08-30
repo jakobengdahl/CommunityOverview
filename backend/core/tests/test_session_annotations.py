@@ -205,6 +205,10 @@ class TestProjectNote:
             "rotation": 0,
             "z": 3,
             "locked": True,
+            # Server-owned versioning bookkeeping
+            # (dec-annotation-field-patches-and-conflicts); defaults to 1 for
+            # an annotation stored before this field existed, as here.
+            "version": 1,
             "created_at": "t1",
             "updated_at": "t2",
             "created_by": "mcp-agent",
