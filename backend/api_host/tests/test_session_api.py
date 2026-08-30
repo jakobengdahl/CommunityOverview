@@ -989,6 +989,68 @@ class TestSessionImageIngestEndpoint:
         )
         assert allowed.status_code == 200
 
+    def test_lease_acquired_during_fetch_races_the_authoritative_check_409(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """The pre-check above only sees leases that already existed *before*
+        the awaited fetch/optimize step starts. If another browser's lease
+        acquisition lands *during* that await — after the pre-check passed,
+        before upsert_image_annotation runs — the pre-check cannot catch it;
+        the authoritative check inside upsert_image_annotation itself is
+        what has to (see LeaseConflict's docstring and
+        upsert_image_annotation's). Without `except LeaseConflict` around
+        that call in ingest_session_image, this scenario raises unhandled
+        out of the route handler instead of the expected 409."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        first = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(color=(255, 0, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert first.status_code == 200
+
+        mgr = test_app.app.state.session_manager
+        real_fetch_and_optimize = rest_api_module._fetch_and_optimize_image
+
+        def _fetch_and_optimize_then_acquire_lease(image_data, image_url):
+            # Runs inside asyncio.to_thread, standing in for the "someone
+            # else's edit-lease acquisition landed while this request's
+            # fetch/optimize step was in flight" window — after this
+            # endpoint's own pre-check already found no lease, before
+            # upsert_image_annotation's authoritative check runs.
+            result = real_fetch_and_optimize(image_data, image_url)
+            mgr.leases.acquire(sid, "browser-2", ["img-1"])
+            return result
+
+        monkeypatch.setattr(
+            rest_api_module,
+            "_fetch_and_optimize_image",
+            _fetch_and_optimize_then_acquire_lease,
+        )
+
+        raced = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 5,
+                "y": 5,
+                "image_data": _png_data_url(color=(0, 255, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert raced.status_code == 409
+
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert (
+            state["annotations"][0]["image"]["url"]
+            == first.json()["annotation"]["image"]["url"]
+        )
+
 
 class TestImageIngestRateLimit:
     """The ingest op is attributed to a single fixed marker id (see the class

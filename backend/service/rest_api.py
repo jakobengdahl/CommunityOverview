@@ -1280,6 +1280,16 @@ def _register_session_endpoints(
                     "by another collaborator; retry with a different id."
                 ),
             )
+        except LeaseConflict as exc:
+            # The pre-check above (before the fetch/optimize step) is a
+            # fail-fast UX nicety only; this is the authoritative check
+            # inside upsert_image_annotation itself, closing the race where a
+            # lease is acquired by someone else during the awaited
+            # fetch/optimize step — see LeaseConflict's docstring. Same 409
+            # shape as apply_session_ops/undo_session_action use for this
+            # exception, so the browser's shared terminal-rejection handling
+            # (sessionSyncClient.js) applies uniformly.
+            raise HTTPException(status_code=409, detail=str(exc))
         except LayoutBusy:
             raise HTTPException(status_code=409, detail="session busy, retry")
         except RateLimited:
