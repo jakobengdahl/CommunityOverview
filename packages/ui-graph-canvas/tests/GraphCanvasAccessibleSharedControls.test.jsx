@@ -232,3 +232,95 @@ describe('GraphCanvas: keyboard creation lands selected and focused, ready to ed
     expect(nodeById('already-selected').selected).toBe(false);
   });
 });
+
+describe('GraphCanvas: creation focus must never escape an open modal mobile sheet', () => {
+  // This suite's `reactflow` mock (above) never actually renders a real
+  // `.react-flow__node[data-id]` wrapper for a created node - real ReactFlow
+  // does that internally from the `nodes` prop, which this mock ignores in
+  // favour of just rendering `children`. createAnnotation's own focus call
+  // (GraphCanvas.jsx) looks one up by querying `reactFlowWrapper.current`,
+  // so each test here plants a stand-in matching what production would have
+  // rendered, inside the mocked `<ReactFlow>`'s own DOM (a real descendant
+  // of the wrapper `reactFlowWrapper` is `ref`ed to) - then asserts on real
+  // DOM focus, not on an implementation detail.
+  let dateNowSpy;
+
+  beforeEach(() => {
+    store.nodes = [];
+    store.edges = [];
+    store.handlers = {};
+    // Deterministic id (createAnnotation: `${kind}-${Date.now()}`) so the
+    // stand-in element below can be planted with the exact data-id the real
+    // focus call will look up.
+    dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(1735500000000);
+    // createAnnotation defers its focus call to a rAF; running it
+    // synchronously keeps these tests assertion-after-act rather than
+    // needing a real animation-frame wait.
+    vi.stubGlobal('requestAnimationFrame', (cb) => {
+      cb();
+      return 0;
+    });
+  });
+
+  afterEach(() => {
+    dateNowSpy.mockRestore();
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  function mountFocusTarget(id) {
+    const el = document.createElement('div');
+    el.className = 'react-flow__node';
+    el.setAttribute('data-id', id);
+    el.tabIndex = -1; // focusable in jsdom, matching ReactFlow's own node wrapper
+    screen.getByTestId('react-flow').appendChild(el);
+    return el;
+  }
+
+  it('DESKTOP (no modal sheet open): focus lands on the newly created annotation — the keyboard-accessibility case this behaviour exists to establish', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} compactMode="off" onAnnotationChange={vi.fn()} />);
+    const target = mountFocusTarget('note-1735500000000');
+
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+    expect(document.activeElement).toBe(target);
+  });
+
+  it("MOBILE with the annotate BottomSheet open (isCompact + annotationToolboxPortalContainer, the sheet's own open signal): focus must NOT move onto the canvas node hidden behind the still-open modal sheet", () => {
+    const portalContainer = document.createElement('div');
+    document.body.appendChild(portalContainer);
+    try {
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          compactMode="on"
+          annotationToolboxPortalContainer={portalContainer}
+          onAnnotationChange={vi.fn()}
+        />
+      );
+      const target = mountFocusTarget('note-1735500000000');
+
+      fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+      expect(document.activeElement).not.toBe(target);
+      // The invariant is "focus never left the sheet", not merely "focus
+      // avoided this one element" - confirm it landed nowhere inside the
+      // canvas wrapper at all, mobile sheet or not.
+      expect(screen.getByTestId('react-flow').contains(document.activeElement)).toBe(false);
+    } finally {
+      portalContainer.remove();
+    }
+  });
+
+  it('MOBILE compact but with NO modal sheet open (no portal container - the fallback inline strip): focus still lands on the new annotation, same as desktop', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} compactMode="on" onAnnotationChange={vi.fn()} />);
+    const target = mountFocusTarget('note-1735500000000');
+
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+    expect(document.activeElement).toBe(target);
+  });
+});

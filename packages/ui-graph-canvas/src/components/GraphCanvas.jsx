@@ -30,7 +30,6 @@ import {
   MultiNodeContextMenu,
   EdgeContextMenu,
   PaneContextMenu,
-  useAnnotationMenuKeyNav,
 } from './ContextMenus';
 import { useRemotePositions } from '../hooks/useRemotePositions';
 import { useAnimatedLayout } from '../hooks/useAnimatedLayout';
@@ -1894,14 +1893,31 @@ function GraphCanvasInner({
       );
       setPaneContextMenu(null);
       onAnnotationChangeRef.current?.('create');
-      requestAnimationFrame(() => {
-        const el = reactFlowWrapper.current?.querySelector(
-          `.react-flow__node[data-id="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`
-        );
-        el?.focus();
-      });
+      // The focus-after-create above must never fire while the mobile
+      // `'annotate'` BottomSheet (aria-modal="true") is still open — that
+      // sheet never auto-closes on creation, so moving DOM focus onto the new
+      // node (rendered behind the still-visible sheet) would silently break
+      // the sheet's own modal-focus contract, which only intercepts Tab, not
+      // a programmatic .focus() from here. `isCompact && annotationToolbox
+      // PortalContainer` is exactly the host's existing signal for "that
+      // sheet is currently mounted" (the same condition that portals the
+      // sheet-variant AnnotationToolbox into it above, and disarms
+      // prevAnnotationPortalContainerRef's stash), so this reuses it rather
+      // than inventing a new one. Desktop (isCompact false, no portal
+      // container) always takes the focus branch unchanged — the
+      // keyboard-accessibility case this behaviour exists for in the first
+      // place.
+      const modalSheetOpen = isCompact && Boolean(annotationToolboxPortalContainer);
+      if (!modalSheetOpen) {
+        requestAnimationFrame(() => {
+          const el = reactFlowWrapper.current?.querySelector(
+            `.react-flow__node[data-id="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`
+          );
+          el?.focus();
+        });
+      }
     },
-    [setNodes]
+    [setNodes, isCompact, annotationToolboxPortalContainer]
   );
 
   // The "Nearby object menu" creation entry point
