@@ -273,7 +273,14 @@
 .graph-annotation-context-menu--bar {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  /* One row. The right-edge panel anchoring below keys off DOM order, which
+     only tracks visual order while the bar does not wrap; a wrapped bar would
+     put the visually-rightmost group somewhere in the middle of the list and
+     anchor the wrong panels. An x-scroll is the honest fallback for a bar too
+     wide to fit. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
   align-items: center;
   gap: 2px;
   padding: 4px;

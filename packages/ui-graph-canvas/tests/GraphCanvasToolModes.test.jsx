@@ -3,7 +3,7 @@
 // change — sticky placement, an eraser, and a stylus's inverted tip — plus the
 // long-press pointer type that a stylus actually reports.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 const store = vi.hoisted(() => ({ handlers: {}, nodes: [] }));
@@ -114,6 +114,14 @@ function dragOnPane(x1, y1, x2, y2) {
   pressPane(x1, y1);
   movePointer(x2, y2);
   releasePointer(x2, y2);
+}
+
+// The shape slot shows only the current variant; every other one has to be
+// picked from its fold-out first. Picking also arms the tool.
+function selectShapeVariant(name) {
+  fireEvent.click(screen.getByRole('button', { name: /choose a shape/i }));
+  const picker = screen.getByRole('group', { name: /^shapes$/i });
+  fireEvent.click(within(picker).getByRole('button', { name }));
 }
 
 function countOf(type) {
@@ -250,6 +258,38 @@ describe('GraphCanvas annotation tool modes', () => {
       expect(dot.position).toEqual({ x: 100, y: 100 });
     });
 
+    it('sizes a regular subtype from the longer side of the drag, not from dx alone', () => {
+      // A regular subtype's proportion is recomputed from its WIDTH
+      // (regularShapeSize), so sizing it from dx meant a mostly-vertical drag
+      // always produced a minimum-size triangle however far the user dragged.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      selectShapeVariant(/^triangle$/i);
+
+      dragOnPane(100, 100, 130, 500);
+
+      const shape = store.nodes.find((n) => n.type === 'shape');
+      expect(shape.data.shape).toBe('triangle');
+      // 400px is the long side; the height follows the subtype's own ratio.
+      expect(shape.style.width).toBe(400);
+      expect(shape.style.height).toBe(Math.round(400 / (2 / Math.sqrt(3))));
+    });
+
+    it('never produces a box under the resizer’s own minimum, even after re-proportioning', () => {
+      // The clamp has to survive `regularShapeSize`, which recomputes height
+      // from width: clamping first meant the height was simply discarded, and
+      // a triangle came out 40x35 — under the minimum the clamp exists for.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      selectShapeVariant(/^triangle$/i);
+
+      dragOnPane(100, 100, 108, 112);
+
+      const shape = store.nodes.find((n) => n.type === 'shape');
+      expect(shape.style.width).toBeGreaterThanOrEqual(40);
+      expect(shape.style.height).toBeGreaterThanOrEqual(40);
+    });
+
     it('never starts a placement from a press that landed on an existing node', () => {
       // An armed tool must not make the rest of the canvas unusable: pressing
       // an object still selects and drags it.
@@ -291,10 +331,18 @@ describe('GraphCanvas annotation tool modes', () => {
       }
     }
 
-    function mountNodeElement(id) {
+    function mountNodeElement(id, rect = { left: 0, top: 0, right: 120, bottom: 80 }) {
       const el = document.createElement('div');
       el.className = 'react-flow__node';
       el.setAttribute('data-id', id);
+      // jsdom gives every element a zero-size rect; the eraser measures the
+      // element it just removed to know what area to ignore, so the test has
+      // to supply a real one.
+      el.getBoundingClientRect = () => ({
+        ...rect,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+      });
       screen.getByTestId('react-flow').appendChild(el);
       return el;
     }
@@ -372,22 +420,24 @@ describe('GraphCanvas annotation tool modes', () => {
       openToolbox();
       arm(/^eraser$/i);
 
-      const first = mountNodeElement('note-1');
-      const second = mountNodeElement('note-2');
+      // Two objects side by side, as they would be on a real canvas — the
+      // sweep has to leave the first one's footprint to reach the second.
+      const first = mountNodeElement('note-1', { left: 0, top: 0, right: 50, bottom: 50 });
+      const second = mountNodeElement('note-2', { left: 200, top: 0, right: 250, bottom: 50 });
       const rf = screen.getByTestId('react-flow');
       // One press, then movement across two objects, then one release.
       withElementAtPoint(first, () => {
         act(() => {
-          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
+          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
         });
       });
       withElementAtPoint(second, () => {
         act(() => {
-          rf.dispatchEvent(pointerEvent('pointermove', { clientX: 60, clientY: 60 }));
+          rf.dispatchEvent(pointerEvent('pointermove', { clientX: 220, clientY: 20 }));
         });
       });
       act(() => {
-        rf.dispatchEvent(pointerEvent('pointerup', { clientX: 60, clientY: 60 }));
+        rf.dispatchEvent(pointerEvent('pointerup', { clientX: 220, clientY: 20 }));
       });
 
       expect(store.nodes.find((n) => n.id === 'note-1')).toBeUndefined();
@@ -400,8 +450,19 @@ describe('GraphCanvas annotation tool modes', () => {
       // per-object key alone does not prevent this — whatever is underneath
       // is simply a new key.
       const onHide = vi.fn();
+      const graphNode = {
+        id: 'graph-1',
+        type: 'custom',
+        position: { x: 0, y: 0 },
+        data: { label: 'A' },
+      };
       store.nodes = [{ id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
-      render(<GraphCanvas nodes={[]} edges={[]} onHide={onHide} onAnnotationChange={vi.fn()} />);
+      // `graph-1` has to be a REAL node, delivered through the prop: without
+      // it `eraseAt` bails at its "node not found" guard and the test passes
+      // no matter what the cascade guard does.
+      render(
+        <GraphCanvas nodes={[graphNode]} edges={[]} onHide={onHide} onAnnotationChange={vi.fn()} />
+      );
       openToolbox();
       arm(/^eraser$/i);
 

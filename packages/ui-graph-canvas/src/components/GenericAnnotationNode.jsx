@@ -175,6 +175,22 @@ const SHAPE_TEXT_INSET = Object.freeze(
 // shape name, matching SHAPE_STYLES' own fallback — including a name that
 // collides with an inherited Object member, since SHAPE_TEXT_INSET has no
 // prototype to collide with.
+// Swap the inset's left/right and/or top/bottom so a mirrored shape's caption
+// follows the figure. A no-op when nothing is flipped.
+function mirrorInset(inset, flipX, flipY) {
+  if (!flipX && !flipY) return inset;
+  const next = { ...inset };
+  if (flipX) {
+    next.left = inset.right;
+    next.right = inset.left;
+  }
+  if (flipY) {
+    next.top = inset.bottom;
+    next.bottom = inset.top;
+  }
+  return next;
+}
+
 function shapeTextInsetStyle(shape) {
   const inset = SHAPE_TEXT_INSET[shape] || SHAPE_TEXT_INSET.rectangle;
   return {
@@ -943,7 +959,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             <div
               className="graph-generic-annotation-shape-text"
               style={{
-                ...shapeTextInsetStyle(shape),
+                // Mirrored with the figure: the inset is asymmetric for the
+                // directional variants (a triangle's top half, a process
+                // arrow's right side), so on a flipped shape the unmirrored
+                // inset put the caption in the half the figure no longer
+                // occupies. The text itself is not mirrored — only where it
+                // sits.
+                ...mirrorInset(shapeTextInsetStyle(shape), data?.flipX, data?.flipY),
                 justifyContent: textAlignStyle.justifyContent,
                 alignItems: textAlignStyle.alignItems,
                 ...opacityStyle,

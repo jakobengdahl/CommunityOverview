@@ -523,7 +523,22 @@ function AnnotationToolbox({
   // and would misread them as keyboard use.
   const handleToolKeyDown = (event, kind, options) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
+    // Holding the key must not spray objects across the canvas.
+    if (event.repeat) return;
     if (!onCreate) return;
+    // Only the kinds that actually produce an object. `select`, `eraser` and
+    // `freehand` arm a mode and `image` opens a file picker — none of them is
+    // something `createAnnotation` knows how to build, and passing one through
+    // fell out of every branch into the terminal `else` and created an ARROW.
+    // Keyboard-activating the Select tool dropped an arrow on the canvas.
+    if (MODE_KINDS.has(kind) || kind === 'image') {
+      // Still let these arm, so the keyboard reaches them at all — just
+      // through the mode path rather than the creation one.
+      event.preventDefault();
+      setHovered(null);
+      activateTool(kind, options);
+      return;
+    }
     event.preventDefault();
     setHovered(null);
     onCreate(kind, options);

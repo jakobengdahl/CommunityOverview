@@ -72,10 +72,15 @@ describe('AnnotationMenuGroup', () => {
     const border = screen.getByRole('button', { name: 'Border' });
 
     fireEvent.click(fill);
+    // Focus has to actually go INTO the open panel first, or the restore this
+    // guards is never armed and the test passes with the guard deleted —
+    // `fireEvent.click` does not move focus in jsdom.
+    screen.getByText('fill-option').focus();
     border.focus();
     fireEvent.click(border);
 
     expect(document.activeElement).toBe(border);
+    expect(screen.getByText('border-option')).toBeInTheDocument();
   });
 
   it('returns focus to its own trigger when its panel closes under it', () => {

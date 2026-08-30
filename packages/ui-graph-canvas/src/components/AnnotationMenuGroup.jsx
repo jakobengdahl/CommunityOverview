@@ -49,6 +49,12 @@ export function AnnotationMenuGroup({ groupKey, label, glyph, swatch, open, onTo
     if (!open) return undefined;
     const el = groupRef.current;
     if (!el) return undefined;
+    // Seeded from the current focus: the effect attaches after the click that
+    // opened the group, so the trigger's own focusin is already past. Without
+    // this, a keyboard user who opens a group and never tabs into the panel
+    // leaves `heldFocusRef` false for the whole open lifetime, and the
+    // focus-return this component documents never happens.
+    heldFocusRef.current = el.contains(document.activeElement);
     const onFocusIn = () => {
       heldFocusRef.current = true;
     };

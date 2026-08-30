@@ -19,7 +19,11 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode, { newShapeSize, regularShapeSize } from './GenericAnnotationNode';
+import GenericAnnotationNode, {
+  newShapeSize,
+  regularShapeSize,
+  regularShapeAspect,
+} from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
@@ -115,6 +119,10 @@ function isEraserTipEvent(event) {
 // How far the pointer must travel before the eraser will act again. See
 // eraseAt: without it a sweep cascades down a stack of objects at one spot.
 const ERASE_RESTEP_PX = 8;
+
+// GenericAnnotationNode's own MIN_SIZE. A drawn box may never come out under
+// it, before or after a subtype's proportion is applied.
+const MIN_ANNOTATION_SIZE = 40;
 
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
@@ -724,9 +732,10 @@ function GraphCanvasInner({
   // re-render the canvas on every pointermove.
   const placementRef = useRef(null);
   const placementPreviewRef = useRef(null);
+  const placementSuspendedRef = useRef(false);
   const createAnnotationRef = useRef(null);
   const erasingPointerIdRef = useRef(null);
-  const lastErasePointRef = useRef(null);
+  const eraseBlockRectRef = useRef(null);
   const erasedThisStrokeRef = useRef(new Set());
   const latestNodesRef = useRef([]);
   // The mobile annotate sheet unmounts the toolbox on close (its portal
@@ -1943,8 +1952,18 @@ function GraphCanvasInner({
         // aspect lock would then cement the distortion — reintroducing exactly
         // the squashed-shape bug that code exists to prevent. The drag still
         // decides the SIZE; the subtype decides the proportion.
-        const drawnBox = options.box
+        // Re-proportion FIRST, then re-floor: `regularShapeSize` recomputes
+        // height from width, so a height clamped before it is simply
+        // discarded — at the minimum a triangle came out 40x35, under the
+        // resizer's own MIN_SIZE that the clamp exists to respect.
+        const proportioned = options.box
           ? (regularShapeSize(shape, options.box.width) ?? options.box)
+          : null;
+        const drawnBox = proportioned
+          ? {
+              width: Math.max(MIN_ANNOTATION_SIZE, proportioned.width),
+              height: Math.max(MIN_ANNOTATION_SIZE, proportioned.height),
+            }
           : null;
         newNode = {
           id,
@@ -3345,13 +3364,46 @@ function GraphCanvasInner({
       return null;
     };
 
+    // The footprint of the element being erased, measured before it is
+    // removed. Falls back to a small box around the pointer when the element
+    // cannot be measured (jsdom, or an element already detached).
+    const rectOfErased = (clientX, clientY) => {
+      const el = document.elementFromPoint(clientX, clientY)?.closest?.('.react-flow__node');
+      const rect = el?.getBoundingClientRect?.();
+      if (rect && (rect.width || rect.height)) {
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+      }
+      return {
+        left: clientX - ERASE_RESTEP_PX,
+        right: clientX + ERASE_RESTEP_PX,
+        top: clientY - ERASE_RESTEP_PX,
+        bottom: clientY + ERASE_RESTEP_PX,
+      };
+    };
+
     const eraseAt = (clientX, clientY) => {
-      // One object per position. Without this, erasing a small annotation that
-      // sits on top of a graph node hides that node on the very next pixel of
-      // movement — the per-object key alone does not prevent cascading down a
-      // stack at a single spot, because whatever is underneath is a new key.
-      const last = lastErasePointRef.current;
-      if (last && Math.hypot(clientX - last.x, clientY - last.y) < ERASE_RESTEP_PX) return;
+      // Never act on what this stroke's own deletion just revealed. Erasing a
+      // small annotation sitting on a graph node would otherwise hide that
+      // node the moment the pointer moved — the per-object key cannot prevent
+      // it, because whatever is underneath is simply a different key.
+      //
+      // The gate is the erased element's own rectangle rather than a fixed
+      // radius: a radius only delays the cascade until the pointer has moved
+      // past it, and picks a distance that is wrong for both a vote dot and a
+      // full-width note. Leaving the erased object's footprint is the honest
+      // signal that the user has moved on to something else.
+      const blocked = eraseBlockRectRef.current;
+      if (blocked) {
+        if (
+          clientX >= blocked.left &&
+          clientX <= blocked.right &&
+          clientY >= blocked.top &&
+          clientY <= blocked.bottom
+        ) {
+          return;
+        }
+        eraseBlockRectRef.current = null;
+      }
 
       const target = resolveTarget(clientX, clientY);
       if (!target) return;
@@ -3360,7 +3412,6 @@ function GraphCanvasInner({
 
       if (target.kind === 'edge') {
         erasedThisStrokeRef.current.add(key);
-        lastErasePointRef.current = { x: clientX, y: clientY };
         onHideEdge?.(target.id);
         return;
       }
@@ -3377,20 +3428,22 @@ function GraphCanvasInner({
       // kind of thing a sweeping eraser lands on by accident.
       if (node.type === 'group') return;
 
-      erasedThisStrokeRef.current.add(key);
-      lastErasePointRef.current = { x: clientX, y: clientY };
-
       if (OVERLAY_TYPES.has(node.type)) {
         // Same guards the bulk delete applies: an annotation another client
         // is editing, or one the user locked on purpose, is not erasable by
-        // sweeping a pointer over it.
+        // sweeping a pointer over it. Checked BEFORE anything is recorded, so
+        // sweeping over a locked annotation does not also block whatever sits
+        // near it.
         if (isRemoteLocked(node.data) || node.data?.locked) return;
+        erasedThisStrokeRef.current.add(key);
+        eraseBlockRectRef.current = rectOfErased(clientX, clientY);
         setNodes((nds) => nds.filter((n) => n.id !== target.id));
         onAnnotationChangeRef.current?.('delete');
         // The same edit-lease handshake every other annotation delete performs.
         beginEditingRef.current?.([target.id]).then(() => endEditingRef.current?.([target.id]));
         return;
       }
+      erasedThisStrokeRef.current.add(key);
       onHide?.(target.id);
     };
 
@@ -3398,7 +3451,7 @@ function GraphCanvasInner({
       if (!wantsErase(event) || erasingPointerIdRef.current !== null) return;
       erasingPointerIdRef.current = event.pointerId;
       erasedThisStrokeRef.current.clear();
-      lastErasePointRef.current = null;
+      eraseBlockRectRef.current = null;
       // Capture the pointer so `pointerup` is delivered here even when the
       // sweep ends outside the wrapper (over browser chrome, or off-window).
       // Without it that release is lost, `erasingPointerIdRef` stays set, and
@@ -3432,7 +3485,7 @@ function GraphCanvasInner({
       }
       erasingPointerIdRef.current = null;
       erasedThisStrokeRef.current.clear();
-      lastErasePointRef.current = null;
+      eraseBlockRectRef.current = null;
     };
 
     // Capture phase so the gesture is claimed before ReactFlow's own pane
@@ -3456,7 +3509,7 @@ function GraphCanvasInner({
       // Never leave the gesture latched across a teardown.
       erasingPointerIdRef.current = null;
       erasedThisStrokeRef.current.clear();
-      lastErasePointRef.current = null;
+      eraseBlockRectRef.current = null;
     };
     // No `nodes` dependency on purpose — see erasingPointerIdRef above.
   }, [setNodes, onHide, onHideEdge]);
@@ -3486,7 +3539,7 @@ function GraphCanvasInner({
     const MIN_DRAG_PX = 6;
     // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
     // be smaller than the resizer would allow it to be dragged to.
-    const MIN_DRAWN_SIZE = 40;
+    const MIN_DRAWN_SIZE = MIN_ANNOTATION_SIZE;
 
     const armedPlacement = () => {
       const tool = activeToolRef.current;
@@ -3509,8 +3562,15 @@ function GraphCanvasInner({
       // Abandoning rather than hijacking is what keeps two-finger zoom usable
       // while a tool is armed — which matters because these tools are sticky,
       // so "armed" is the resting state, not a moment.
-      if (placementRef.current) {
+      //
+      // Suspended rather than merely nulled: a third contact (a palm landing
+      // during a two-finger zoom, or the first finger re-landing while the
+      // second is still down) would otherwise find no gesture in flight, start
+      // a fresh one, and commit an annotation when it lifted. The suspension
+      // lasts until every pointer is up.
+      if (placementRef.current || placementSuspendedRef.current) {
         placementRef.current = null;
+        placementSuspendedRef.current = true;
         hidePreview();
         return;
       }
@@ -3527,6 +3587,27 @@ function GraphCanvasInner({
         startY: event.clientY,
         dragged: false,
       };
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    // Claiming the gesture from ReactFlow needs a SECOND block, on the legacy
+    // events. d3-zoom — which is what `panOnDrag` drives — binds
+    // `mousedown.zoom` and `touchstart.zoom`, not pointer events, so
+    // `stopPropagation` on a pointerdown never reached it and the canvas
+    // panned along with the drag that was sizing the object. Both corners are
+    // then converted at release with the moved transform, collapsing the box
+    // to nothing — which the minimum-size clamp would have quietly turned into
+    // a 40x40 shape at the wrong place instead of an obvious failure.
+    //
+    // Blocked only while THIS gesture owns the pointer, and only for a single
+    // contact: a second finger abandons the placement (see above) and its own
+    // `touchstart` is let through carrying both touches, so d3-zoom can still
+    // start a pinch. That is what keeps zoom usable while a sticky tool is
+    // armed instead of trading one regression for the other.
+    const blockCanvasGesture = (event) => {
+      if (!placementRef.current) return;
+      if (event.type === 'touchstart' && event.touches && event.touches.length > 1) return;
       event.preventDefault();
       event.stopPropagation();
     };
@@ -3589,14 +3670,22 @@ function GraphCanvasInner({
       // process arrow is the whole reason to drag in that direction.
       const a = screenToFlowPositionRef.current({ x: startX, y: startY });
       const b = screenToFlowPositionRef.current({ x: event.clientX, y: event.clientY });
-      // Clamped to the resizer's own minimum. `MIN_DRAG_PX` is satisfied by
-      // EITHER axis, so a purely horizontal drag would otherwise produce a
-      // zero-height annotation: invisible, and almost impossible to select
-      // again in order to fix.
-      const box = {
-        width: Math.max(MIN_DRAWN_SIZE, Math.round(Math.abs(b.x - a.x))),
-        height: Math.max(MIN_DRAWN_SIZE, Math.round(Math.abs(b.y - a.y))),
-      };
+      // `MIN_DRAG_PX` is satisfied by EITHER axis, so a drag along one axis
+      // alone leaves the other at zero. Both are therefore floored at the
+      // resizer's own minimum — and a regular subtype, whose proportion is
+      // recomputed from the WIDTH alone (`regularShapeSize`), is sized from
+      // the longer side rather than from `dx`: sizing it from a near-zero
+      // width meant a mostly-vertical drag always produced a minimum-size
+      // triangle no matter how far the user actually dragged.
+      const sweptWidth = Math.round(Math.abs(b.x - a.x));
+      const sweptHeight = Math.round(Math.abs(b.y - a.y));
+      const regular = regularShapeAspect(tool.options?.shape || 'rectangle') !== null;
+      const box = regular
+        ? { width: Math.max(MIN_DRAWN_SIZE, sweptWidth, sweptHeight), height: MIN_DRAWN_SIZE }
+        : {
+            width: Math.max(MIN_DRAWN_SIZE, sweptWidth),
+            height: Math.max(MIN_DRAWN_SIZE, sweptHeight),
+          };
       createAnnotationRef.current(
         tool.kind,
         { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) },
@@ -3619,16 +3708,32 @@ function GraphCanvasInner({
       hidePreview();
     };
 
+    // Lifting the last contact clears a suspension, so the next press is a
+    // fresh placement again.
+    const clearSuspension = (event) => {
+      if (event.pointerType === 'touch' && event.buttons) return;
+      placementSuspendedRef.current = false;
+    };
+
     wrapper.addEventListener('pointerdown', handlePointerDown, true);
     wrapper.addEventListener('pointermove', handlePointerMove, true);
     wrapper.addEventListener('pointerup', handlePointerUp, true);
     wrapper.addEventListener('pointercancel', handlePointerCancel, true);
+    wrapper.addEventListener('pointerup', clearSuspension, true);
+    wrapper.addEventListener('pointercancel', clearSuspension, true);
+    wrapper.addEventListener('mousedown', blockCanvasGesture, true);
+    wrapper.addEventListener('touchstart', blockCanvasGesture, { capture: true, passive: false });
     return () => {
       wrapper.removeEventListener('pointerdown', handlePointerDown, true);
       wrapper.removeEventListener('pointermove', handlePointerMove, true);
       wrapper.removeEventListener('pointerup', handlePointerUp, true);
       wrapper.removeEventListener('pointercancel', handlePointerCancel, true);
+      wrapper.removeEventListener('pointerup', clearSuspension, true);
+      wrapper.removeEventListener('pointercancel', clearSuspension, true);
+      wrapper.removeEventListener('mousedown', blockCanvasGesture, true);
+      wrapper.removeEventListener('touchstart', blockCanvasGesture, { capture: true });
       placementRef.current = null;
+      placementSuspendedRef.current = false;
     };
   }, []);
 

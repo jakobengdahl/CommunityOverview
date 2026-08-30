@@ -126,8 +126,11 @@ MCP. The required entry points are:
   next line, with nothing on screen saying the tool had gone.
 - **Keyboard activation still creates.** Arming is a pointer contract — the
   gesture that completes it is a pointerdown/pointerup on the pane — so a
-  keyboard activation (Enter/Space, `event.detail === 0`) creates at the
-  viewport centre instead of arming. Routing it through arming would leave a
+  keyboard activation (a real Enter/Space keydown, which also preventDefaults
+  the click the browser would synthesize from it — not an `event.detail`
+  sniff, which misreads ordinary programmatic clicks) creates at the viewport
+  centre instead of arming. The mode tools have nothing to create, so for
+  those the key still arms. Routing it through arming would leave a
   keyboard user with a live tool and no way to place anything, removing the
   only keyboard route to a standalone annotation.
 - **Drag to draw.** For the kinds with a real box (`shape`, `note`) the press
