@@ -225,6 +225,8 @@ function App() {
     setRoster,
     remoteSelections,
     setRemoteSelections,
+    remoteLeases,
+    setRemoteLeases,
     opStreamReady,
   } = useSyncConnection(sessionId);
   const applyServerSessionRef = useRef(null);
@@ -936,11 +938,10 @@ function App() {
       setSelectedGraphNodes(selectedWithData);
       // Advertise the local selection as selection claims so collaborators see
       // colored markers on the elements this user is working with (design 3.5).
-      // Extended to every annotation kind, not just graph nodes
-      // (task-annotation-shared-session-realtime): GraphCanvas's own
-      // remote-selection effect makes an annotation claim exclusive (it blocks
-      // local dragging and every mutation while another client holds it), not
-      // merely advisory the way the graph-node marker still is.
+      // Extended to every annotation kind, not just graph nodes. Purely
+      // cosmetic (task-annotation-exclusive-edit-leases): selecting an
+      // annotation never blocks another client's dragging or editing of it —
+      // only an actual edit-lease acquisition (handleBeginEditing below) does.
       const claimIds = selectedNodes
         .filter((n) => n.type === 'custom' || CANVAS_ANNOTATION_TYPES.has(n.type))
         .map((n) => n.id);
@@ -948,6 +949,24 @@ function App() {
     },
     [setSelectedGraphNodes]
   );
+
+  // GraphCanvas's edit-lease acquire/release pair (task-annotation-exclusive-
+  // edit-leases): every real edit-start entry point in the canvas package
+  // (text field open, geometry gesture, property editor, bulk mutation)
+  // calls these via AnnotationContext before mutating. Thin wrappers over
+  // the sync client so GraphCanvas never has to know about SessionSyncClient
+  // directly — mirrors how handleSelectionChange above wraps
+  // setLocalSelection. Optimistic-fail-open when no session is connected
+  // yet (nothing server-side could hold a competing lease before the
+  // session exists), matching SessionSyncClient.beginEditing's own
+  // reasoning.
+  const handleBeginEditing = useCallback(async (elementIds) => {
+    if (!syncRef.current) return { granted: elementIds || [], denied: {} };
+    return syncRef.current.beginEditing(elementIds);
+  }, []);
+  const handleEndEditing = useCallback((elementIds) => {
+    syncRef.current?.endEditing(elementIds);
+  }, []);
 
   // Callback: Double-click on node
   const handleNodeDoubleClick = useCallback(
@@ -1909,6 +1928,7 @@ function App() {
       },
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
+      onLeases: (l) => setRemoteLeases(l),
       onSessionRenamed: (name) => {
         sessionStore.renameSession(sessionId, name);
         setSessionsVersion((v) => v + 1);
@@ -1964,6 +1984,7 @@ function App() {
     syncHandlersRef,
     setRoster,
     setRemoteSelections,
+    setRemoteLeases,
   ]);
 
   // Switch working session: persist the current one first (ops via the snapshot
@@ -2364,6 +2385,9 @@ function App() {
           remoteAnnotationOps={remoteAnnotationOps}
           onRemoteAnnotationsApplied={() => setRemoteAnnotationOps(null)}
           remoteSelections={remoteSelections}
+          remoteLeases={remoteLeases}
+          onBeginEditing={handleBeginEditing}
+          onEndEditing={handleEndEditing}
           federationDepth={federationDepth}
           onFederationDepthChange={setFederationDepth}
           maxFederationDepth={maxFederationDepth}
