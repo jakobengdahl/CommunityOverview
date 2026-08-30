@@ -516,6 +516,89 @@ export function foldAckedAnnotationOp(mirrorState, op) {
   return applyOpToMirror(mirror, { ...op, annotation: { ...ann, version, field_versions } });
 }
 
+/**
+ * Apply a remote `annotation_created`/`annotation_updated` broadcast to the
+ * baseline, refusing to let it regress an annotation this client already
+ * has newer data for. Sole caller: `_handleEvent`'s `'op'` case, for an op
+ * attributed to a genuinely different client — never this client's own
+ * (that echo is filtered before reaching here, see the "echo of our own
+ * op" check just above that call site).
+ *
+ * Round 3 review, following the same-client race fix in
+ * `foldAckedAnnotationOp` (round 2): the SSE stream and this client's own
+ * POST-ack channel have no cross-ordering guarantee (see the R15 comment on
+ * `_appliedSeq` above — a concurrent op's broadcast can still be in flight
+ * on a separate HTTP connection when this client's own later op's ack
+ * already landed). So a genuinely different client's broadcast for a
+ * chronologically EARLIER op can arrive after this client's own
+ * already-acked LATER op on the same annotation, and — applied
+ * unconditionally via plain `applyOpToMirror`, as before this fix — would
+ * silently regress both `version`/`field_versions` and content back to that
+ * earlier point, reintroducing the exact spurious `field_conflict` the
+ * whole round-2 mechanism exists to close, this time from a genuine
+ * two-client interleaving rather than a same-client race.
+ *
+ * This function is deliberately NOT `foldAckedAnnotationOp` reused
+ * unmodified: that function max-merges `version`/`field_versions` but still
+ * overwrites content unconditionally (documented in its own docstring as an
+ * accepted, separately-tracked gap for the ack path, where the content is
+ * always this client's own trustworthy write). Reusing it here would fix
+ * the version regression but still let a stale broadcast's stale content
+ * overwrite fresher confirmed fields — version:3 but a field's value
+ * reverted to its version-2 content, an internally inconsistent record.
+ * Every `annotation_created`/`annotation_updated` op the server emits
+ * carries the FULL current record (`session_store.py` mutates the one
+ * server-side object in place and hands back the whole thing, never a
+ * diff — see `applied["annotation"] = target`), so a lower `version` than
+ * the baseline already holds means the ENTIRE incoming record is already a
+ * strictly older, superseded snapshot: there is no field in it the
+ * baseline's newer snapshot does not already have at least as current,
+ * because the server applies ops for one annotation strictly in sequence
+ * against that single shared object — whichever of two ops actually landed
+ * first server-side is already folded into whichever landed second. So
+ * rejecting the whole stale op atomically (rather than merging it in
+ * field-by-field against its own `field_versions`) is not just simpler but
+ * more correct here: a per-field merge would compare the incoming op's
+ * server-assigned version numbers against a baseline that can itself be a
+ * locally *predicted*, not-yet-confirmed version
+ * (`predictAnnotationVersionsForSend`, possibly still in flight when this
+ * op arrives) — mixing fields from two different, not-necessarily-aligned
+ * numbering schemes risks synthesizing a record no real server snapshot
+ * ever actually was. Dropping the whole op instead only ever keeps a
+ * complete, real snapshot already applied; if the drop was itself
+ * over-cautious (this client's own predicted baseline overshot true server
+ * order), this client's own next ack — always a full, cumulative snapshot
+ * too, via `foldAckedAnnotationOp` — recovers anything the rejected
+ * broadcast would have contributed, for the same reason: full-object state
+ * for one annotation is cumulative, never lost by ignoring an earlier,
+ * already-superseded echo of it.
+ *
+ * A version tie, an annotation this baseline has no entry for yet (a fresh
+ * id), or an op whose version cannot be compared, all apply normally
+ * through the ordinary `applyOpToMirror` path — this only ever changes
+ * behaviour for a genuine regression. Non-annotation ops are untouched.
+ */
+export function foldRemoteAnnotationOp(mirrorState, op) {
+  const mirror = normalizeMirror(mirrorState);
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') {
+    return applyOpToMirror(mirror, op);
+  }
+  const ann = op.annotation;
+  if (!ann || !ann.id) return applyOpToMirror(mirror, op);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return applyOpToMirror(mirror, op);
+  const incomingVersion = Number(ann.version);
+  const currentVersion = Number(current.version) || 0;
+  if (Number.isFinite(incomingVersion) && incomingVersion < currentVersion) {
+    // Stale/reordered broadcast — this client's baseline is already at
+    // least this current for this annotation (see docstring above). Drop
+    // the whole op atomically rather than partially merge it in.
+    return mirror;
+  }
+  return applyOpToMirror(mirror, op);
+}
+
 export class SessionSyncClient {
   /**
    * @param {Object} opts
@@ -1608,9 +1691,22 @@ export class SessionSyncClient {
         // directly (image ingest's own delivery won the race against this
         // echo — see foldLocalOp): re-folding this now-possibly-stale
         // creation-time content would revert any edit made since.
+        //
+        // foldRemoteAnnotationOp, not the plain applyOpToMirror (round 3
+        // review): this SSE delivery and this client's own POST-ack channel
+        // have no cross-ordering guarantee (R15, above), so a genuinely
+        // different client's broadcast for a chronologically earlier op can
+        // arrive after this client's own already-acked later op on the same
+        // annotation — an unconditional fold would silently regress the
+        // baseline's version/field_versions and content back to that
+        // earlier point, reintroducing the same spurious field_conflict the
+        // round-2 self-conflict-race fix closed, this time via a genuine
+        // two-client interleaving. See foldRemoteAnnotationOp's own
+        // docstring for why the guard rejects a stale op atomically rather
+        // than merging it in field-by-field.
         const foldedId = op?.annotation?.id;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
-          this._baseline = applyOpToMirror(this._baseline, op);
+          this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
         if (this.handlers.onRemoteOps)
           this.handlers.onRemoteOps([op], { clientId: data.client_id });

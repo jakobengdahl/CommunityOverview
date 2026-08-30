@@ -868,6 +868,70 @@ race"). This is purely a client-side prediction; nothing about the server's
 `AnnotationFieldConflict` check, the wire shape, or a *genuine* two-client
 race (the matrix below) changes.
 
+**Update — a genuinely different collaborator's own EARLIER write could still
+regress this client's baseline, via the SSE broadcast channel rather than the
+POST-ack channel (round 3 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+remote-broadcast-reordering follow-up).** The fix above closes the race
+between *this client's own* predicted and acked versions of the *same*
+op-in-flight. It left a related, genuinely two-client gap open: this client's
+own POST-ack channel and its SSE `'op'` broadcast stream are two independent
+HTTP connections with no cross-ordering guarantee (`sessionSyncClient.js`'s
+own `_appliedSeq` comment documents this as an accepted architectural
+property — a concurrent op's broadcast can still be in flight when this
+client's own later op's ack has already landed). So a genuinely different
+collaborator B's broadcast for a chronologically **earlier** op could arrive
+*after* this client A's own already-acked **later** op on the same
+annotation. Before this fix, `_handleEvent`'s `'op'` case folded every remote
+broadcast into the baseline unconditionally (`applyOpToMirror`, no guard at
+all) — so B's late, stale broadcast would silently regress both
+`version`/`field_versions` and content back to B's pre-A-edit snapshot. A's
+*next* edit would then diff against that reverted baseline and send a stale
+`base_version`, which the server correctly refuses as `field_conflict` — the
+exact same class of spurious conflict the round-2 fix closed, this time from
+a genuine two-client interleaving rather than a same-client race, and
+untouched by that fix since it only ever guarded the ack path.
+
+The fix (`foldRemoteAnnotationOp` in `sessionSyncClient.js`, used only by
+`_handleEvent`'s `'op'` case for an op attributed to a different client)
+rejects a stale/reordered remote broadcast atomically — both its
+`version`/`field_versions` and its content — whenever its `version` is lower
+than what the baseline already holds for that annotation, rather than
+`foldAckedAnnotationOp`'s own approach of merging `version`/`field_versions`
+to the higher value while still taking content from the incoming op
+unconditionally. That merge-not-reject approach is correct for the ack path
+(the ack is always this client's own trustworthy write, just possibly behind
+a further not-yet-confirmed local prediction) but would be wrong for a
+remote broadcast: since the server hands back the *whole* annotation record
+on every `annotation_created`/`annotation_updated` op (`session_store.py`
+mutates the one shared server-side object in place, never emits a diff), a
+lower-versioned broadcast is a strictly older, already-superseded snapshot in
+full — accepting even one of its fields would produce a version number and a
+content field from two different points in time that no real server
+snapshot ever actually was. Dropping the whole stale op is also safe: the
+server applies ops for one annotation strictly in sequence against that same
+shared object, so whichever of two ops landed first server-side is already
+folded into whichever landed second — nothing a rejected stale broadcast
+could have contributed is ever permanently lost, because this client's own
+next ack (always a full, cumulative snapshot too) recovers it if needed.
+Test-covered end-to-end through the real `SessionSyncClient`/`_handleEvent`
+path with a genuine simulated SSE `'op'` event
+(`frontend/web/tests/sessionSyncClient.test.js`, "remote broadcast reordering
+vs. an already-acked own write"), plus pure-function coverage for
+`foldRemoteAnnotationOp` itself. A version tie or a genuinely newer broadcast
+still applies normally — this guard only ever changes behaviour for an
+actual regression.
+
+**Known related gap this fix does not close.** `App.jsx`'s `applyRemoteOp`
+(the handler `onRemoteOps` invokes) applies an annotation broadcast's content
+straight onto the *live canvas* React store unconditionally, with no
+version check of its own — a stale broadcast this new guard correctly keeps
+out of `sessionSyncClient.js`'s internal baseline can still flash onto the
+canvas itself via that separate path before self-healing once this client's
+own ack (or a later, genuinely newer broadcast) lands. This is a pre-existing
+gap, not introduced by this fix, and out of its scope (`sessionSyncClient.js`
+only); it is a real candidate for a future round.
+
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
 category on both sides (e.g. both edit text) or a different one (e.g. A edits

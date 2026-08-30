@@ -5,6 +5,7 @@ import {
   applyOpToMirror,
   predictAnnotationVersionsForSend,
   foldAckedAnnotationOp,
+  foldRemoteAnnotationOp,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
@@ -2174,6 +2175,280 @@ describe('same-client self-conflict race (round 2 follow-up to smallfix-annotati
     expect(finalAnnotation.text).toBe('edit 2');
     expect(finalAnnotation.position.x).toBe(40);
     expect(finalAnnotation.version).toBe(4);
+  });
+});
+
+// Round 3 review, following the same-client race fix above: every test up
+// to here — including the two-client tests further up this file — is
+// single-client only from `_handleEvent`'s point of view; none of them
+// injects a genuinely remote SSE 'op' event. This block closes that gap by
+// driving a real remote broadcast through the real
+// SessionSyncClient/_handleEvent path, reproducing the round-3 reviewer's
+// scenario: the SSE stream and this client's own POST-ack channel have no
+// cross-ordering guarantee, so a genuinely different client's broadcast for
+// a chronologically EARLIER op can arrive after this client's own
+// already-acked LATER op on the same annotation.
+describe('remote broadcast reordering vs. an already-acked own write (round 3 follow-up)', () => {
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return { client, es };
+  }
+
+  function makeInitialAnnotation(overrides = {}) {
+    return {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      style: 'red',
+      geometry: { x: 0 },
+      version: 1,
+      field_versions: {},
+      ...overrides,
+    };
+  }
+
+  it("a stale/reordered remote broadcast for a chronologically earlier op never regresses a baseline already advanced by this client's own ack", async () => {
+    const initial = makeInitialAnnotation();
+    // 2. Server-side ordering being reproduced: B's op (geometry) lands
+    // first, bumping version 1 -> 2; A's own op (style) lands second,
+    // bumping version 2 -> 3. A's ack — carrying that real, already-
+    // cumulative version-3 state — is what the POST response below returns.
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [
+            {
+              op: 'annotation_updated',
+              annotation: {
+                ...initial,
+                style: 'blue',
+                geometry: { x: 1 },
+                version: 3,
+                field_versions: { geometry: 2, style: 3 },
+              },
+            },
+          ],
+          seq: 3,
+        }),
+      },
+    ]);
+    const { client, es } = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [initial] });
+
+    // 1. Client A edits style and sends its op.
+    client.syncState({ annotations: [{ ...initial, style: 'blue' }] });
+    await flush();
+    // 3. A's POST ack arrives and is correctly folded (foldAckedAnnotationOp,
+    // unmodified by this fix) — baseline reaches version 3 / style 'blue'.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // 4. B's SSE broadcast for its own earlier (lower-version, lower-seq)
+    // op arrives late, after A's own ack already landed. Its seq (2) is
+    // still above `_appliedSeq` (0 — only stream events advance it, never
+    // the POST-ack's optimistic `_seq`), so the R15 dedup guard does not
+    // itself drop it; this is a genuinely new, merely late delivery, not a
+    // duplicate.
+    es.emit({
+      type: 'op',
+      seq: 2,
+      client_id: 'client-B',
+      op: {
+        op: 'annotation_updated',
+        annotation: {
+          ...initial,
+          style: 'red', // stale — B's snapshot predates A's style edit
+          geometry: { x: 1 },
+          version: 2,
+          field_versions: { geometry: 2 },
+        },
+      },
+    });
+
+    // The baseline must still be at version 3 with A's edit intact. Proven
+    // behaviourally, the same way the same-client race tests above do: the
+    // *next* local edit's outgoing `base_version` reflects the un-regressed
+    // baseline, not the stale broadcast's version 2 — which the server
+    // would otherwise genuinely reject as a conflict against A's own prior,
+    // already-succeeded write (the consequence this fix closes).
+    client.syncState({ annotations: [{ ...initial, style: 'blue', text: 'caption' }] });
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const secondBatch = fetchImpl.calls[1].body.ops;
+    const updateOp = secondBatch.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(3); // not regressed to 2
+    expect(updateOp.annotation.text).toBe('caption');
+  });
+
+  it('a genuinely newer remote broadcast still applies normally (not a license to ignore real remote updates)', async () => {
+    const initial = makeInitialAnnotation();
+    const fetchImpl = makeFetch();
+    const { client, es } = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [initial] });
+
+    // A genuinely different, and genuinely newer, collaborator edit.
+    es.emit({
+      type: 'op',
+      seq: 1,
+      client_id: 'client-B',
+      op: {
+        op: 'annotation_updated',
+        annotation: {
+          ...initial,
+          geometry: { x: 5 },
+          version: 2,
+          field_versions: { geometry: 2 },
+        },
+      },
+    });
+
+    // The next local edit's base_version must reflect the applied
+    // broadcast's version 2 — proving it was folded into the baseline,
+    // not dropped by the new guard.
+    client.syncState({ annotations: [{ ...initial, geometry: { x: 5 }, style: 'green' }] });
+    await flush();
+    const sentOps = fetchImpl.calls[0].body.ops;
+    const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(2);
+    expect(updateOp.annotation.style).toBe('green');
+  });
+
+  it('a stale broadcast followed by a genuinely newer one: the stale one is dropped but the newer one still applies', async () => {
+    const initial = makeInitialAnnotation();
+    const fetchImpl = makeFetch();
+    const { client, es } = makeReadyClient(fetchImpl);
+    // Baseline already at version 3 (as if this client's own ack, or an
+    // earlier remote op, already advanced it) — mirrors the point reached
+    // right after step 3 of the scenario above, isolated from the POST/ack
+    // machinery so this test can focus purely on two out-of-order
+    // broadcasts arriving back to back.
+    client.setBaseline({
+      annotations: [{ ...initial, style: 'blue', version: 3, field_versions: { style: 3 } }],
+    });
+
+    // A stale broadcast (version 2) arrives first...
+    es.emit({
+      type: 'op',
+      seq: 2,
+      client_id: 'client-B',
+      op: {
+        op: 'annotation_updated',
+        annotation: { ...initial, style: 'red', version: 2, field_versions: { style: 2 } },
+      },
+    });
+    // ...then a genuinely newer one (version 4) arrives right after.
+    es.emit({
+      type: 'op',
+      seq: 4,
+      client_id: 'client-C',
+      op: {
+        op: 'annotation_updated',
+        annotation: {
+          ...initial,
+          style: 'blue',
+          geometry: { x: 9 },
+          version: 4,
+          field_versions: { style: 3, geometry: 4 },
+        },
+      },
+    });
+
+    // The stale one must not have won, and the newer one must have: the
+    // next local edit's base_version reflects version 4, not 2 or 3.
+    client.syncState({
+      annotations: [{ ...initial, style: 'blue', geometry: { x: 9 }, text: 'z' }],
+    });
+    await flush();
+    const sentOps = fetchImpl.calls[0].body.ops;
+    const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(4);
+  });
+});
+
+// Pure-function coverage for `foldRemoteAnnotationOp`, the guard the tests
+// above drive end-to-end — see its own docstring in sessionSyncClient.js for
+// why it rejects a stale remote op atomically rather than merging it in
+// field-by-field, unlike `foldAckedAnnotationOp` just below.
+describe('foldRemoteAnnotationOp', () => {
+  it('drops a stale remote op atomically — neither version/field_versions nor content regress', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: 'blue',
+          geometry: { x: 1 },
+          version: 3,
+          field_versions: { geometry: 2, style: 3 },
+        },
+      ],
+    };
+    const staleOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: 'red', // stale content
+        geometry: { x: 1 },
+        version: 2,
+        field_versions: { geometry: 2 },
+      },
+    };
+    const result = foldRemoteAnnotationOp(baseline, staleOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3);
+    expect(a.field_versions).toEqual({ geometry: 2, style: 3 });
+    expect(a.style).toBe('blue'); // not regressed to the stale op's 'red'
+  });
+
+  it('applies a version tie normally', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3, field_versions: {} },
+      ],
+    };
+    const tieOp = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', style: 'green', version: 3 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, tieOp);
+    expect(result.annotations.find((x) => x.id === 'a').style).toBe('green');
+  });
+
+  it('applies a genuinely newer remote op normally', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3, field_versions: {} },
+      ],
+    };
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', style: 'green', version: 4 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, newerOp);
+    expect(result.annotations.find((x) => x.id === 'a').style).toBe('green');
+  });
+
+  it('applies a create for an id the baseline does not know yet, unconditionally', () => {
+    const baseline = { annotations: [] };
+    const createOp = {
+      op: 'annotation_created',
+      annotation: { id: 'new', type: 'shape', kind: 'shape', style: 'blue', version: 1 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, createOp);
+    expect(result.annotations.find((x) => x.id === 'new').style).toBe('blue');
+  });
+
+  it('leaves non-annotation ops untouched (passthrough to applyOpToMirror)', () => {
+    const baseline = { node_refs: ['a'] };
+    const result = foldRemoteAnnotationOp(baseline, { op: 'nodes_added', node_ids: ['b'] });
+    expect(result.node_refs).toEqual(['a', 'b']);
   });
 });
 
