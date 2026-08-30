@@ -131,6 +131,21 @@ ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
 # written for a vote_dot already stored with one.
 ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"})
 
+# Semantic default layer at creation (task-annotation-render-direct-
+# manipulation's remaining scope: "semantic default layers - a per-kind
+# default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
+# Mirrors `DEFAULT_ANNOTATION_Z_BY_TYPE`/`defaultAnnotationZ` in
+# packages/ui-graph-canvas/src/utils/annotationModel.js exactly — see that
+# file's comment for the full reasoning (only `shape` moves, everything else
+# including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
+# annotation and a GUI-created one of the same kind start on the same layer.
+SHAPE_DEFAULT_Z = -1
+DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {"shape": SHAPE_DEFAULT_Z}
+
+
+def default_annotation_z(annotation_type: Optional[str]) -> float:
+    return DEFAULT_ANNOTATION_Z_BY_TYPE.get(annotation_type, 0)
+
 
 def _attachment_error(value: Any, *, field: str) -> Optional[str]:
     """Structural validation for an `attachment = {target_id, target_type,
@@ -753,7 +768,7 @@ def build_annotation(
         "kind": type,
         "position": {"x": x, "y": y},
         "geometry": geometry,
-        "z": z if z is not None else 0,
+        "z": z if z is not None else default_annotation_z(type),
         "locked": bool(locked),
     }
     if w is not None or h is not None:

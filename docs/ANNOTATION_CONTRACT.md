@@ -306,14 +306,16 @@ CSSOM accepts the fractional value that a real browser discards.
 
 Front/back rather than a one-step forward/back is a deliberate trade. A true
 one-step swap needs distinct integer levels to step between, and every
-annotation is created at `z = 0`, so the common case is a pile of ties.
-Breaking those ties one step at a time means renumbering the annotations
-around the one that moved — and an `annotation_updated` op carries the
-*whole* annotation, which for an embedded image is its entire data URI. A
-renumber touching a few images would exceed the session op batch's byte cap
-and be rejected atomically. Front/back always writes exactly one annotation,
-so it cannot reach that cap. One-step forward/back, and the level compaction
-it would need, are not implemented.
+annotation but `shape` is created at `z = 0` (see [Semantic default
+layers](#semantic-default-layers) below for the one exception), so the common
+case is still a pile of ties — now two piles, one at 0 and one at `shape`'s
+own -1, rather than one. Breaking those ties one step at a time means
+renumbering the annotations around the one that moved — and an
+`annotation_updated` op carries the *whole* annotation, which for an embedded
+image is its entire data URI. A renumber touching a few images would exceed
+the session op batch's byte cap and be rejected atomically. Front/back always
+writes exactly one annotation, so it cannot reach that cap. One-step
+forward/back, and the level compaction it would need, are not implemented.
 
 An annotation tied with the current front is not treated as already in front —
 the tie is what the click exists to break — so it moves. A click that would
@@ -534,17 +536,19 @@ Contrast an edit lease, which the server does enforce for browser writes.
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
 same as staying within the graph's own band, and should not be read as such.
-Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
-created annotation, while send-to-back writes one below the backmost
+Graph nodes carry no layer of their own, so they sit at 0 alongside every
+annotation kind except a freshly created `shape` (see [Semantic default
+layers](#semantic-default-layers) below — `shape` now starts one level behind
+that 0 on its own), while send-to-back writes one below the backmost
 annotation. Whenever that backmost annotation is itself at or below 0 — the
-default, since every annotation is created at 0 — the result is negative and
-does place the annotation behind the graph's nodes and edges. That is
-intended and useful, and it is how a `shape` with a transparent fill
-(standing in for the retired `frame`) gets behind the nodes it frames;
-it is not, however, a guarantee. Once every annotation has been pushed above
-0, send-to-back lands at 0 or higher — level with the graph (where paint
-order falls back to document order) or in front of it, but no longer behind
-it.
+default for every kind but `shape`, since every kind but `shape` is still
+created at 0 — the result is negative and does place the annotation behind
+the graph's nodes and edges. That is intended and useful, and it is how a
+`shape` with a transparent fill (standing in for the retired `frame`) gets
+behind the nodes it frames; it is not, however, a guarantee. Once every
+annotation has been pushed above 0, send-to-back lands at 0 or higher — level
+with the graph (where paint order falls back to document order) or in front
+of it, but no longer behind it.
 
 A layer is only ever written when it is an integer strictly past every other
 annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
@@ -554,10 +558,94 @@ down to the bound would land level with the neighbour it is meant to pass,
 recreating the tie the control exists to break while publishing an operation
 that changes nothing on screen.
 
-Semantic default layers — a per-kind default `z` at creation time, so a
-transparent-fill shape starts behind the annotations it frames — are **not**
-implemented; every
-annotation is created at `z = 0` and ordered manually from there.
+### Semantic default layers
+
+A per-kind default `z` at creation time (task-annotation-render-direct-
+manipulation's remaining scope) is implemented, narrowly: **only `shape`
+moves off the shared 0.** A freshly created `shape` is now given `z = -1` —
+one level behind the 0 every graph node and every other annotation kind
+(`note`, `text`, `label`, `line`, `icon`, `vote_dot`, `image`, `freehand`,
+`group`) is still created at — so it opens already behind content instead of
+needing a manual send-to-back to get there. That is exactly the relationship
+the paragraph above already describes send-to-back producing for a shape by
+hand (the transparent-fill-standing-in-for-`frame` case); this makes it the
+shape's starting position rather than a step a user or agent has to take
+themselves.
+
+**Why only `shape`.** A shape is the decorative kind most often used as a
+background or frame that other annotations get drawn over — the merged-in
+`frame` look (a transparent fill with a coloured border) is the clearest
+case, but even a filled shape is commonly a backdrop a label or icon sits on
+top of. No other kind carries that same "usually a backdrop" reading strongly
+enough to default it below the rest without guessing at a use the contract
+has no worked example for. `image` was considered — a pasted screenshot or
+diagram is sometimes used the same way, as a backdrop for icons/labels drawn
+over it — but left at 0 deliberately: the contract's own illustrative case
+for this feature names only `shape`, and widening the change to a second kind
+on an inference the contract does not state would be exactly the "guessed"
+default this section exists to avoid. If a real backdrop-image complaint
+shows up in practice, revisit it as its own decision rather than folding it
+into this task's scope.
+
+**Backward compatibility.** The default is applied once, at the moment of
+creation — never retroactively. An annotation already stored before this
+change (every kind, `shape` included) keeps whatever `z` it already has,
+typically 0, exactly as it does for every other envelope field. That old
+`shape` and a *new* `shape` created after this change end up on different
+layers purely because of when each was created — the old one at 0, the new
+one at -1 — which is a real, visible difference: the newer shape now renders
+*behind* the older one by default, opposite of the usual last-created-is-
+on-top expectation. This is judged acceptable rather than confusing because
+(a) `shape` is the one kind this section deliberately treats as a
+backdrop, so "the newest shape is furthest back" reads as the feature working
+as intended, not as a bug, and (b) the manual layer row
+(`AnnotationLayerControls`, described above) still works exactly as before on
+both — a user who wants the new shape back in front of the old one just
+clicks bring-to-front, the same single action this whole feature exists to
+make unnecessary for the *common* case, not to forbid for the exceptional
+one. No stored annotation's `z` is rewritten by this change, and no migration
+was written or is needed. An old `shape` and a newly created non-`shape`
+annotation (say, a `label`) never had this concern in the first place: the
+label still defaults to 0 exactly as it always has, so it ties with the old
+shape exactly as any two same-era annotations already could.
+
+**Both creation paths agree.** The GUI's one-click/drag-to-create toolbox
+path (`GraphCanvas.jsx`'s own node-builder `createAnnotation`, which sets
+`zIndex` explicitly only on the `shape` branch it builds) and the MCP/REST
+creation path (`create_annotation`, `create_image_annotation`, and the image
+REST ingest endpoint, all funnelling through `session_annotations.py`'s
+`build_annotation`) apply the identical `shape → -1, everything else → 0`
+mapping, so a GUI-created and an MCP-created shape start on the same layer.
+`packages/ui-graph-canvas/src/utils/annotationModel.js`'s `createAnnotation` —
+the shared client-side model both the canvas's document normalizer and the
+session save/restore translators route through — carries the same mapping
+too, for the same reason: the model documented as the v1 annotation shape's
+source of truth should not disagree with what actually gets created.
+`duplicate_annotation` (backend) and the GUI's own duplicate action
+(`AnnotationDuplicateControl`) are both unaffected by design — each copies
+the *source's own stored* `z` verbatim rather than passing through the
+default at all, the same as every other envelope field a duplicate carries
+over (see the Layer order section above).
+
+**Explicitly out of scope, tracked separately.** `group` is deliberately
+*not* given a non-zero default here, even though
+dec-annotation-group-background-layering also wants group backgrounds behind
+all content: a group's paint order does not read its `z` at all today (it
+comes from ReactFlow parent/child array order — see the Layer order section
+above), so a default here would be inert, and that decision's own mechanism
+is the smallfix-group-annotation-has-no-layer-control task's to design, not
+this one's. That follow-up task should treat `shape`'s `-1` as the
+one already-claimed layer immediately behind the graph-node baseline: since
+`shape` is "the freely layered decorative alternative" (the decision's own
+phrase) and can be brought forward or back by hand like anything else,
+whatever mechanism the group task builds needs to guarantee a group
+background stays behind *every* `shape` position a user could manually
+reach, in both directions — not just behind `shape`'s -1 default — since
+dec-annotation-group-background-layering requires "behind all content"
+unconditionally, not "behind content's starting position." The true one-step
+forward/back "level compaction" this task's own history flags as unsafe (the
+op-batch byte cap issue described above) is equally out of scope here and
+remains unimplemented.
 
 ## Operation layer
 

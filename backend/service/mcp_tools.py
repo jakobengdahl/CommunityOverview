@@ -2623,7 +2623,13 @@ def register_mcp_tools(
             style: Optional style dict (color/opacity; for
                 text/shape also fontSize/font/textAlign, and for shape also
                 fill/border — see above).
-            z: Optional layer order (higher draws on top). Defaults to 0.
+            z: Optional layer order (higher draws on top). Defaults to 0 for
+                every type except `shape`, which defaults to -1 so a freshly
+                created shape starts one layer behind the rest — the
+                semantic default described in docs/ANNOTATION_CONTRACT.md's
+                "Layer order" section. Applies only when creating (or
+                upsert-replacing without resending `z`); pass an explicit
+                value to override it.
             locked: Whether the annotation starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the
                 server assign one.

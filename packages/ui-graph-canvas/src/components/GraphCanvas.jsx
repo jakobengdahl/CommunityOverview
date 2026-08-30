@@ -69,6 +69,7 @@ import {
   NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
+import { defaultAnnotationZ } from '../utils/annotationModel';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -1701,8 +1702,22 @@ function GraphCanvasInner({
           // look (a transparent box with a coloured border) is now reached by
           // right-clicking a created shape and setting fill to transparent,
           // not by a separate creation-time default.
+          //
+          // `zIndex` is the one per-kind semantic default this creation
+          // function sets (task-annotation-render-direct-manipulation's
+          // "semantic default layers" — see annotationModel.js's
+          // `defaultAnnotationZ` and docs/ANNOTATION_CONTRACT.md's Layer
+          // order section for the reasoning): a shape starts one layer
+          // behind the 0 every other kind (and every graph node) still
+          // starts at, so it opens already behind content instead of
+          // needing a manual send-to-back. Every other branch below omits
+          // `zIndex` on purpose, which resolves to that same unchanged 0
+          // through the existing `zIndex ?? 0` fallbacks
+          // (annotationLayers.js's `layerOf`, annotations.js's
+          // `flowNodeToOverlay`) — nothing here regresses their behavior.
           data: { shape, text: '', fill: undefined, border: undefined },
           style: newShapeSize(shape),
+          zIndex: defaultAnnotationZ(kind),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size

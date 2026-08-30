@@ -117,6 +117,10 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // entry point: today's plain one-click toolbox creation (no target
     // anchor involved) must still produce an unattached annotation.
     expect(text.data.attachment).toBeUndefined();
+    // Unlike `shape` (see the semantic-default-layer test below), every
+    // other kind gets no explicit `zIndex` at creation, which resolves to
+    // the unchanged 0 default through the existing `zIndex ?? 0` fallbacks.
+    expect(text.zIndex).toBeUndefined();
   });
 
   // task-annotation-merge-frame-into-shape-rectangle: a toolbox-created shape
@@ -134,6 +138,21 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(shape).toBeTruthy();
     expect(shape.data.fill).toBeUndefined();
     expect(shape.data.border).toBeUndefined();
+  });
+
+  // task-annotation-render-direct-manipulation's remaining "semantic default
+  // layers" scope: a shape is the one kind this creation path gives an
+  // explicit non-zero starting layer, so it opens one behind everything else
+  // (docs/ANNOTATION_CONTRACT.md's Layer order section) instead of needing a
+  // manual send-to-back. Every other kind stays at the unchanged 0 default —
+  // see the text creation test above for that side of the contrast.
+  it('creates a shape via the toolbox one layer behind the default (zIndex -1)', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    const shape = findCreatedNode('shape');
+    expect(shape.zIndex).toBe(-1);
   });
 
   it.each([
