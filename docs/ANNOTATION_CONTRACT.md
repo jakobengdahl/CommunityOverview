@@ -392,6 +392,63 @@ members as backdrops), and groups are ReactFlow parents whose members carry
 about how group layering relates to that parent/child backdrop model, which
 has not been taken.
 
+### Multi-select align and distribute
+
+A right-click multi-selection's context menu (`MultiNodeContextMenu`) offers
+two bulk actions beyond the pre-existing multi-select Delete
+(task-annotation-render-direct-manipulation's remaining_scope): **Align**
+(left / horizontal centers / right / top / vertical middles / bottom) and
+**Distribute** (equal-gap horizontal / vertical spacing, offered only at 3+
+eligible members — the minimum for a gap to be meaningful). Both are computed
+from each member's real on-canvas bounding box (`node.width`/`height`, the
+same measured-size fallback `nodeCenter` already used, now factored out as
+`nodeSize` in `utils/annotations.js`), not a fixed layout grid — unlike
+`arrangeNodes`' cell-based Organize modes, an Align/Distribute result depends
+on what is actually selected, so two differently-sized boxes end up flush,
+not merely evenly spaced by index.
+
+Unlike Organize (graph nodes only), the eligible set spans graph nodes *and*
+overlay annotations — the same "mixed selection" the multi-select Delete
+already applies to. Two exclusions are deliberate, both narrower than what
+Delete excludes:
+
+- **`arrow` is excluded**, the same way a graph edge is (per the task's own
+  scope: "edges themselves have no independent position, so they simply move
+  with their connected nodes"). An arrow's on-canvas geometry is a pair of
+  connected endpoints (`position` + `dx`/`dy`), not an independently movable
+  box, so there is nothing for "align its left edge" to mean that isn't
+  already covered by aligning whatever it's anchored to (or, for a free
+  arrow, by dragging an endpoint directly). `group` stays excluded too, the
+  same as Delete — its own context menu is where its box, as opposed to its
+  members, is manipulated.
+- **A currently-attached label/text/icon is excluded**, even though it is
+  neither locked nor claimed. The pre-existing attachment-follow effect
+  (`ATTACHABLE_OVERLAY_KINDS`, above) re-glues such an overlay to its
+  target's centre on every `nodes` change, unconditionally — moving it here
+  would be undone by that effect on the very next render, a fight between
+  two mechanisms that would show up as jitter rather than the alignment
+  asked for. It is left out of the move set and simply follows if its own
+  attachment target happens to move as part of the same selection.
+
+The locked/remote-claimed exclusion itself is unchanged from Delete's own
+rule (a locked or another-client-claimed overlay is skipped, not refused for
+the whole selection — "the more forgiving of the two options", matching
+delete's own choice recorded above), and the same priority order Delete's
+own notice uses when a selection mixes skip reasons: a remote claim's notice
+wins over a plain lock's, which wins over the attached-item notice, since a
+remote claim is the one the user cannot resolve alone.
+
+Every position this produces is written through the exact publish paths a
+drag or Organize already use — `onNodePositionChange` for a graph node
+(same callback `onNodeDragStop`/`applyPositionMoves` call), `onAnnotationChange('geometry')`
+once for any annotation moved (same notifier the attach-follow effects and
+`onNodeDragStop`'s own attach/detach branch use) — and one undo/redo entry
+per action via the same `useCanvasHistory` record Organize uses, so **Ctrl/Cmd+Z**
+reverses an Align/Distribute exactly like it reverses a drag or an Organize.
+Neither action gained its own keyboard shortcut (Organize's **Ctrl/Cmd+O** is
+unaffected); that is a deliberate scope cut, not an oversight — see the PR
+that introduced this section.
+
 ### Unrecognised annotation data
 
 Annotations have no users yet, so the shapes below may change without migrating

@@ -38,6 +38,8 @@ import {
   getCircularLayout,
   reconcileSessionNodes,
   arrangeNodes,
+  alignNodes,
+  distributeNodes,
 } from '../utils/graphLayout';
 import {
   getNodeColor,
@@ -57,6 +59,7 @@ import {
   overlayToFlowNode,
   flowNodeToOverlay,
   nodeCenter,
+  nodeSize,
   resolveAnchoredArrow,
   computeDroppedAttachment,
   resolveAttachedPosition,
@@ -324,6 +327,17 @@ function GraphCanvasInner({
     organizeVertical: 'List vertically',
     organizeTree: 'Arrange as tree',
     organizeHint: 'Organize: A auto-tidy · C cluster · H horizontal · V vertical · T tree',
+    align: 'Align',
+    alignLeft: 'Align left',
+    alignCenterHorizontal: 'Align horizontal centers',
+    alignRight: 'Align right',
+    alignTop: 'Align top',
+    alignCenterVertical: 'Align vertical middles',
+    alignBottom: 'Align bottom',
+    distribute: 'Distribute',
+    distributeHorizontal: 'Distribute horizontally',
+    distributeVertical: 'Distribute vertically',
+    annotationAttachedSkipped: 'Attached items follow their target and were left out',
     hideAll: 'Hide all',
     deleteAll: 'Delete all',
     dimNode: 'Dim node',
@@ -1352,6 +1366,171 @@ function GraphCanvasInner({
       closeAllMenus();
     },
     [selectedNodes, nodes, edges, setNodes, onNodePositionChange, closeAllMenus, recordMove]
+  );
+
+  // Eligible members of the current selection for the multi-select Align and
+  // Distribute actions (task-annotation-render-direct-manipulation). Unlike
+  // Organize above (graph nodes only), these two also move overlay
+  // annotations — but not every kind, and not unconditionally:
+  //
+  // - `arrow` is excluded the same way a graph edge is: its geometry is a
+  //   pair of connected endpoints, not an independently movable box, so
+  //   there is nothing sensible to align/distribute — it already moves with
+  //   whatever it is anchored to, same as an edge follows its nodes.
+  // - `group` is excluded, matching deleteSelectedNodes's own exclusion —
+  //   its box is manipulated from its own context menu, not this one.
+  // - A locked or remote-claimed overlay is excluded exactly like
+  //   deleteSelectedNodes excludes it: this action skips the ineligible
+  //   member and proceeds with the rest, rather than refusing the whole
+  //   selection — the more forgiving of the two options and the one delete
+  //   already established.
+  // - An attached label/text/icon (`content.attachment`, ATTACHABLE_OVERLAY_
+  //   KINDS) is excluded even though it is neither locked nor claimed: the
+  //   attachment-follow effect further down re-glues it to its target's
+  //   centre on every `nodes` change, so moving it here would be
+  //   immediately undone by that effect on the very next render — a fight
+  //   between the two mechanisms that would show up as visible jitter
+  //   rather than the alignment the user asked for. It stays out of the
+  //   move set and simply follows if its own attachment target moves as
+  //   part of the same align/distribute.
+  const alignDistributeEligibility = useMemo(() => {
+    const isMovableOverlay = (n) =>
+      OVERLAY_TYPES.has(n.type) && n.type !== 'arrow' && !isRemoteLocked(n.data) && !n.data?.locked;
+    const isAttachedOverlay = (n) => ATTACHABLE_OVERLAY_KINDS.has(n.type) && !!n.data?.attachment;
+    const candidates = selectedNodes.filter(
+      (n) => !ANNOTATION_TYPES.has(n.type) || isMovableOverlay(n)
+    );
+    const skippedLocked = selectedNodes.some(
+      (n) => OVERLAY_TYPES.has(n.type) && n.type !== 'arrow' && isRemoteLocked(n.data)
+    );
+    const skippedOwnLocked = selectedNodes.some(
+      (n) => OVERLAY_TYPES.has(n.type) && n.type !== 'arrow' && n.data?.locked
+    );
+    const skippedAttached = candidates.some(isAttachedOverlay);
+    return {
+      movable: candidates.filter((n) => !isAttachedOverlay(n)),
+      skippedLocked,
+      skippedOwnLocked,
+      skippedAttached,
+    };
+  }, [selectedNodes]);
+
+  // Resolve each eligible node's absolute-coordinate bounding box (position +
+  // measured size), converting a grouped graph node's parent-relative
+  // position to absolute the same way organizeSelection does above — a
+  // selection spanning grouped and ungrouped nodes must align/distribute in
+  // one consistent coordinate space.
+  const alignmentBounds = useCallback(
+    (movable) => {
+      const groupPos = new Map(
+        nodes.filter((n) => n.type === 'group').map((g) => [g.id, g.position])
+      );
+      const toAbsolute = (n) => {
+        const parent = n.parentId ? groupPos.get(n.parentId) : null;
+        return parent ? { x: n.position.x + parent.x, y: n.position.y + parent.y } : n.position;
+      };
+      return movable.map((n) => {
+        const { w, h } = nodeSize(n);
+        return { id: n.id, position: toAbsolute(n), width: w, height: h };
+      });
+    },
+    [nodes]
+  );
+
+  // Shared tail for alignSelectedNodes/distributeSelectedNodes: converts the
+  // computed absolute positions back to parent-relative for grouped nodes,
+  // records one undoable move, applies it locally, and persists it through
+  // exactly the paths a drag or Organize already use — onNodePositionChange
+  // for graph nodes (the same callback onNodeDragStop and applyPositionMoves
+  // call), onAnnotationChange('geometry') once for any annotation moved (the
+  // same notifier the attach-follow effects and onNodeDragStop's own
+  // attach/detach branch use) — so the new positions reach the realtime
+  // publish path and MCP-visible session state the same way any other
+  // geometry change does, not just local React state.
+  const applyAlignedPositions = useCallback(
+    (positionsById) => {
+      if (positionsById.size === 0) return;
+      const groupPos = new Map(
+        nodes.filter((n) => n.type === 'group').map((g) => [g.id, g.position])
+      );
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const finalPos = new Map();
+      const moves = [];
+      let touchedAnnotation = false;
+      for (const [id, abs] of positionsById) {
+        const cur = nodeById.get(id);
+        if (!cur) continue;
+        const parent = cur.parentId ? groupPos.get(cur.parentId) : null;
+        const pos = parent ? { x: abs.x - parent.x, y: abs.y - parent.y } : abs;
+        finalPos.set(id, pos);
+        moves.push({
+          id,
+          from: { x: cur.position.x, y: cur.position.y, parentId: cur.parentId },
+          to: { x: pos.x, y: pos.y, parentId: cur.parentId },
+        });
+        if (ANNOTATION_TYPES.has(cur.type)) touchedAnnotation = true;
+      }
+      if (finalPos.size === 0) return;
+      recordMove(moves);
+      setNodes((nds) =>
+        nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id) } : n))
+      );
+      if (onNodePositionChange) {
+        for (const [id, pos] of finalPos) {
+          const cur = nodeById.get(id);
+          if (cur && !ANNOTATION_TYPES.has(cur.type)) onNodePositionChange(id, pos);
+        }
+      }
+      if (touchedAnnotation) onAnnotationChangeRef.current?.('geometry');
+      closeAllMenus();
+    },
+    [nodes, setNodes, onNodePositionChange, closeAllMenus, recordMove]
+  );
+
+  // A remote claim wins the notice when the selection mixes several skip
+  // reasons, matching deleteSelectedNodes's own priority — it is the one the
+  // user cannot resolve alone by e.g. detaching an annotation themselves.
+  const notifySkippedAlignment = useCallback(
+    ({ skippedLocked, skippedOwnLocked, skippedAttached }) => {
+      if (skippedLocked) showNotification('info', cml.annotationRemoteLocked);
+      else if (skippedOwnLocked) showNotification('info', cml.annotationLockedSkipped);
+      else if (skippedAttached) showNotification('info', cml.annotationAttachedSkipped);
+    },
+    [
+      showNotification,
+      cml.annotationRemoteLocked,
+      cml.annotationLockedSkipped,
+      cml.annotationAttachedSkipped,
+    ]
+  );
+
+  // Align every eligible selected node/annotation's bounding box to a shared
+  // edge or centre line (mode: 'left' | 'centerX' | 'right' | 'top' |
+  // 'centerY' | 'bottom'). Absent from the menu (see the MultiNodeContextMenu
+  // wiring below) below 2 eligible members; the guard here is defence in
+  // depth for any other caller.
+  const alignSelectedNodes = useCallback(
+    (mode) => {
+      const { movable, ...skip } = alignDistributeEligibility;
+      if (movable.length < 2) return;
+      applyAlignedPositions(alignNodes(alignmentBounds(movable), mode));
+      notifySkippedAlignment(skip);
+    },
+    [alignDistributeEligibility, alignmentBounds, applyAlignedPositions, notifySkippedAlignment]
+  );
+
+  // Spread every eligible selected node/annotation evenly (equal gaps) along
+  // one axis. Only meaningful with 3+ eligible members (see distributeNodes'
+  // own doc comment) — absent from the menu below that, same defence-in-depth
+  // guard as alignSelectedNodes above.
+  const distributeSelectedNodes = useCallback(
+    (axis) => {
+      const { movable, ...skip } = alignDistributeEligibility;
+      if (movable.length < 3) return;
+      applyAlignedPositions(distributeNodes(alignmentBounds(movable), axis));
+      notifySkippedAlignment(skip);
+    },
+    [alignDistributeEligibility, alignmentBounds, applyAlignedPositions, notifySkippedAlignment]
   );
 
   // Create a free-floating annotation (note, label, arrow, or one of the
@@ -3462,6 +3641,10 @@ function GraphCanvasInner({
           }
           selectNodesByType={selectNodesByType}
           onOrganize={organizeSelection}
+          onAlign={alignDistributeEligibility.movable.length >= 2 ? alignSelectedNodes : undefined}
+          onDistribute={
+            alignDistributeEligibility.movable.length >= 3 ? distributeSelectedNodes : undefined
+          }
           dimmedNodeIds={dimmedNodeIds}
           dimmedEdgeIds={dimmedEdgeIds}
           graphEdges={inputEdges}

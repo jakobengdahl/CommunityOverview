@@ -172,14 +172,31 @@ arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a
 multi-selection, then **A** (auto-tidy), **C** (cluster), **H** (horizontal), **V**
 (vertical) or **T** (tree).
 
+The same right-click menu also offers **Align** and **Distribute**, and — unlike
+Organize — both work across a selection mixing graph nodes with annotations (notes,
+labels, shapes, text, icons and the rest), not graph nodes alone. **Align** opens a
+submenu of six edge/centre choices: Align left, Align horizontal centers, Align right,
+Align top, Align vertical middles, Align bottom, each computed from the selection's
+actual on-canvas boxes. **Distribute** offers Distribute horizontally and Distribute
+vertically, spacing the selection with equal gaps between neighbouring boxes while the
+two outermost members stay put; it only appears once 3 or more members are eligible; a
+2-member selection can only be aligned. A locked annotation, one someone else is
+currently editing, and one already attached to another node or annotation (dragged
+close enough to snap onto it) are left out of either action — attached items keep
+following whatever they're attached to instead of being moved independently, which
+would otherwise fight the very effect that keeps them glued in place. When any of the
+selection was left out this way, a brief notice says why.
+
 Every context menu supports keyboard use: opening one moves focus to its first item,
 **↑/↓** move between items and wrap at the ends, **Home/End** jump to the first/last
 item, and **Escape** closes the menu and returns focus to wherever it was before the
-menu opened. A submenu trigger (**Change type**, **Organize**) also opens with **→**
-or **Enter**, and closes with **←** or **Escape** without closing the menu it belongs to.
+menu opened. A submenu trigger (**Change type**, **Organize**, **Align**, **Distribute**)
+also opens with **→** or **Enter**, and closes with **←** or **Escape** without closing
+the menu it belongs to.
 
-Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
-Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag, an
+Organize arrangement, or an Align/Distribute), and **Ctrl/Cmd+Shift+Z** (or
+**Ctrl/Cmd+Y**) reapplies it.
 The undo history covers the layout you are looking at, so it is discarded whenever the
 canvas is repopulated — switching session, loading a saved view, or clearing the board.
 Moves made by other people in the session, or by an assistant arranging the view, do not
@@ -989,7 +1006,7 @@ leaving you in it without the controls to get out.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag, Organize, or Align/Distribute) |
 | **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |

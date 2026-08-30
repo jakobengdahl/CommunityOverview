@@ -25,6 +25,16 @@ const labels = {
   organizeHorizontal: 'List horizontally',
   organizeVertical: 'List vertically',
   organizeTree: 'Arrange as tree',
+  align: 'Align',
+  alignLeft: 'Align left',
+  alignCenterHorizontal: 'Align horizontal centers',
+  alignRight: 'Align right',
+  alignTop: 'Align top',
+  alignCenterVertical: 'Align vertical middles',
+  alignBottom: 'Align bottom',
+  distribute: 'Distribute',
+  distributeHorizontal: 'Distribute horizontally',
+  distributeVertical: 'Distribute vertically',
   hideAll: 'Hide all',
   deleteAll: 'Delete all',
   dimNode: 'Dim node',
@@ -537,6 +547,67 @@ describe('MultiNodeContextMenu', () => {
     fireEvent.click(organizeBtn);
     fireEvent.click(screen.getByRole('button', { name: /^cluster$/i }));
     expect(document.activeElement).toBe(organizeBtn);
+  });
+
+  it('omits the align and distribute triggers when their callbacks are absent', () => {
+    render(<MultiNodeContextMenu menu={{ x: 0, y: 0, nodes }} labels={labels} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /^align$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^distribute$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /align left/i })).toBeNull();
+  });
+
+  it('groups the align actions behind their own submenu trigger and calls onAlign with the chosen mode', () => {
+    const onAlign = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onAlign={onAlign}
+        onClose={vi.fn()}
+      />
+    );
+    // Not offered at the root level...
+    expect(screen.queryByRole('button', { name: /align left/i })).toBeNull();
+    // ...only once the Align trigger opens its panel.
+    const openAlign = () => fireEvent.click(screen.getByRole('button', { name: /^align$/i }));
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /^align left$/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(1, 'left');
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /align horizontal centers/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(2, 'centerX');
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /^align right$/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(3, 'right');
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /^align top$/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(4, 'top');
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /align vertical middles/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(5, 'centerY');
+    openAlign();
+    fireEvent.click(screen.getByRole('button', { name: /^align bottom$/i }));
+    expect(onAlign).toHaveBeenNthCalledWith(6, 'bottom');
+  });
+
+  it('groups the distribute actions behind their own submenu trigger and calls onDistribute with the chosen axis', () => {
+    const onDistribute = vi.fn();
+    render(
+      <MultiNodeContextMenu
+        menu={{ x: 0, y: 0, nodes }}
+        labels={labels}
+        onDistribute={onDistribute}
+        onClose={vi.fn()}
+      />
+    );
+    const openDistribute = () =>
+      fireEvent.click(screen.getByRole('button', { name: /^distribute$/i }));
+    openDistribute();
+    fireEvent.click(screen.getByRole('button', { name: /distribute horizontally/i }));
+    expect(onDistribute).toHaveBeenNthCalledWith(1, 'horizontal');
+    openDistribute();
+    fireEvent.click(screen.getByRole('button', { name: /distribute vertically/i }));
+    expect(onDistribute).toHaveBeenNthCalledWith(2, 'vertical');
   });
 
   it('prefers onDeleteMultiple over per-node onDelete', () => {

@@ -522,13 +522,26 @@ export function flowNodeToOverlay(node) {
   return out;
 }
 
+// On-canvas size (flow px) of a node: ReactFlow's own measured `width`/
+// `height` (set once the node has actually rendered) when available, falling
+// back to an explicit `style.width`/`style.height` for a node not yet
+// measured (or one — like an unmounted overlay snapshot — that never will
+// be). Shared by nodeCenter below and by the multi-select align/distribute
+// bounding-box math (task-annotation-render-direct-manipulation), so the two
+// agree on what a node's box is.
+export function nodeSize(node) {
+  return {
+    w: node.width || node.style?.width || 0,
+    h: node.height || node.style?.height || 0,
+  };
+}
+
 // Centre point (flow coords) of a node, using its measured size when available.
 // Returns null when the node has no usable position.
 export function nodeCenter(node) {
   const pos = node.positionAbsolute || node.position;
   if (!pos) return null;
-  const w = node.width || node.style?.width || 0;
-  const h = node.height || node.style?.height || 0;
+  const { w, h } = nodeSize(node);
   return { x: pos.x + w / 2, y: pos.y + h / 2 };
 }
 

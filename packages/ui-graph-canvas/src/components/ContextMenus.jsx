@@ -617,6 +617,8 @@ export function MultiNodeContextMenu({
   onDeleteSelection,
   selectNodesByType,
   onOrganize,
+  onAlign,
+  onDistribute,
   dimmedNodeIds = [],
   dimmedEdgeIds = [],
   graphEdges = [],
@@ -654,6 +656,30 @@ export function MultiNodeContextMenu({
         },
         { key: 'vertical', label: cml.organizeVertical, onSelect: () => onOrganize('vertical') },
         { key: 'tree', label: cml.organizeTree, onSelect: () => onOrganize('tree') },
+      ]
+    : [];
+  const alignItems = onAlign
+    ? [
+        { key: 'left', label: cml.alignLeft, onSelect: () => onAlign('left') },
+        { key: 'centerX', label: cml.alignCenterHorizontal, onSelect: () => onAlign('centerX') },
+        { key: 'right', label: cml.alignRight, onSelect: () => onAlign('right') },
+        { key: 'top', label: cml.alignTop, onSelect: () => onAlign('top') },
+        { key: 'centerY', label: cml.alignCenterVertical, onSelect: () => onAlign('centerY') },
+        { key: 'bottom', label: cml.alignBottom, onSelect: () => onAlign('bottom') },
+      ]
+    : [];
+  const distributeItems = onDistribute
+    ? [
+        {
+          key: 'horizontal',
+          label: cml.distributeHorizontal,
+          onSelect: () => onDistribute('horizontal'),
+        },
+        {
+          key: 'vertical',
+          label: cml.distributeVertical,
+          onSelect: () => onDistribute('vertical'),
+        },
       ]
     : [];
 
@@ -702,6 +728,24 @@ export function MultiNodeContextMenu({
             resetKey={menu}
           />
         </>
+      )}
+      {onAlign && (
+        <Submenu
+          label={`📐 ${cml.align}`}
+          ariaLabel={cml.align}
+          items={alignItems}
+          panelClassName="align-list"
+          resetKey={menu}
+        />
+      )}
+      {onDistribute && (
+        <Submenu
+          label={`↔️ ${cml.distribute}`}
+          ariaLabel={cml.distribute}
+          items={distributeItems}
+          panelClassName="distribute-list"
+          resetKey={menu}
+        />
       )}
       {(onHideSelection || onHideMultiple || onHide) && (
         <button
