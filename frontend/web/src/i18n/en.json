@@ -666,10 +666,12 @@
     "graph": "Graph",
     "search": "Search",
     "create": "Create",
+    "annotate": "Annotate",
     "chat": "Chat",
     "menu": "Menu",
     "search_panel_title": "Search",
     "create_panel_title": "Create",
+    "annotate_panel_title": "Annotate",
     "chat_panel_title": "Assistant"
   }
 }

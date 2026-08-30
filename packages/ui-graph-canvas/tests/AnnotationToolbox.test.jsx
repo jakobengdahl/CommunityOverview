@@ -358,6 +358,41 @@ describe('AnnotationToolbox', () => {
     );
   });
 
+  describe('variant="sheet" (mobile shared-surface integration)', () => {
+    it('is expanded from the start, with no toggle button to expand', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} variant="sheet" />);
+
+      expect(screen.queryByRole('button', { name: /add annotation/i })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /collapse annotation toolbox/i })
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^note$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
+    });
+
+    it('applies the sheet modifier class and not the toolbar toggle chrome', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} variant="sheet" />);
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      expect(toolbox).toHaveClass('annotation-toolbox--sheet');
+      expect(toolbox.querySelector('.annotation-toolbox-toggle')).toBeNull();
+    });
+
+    it('still creates every kind exactly as the toolbar variant does', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} variant="sheet" />);
+
+      fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('defaults to the toolbar variant (collapsed, own toggle) when no variant prop is given', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      expect(screen.getByTestId('annotation-toolbox')).not.toHaveClass('annotation-toolbox--sheet');
+      expect(screen.getByRole('button', { name: /add annotation/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
+    });
+  });
+
   describe('drag-to-create', () => {
     it('is HTML5-draggable by default (fine pointer) for every kind that creates an object', () => {
       render(<AnnotationToolbox onCreate={vi.fn()} />);

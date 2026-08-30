@@ -666,10 +666,12 @@
     "graph": "Graf",
     "search": "Sök",
     "create": "Skapa",
+    "annotate": "Kommentera",
     "chat": "Chatt",
     "menu": "Meny",
     "search_panel_title": "Sök",
     "create_panel_title": "Skapa",
+    "annotate_panel_title": "Kommentera",
     "chat_panel_title": "Assistent"
   }
 }

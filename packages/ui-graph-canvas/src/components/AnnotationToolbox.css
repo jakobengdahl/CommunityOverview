@@ -439,3 +439,58 @@
 .annotation-toolbox--touch .annotation-toolbox-item-label {
   display: inline;
 }
+
+/* Sheet variant (variant="sheet" in AnnotationToolbox.jsx): portaled into the
+   app's mobile BottomSheet content (GraphCanvas's
+   annotationToolboxPortalContainer), not floating above the canvas like
+   --compact/--touch above. BottomSheet already supplies the surrounding
+   chrome (backdrop, drag handle, title bar, scroll container - see
+   frontend/web's BottomSheet.css .bottom-sheet-content), so this variant lays
+   out in normal document flow instead of stacking another
+   fixed/absolute-positioned surface on top of it, and drops the pill's own
+   border/shadow so it reads as the sheet's content rather than a second card
+   floating inside it. A grid (not the flex-wrap every other variant uses)
+   keeps cells a predictable thumb-reachable size across row lengths, and
+   labels stay visible unconditionally (matching --touch, but not conditional
+   on it: --sheet is always a touch-sized dedicated surface regardless of the
+   host's own touch-detection signal). */
+.annotation-toolbox--sheet {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  transform: none;
+  max-width: none;
+  width: 100%;
+  gap: 0;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 0 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-item {
+  width: 100%;
+  min-width: 0;
+  height: 68px;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-item-label {
+  display: inline;
+  font-size: 12px;
+}
+
+.annotation-toolbox--sheet .annotation-toolbox-slot {
+  width: 100%;
+}
