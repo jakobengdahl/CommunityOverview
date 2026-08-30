@@ -53,13 +53,20 @@ export default function AnnotationLayerControls({ labels, locked, onChangeLayer 
  * The layer-change handler behind the row above.
  *
  * Refuses on a persisted `locked` flag as well as on another client's live
- * claim. The row above already hides itself when locked, so this is the
+ * edit lease. The row above already hides itself when locked, so this is the
  * enforcement behind that: a guarantee of the hook itself rather than of any
  * one caller's markup, so no future call site can reintroduce the hole by
- * rendering the row without its own `locked` branch.
+ * rendering the row without its own `locked` branch. A layer change is an
+ * instant, single-shot property edit (task-annotation-exclusive-edit-leases'
+ * "property editors via right-click menus" entry point): applies optimistically
+ * (matching every other release-point mutation in this package — no round
+ * trip before the user sees the result) while acquiring/releasing the lease
+ * in the background around it, rather than gating the write on the round
+ * trip. The server remains the authoritative backstop for a lost race
+ * (LeaseConflict) regardless.
  *
  * Stays silent when the step is a no-op: an annotation already at the front
- * has nothing to publish.
+ * has nothing to publish (and never attempts to acquire a lease for it).
  *
  * A layer change publishes as 'style': an envelope-field edit at a release
  * point, not a continuous gesture, so it wants the immediate publish path
@@ -67,7 +74,8 @@ export default function AnnotationLayerControls({ labels, locked, onChangeLayer 
  */
 export function useAnnotationLayer(id, data) {
   const { getNodes, setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, beginEditing, endEditing } =
+    useContext(AnnotationContext);
   return (direction) => {
     if (isRemoteLocked(data)) {
       notifyRemoteLockedAttempt();
@@ -81,5 +89,11 @@ export function useAnnotationLayer(id, data) {
     if (z === null) return;
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, zIndex: z } : n)));
     notifyChange('style');
+    if (beginEditing) {
+      beginEditing([id]).then(({ denied } = {}) => {
+        if (denied?.[id]) notifyRemoteLockedAttempt();
+        endEditing?.([id]);
+      });
+    }
   };
 }

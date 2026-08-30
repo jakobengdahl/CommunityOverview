@@ -17,10 +17,24 @@ import { createContext } from 'react';
  * safe default for a call site nobody has classified yet.
  *
  * `notifyRemoteLockedAttempt` is called instead of `notifyChange` when a
- * mutation is refused because another client currently holds the
- * annotation's selection claim (leases are exclusive —
- * task-annotation-shared-session-realtime), so the host can surface the
- * attempt (e.g. a toast) rather than the change silently doing nothing.
+ * mutation is refused because another client currently holds a live *edit
+ * lease* on the annotation (task-annotation-exclusive-edit-leases —
+ * first-actual-editor-wins, never a mere selection), so the host can
+ * surface the attempt (e.g. a toast) rather than the change silently doing
+ * nothing.
+ *
+ * `beginEditing(elementIds)` / `endEditing(elementIds)` are the edit-lease
+ * acquire/release pair every real edit-start entry point calls — opening a
+ * text field, beginning a geometry gesture, opening a property editor,
+ * starting a bulk mutation or undo — never on mere selection.
+ * `beginEditing` resolves `{granted, denied}` (`denied` maps a refused id to
+ * the display name of whoever holds it); a caller checks `denied[id]` before
+ * proceeding and calls `notifyRemoteLockedAttempt()` if refused. Backed by
+ * `sessionSyncClient.beginEditing`/`endEditing` (see that module for the
+ * first-actual-editor-wins acquisition semantics); the default below fails
+ * open (grants locally) for a context consumer with no host wired up (e.g.
+ * a bare unit test), matching that module's own fail-open reasoning for "no
+ * live connection yet".
  *
  * `attachNearby(targetId, kind)` is the "Nearby object menu" creation entry
  * point (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces"): creates a
@@ -34,6 +48,8 @@ import { createContext } from 'react';
 export const AnnotationContext = createContext({
   notifyChange: () => {},
   notifyRemoteLockedAttempt: () => {},
+  beginEditing: async (elementIds) => ({ granted: elementIds || [], denied: {} }),
+  endEditing: () => {},
   attachNearby: () => {},
   labels: {
     color: 'Colour',

@@ -7,12 +7,14 @@ import {
   rotationStyle,
   isRemoteLocked,
   isAnnotationDraggable,
+  remoteEditBadge,
   resolveRotatedResizeGeometry,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './NoteNode.css';
 
 /**
@@ -38,18 +40,19 @@ function NoteNode({ id, data = {}, selected }) {
   // through this note's rotation (resolveRotatedResizeGeometry).
   const resizeStartRef = useRef(null);
   const { setNodes } = useReactFlow();
-  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby, beginEditing, endEditing } =
     useContext(AnnotationContext);
-  // Another client's live selection claim makes this note's lease exclusive
-  // (task-annotation-shared-session-realtime): every mutation below refuses
-  // to run while it is held, surfacing the attempt instead of silently
-  // dropping it or letting two clients race.
+  // Another client's live edit lease (task-annotation-exclusive-edit-leases,
+  // acquired only when real editing starts — never on mere selection):
+  // every mutation below refuses to run while it is held, surfacing the
+  // attempt instead of silently dropping it or letting two clients race.
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
   const locked = Boolean(data?.locked);
   const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
     useEditableText(id, data);
+  useAnnotationEditLease(id, Boolean(contextMenu));
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -138,8 +141,14 @@ function NoteNode({ id, data = {}, selected }) {
     notifyChange('style');
   };
 
+  // Resize is a geometry gesture (task-annotation-exclusive-edit-leases):
+  // acquires the lease at the start (fire-and-forget — NodeResizer already
+  // started the visual drag by the time this fires, so there is nothing to
+  // block on; a lost race is the server-side write's problem, same as a
+  // plain drag) and releases it when the gesture ends.
   const handleResizeStart = (event, params) => {
     resizeStartRef.current = params;
+    beginEditing?.([id]);
   };
 
   // NodeResizer computes `params` as if this note's box were axis-aligned
@@ -167,10 +176,16 @@ function NoteNode({ id, data = {}, selected }) {
     }
     resizeStartRef.current = null;
     notifyChange('geometry');
+    endEditing?.([id]);
   };
 
   const color = data.color || NOTE_COLORS[0];
   const fontSize = data.fontSize || DEFAULT_NOTE_FONT_SIZE;
+  // Cosmetic "who's here" marker, independent of the edit-lease check above:
+  // prefers the active editor when there is one, else whoever merely has
+  // this selected (task-annotation-exclusive-edit-leases — selection alone
+  // never gates anything, but it is still worth showing).
+  const badge = remoteEditBadge(data);
 
   return (
     <>
@@ -200,23 +215,27 @@ function NoteNode({ id, data = {}, selected }) {
           className="graph-note-node"
           style={{
             backgroundColor: color,
-            outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
-            outlineOffset: remoteLocked ? '2px' : undefined,
+            outline: badge ? `2px solid ${badge.color}` : undefined,
+            outlineOffset: badge ? '2px' : undefined,
           }}
           onDoubleClick={startEditing}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
             setContextMenu({ x: e.clientX, y: e.clientY });
           }}
         >
-          {remoteLocked && (
+          {badge && (
             <div
               className="graph-node-remote-badge"
-              style={{ backgroundColor: data.remoteSelection.color }}
-              title={data.remoteSelection.displayName}
+              style={{ backgroundColor: badge.color }}
+              title={badge.displayName}
             >
-              {data.remoteSelection.displayName}
+              {badge.displayName}
             </div>
           )}
           {isEditing ? (

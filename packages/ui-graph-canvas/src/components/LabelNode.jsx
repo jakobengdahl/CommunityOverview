@@ -7,11 +7,13 @@ import {
   rotationStyle,
   isRemoteLocked,
   isAnnotationDraggable,
+  remoteEditBadge,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
 import './LabelNode.css';
 
 /**
@@ -30,8 +32,8 @@ function LabelNode({ id, data, selected }) {
   const { setNodes } = useReactFlow();
   const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
     useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this label's lease exclusive (task-annotation-shared-session-realtime).
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
@@ -41,6 +43,7 @@ function LabelNode({ id, data, selected }) {
   // a newline — see useEditableText's doc comment.
   const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
     useEditableText(id, data, { commitOnEnter: true });
+  useAnnotationEditLease(id, Boolean(contextMenu));
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -131,6 +134,7 @@ function LabelNode({ id, data, selected }) {
 
   const color = data.color || DEFAULT_LABEL_COLOR;
   const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
+  const badge = remoteEditBadge(data);
 
   return (
     <>
@@ -140,23 +144,27 @@ function LabelNode({ id, data, selected }) {
           color,
           fontSize,
           ...rotationStyle('label', data.rotation),
-          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
-          outlineOffset: remoteLocked ? '2px' : undefined,
+          outline: badge ? `2px solid ${badge.color}` : undefined,
+          outlineOffset: badge ? '2px' : undefined,
         }}
         onDoubleClick={startEditing}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (remoteLocked) {
+            notifyRemoteLockedAttempt();
+            return;
+          }
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        {remoteLocked && (
+        {badge && (
           <div
             className="graph-node-remote-badge"
-            style={{ backgroundColor: data.remoteSelection.color }}
-            title={data.remoteSelection.displayName}
+            style={{ backgroundColor: badge.color }}
+            title={badge.displayName}
           >
-            {data.remoteSelection.displayName}
+            {badge.displayName}
           </div>
         )}
         {isEditing ? (

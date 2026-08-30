@@ -321,28 +321,48 @@ export function isArrowAnchored(data) {
   return Boolean(data?.startAnchor || data?.endAnchor);
 }
 
-// Whether another live client currently holds this annotation's selection
-// claim (task-annotation-shared-session-realtime: annotation leases are
-// exclusive, not merely advisory — see the task's slice_scope). GraphCanvas's
-// remote-selection effect stamps `data.remoteSelection` from the sync
-// client's live claim map; this is the single read-side check every
-// annotation component uses to refuse a local edit while someone else holds
-// the claim. Distinct from `data.locked` (a persisted, geometry-only edit
-// lock a user sets deliberately) — a remote claim clears itself (release or
-// 30s TTL expiry) the moment the other client lets go.
+// Whether another live client currently holds an *edit lease* on this
+// annotation (task-annotation-exclusive-edit-leases, deciding
+// dec-mcp-agent-ops-vs-annotation-claimmap: edit leases are genuinely
+// exclusive — first-actual-editor-wins, refused rather than taken over — as
+// opposed to the advisory, last-write-wins selection claim `data.
+// remoteSelection` carries; this now reads a *different* field on purpose).
+// GraphCanvas's remote-lease effect stamps `data.remoteLease` from the sync
+// client's live lease map (`sessionSyncClient.getRemoteLeases()`), populated
+// only when the other client actually started editing (opened a text field,
+// began a geometry gesture, opened a property editor, started a bulk
+// mutation/undo) — never on mere selection. This is the single read-side
+// check every annotation component uses to refuse a local edit while
+// someone else holds the lease. Distinct from `data.locked` (a persisted,
+// geometry-only edit lock a user sets deliberately) — a remote lease clears
+// itself (release, completion or 30s TTL expiry) the moment the other
+// client lets go, and is unrelated to `data.remoteSelection`, which stays a
+// purely cosmetic "who has this selected" marker with no bearing on
+// whether an edit is allowed.
 export function isRemoteLocked(data) {
-  return Boolean(data?.remoteSelection);
+  return Boolean(data?.remoteLease);
+}
+
+// The marker to render as the collaborator badge/outline: the id of whoever
+// is actively *editing* this annotation when there is one (more specific and
+// more urgent to show than a mere selection), else whoever merely has it
+// selected. Both are `{ clientId, color, displayName }` or null/undefined —
+// see `data.remoteLease` and `data.remoteSelection` above. Centralises what
+// every annotation component's own badge JSX would otherwise re-derive
+// identically six times.
+export function remoteEditBadge(data) {
+  return data?.remoteLease || data?.remoteSelection || null;
 }
 
 // Whether an annotation should currently accept a plain ReactFlow drag,
-// combining its persisted lock, a live remote claim, and — for arrows only —
-// whether either endpoint is anchored to a target (anchored arrows move only
-// via their endpoint handles, never as a whole). Drives GraphCanvas's
-// remote-selection effect, which takes the `false` verbatim but maps a `true`
-// for a group to `undefined`, so the group keeps deferring to the canvas-wide
-// `nodesDraggable` switch instead of overriding it. `overlayToFlowNode`
-// computes the locked/anchor-only half of this itself at hydration time, when
-// no remote claim can yet exist.
+// combining its persisted lock, a live remote edit lease, and — for arrows
+// only — whether either endpoint is anchored to a target (anchored arrows
+// move only via their endpoint handles, never as a whole). Drives
+// GraphCanvas's remote-lease effect, which takes the `false` verbatim but
+// maps a `true` for a group to `undefined`, so the group keeps deferring to
+// the canvas-wide `nodesDraggable` switch instead of overriding it.
+// `overlayToFlowNode` computes the locked/anchor-only half of this itself at
+// hydration time, when no remote lease can yet exist.
 export function isAnnotationDraggable(node) {
   const data = node?.data;
   if (Boolean(data?.locked) || isRemoteLocked(data)) return false;

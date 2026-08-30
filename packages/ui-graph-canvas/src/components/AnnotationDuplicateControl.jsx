@@ -62,10 +62,10 @@ export default function AnnotationDuplicateControl({ labels, onDuplicate }) {
  *   copied verbatim; an unlocked, attached duplicate is an ordinary, valid
  *   state.
  *
- * Refuses on a remote claim like every other mutation here — a duplicate
- * does not touch the source, but reading a mid-drag/mid-edit node into a
- * copy would freeze whatever half-finished state another actor's gesture
- * happens to be in.
+ * Refuses on a remote edit lease like every other mutation here (task-
+ * annotation-exclusive-edit-leases) — a duplicate does not touch the source,
+ * but reading a mid-drag/mid-edit node into a copy would freeze whatever
+ * half-finished state another actor's gesture happens to be in.
  */
 export function useAnnotationDuplicate(id, data) {
   const { getNodes, setNodes } = useReactFlow();
@@ -77,7 +77,13 @@ export function useAnnotationDuplicate(id, data) {
     }
     const source = getNodes().find((n) => n.id === id);
     if (!source) return;
-    const { remoteSelection: _remoteSelection, ...restData } = source.data || {};
+    // Neither remote marker belongs on a fresh id nothing has selected or
+    // leased yet — strip both rather than just the (originally sole) claim
+    // marker, or a duplicate taken while its source happened to carry a
+    // stale `remoteLease` would render as remote-locked from its very first
+    // frame, until the next reconcile effect corrects it.
+    const { remoteSelection: _remoteSelection, remoteLease: _remoteLease, ...restData } =
+      source.data || {};
     const newId = `${source.type}-${Date.now()}`;
     const position = source.position || { x: 0, y: 0 };
     const newData = { ...restData, locked: false };
