@@ -448,6 +448,15 @@ export class SessionSyncClient {
     // tracked separately from selection claims above — see LEASE_TTL_MS.
     this._leases = new Map(); // element_id -> { clientId, expiresAt }
     this._activeEditIds = new Set(); // element ids this client is actively editing
+    // Ids the caller currently *wants* held, set synchronously the instant
+    // beginEditing is called — distinct from _activeEditIds, which only gains
+    // an id once its acquisition round trip actually resolves. See
+    // beginEditing's docstring for why this exists: without it, an
+    // endEditing that lands while the matching beginEditing is still
+    // in-flight has nothing in _activeEditIds to find yet, so the release
+    // would silently do nothing and the later-resolving acquire would then
+    // hold a lease nobody wants released — until the 30s TTL expired.
+    this._editIntent = new Set();
     this._leaseRenewTimer = null;
     this._leasePruneTimer = null;
   }
@@ -680,15 +689,23 @@ export class SessionSyncClient {
    * and the mutating op the caller sends next is still checked server-side
    * regardless (defense in depth — see `LeaseConflict` in
    * `backend/core/session_manager.py`).
+   *
+   * Records each id in `_editIntent` synchronously, before the round trip —
+   * so a fast `endEditing` landing while this call is still in flight (a
+   * quick Escape right after double-click, a fast drag, a menu opened and
+   * closed within one round trip) is not silently lost: `_commitGranted`
+   * checks `_editIntent` again once the round trip resolves, and releases
+   * anything the caller no longer wants instead of committing a lease
+   * nobody asked to keep — see `endEditing`.
    */
   async beginEditing(elementIds) {
     const ids = Array.from(
       new Set((elementIds || []).filter((id) => typeof id === 'string' && id))
     );
     if (!ids.length) return { granted: [], denied: {} };
+    for (const id of ids) this._editIntent.add(id);
     if (!this._fetch || !this._ready) {
-      for (const id of ids) this._activeEditIds.add(id);
-      this._startLeaseRenewTimer();
+      this._commitGranted(ids);
       return { granted: ids, denied: {} };
     }
     let granted = ids;
@@ -712,13 +729,35 @@ export class SessionSyncClient {
     } catch {
       /* fail open — see the docstring above */
     }
+    this._commitGranted(granted);
+    return { granted, denied };
+  }
+
+  /**
+   * Commit a resolved acquisition: only for ids still in `_editIntent` (the
+   * caller has not since called `endEditing` for them) does this add the
+   * lease to local tracking and keep renewing it. An id the caller already
+   * released while the acquisition was in flight is instead released again
+   * right away — the earlier `endEditing` found nothing in `_activeEditIds`
+   * yet and so had nothing to enqueue, and without this the server would be
+   * left thinking this client holds a lease nobody wants, for the full 30s
+   * TTL, wrongly refusing a genuine second editor in the meantime.
+   */
+  _commitGranted(granted) {
     const expiresAt = this._now() + LEASE_TTL_MS;
+    const toReleaseAgain = [];
     for (const id of granted) {
-      this._leases.set(id, { clientId: this.clientId, expiresAt });
-      this._activeEditIds.add(id);
+      if (this._editIntent.has(id)) {
+        this._leases.set(id, { clientId: this.clientId, expiresAt });
+        this._activeEditIds.add(id);
+      } else {
+        toReleaseAgain.push(id);
+      }
     }
     if (this._activeEditIds.size) this._startLeaseRenewTimer();
-    return { granted, denied };
+    if (toReleaseAgain.length) {
+      this._enqueue([{ op: 'edit_lease_released', element_ids: toReleaseAgain }]);
+    }
   }
 
   /**
@@ -729,9 +768,18 @@ export class SessionSyncClient {
    * superset. Queued rather than awaited (unlike `beginEditing`): nothing
    * downstream needs to know the release landed, and the id is removed from
    * local tracking immediately either way.
+   *
+   * Always drops `elementIds` from `_editIntent` first, whether or not they
+   * are in `_activeEditIds` yet — see `_commitGranted`: a matching
+   * `beginEditing` still in flight for one of these ids reads that absence
+   * when it resolves and releases the lease immediately instead of holding
+   * it, rather than this call finding nothing yet to do and the release
+   * being lost.
    */
   endEditing(elementIds) {
-    const ids = (elementIds || []).filter((id) => this._activeEditIds.has(id));
+    const requested = elementIds || [];
+    for (const id of requested) this._editIntent.delete(id);
+    const ids = requested.filter((id) => this._activeEditIds.has(id));
     if (!ids.length) return;
     for (const id of ids) this._activeEditIds.delete(id);
     if (!this._activeEditIds.size) this._stopLeaseRenewTimer();

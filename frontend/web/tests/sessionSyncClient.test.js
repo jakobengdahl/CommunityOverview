@@ -1407,3 +1407,310 @@ describe('SessionSyncClient presence + claims', () => {
     expect(client.getRemoteSelections()).toEqual({});
   });
 });
+
+// task-annotation-exclusive-edit-leases: beginEditing/endEditing are a
+// separate protocol from the selection claims above — first-actual-editor-
+// wins, refused rather than taken over, never acquired by a mere selection.
+describe('SessionSyncClient edit leases', () => {
+  const roster = [
+    { client_id: 'client-me', display_name: 'Me', color: '#111' },
+    { client_id: 'client-other', display_name: 'Ada', color: '#e6194b' },
+  ];
+
+  it('seeds remote leases from a snapshot, excluding its own', () => {
+    const onLeases = vi.fn();
+    const { client } = makeClient({ handlers: { onLeases } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: { 'node-a': 'client-other', 'node-b': 'client-me' },
+    });
+    expect(client.getRemoteLeases()).toEqual({
+      'node-a': { clientId: 'client-other', color: '#e6194b', displayName: 'Ada' },
+    });
+    expect(onLeases).toHaveBeenLastCalledWith(client.getRemoteLeases());
+  });
+
+  it('beginEditing acquires via a direct POST (bypassing the debounced queue) and grants locally', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({ applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }] }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+    // Sent immediately, not through the debounced op queue setLocalSelection uses.
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'edit_lease_acquired', element_ids: ['node-a'] },
+    ]);
+  });
+
+  it('beginEditing reports a denial with the holder\'s display name', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: [], denied: { 'node-a': 'client-other' } }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: [], denied: { 'node-a': 'Ada' } });
+  });
+
+  it('fails open (grants without a round trip) before the stream is ready', async () => {
+    const fetchImpl = makeFetch();
+    const { client } = makeClient({ fetchImpl });
+    // Never connected — no live session yet.
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('endEditing sends edit_lease_released for ids actually held, ignoring the rest', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+    await client.beginEditing(['node-a']);
+    fetchImpl.calls.length = 0;
+
+    client.endEditing(['node-a', 'node-never-held']);
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'edit_lease_released', element_ids: ['node-a'] },
+    ]);
+  });
+
+  it('an endEditing that lands while the matching beginEditing is still in flight releases the lease once it resolves, instead of leaking it', async () => {
+    // Regression for a real race found in review: a fast Escape right after
+    // double-click (or any edit-start/end pair shorter than the acquire
+    // round trip) used to have nothing in `_activeEditIds` yet for
+    // `endEditing` to find, so the release was silently dropped — and the
+    // later-resolving `beginEditing` then committed a lease nobody wanted,
+    // held until the 30 s TTL expired and wrongly refusing a genuine second
+    // editor in the meantime.
+    let resolveFetch;
+    const fetchImpl = vi.fn((url, opts) => {
+      fetchImpl.calls.push({ url, body: JSON.parse(opts.body) });
+      return new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+    });
+    fetchImpl.calls = [];
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const beginPromise = client.beginEditing(['node-a']);
+    // The caller changes its mind (Escape, a cancelled drag, a closed menu)
+    // before the acquire round trip has resolved.
+    client.endEditing(['node-a']);
+    // Nothing to release yet from the caller's point of view — the id was
+    // never actually held — so no op is enqueued for it here.
+    expect(fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released')).toHaveLength(0);
+
+    // The server now grants the acquisition the caller no longer wants.
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+      }),
+    });
+    const result = await beginPromise;
+    // The direct caller of beginEditing still sees it as granted — this is a
+    // race between two calls the caller itself made, not a server refusal.
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+
+    // But the lease is released again immediately rather than held locally.
+    await flush();
+    const released = fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released');
+    expect(released).toHaveLength(1);
+    expect(released[0].body.ops).toEqual([{ op: 'edit_lease_released', element_ids: ['node-a'] }]);
+  });
+
+  it('tracks remote lease acquire/release ops but ignores its own echoes', () => {
+    const onLeases = vi.fn();
+    const { client } = makeClient({ handlers: { onLeases } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_acquired', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_released', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()).toEqual({});
+
+    // Our own acquire echo must not render as a remote marker (beginEditing
+    // already updated local state from the direct response).
+    es.emit({
+      type: 'op',
+      client_id: 'client-me',
+      op: { op: 'edit_lease_acquired', client_id: 'client-me', element_ids: ['node-c'] },
+    });
+    expect(client.getRemoteLeases()['node-c']).toBeUndefined();
+  });
+
+  it('drops a departed client\'s leases on presence_left', () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: { 'node-a': 'client-other' },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+
+    es.emit({ type: 'presence_left', client_id: 'client-other' });
+    expect(client.getRemoteLeases()).toEqual({});
+  });
+
+  it('re-acquires actively-held edit leases on reconnect (server dropped them on disconnect)', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+    await client.beginEditing(['node-a']);
+    fetchImpl.calls.length = 0;
+
+    es.emit({ type: 'catch_up', seq: 1, ops: [], roster, claims: {}, leases: {} });
+    await flush();
+    const reacquires = fetchImpl.calls
+      .flatMap((c) => c.body.ops)
+      .filter((o) => o.op === 'edit_lease_acquired' && o.element_ids.includes('node-a'));
+    expect(reacquires.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renews a held lease on a timer, but skips renewal while the stream is disconnected', async () => {
+    const fetchImpl = makeFetch(
+      Array.from({ length: 10 }, () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      }))
+    );
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+
+    // Fake timers engaged before beginEditing — `_startLeaseRenewTimer`'s
+    // `setInterval` is only created once its acquire resolves, and a
+    // `setInterval` created under real timers is invisible to a fake clock
+    // engaged afterward. `advanceTimersByTimeAsync` (unlike the sync
+    // variant) also flushes the microtask queue between ticks, which is
+    // what actually lets the mocked fetch's resolved Promise settle.
+    vi.useFakeTimers();
+    try {
+      const beginPromise = client.beginEditing(['node-a']);
+      await vi.advanceTimersByTimeAsync(0);
+      await beginPromise;
+      const afterAcquire = fetchImpl.calls.length;
+      expect(afterAcquire).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(15_000); // one LEASE_RENEW_MS interval
+      expect(fetchImpl.calls.length).toBeGreaterThan(afterAcquire);
+      const afterRenew = fetchImpl.calls.length;
+
+      es.error(); // stream drops → not ready
+      await vi.advanceTimersByTimeAsync(60_000); // several renewal intervals pass
+      expect(fetchImpl.calls.length).toBe(afterRenew);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a remote lease client-side once its TTL passes', () => {
+    let now = 1000;
+    const { client } = makeClient({ nowFn: () => now });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_acquired', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+    now += 31_000;
+    expect(client.getRemoteLeases()).toEqual({});
+  });
+});
