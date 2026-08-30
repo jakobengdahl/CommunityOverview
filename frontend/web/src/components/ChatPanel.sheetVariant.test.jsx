@@ -5,6 +5,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import ChatPanel from './ChatPanel';
+import BottomSheet from './BottomSheet';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 
@@ -119,52 +120,83 @@ describe('ChatPanel sheet variant', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('is a graceful no-op when visualViewport is unavailable: composer has no inline keyboard margin', () => {
-    Object.defineProperty(window, 'visualViewport', { configurable: true, value: undefined });
-
-    render(<ChatPanel variant="sheet" />);
-    const composer = screen
-      .getByPlaceholderText('chat.placeholder')
-      .closest('.chat-input-container');
-
-    expect(composer.style.marginBottom).toBe('');
-  });
-
-  it('lifts the composer above the keyboard via visualViewport once it shrinks', () => {
+  // Keyboard avoidance for the sheet variant's composer used to be ChatPanel's
+  // own job (an inline marginBottom driven by useVisualViewportInset), but
+  // that stacked with BottomSheet's own scrim-shrink once BottomSheet grew
+  // the same mechanism (frontend/web/src/components/BottomSheet.jsx) — the
+  // sheet variant is *always* mounted inside a BottomSheet (MobileShell.jsx
+  // is its only caller), so double-compensating pushed the composer roughly
+  // twice as far above the keyboard as intended. ChatPanel now applies none
+  // of its own; BottomSheet.test.jsx's "on-screen keyboard avoidance" cases
+  // are the real coverage for this behavior now. These tests just pin that
+  // ChatPanel stays out of it entirely, in both variants.
+  it('never applies an inline keyboard margin to the composer, in either variant', () => {
     const vv = makeVisualViewport({ height: 800 });
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
 
-    render(<ChatPanel variant="sheet" />);
+    const { rerender } = render(<ChatPanel variant="sheet" />);
+    const sheetComposer = screen
+      .getByPlaceholderText('chat.placeholder')
+      .closest('.chat-input-container');
+    expect(sheetComposer.style.marginBottom).toBe('');
+
+    act(() => {
+      vv.emit('resize', { height: 480 });
+    });
+    expect(sheetComposer.style.marginBottom).toBe('');
+
+    rerender(<ChatPanel />);
+    const floatingComposer = screen
+      .getByPlaceholderText('chat.placeholder')
+      .closest('.chat-input-container');
+    expect(floatingComposer.style.marginBottom).toBe('');
+  });
+
+  it('does not double-compensate for the keyboard when actually nested inside BottomSheet, the way MobileShell.jsx really mounts it', () => {
+    const vv = makeVisualViewport({ height: 800 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+    render(
+      <BottomSheet isOpen snapPoint="half" onClose={() => {}} onSnapPointChange={() => {}}>
+        <ChatPanel variant="sheet" />
+      </BottomSheet>
+    );
     const composer = screen
       .getByPlaceholderText('chat.placeholder')
       .closest('.chat-input-container');
-    expect(composer.style.marginBottom).toBe('');
 
     act(() => {
       vv.emit('resize', { height: 480 });
     });
 
-    expect(composer.style.marginBottom).toBe('320px');
-  });
-
-  it('does not apply the keyboard margin in the floating (desktop) variant even with a shrunk visualViewport', () => {
-    const vv = makeVisualViewport({ height: 480 });
-    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
-
-    render(<ChatPanel />);
-    const composer = screen
-      .getByPlaceholderText('chat.placeholder')
-      .closest('.chat-input-container');
-
+    // BottomSheet itself shrinks its scrim to stay above the keyboard (see
+    // BottomSheet.test.jsx); the composer must not ALSO apply its own
+    // margin on top of that, or it ends up roughly twice as far above the
+    // keyboard as intended.
     expect(composer.style.marginBottom).toBe('');
+    expect(
+      screen.getByTestId('bottom-sheet-scrim').style.getPropertyValue('--keyboard-inset')
+    ).toBe('320px');
   });
 
-  it('never subscribes to visualViewport in the floating (desktop) variant', () => {
+  it('never subscribes to visualViewport, in either variant', () => {
     const vv = makeVisualViewport({ height: 800 });
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
 
-    render(<ChatPanel />);
-
+    const { rerender } = render(<ChatPanel variant="sheet" />);
     expect(vv.addEventListener).not.toHaveBeenCalled();
+
+    rerender(<ChatPanel />);
+    expect(vv.addEventListener).not.toHaveBeenCalled();
+  });
+
+  it('is a graceful no-op when visualViewport is unavailable', () => {
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: undefined });
+
+    expect(() => render(<ChatPanel variant="sheet" />)).not.toThrow();
+    const composer = screen
+      .getByPlaceholderText('chat.placeholder')
+      .closest('.chat-input-container');
+    expect(composer.style.marginBottom).toBe('');
   });
 });
