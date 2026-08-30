@@ -922,15 +922,52 @@ vs. an already-acked own write"), plus pure-function coverage for
 still applies normally — this guard only ever changes behaviour for an
 actual regression.
 
-**Known related gap this fix does not close.** `App.jsx`'s `applyRemoteOp`
-(the handler `onRemoteOps` invokes) applies an annotation broadcast's content
-straight onto the *live canvas* React store unconditionally, with no
-version check of its own — a stale broadcast this new guard correctly keeps
-out of `sessionSyncClient.js`'s internal baseline can still flash onto the
-canvas itself via that separate path before self-healing once this client's
-own ack (or a later, genuinely newer broadcast) lands. This is a pre-existing
-gap, not introduced by this fix, and out of its scope (`sessionSyncClient.js`
-only); it is a real candidate for a future round.
+**Update — the related canvas-layer gap this fix originally left open is now
+closed (round 5, smallfix-applyremoteop-canvas-no-version-guard).** An
+earlier revision of this section recorded a "known related gap" here:
+`App.jsx`'s `applyRemoteOp` (the handler `onRemoteOps` invokes) applied an
+annotation broadcast's content straight onto the *live canvas* React store
+unconditionally, with no version check of its own, so a stale broadcast this
+guard correctly kept out of `sessionSyncClient.js`'s internal baseline could
+still flash onto the canvas itself via that separate path. That revision
+described the canvas as "self-healing once this client's own ack (or a
+later, genuinely newer broadcast) lands" — that framing oversold the actual
+risk and was corrected once traced through in full: nothing *automatically*
+corrects a wrongly-applied stale annotation. A remote apply alone triggers no
+save (`GraphCanvas.jsx`'s remote-annotation-ops effect only clears the queue,
+via `onRemoteAnnotationsApplied`), so the stale content simply sits on the
+canvas until the *next*, entirely unrelated autosave trigger (a node drag, a
+different annotation edit, Save View). That autosave builds its outgoing
+snapshot from whatever the canvas currently shows — the stale, reverted
+content, never corrected — and diffs it against the sync baseline, which
+(thanks to this same guard) is correctly still at the true higher version.
+`predictAnnotationVersionsForSend` computes a valid-looking `base_version`
+for the resulting patch, the server has no way to distinguish this from a
+genuine edit and accepts it as a new version, and a collaborator's confirmed
+change is silently overwritten and re-broadcast to everyone as real — the
+same data-loss class this whole four-round chain exists to close, reachable
+through ordinary two-collaborator editing, not only a narrow race window a
+self-heal could plausibly outrun.
+
+The fix reuses this guard's own comparison rather than adding a second,
+independently-maintained version check at the canvas layer: `_handleEvent`'s
+`'op'` case now computes `isAnnotationOpStale` (the same predicate
+`foldRemoteAnnotationOp` above acts on, factored out as its own pure
+function) against the pre-fold baseline and, when the incoming
+`annotation_created`/`annotation_updated` broadcast is stale, never invokes
+`onRemoteOps` for it at all. `App.jsx`'s `applyRemoteOp`/
+`applyAnnotationUpsertToCanvas` are consequently never called with a stale
+annotation broadcast in the first place — the canvas and the sync baseline
+are now gated by the exact same decision, computed once, so the two cannot
+independently drift into disagreeing with each other the way two separately
+maintained checks could. A brand-new annotation (no baseline entry yet)
+still applies unconditionally, and a genuinely newer broadcast still reaches
+the canvas normally — this only ever changes behaviour for an actual
+regression. Test-covered at the sync-client layer (`frontend/web/tests/
+sessionSyncClient.test.js`, the "remote broadcast reordering" describe block
+now also asserts on `onRemoteOps`) and end-to-end through the real
+`SessionSyncClient`/`sessionAnnotations.js`/`GraphCanvas` chain
+(`frontend/web/tests/annotationRemoteCanvasVersionGuard.test.jsx`).
 
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation

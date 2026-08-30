@@ -6,6 +6,7 @@ import {
   predictAnnotationVersionsForSend,
   foldAckedAnnotationOp,
   foldRemoteAnnotationOp,
+  isAnnotationOpStale,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
 import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
@@ -2237,7 +2238,8 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
         }),
       },
     ]);
-    const { client, es } = makeReadyClient(fetchImpl);
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
     client.setBaseline({ annotations: [initial] });
 
     // 1. Client A edits style and sends its op.
@@ -2282,29 +2284,37 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     const updateOp = secondBatch.find((o) => o.op === 'annotation_updated');
     expect(updateOp.base_version).toBe(3); // not regressed to 2
     expect(updateOp.annotation.text).toBe('caption');
+
+    // 5. Round 5 (smallfix-applyremoteop-canvas-no-version-guard): the stale
+    // broadcast must never reach onRemoteOps either — the exact handler
+    // App.jsx wires straight onto the live canvas with no version check of
+    // its own (see applyRemoteOp/applyAnnotationUpsertToCanvas). Before this
+    // fix, onRemoteOps fired for B's stale op regardless of the baseline
+    // guard above, so the canvas would flash to B's reverted style even
+    // though the sync baseline (asserted above) correctly never moved. The
+    // only 'op' event this test emitted was that stale broadcast, so the
+    // handler must not have been called at all.
+    expect(onRemoteOps).not.toHaveBeenCalled();
   });
 
   it('a genuinely newer remote broadcast still applies normally (not a license to ignore real remote updates)', async () => {
     const initial = makeInitialAnnotation();
     const fetchImpl = makeFetch();
-    const { client, es } = makeReadyClient(fetchImpl);
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
     client.setBaseline({ annotations: [initial] });
 
     // A genuinely different, and genuinely newer, collaborator edit.
-    es.emit({
-      type: 'op',
-      seq: 1,
-      client_id: 'client-B',
-      op: {
-        op: 'annotation_updated',
-        annotation: {
-          ...initial,
-          geometry: { x: 5 },
-          version: 2,
-          field_versions: { geometry: 2 },
-        },
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: {
+        ...initial,
+        geometry: { x: 5 },
+        version: 2,
+        field_versions: { geometry: 2 },
       },
-    });
+    };
+    es.emit({ type: 'op', seq: 1, client_id: 'client-B', op: newerOp });
 
     // The next local edit's base_version must reflect the applied
     // broadcast's version 2 — proving it was folded into the baseline,
@@ -2315,12 +2325,18 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
     expect(updateOp.base_version).toBe(2);
     expect(updateOp.annotation.style).toBe('green');
+
+    // A genuinely newer broadcast must still reach onRemoteOps — round 5's
+    // fix must not turn into a "collaboration doesn't work" regression by
+    // over-suppressing delivery of real updates.
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-B' });
   });
 
   it('a stale broadcast followed by a genuinely newer one: the stale one is dropped but the newer one still applies', async () => {
     const initial = makeInitialAnnotation();
     const fetchImpl = makeFetch();
-    const { client, es } = makeReadyClient(fetchImpl);
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
     // Baseline already at version 3 (as if this client's own ack, or an
     // earlier remote op, already advanced it) — mirrors the point reached
     // right after step 3 of the scenario above, isolated from the POST/ack
@@ -2331,31 +2347,23 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     });
 
     // A stale broadcast (version 2) arrives first...
-    es.emit({
-      type: 'op',
-      seq: 2,
-      client_id: 'client-B',
-      op: {
-        op: 'annotation_updated',
-        annotation: { ...initial, style: 'red', version: 2, field_versions: { style: 2 } },
-      },
-    });
+    const staleOp = {
+      op: 'annotation_updated',
+      annotation: { ...initial, style: 'red', version: 2, field_versions: { style: 2 } },
+    };
+    es.emit({ type: 'op', seq: 2, client_id: 'client-B', op: staleOp });
     // ...then a genuinely newer one (version 4) arrives right after.
-    es.emit({
-      type: 'op',
-      seq: 4,
-      client_id: 'client-C',
-      op: {
-        op: 'annotation_updated',
-        annotation: {
-          ...initial,
-          style: 'blue',
-          geometry: { x: 9 },
-          version: 4,
-          field_versions: { style: 3, geometry: 4 },
-        },
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: {
+        ...initial,
+        style: 'blue',
+        geometry: { x: 9 },
+        version: 4,
+        field_versions: { style: 3, geometry: 4 },
       },
-    });
+    };
+    es.emit({ type: 'op', seq: 4, client_id: 'client-C', op: newerOp });
 
     // The stale one must not have won, and the newer one must have: the
     // next local edit's base_version reflects version 4, not 2 or 3.
@@ -2366,6 +2374,11 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     const sentOps = fetchImpl.calls[0].body.ops;
     const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
     expect(updateOp.base_version).toBe(4);
+
+    // onRemoteOps sees only the genuinely newer broadcast — the stale one
+    // never reaches it (and so never reaches a canvas wired to it either).
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-C' });
   });
 });
 
@@ -2449,6 +2462,67 @@ describe('foldRemoteAnnotationOp', () => {
     const baseline = { node_refs: ['a'] };
     const result = foldRemoteAnnotationOp(baseline, { op: 'nodes_added', node_ids: ['b'] });
     expect(result.node_refs).toEqual(['a', 'b']);
+  });
+});
+
+// Pure-function coverage for `isAnnotationOpStale` — the predicate
+// `foldRemoteAnnotationOp` (above) and `_handleEvent`'s `'op'` case (which
+// gates `onRemoteOps`, and so ultimately App.jsx's canvas write, on it) both
+// consult, so the two can never independently drift on the same question
+// (round 5, smallfix-applyremoteop-canvas-no-version-guard).
+describe('isAnnotationOpStale', () => {
+  const baseline = {
+    annotations: [{ id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3 }],
+  };
+
+  it('is true for a lower incoming version', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 2 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(true);
+  });
+
+  it('is false for a version tie', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 3 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for a genuinely higher incoming version', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 4 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for an id the baseline has no entry for yet (a fresh annotation)', () => {
+    const op = {
+      op: 'annotation_created',
+      annotation: { id: 'new', type: 'shape', kind: 'shape', version: 1 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false when the incoming version cannot be compared', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape' }, // no version field
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for a non-annotation op', () => {
+    expect(isAnnotationOpStale(baseline, { op: 'nodes_added', node_ids: ['b'] })).toBe(false);
+  });
+
+  it('is false for an annotation op with no id', () => {
+    expect(
+      isAnnotationOpStale(baseline, { op: 'annotation_updated', annotation: { version: 1 } })
+    ).toBe(false);
   });
 });
 

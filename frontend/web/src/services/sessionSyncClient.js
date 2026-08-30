@@ -517,6 +517,42 @@ export function foldAckedAnnotationOp(mirrorState, op) {
 }
 
 /**
+ * Whether an `annotation_created`/`annotation_updated` op is stale/reordered
+ * relative to what `mirrorState`'s baseline already holds for that
+ * annotation — the exact predicate `foldRemoteAnnotationOp` (below) uses to
+ * decide whether to drop an incoming remote op atomically, factored out on
+ * its own (round 5, smallfix-applyremoteop-canvas-no-version-guard) so
+ * `_handleEvent`'s `'op'` case can gate delivery to `onRemoteOps` — and so
+ * ultimately reach the *canvas* App.jsx renders from it — on the very same
+ * decision, rather than adding a second, independently-drifting
+ * reimplementation of this comparison at the canvas layer (a third one,
+ * after `foldAckedAnnotationOp`'s own differently-scoped merge, would have
+ * been a fourth-order repeat of the same bug class this whole four-round
+ * chain exists to close: two guards that *should* always agree but are
+ * free, by construction, to quietly stop agreeing).
+ *
+ * A non-annotation op, an op with no `annotation.id`, an id the mirror has
+ * no entry for yet (a fresh annotation — round 3's "no baseline entry"
+ * rule), or a version that cannot be compared as a finite number, all read
+ * as "not stale": the caller should apply normally. See
+ * `foldRemoteAnnotationOp`'s own docstring below for the full reasoning on
+ * why a strictly lower version means the whole incoming record — content
+ * included — is already superseded.
+ */
+export function isAnnotationOpStale(mirrorState, op) {
+  const type = op && op.op;
+  if (type !== 'annotation_created' && type !== 'annotation_updated') return false;
+  const ann = op.annotation;
+  if (!ann || !ann.id) return false;
+  const mirror = normalizeMirror(mirrorState);
+  const current = mirror.annotations.find((a) => a.id === ann.id);
+  if (!current) return false;
+  const incomingVersion = Number(ann.version);
+  const currentVersion = Number(current.version) || 0;
+  return Number.isFinite(incomingVersion) && incomingVersion < currentVersion;
+}
+
+/**
  * Apply a remote `annotation_created`/`annotation_updated` broadcast to the
  * baseline, refusing to let it regress an annotation this client already
  * has newer data for. Sole caller: `_handleEvent`'s `'op'` case, for an op
@@ -577,6 +613,9 @@ export function foldAckedAnnotationOp(mirrorState, op) {
  * id), or an op whose version cannot be compared, all apply normally
  * through the ordinary `applyOpToMirror` path — this only ever changes
  * behaviour for a genuine regression. Non-annotation ops are untouched.
+ * The staleness test itself is `isAnnotationOpStale` (above) — kept as one
+ * pure predicate so `_handleEvent` can consult the exact same answer this
+ * function acts on, without recomputing its own version of it.
  */
 export function foldRemoteAnnotationOp(mirrorState, op) {
   const mirror = normalizeMirror(mirrorState);
@@ -584,13 +623,7 @@ export function foldRemoteAnnotationOp(mirrorState, op) {
   if (type !== 'annotation_created' && type !== 'annotation_updated') {
     return applyOpToMirror(mirror, op);
   }
-  const ann = op.annotation;
-  if (!ann || !ann.id) return applyOpToMirror(mirror, op);
-  const current = mirror.annotations.find((a) => a.id === ann.id);
-  if (!current) return applyOpToMirror(mirror, op);
-  const incomingVersion = Number(ann.version);
-  const currentVersion = Number(current.version) || 0;
-  if (Number.isFinite(incomingVersion) && incomingVersion < currentVersion) {
+  if (isAnnotationOpStale(mirror, op)) {
     // Stale/reordered broadcast — this client's baseline is already at
     // least this current for this annotation (see docstring above). Drop
     // the whole op atomically rather than partially merge it in.
@@ -607,8 +640,14 @@ export class SessionSyncClient {
    * @param {string|null} [opts.displayName]
    * @param {string} opts.streamUrl  Full SSE URL (query appended by the client).
    * @param {string} opts.opsUrl     Full POST URL for op batches.
-   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
-   *   onSelections, onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
+   * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps (never
+   *   called for a stale/reordered annotation_created/annotation_updated
+   *   broadcast — `isAnnotationOpStale`/`foldRemoteAnnotationOp` reject it at
+   *   the same point they keep it out of the internal sync baseline, so a
+   *   caller applying these ops straight onto a live canvas, as App.jsx
+   *   does, is protected by construction rather than needing its own version
+   *   check — see `_handleEvent`'s `'op'` case), onPresence, onSelections,
+   *   onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
    *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
    *   with the acked annotation_created/annotation_updated `applied` entries
    *   after this client's own op batch lands, so the caller can thread the
@@ -1704,11 +1743,37 @@ export class SessionSyncClient {
         // two-client interleaving. See foldRemoteAnnotationOp's own
         // docstring for why the guard rejects a stale op atomically rather
         // than merging it in field-by-field.
+        //
+        // `staleRemoteAnnotation` is computed from the SAME pre-fold
+        // baseline `foldRemoteAnnotationOp` is about to consult (round 5,
+        // smallfix-applyremoteop-canvas-no-version-guard) and gates whether
+        // `onRemoteOps` fires below at all. Before this, a stale op the fold
+        // just rejected still reached `onRemoteOps` unconditionally — and
+        // from there App.jsx's `applyRemoteOp`/`applyAnnotationUpsertToCanvas`
+        // wrote it straight onto the live canvas with no version check of
+        // its own, so the exact broadcast this guard was keeping out of the
+        // *baseline* still flashed onto the *canvas*. A later, unrelated
+        // autosave then diffed the canvas's now-reverted content against the
+        // (correctly un-regressed) baseline, computed a valid-looking
+        // `base_version`, and the server accepted it as a genuine new write —
+        // silently overwriting a collaborator's confirmed edit. Suppressing
+        // delivery here, at the single point that already knows the answer,
+        // means every consumer of `onRemoteOps` (App.jsx's canvas; the XR
+        // frontend's `sceneSession.js`, which imports this same class) is
+        // protected by construction — there is no second, independently
+        // maintained "is this stale" check anywhere else that could quietly
+        // stop agreeing with this one. Left `false` (apply normally) in the
+        // locally-folded-echo branch just below: that branch does not mean
+        // "stale", it means "already handled via foldLocalOp" (image
+        // ingest), and its own delivery must still reach the canvas the same
+        // way it always has (see foldLocalOp's docstring).
         const foldedId = op?.annotation?.id;
+        let staleRemoteAnnotation = false;
         if (!(foldedId && this._locallyFoldedAnnotationIds.delete(foldedId))) {
+          staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
-        if (this.handlers.onRemoteOps)
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation)
           this.handlers.onRemoteOps([op], { clientId: data.client_id });
         break;
       }

@@ -448,6 +448,24 @@ function App() {
         case 'annotation_updated': {
           const ann = op.annotation;
           if (!ann || !ann.id) return false;
+          // No version check here on purpose (smallfix-applyremoteop-canvas-
+          // no-version-guard, round 5): a stale/reordered broadcast for this
+          // annotation is already filtered out before it ever reaches this
+          // function. Ops arrive here from three places — onRemoteOps
+          // (sessionSyncClient.js's `_handleEvent` now suppresses delivery
+          // for a stale annotation_created/annotation_updated the same
+          // `isAnnotationOpStale` check keeps out of its own sync baseline,
+          // so a genuine remote broadcast that gets here is never stale
+          // relative to what this canvas already shows); resyncFromServer's
+          // replay of this client's own not-yet-confirmed local ops (never
+          // "stale" — they are this client's own pending edits); and
+          // handleImageIngest's direct optimistic apply of a brand-new
+          // annotation this client just created (nothing to be stale
+          // relative to). Adding a second, separately-maintained version
+          // check here would risk it drifting from the one upstream rather
+          // than adding real protection — see sessionSyncClient.js's
+          // `isAnnotationOpStale` docstring.
+          //
           // This function is the one shared place both of an image ingest's
           // two deliveries end up — this browser's own direct optimistic
           // apply (handleImageIngest) and its confirming SSE echo (via
