@@ -409,7 +409,7 @@ describe('GraphCanvas annotation tool modes', () => {
       expect(store.nodes.find((n) => n.type === 'shape')).toBeUndefined();
     });
 
-    it('never starts a placement from a press on an edge or a control', () => {
+    it('never starts a placement from a press on an edge, a control or the selection box', () => {
       render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
       openToolbox();
       arm(/^rectangle$/i);
@@ -422,8 +422,18 @@ describe('GraphCanvas annotation tool modes', () => {
       const handle = document.createElement('div');
       handle.className = 'react-flow__resize-control handle';
       viewport.appendChild(handle);
+      // The multi-selection box is a DIRECT child of the pane, outside the
+      // viewport, so no node/edge selector reaches it — and its rect covers
+      // the whole selection with `pointer-events: all`. Pressing it to drag
+      // the selection created an annotation on top of it instead.
+      const selectionEl = document.createElement('div');
+      selectionEl.className = 'react-flow__nodesselection';
+      const rect = document.createElement('div');
+      rect.className = 'react-flow__nodesselection-rect';
+      selectionEl.appendChild(rect);
+      document.querySelector('.react-flow__pane').appendChild(selectionEl);
 
-      for (const el of [edgeEl, handle]) {
+      for (const el of [edgeEl, handle, rect]) {
         act(() => {
           el.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
           el.dispatchEvent(pointerEvent('pointerup', { clientX: 10, clientY: 10 }));

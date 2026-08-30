@@ -3628,12 +3628,26 @@ function GraphCanvasInner({
       // create a second one on top of it.
       const target = event.target;
       if (!target?.closest) return;
-      if (target.closest('.react-flow__node, .react-flow__edge, .react-flow__resize-control')) {
+      // `.react-flow__nodesselection` is a DIRECT child of the pane, outside
+      // the viewport, so no node/edge selector reaches it — and its rect
+      // carries `pointer-events: all` across the whole multi-selection box.
+      // Without it here, pressing a multi-selection to drag it created an
+      // annotation on top of the selection instead.
+      if (
+        target.closest(
+          '.react-flow__node, .react-flow__edge, .react-flow__resize-control, .react-flow__nodesselection'
+        )
+      ) {
         return;
       }
       if (target.closest('button, input, textarea, select, [role="button"]')) return;
       if (!target.closest('.react-flow__pane')) return;
 
+      // Any earlier gesture's pending click is stale by now. On touch and pen
+      // the compatibility click is suppressed by the preventDefault below, so
+      // the flag would otherwise stay armed and the swallow would eat the
+      // user's NEXT tap on the canvas instead.
+      pendingPlacementClickRef.current = false;
       placementRef.current = {
         pointerId: event.pointerId,
         tool,
