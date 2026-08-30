@@ -7,7 +7,12 @@ presence roster/colour assignment, and selection-claim TTL/release.
 import asyncio
 import threading
 
-from backend.core.session_hub import ClaimMap, InProcessEventBus, LeaseMap, PresenceRegistry
+from backend.core.session_hub import (
+    ClaimMap,
+    InProcessEventBus,
+    LeaseMap,
+    PresenceRegistry,
+)
 
 
 class TestInProcessEventBus:

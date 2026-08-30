@@ -538,10 +538,16 @@ class TestLeaseAcquisition:
         s = mgr.create_session()
         results = await asyncio.gather(
             mgr.apply_ops(
-                s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+                s.id,
+                "c1",
+                0,
+                [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
             ),
             mgr.apply_ops(
-                s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+                s.id,
+                "c2",
+                0,
+                [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
             ),
         )
         granted_by = [
@@ -792,9 +798,7 @@ class TestLeaseEnforcement:
         Nothing else carries the distinction over the wire (both are a bare
         409 with a prose ``detail``), so reword the message and the UI silently
         starts telling users a retryable refusal is permanent."""
-        assert "is being edited by another client" in str(
-            LeaseConflict("note-1", "c2")
-        )
+        assert "is being edited by another client" in str(LeaseConflict("note-1", "c2"))
 
     async def test_non_holder_delete_is_rejected(self):
         mgr = _manager()
