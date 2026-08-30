@@ -290,6 +290,51 @@ describe('GraphCanvas annotation tool modes', () => {
       expect(shape.style.height).toBeGreaterThanOrEqual(40);
     });
 
+    it('does not commit anything from a second contact during a pinch', () => {
+      // A second pointer abandons the placement — and the abandonment has to
+      // last until every contact lifts, or a third one (a palm, or the first
+      // finger re-landing) starts a fresh placement mid-pinch and commits an
+      // object when it lifts.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      const pane = document.querySelector('.react-flow__pane');
+      act(() => {
+        pane.dispatchEvent(pointerEvent('pointerdown', { pointerId: 1, clientX: 50, clientY: 50 }));
+        pane.dispatchEvent(
+          pointerEvent('pointerdown', { pointerId: 2, clientX: 150, clientY: 60 })
+        );
+        // A third contact while the pinch is still in progress.
+        pane.dispatchEvent(pointerEvent('pointerdown', { pointerId: 3, clientX: 90, clientY: 90 }));
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 3, clientX: 90, clientY: 90 }));
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 2, clientX: 150, clientY: 60 }));
+      });
+
+      expect(store.nodes.filter((n) => n.type === 'shape')).toHaveLength(0);
+    });
+
+    it('places again once every contact has lifted', () => {
+      // The suspension must not be sticky beyond the gesture that caused it.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      const pane = document.querySelector('.react-flow__pane');
+      act(() => {
+        pane.dispatchEvent(pointerEvent('pointerdown', { pointerId: 1, clientX: 50, clientY: 50 }));
+        pane.dispatchEvent(
+          pointerEvent('pointerdown', { pointerId: 2, clientX: 150, clientY: 60 })
+        );
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 1, clientX: 50, clientY: 50 }));
+        pane.dispatchEvent(pointerEvent('pointerup', { pointerId: 2, clientX: 150, clientY: 60 }));
+      });
+      tapPane(200, 200);
+
+      expect(store.nodes.filter((n) => n.type === 'shape')).toHaveLength(1);
+    });
+
     it('never starts a placement from a press that landed on an existing node', () => {
       // An armed tool must not make the rest of the canvas unusable: pressing
       // an object still selects and drags it.
@@ -490,8 +535,9 @@ describe('GraphCanvas annotation tool modes', () => {
       // and their positions converted back to absolute. A bare removal leaves
       // them pointing at a parent that no longer exists — and a group's large
       // empty interior is exactly what a sweeping eraser lands on.
+      const onHide = vi.fn();
       store.nodes = [{ id: 'group-1', type: 'group', position: { x: 0, y: 0 }, data: {} }];
-      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      render(<GraphCanvas nodes={[]} edges={[]} onHide={onHide} onAnnotationChange={vi.fn()} />);
       openToolbox();
       arm(/^eraser$/i);
 
@@ -499,6 +545,11 @@ describe('GraphCanvas annotation tool modes', () => {
       withElementAtPoint(el, () => eraseOver(screen.getByTestId('react-flow')));
 
       expect(store.nodes.find((n) => n.id === 'group-1')).toBeTruthy();
+      // And not merely spared deletion by falling through to the hide path:
+      // `group` is not in OVERLAY_TYPES, so without the explicit refusal the
+      // node would survive here while quietly being hidden instead. Asserting
+      // only survival passed with the guard removed.
+      expect(onHide).not.toHaveBeenCalled();
     });
 
     it('refuses to erase a locked annotation, or one another client is editing', () => {
@@ -556,6 +607,46 @@ describe('GraphCanvas annotation tool modes', () => {
       const second = mountNodeElement('note-2');
       withElementAtPoint(second, () => eraseOver(rf, {}, 200));
       expect(store.nodes.find((n) => n.id === 'note-2')).toBeUndefined();
+    });
+
+    it('does not cascade into what a HIDE reveals either', () => {
+      // The gate was armed only for annotation deletes, so hiding a graph node
+      // revealed the edge beneath it and the next move hid that too.
+      const onHide = vi.fn();
+      const onHideEdge = vi.fn();
+      const graphNode = { id: 'graph-1', type: 'custom', position: { x: 0, y: 0 }, data: {} };
+      render(
+        <GraphCanvas
+          nodes={[graphNode]}
+          edges={[]}
+          onHide={onHide}
+          onHideEdge={onHideEdge}
+          onAnnotationChange={vi.fn()}
+        />
+      );
+      openToolbox();
+      arm(/^eraser$/i);
+
+      const node = mountNodeElement('graph-1', { left: 0, top: 0, right: 60, bottom: 60 });
+      const edgeEl = document.createElement('div');
+      edgeEl.className = 'react-flow__edge';
+      edgeEl.setAttribute('data-testid', 'rf__edge-edge-1');
+      screen.getByTestId('react-flow').appendChild(edgeEl);
+      const rf = screen.getByTestId('react-flow');
+
+      withElementAtPoint(node, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+        });
+      });
+      withElementAtPoint(edgeEl, () => {
+        act(() => {
+          rf.dispatchEvent(pointerEvent('pointermove', { clientX: 14, clientY: 12 }));
+        });
+      });
+
+      expect(onHide).toHaveBeenCalledWith('graph-1');
+      expect(onHideEdge).not.toHaveBeenCalled();
     });
 
     it('disables panning, marquee selection and node dragging while armed', () => {

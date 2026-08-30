@@ -203,6 +203,42 @@ describe('AnnotationToolbox', () => {
     expect(onSelectTool).toHaveBeenLastCalledWith('note', undefined);
   });
 
+  it('arms rather than creates when Enter lands on a tool with nothing to create', () => {
+    // `select`, `eraser`, `freehand` and `image` are not kinds
+    // `createAnnotation` can build: passing one through fell out of every
+    // branch into its terminal `else` and produced an ARROW, so
+    // keyboard-activating the Select tool dropped an arrow on the canvas.
+    const onCreate = vi.fn();
+    const onSelectTool = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} onSelectTool={onSelectTool} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    for (const name of [/^select$/i, /^eraser$/i, /^freehand$/i, /^image$/i]) {
+      fireEvent.keyDown(screen.getByRole('button', { name }), { key: 'Enter' });
+    }
+
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(onSelectTool.mock.calls.map((c) => c[0])).toEqual([
+      'select',
+      'eraser',
+      'freehand',
+      'image',
+    ]);
+  });
+
+  it('ignores auto-repeat, so holding the key does not spray objects', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} onSelectTool={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    const note = screen.getByRole('button', { name: /^note$/i });
+    fireEvent.keyDown(note, { key: 'Enter' });
+    fireEvent.keyDown(note, { key: 'Enter', repeat: true });
+    fireEvent.keyDown(note, { key: 'Enter', repeat: true });
+
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('does not report a pressed state for image, which never becomes the armed tool', () => {
     render(<AnnotationToolbox onCreate={vi.fn()} onSelectTool={vi.fn()} activeKind="select" />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));

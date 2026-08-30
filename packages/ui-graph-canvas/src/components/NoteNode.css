@@ -273,14 +273,14 @@
 .graph-annotation-context-menu--bar {
   display: flex;
   flex-direction: row;
-  /* One row. The right-edge panel anchoring below keys off DOM order, which
-     only tracks visual order while the bar does not wrap; a wrapped bar would
-     put the visually-rightmost group somewhere in the middle of the list and
-     anchor the wrong panels. An x-scroll is the honest fallback for a bar too
-     wide to fit. */
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  scrollbar-width: none;
+  /* Wraps, and is NOT a scroll container. `overflow-x: auto` here was a
+     mistake with a large blast radius: per CSS Overflow 3 a non-visible value
+     on one axis computes the other to `auto` too, so the bar became a ~52px
+     scrollport that clipped every group panel — the panels open outside the
+     bar's own box by design, so activating one showed nothing at all. Wrapping
+     also keeps all thirteen groups reachable on a narrow screen, which a
+     silent horizontal scroll did not. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
   padding: 4px;
@@ -376,10 +376,10 @@
   left: 0;
   z-index: 1;
   min-width: 150px;
-  /* The menu is placed at the raw pointer position, so a group near the top
-     of the window would open a panel above the viewport edge with no way to
-     reach it. Capping the height and letting it scroll keeps every control
-     reachable wherever the menu lands. */
+  max-width: min(280px, 92vw);
+  /* Capping the height and letting the panel itself scroll keeps every
+     control reachable wherever the menu lands. The panel is its own scroll
+     container; the bar above it deliberately is not. */
   max-height: 60vh;
   overflow-y: auto;
   padding: 8px;
@@ -399,13 +399,12 @@
   max-height: none;
 }
 
-/* A group near the right edge of the bar would otherwise push its panel off
-   the right of the window; anchoring the last few groups' panels to their
-   right edge keeps them on screen. */
-.annotation-menu-group:nth-last-child(-n + 4) .annotation-menu-group-panel {
-  left: auto;
-  right: 0;
-}
+/* Panels are kept on screen by clamping the MENU itself into the viewport
+   (ContextMenuPortal measures and adjusts), not by guessing which groups sit
+   near an edge. The previous `nth-last-child` rule keyed off DOM order, which
+   stops tracking visual order the moment the bar wraps — it would right-anchor
+   panels in the middle of a wrapped bar and leave the actual rightmost ones
+   hanging off the edge. */
 
 /* A panel's own controls keep the spacing they had as sections, minus the
    bottom margin that separated one section from the next — inside a panel

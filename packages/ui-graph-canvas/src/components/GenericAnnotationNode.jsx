@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react';
+import { memo, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
@@ -1156,6 +1156,26 @@ function ContextMenuPortal({
   // two open panels would overlap each other on a pointer-positioned menu,
   // and the bar exists to keep the surface small.
   const [openGroup, setOpenGroup] = useState(null);
+  // Keep the floating menu inside the viewport. It is placed at the raw
+  // pointer position, so opening one near the right or bottom edge used to
+  // put part of the bar — and, worse, whichever group panel was activated —
+  // off screen with no way to reach it. Clamping the menu is the one place
+  // that fixes both, and it replaces a CSS rule that tried to guess which
+  // groups sat near an edge from their DOM order.
+  useLayoutEffect(() => {
+    if (sheet) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width && !rect.height) return; // no layout (jsdom)
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    const left = Math.min(Math.max(margin, position.x), maxLeft);
+    const top = Math.min(Math.max(margin, position.y), maxTop);
+    if (left !== position.x) el.style.left = `${left}px`;
+    if (top !== position.y) el.style.top = `${top}px`;
+  }, [sheet, position.x, position.y, menuRef, openGroup]);
   const portalTarget = sheet ? sheetContainer : document.body;
   if (!portalTarget) return null;
   const menuClassName = `graph-annotation-context-menu${sheet ? ' sheet' : ''}`;

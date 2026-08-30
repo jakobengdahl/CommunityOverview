@@ -124,6 +124,10 @@ const ERASE_RESTEP_PX = 8;
 // it, before or after a subtype's proportion is applied.
 const MIN_ANNOTATION_SIZE = 40;
 
+// How far the erased-footprint gate may extend from the pointer. Bounds the
+// measured rect so a large shape cannot black out the rest of the stroke.
+const ERASE_BLOCK_MAX_PX = 96;
+
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
@@ -733,6 +737,7 @@ function GraphCanvasInner({
   const placementRef = useRef(null);
   const placementPreviewRef = useRef(null);
   const placementSuspendedRef = useRef(false);
+  const pendingPlacementClickRef = useRef(false);
   const createAnnotationRef = useRef(null);
   const erasingPointerIdRef = useRef(null);
   const eraseBlockRectRef = useRef(null);
@@ -1959,11 +1964,23 @@ function GraphCanvasInner({
         const proportioned = options.box
           ? (regularShapeSize(shape, options.box.width) ?? options.box)
           : null;
+        // Floor the WIDTH so the derived height clears the minimum too —
+        // flooring both independently breaks the very ratio the
+        // re-proportioning exists to keep. `regularShapeSize(40)` gives a
+        // triangle 40x35; raising that 35 to 40 produced a 1:1 "equal-sided"
+        // triangle, and NodeResizer's keepAspectRatio then locked the
+        // distortion in.
+        const aspect = regularShapeAspect(shape);
         const drawnBox = proportioned
-          ? {
-              width: Math.max(MIN_ANNOTATION_SIZE, proportioned.width),
-              height: Math.max(MIN_ANNOTATION_SIZE, proportioned.height),
-            }
+          ? aspect
+            ? (regularShapeSize(
+                shape,
+                Math.max(proportioned.width, Math.ceil(MIN_ANNOTATION_SIZE * aspect))
+              ) ?? proportioned)
+            : {
+                width: Math.max(MIN_ANNOTATION_SIZE, proportioned.width),
+                height: Math.max(MIN_ANNOTATION_SIZE, proportioned.height),
+              }
           : null;
         newNode = {
           id,
@@ -3371,7 +3388,19 @@ function GraphCanvasInner({
       const el = document.elementFromPoint(clientX, clientY)?.closest?.('.react-flow__node');
       const rect = el?.getBoundingClientRect?.();
       if (rect && (rect.width || rect.height)) {
-        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        // Clamped around the pointer. An unbounded rect can exceed the
+        // viewport for a large shape at high zoom, so the pointer could never
+        // leave it and nothing was erasable for the rest of the stroke; it
+        // also blocked a rotated annotation's whole bounding box rather than
+        // its figure.
+        const cx = clientX;
+        const cy = clientY;
+        return {
+          left: Math.max(rect.left, cx - ERASE_BLOCK_MAX_PX),
+          right: Math.min(rect.right, cx + ERASE_BLOCK_MAX_PX),
+          top: Math.max(rect.top, cy - ERASE_BLOCK_MAX_PX),
+          bottom: Math.min(rect.bottom, cy + ERASE_BLOCK_MAX_PX),
+        };
       }
       return {
         left: clientX - ERASE_RESTEP_PX,
@@ -3412,6 +3441,7 @@ function GraphCanvasInner({
 
       if (target.kind === 'edge') {
         erasedThisStrokeRef.current.add(key);
+        eraseBlockRectRef.current = rectOfErased(clientX, clientY);
         onHideEdge?.(target.id);
         return;
       }
@@ -3443,7 +3473,12 @@ function GraphCanvasInner({
         beginEditingRef.current?.([target.id]).then(() => endEditingRef.current?.([target.id]));
         return;
       }
+      // Armed for the hide half as well. Recording it only for annotation
+      // deletes left the cascade live for the other half: hiding a graph node
+      // revealed the edge running under it, and the next pointermove hid that
+      // too.
       erasedThisStrokeRef.current.add(key);
+      eraseBlockRectRef.current = rectOfErased(clientX, clientY);
       onHide?.(target.id);
     };
 
@@ -3612,6 +3647,23 @@ function GraphCanvasInner({
       event.stopPropagation();
     };
 
+    // Swallow the click the browser synthesizes at the end of the gesture.
+    // Blocking `mousedown` above means the canvas never recorded a press
+    // position, so its own click handler cannot tell this click apart from a
+    // plain one and falls through to clearing the selection — deselecting the
+    // annotation that was just created and focused. One click, once, per
+    // completed placement.
+    const swallowSyntheticClick = (event) => {
+      if (!pendingPlacementClickRef.current) return;
+      pendingPlacementClickRef.current = false;
+      // Only the pane's own click. The toolbox lives inside this wrapper too,
+      // so an unscoped swallow ate the user's NEXT button press — arming a
+      // different tool right after drawing silently did nothing.
+      if (!event.target?.closest?.('.react-flow__pane')) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
     const hidePreview = () => {
       const previewEl = placementPreviewRef.current;
       if (previewEl) previewEl.style.display = 'none';
@@ -3647,6 +3699,7 @@ function GraphCanvasInner({
       const placement = placementRef.current;
       if (!placement || event.pointerId !== placement.pointerId) return;
       placementRef.current = null;
+      pendingPlacementClickRef.current = true;
       hidePreview();
 
       const { tool, startX, startY } = placement;
@@ -3708,29 +3761,40 @@ function GraphCanvasInner({
       hidePreview();
     };
 
-    // Lifting the last contact clears a suspension, so the next press is a
-    // fresh placement again.
+    // Lifting the LAST contact clears a suspension, so the next press is a
+    // fresh placement again. Tracked with a real set of live pointer ids: the
+    // previous `event.buttons` check was dead code, because `buttons` is 0 on
+    // every pointerup by spec (the contact is gone). The suspension therefore
+    // ended at the first finger up, and a third contact during the rest of a
+    // pinch could start a placement and commit an object — the exact case it
+    // was added to close.
+    const livePointers = new Set();
+    const trackPointerDown = (event) => livePointers.add(event.pointerId);
     const clearSuspension = (event) => {
-      if (event.pointerType === 'touch' && event.buttons) return;
-      placementSuspendedRef.current = false;
+      livePointers.delete(event.pointerId);
+      if (livePointers.size === 0) placementSuspendedRef.current = false;
     };
 
     wrapper.addEventListener('pointerdown', handlePointerDown, true);
     wrapper.addEventListener('pointermove', handlePointerMove, true);
     wrapper.addEventListener('pointerup', handlePointerUp, true);
     wrapper.addEventListener('pointercancel', handlePointerCancel, true);
+    wrapper.addEventListener('pointerdown', trackPointerDown, true);
     wrapper.addEventListener('pointerup', clearSuspension, true);
     wrapper.addEventListener('pointercancel', clearSuspension, true);
     wrapper.addEventListener('mousedown', blockCanvasGesture, true);
+    wrapper.addEventListener('click', swallowSyntheticClick, true);
     wrapper.addEventListener('touchstart', blockCanvasGesture, { capture: true, passive: false });
     return () => {
       wrapper.removeEventListener('pointerdown', handlePointerDown, true);
       wrapper.removeEventListener('pointermove', handlePointerMove, true);
       wrapper.removeEventListener('pointerup', handlePointerUp, true);
       wrapper.removeEventListener('pointercancel', handlePointerCancel, true);
+      wrapper.removeEventListener('pointerdown', trackPointerDown, true);
       wrapper.removeEventListener('pointerup', clearSuspension, true);
       wrapper.removeEventListener('pointercancel', clearSuspension, true);
       wrapper.removeEventListener('mousedown', blockCanvasGesture, true);
+      wrapper.removeEventListener('click', swallowSyntheticClick, true);
       wrapper.removeEventListener('touchstart', blockCanvasGesture, { capture: true });
       placementRef.current = null;
       placementSuspendedRef.current = false;
