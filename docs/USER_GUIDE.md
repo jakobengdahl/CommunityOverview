@@ -315,12 +315,23 @@ what it does. The toolbox is hidden while a focus view is active, since annotati
 set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
 
 **Picking a tool arms it; the canvas decides where the object goes.** After choosing, say,
-**Vote dot**, every click or tap on empty canvas places one more vote dot at that exact
-point, and the tool stays armed until you pick a different one — so placing a row of dots
-is a row of taps, not a trip back to the toolbox for each. **Select** (the arrow, first in
-the row) is the way back to ordinary clicking, dragging and marquee-selection; pressing
-Escape does the same. You can still drag a tool straight from the toolbox onto the canvas
-to place a single object without arming anything.
+**Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
+the tool stays armed until you pick a different one — so placing a row of dots is a row of
+taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
+the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+same. You can still drag a tool straight from the toolbox onto the canvas to place a single
+object without arming anything.
+
+**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+press and drag: an outline follows the pointer showing the box you are about to get, and
+releasing creates it at that size. Dragging left from where you started mirrors the shape,
+and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
+rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
+places them exactly like a press does.
+
+The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
+button shows the colour it will place, and its fold-out picker offers the full palette.
+Pick one and every dot you place is that colour.
 
 The **Shape** entry is a single slot rather than one icon per variant: it shows whichever
 shape (rectangle, circle, triangle, rhombus, hexagon, or process arrow) you last used —
@@ -335,16 +346,17 @@ deleted, while a graph node or edge is only **hidden** — the eraser never dele
 data. If your stylus has an eraser on the far end, flipping the pen over erases without
 arming anything.
 
-**Freehand** works differently from the rest of the toolbox: clicking it arms a
-drawing mode (the button stays highlighted and a banner reminds you Escape cancels), and
-unlike the other tools it disarms itself after a single stroke. Draw one stroke with your mouse, finger or
+**Freehand** arms a drawing mode (the button stays highlighted and a banner reminds you
+Escape cancels) and, like every other tool, stays armed: lift the pen and press again to
+draw the next stroke. Escape or picking another tool is how you leave it. On a
+pressure-sensitive stylus the stroke's width follows how hard you press, and the width is
+visible as you draw rather than only after you lift. Draw one stroke with your mouse, finger or
 stylus and the mode turns itself off again once you lift the pointer — click **Freehand**
 again for another stroke. Panning and marquee-selection are disabled while a stroke is
 being drawn, and a second finger touching down mid-stroke is ignored (with a brief notice)
-rather than starting a second line. On a pressure-sensitive stylus the stroke's width
-follows how hard you press; without pressure data (a mouse, a finger, or a pressure-less
-pen) it draws at a constant width instead. Right-click a finished stroke for its own
-colour, stroke-width, smoothing and opacity controls.
+rather than starting a second line. Without pressure data (a mouse, a finger, or a
+pressure-less pen) the stroke draws at a constant width instead. Right-click a finished
+stroke for its own colour, stroke-width, smoothing and opacity controls.
 
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
 file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas

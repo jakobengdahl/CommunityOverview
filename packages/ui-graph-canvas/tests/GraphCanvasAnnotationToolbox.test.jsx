@@ -18,8 +18,26 @@ function selectShapeVariant(name) {
 // goes. Clicking a toolbox item on its own no longer creates anything, which is
 // the point — it used to drop every object at the viewport centre, so placing
 // several meant dragging each one out of the pile the last had made.
+// jsdom has no PointerEvent constructor; the same helper shape the freehand
+// and touch suites use.
+function pointerEvent(
+  type,
+  { pointerId = 1, pointerType = 'mouse', clientX = 0, clientY = 0 } = {}
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  return event;
+}
+
+// Placement is a pointer gesture on the canvas wrapper (press, optional drag,
+// release), not ReactFlow's `onPaneClick`. It had to move off that callback:
+// it never fires while the pane is in selection mode — the desktop default —
+// so an armed tool produced nothing at all with a mouse.
 function placeOnPane(x = 120, y = 90) {
-  fireEvent.click(screen.getByTestId('pane'), { clientX: x, clientY: y });
+  const pane = screen.getByTestId('pane');
+  fireEvent(pane, pointerEvent('pointerdown', { clientX: x, clientY: y }));
+  fireEvent(pane, pointerEvent('pointerup', { clientX: x, clientY: y }));
 }
 
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
@@ -29,6 +47,7 @@ vi.mock('reactflow', () => {
     <div data-testid="react-flow" className="react-flow">
       <div
         data-testid="pane"
+        className="react-flow__pane"
         onMouseDown={(event) => onPaneMouseDown?.(event)}
         onContextMenu={(event) => onPaneContextMenu?.(event)}
         onClick={(event) => onPaneClick?.(event)}

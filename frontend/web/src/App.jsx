@@ -33,6 +33,7 @@ import { applyEdgeUpdate, confirmNodeDelete } from './utils/sessionScopedGraphEd
 import { createAnnotationChangeScheduler } from './utils/annotationChangeScheduler';
 import { createSelfEchoDedup } from './utils/selfEchoDedup';
 import { applyIngestedImageOptimistically } from './utils/imageIngestApply';
+import { shouldPersistSnapshot } from './utils/sessionSnapshotGuard';
 import './App.css';
 
 // Ceiling on how long resyncFromServer's api.getSession() call may stay
@@ -1405,7 +1406,26 @@ function App() {
       const targetId = sessionId;
       // Suppress only while the session has never materialised server-side: an
       // empty, never-edited session must not register (D13).
-      if (state.nodes.length === 0 && !isSessionMaterialized()) return;
+      //
+      // "Empty" has to mean the whole canvas, not just the graph. Annotations
+      // and group boxes live only in ReactFlow's own node state — never in the
+      // graph store — so asking `state.nodes.length` alone declared a session
+      // holding nothing but annotations to be empty and dropped every save.
+      // A canvas used purely for annotating (a blank session, notes and
+      // shapes on it, no graph nodes at all) therefore persisted nothing, and
+      // the annotations vanished the moment the session was switched away and
+      // back. `viewData` is the snapshot being written and already carries
+      // both lists, so the question can simply be asked correctly here.
+      if (
+        !shouldPersistSnapshot({
+          isMaterialized: isSessionMaterialized(),
+          graphNodeCount: state.nodes.length,
+          annotationCount: viewData?.annotations?.length ?? 0,
+          groupCount: viewData?.groups?.length ?? 0,
+        })
+      ) {
+        return;
+      }
       const positions = {};
       const parentIds = {};
       (viewData?.nodes || []).forEach((n) => {
@@ -1588,8 +1608,14 @@ function App() {
   // stale one captured at creation time.
   const publishRef = useRef(() => {});
   publishRef.current = () => {
-    // Mirrors scheduleAutoSave's own emptiness guard (D14).
-    if (useGraphStore.getState().nodes.length === 0 && !isSessionMaterialized()) return;
+    // No emptiness guard here, deliberately. This runs only for annotation
+    // changes, and an annotation change IS a real write — it is precisely the
+    // case D14's guard must not suppress. Mirroring scheduleAutoSave's
+    // graph-node count instead meant that on a canvas with no graph nodes,
+    // every annotation change was discarded before a snapshot was even
+    // requested. `persistSessionSnapshot` still applies the corrected
+    // whole-canvas guard at the end of the round trip, so a genuinely empty,
+    // never-materialised session still does not register (D13).
     requestSessionSnapshot(null);
   };
   const annotationSchedulerRef = useRef(null);

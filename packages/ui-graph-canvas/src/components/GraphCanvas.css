@@ -931,3 +931,17 @@ body.graph-suppress-selection * {
 .react-flow__node input {
   touch-action: auto;
 }
+
+/* The box a drag-to-draw placement will produce (task-annotation-drag-to-draw).
+   Drawn over the canvas in screen space while the pointer is down, so the user
+   sees the size they are about to get instead of finding out on release. Never
+   a hit target: the gesture it illustrates is being tracked by the wrapper
+   underneath it. */
+.graph-placement-preview {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  border: 1px dashed rgba(56, 189, 248, 0.95);
+  background: rgba(56, 189, 248, 0.12);
+  border-radius: 2px;
+}

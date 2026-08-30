@@ -83,9 +83,11 @@
   margin-bottom: 8px;
 }
 
+/* The swatch is the control's entire content — there is no label — so it has
+   to be big enough to judge a colour from, especially the darker entries. */
 .graph-annotation-context-menu .color-button {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   /* A resting border, not just transparent, so a dark swatch (e.g. arrow's
      '#111827' or the generic annotation's '#0f172a') stays distinguishable
@@ -295,19 +297,24 @@
   display: inline-flex;
 }
 
+/* Sized up ~50% from the first cut (30px cell / 14px glyph / 8px swatch).
+   The bar has no captions, so the glyph and its current-value swatch are the
+   only things carrying meaning — at the original size the swatch in
+   particular was too small to read a colour off, which is most of what it is
+   there for. */
 .annotation-menu-group-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 30px;
-  height: 30px;
-  padding: 0 5px;
+  gap: 4px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 7px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: #e6edf3;
-  font-size: 14px;
+  font-size: 21px;
   line-height: 1;
   cursor: pointer;
 }
@@ -327,8 +334,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
 }
 
 /* The trigger's current-value preview: what the group is set to, without
@@ -337,20 +344,20 @@
    a dark fill. */
 .annotation-menu-group-swatch {
   display: inline-block;
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 14px;
   border: 1px solid rgba(0, 0, 0, 0.6);
-  border-radius: 2px;
+  border-radius: 3px;
 }
 
 .annotation-menu-group-swatch--transparent {
   background-image:
     linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%),
     linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%);
-  background-size: 6px 6px;
+  background-size: 8px 8px;
   background-position:
     0 0,
-    3px 3px;
+    4px 4px;
 }
 
 /* Opens upward by default: the menu is positioned at the pointer, which is on

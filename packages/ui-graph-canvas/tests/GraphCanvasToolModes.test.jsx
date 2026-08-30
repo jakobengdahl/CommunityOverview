@@ -13,6 +13,9 @@ vi.mock('reactflow', () => {
     store.handlers = props;
     return (
       <div data-testid="react-flow" className="react-flow">
+        {/* The placement gesture only starts on empty canvas, which it checks
+            for by looking for this class on the event target. */}
+        <div data-testid="pane" className="react-flow__pane" />
         {props.children}
       </div>
     );
@@ -74,10 +77,43 @@ function arm(name) {
   fireEvent.click(screen.getByRole('button', { name }));
 }
 
-function tapPane(x = 100, y = 100) {
+// Placement is a pointer gesture on the canvas wrapper, not ReactFlow's
+// `onPaneClick` (task-annotation-drag-to-draw). It had to move: `onPaneClick`
+// never fires while the pane is in selection mode — the desktop default — so
+// riding on it meant an armed tool produced nothing at all with a mouse.
+// Driving the real events is also the only way to cover drag-sizing.
+function pressPane(x, y) {
+  const pane = document.querySelector('.react-flow__pane');
   act(() => {
-    store.handlers.onPaneClick?.({ clientX: x, clientY: y });
+    pane.dispatchEvent(pointerEvent('pointerdown', { clientX: x, clientY: y }));
   });
+}
+
+function movePointer(x, y) {
+  const pane = document.querySelector('.react-flow__pane');
+  act(() => {
+    pane.dispatchEvent(pointerEvent('pointermove', { clientX: x, clientY: y }));
+  });
+}
+
+function releasePointer(x, y) {
+  const pane = document.querySelector('.react-flow__pane');
+  act(() => {
+    pane.dispatchEvent(pointerEvent('pointerup', { clientX: x, clientY: y }));
+  });
+}
+
+// A press and release at the same point: the plain click-to-place gesture.
+function tapPane(x = 100, y = 100) {
+  pressPane(x, y);
+  releasePointer(x, y);
+}
+
+// Press, drag, release — sizes the object for the kinds that have a box.
+function dragOnPane(x1, y1, x2, y2) {
+  pressPane(x1, y1);
+  movePointer(x2, y2);
+  releasePointer(x2, y2);
 }
 
 function countOf(type) {
@@ -155,6 +191,84 @@ describe('GraphCanvas annotation tool modes', () => {
     const shape = store.nodes.find((n) => n.type === 'shape');
     expect(shape).toBeTruthy();
     expect(shape.data.shape).toBe('circle');
+  });
+
+  describe('drag to draw', () => {
+    it('sizes a shape from the drag, instead of always using the default box', () => {
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      dragOnPane(100, 100, 340, 260);
+
+      const shape = store.nodes.find((n) => n.type === 'shape');
+      expect(shape.style).toEqual({ width: 240, height: 160 });
+      expect(shape.position).toEqual({ x: 100, y: 100 });
+    });
+
+    it('falls back to the default box for a press with no real drag', () => {
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      tapPane(100, 100);
+
+      const shape = store.nodes.find((n) => n.type === 'shape');
+      // The plain click-to-place gesture is unchanged — a press that never
+      // moved carries no size to apply.
+      expect(shape.style).toEqual({ width: 160, height: 96 });
+    });
+
+    it('mirrors the shape when the drag goes left or up from the press point', () => {
+      // Dragging left from the press point means "point it left", which for a
+      // directional variant (triangle, process arrow) is the only way to aim
+      // it without rotating it by hand afterwards.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      dragOnPane(300, 300, 120, 160);
+
+      const shape = store.nodes.find((n) => n.type === 'shape');
+      expect(shape.data.flipX).toBe(true);
+      expect(shape.data.flipY).toBe(true);
+      // The box is still anchored at the top-left of the swept area.
+      expect(shape.position).toEqual({ x: 120, y: 160 });
+      expect(shape.style).toEqual({ width: 180, height: 140 });
+    });
+
+    it('leaves a point-sized kind unsized however far the pointer is dragged', () => {
+      // A vote dot has a fixed intrinsic size; a drag has nothing to apply.
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^vote dot$/i);
+
+      dragOnPane(100, 100, 400, 400);
+
+      const dot = store.nodes.find((n) => n.type === 'vote_dot');
+      expect(dot.style).toBeUndefined();
+      expect(dot.position).toEqual({ x: 100, y: 100 });
+    });
+
+    it('never starts a placement from a press that landed on an existing node', () => {
+      // An armed tool must not make the rest of the canvas unusable: pressing
+      // an object still selects and drags it.
+      store.nodes = [{ id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
+      render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+      openToolbox();
+      arm(/^rectangle$/i);
+
+      const nodeEl = document.createElement('div');
+      nodeEl.className = 'react-flow__node';
+      nodeEl.setAttribute('data-id', 'note-1');
+      screen.getByTestId('react-flow').appendChild(nodeEl);
+      act(() => {
+        nodeEl.dispatchEvent(pointerEvent('pointerdown', { clientX: 10, clientY: 10 }));
+        nodeEl.dispatchEvent(pointerEvent('pointerup', { clientX: 10, clientY: 10 }));
+      });
+
+      expect(store.nodes.find((n) => n.type === 'shape')).toBeUndefined();
+    });
   });
 
   describe('eraser', () => {

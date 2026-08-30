@@ -182,13 +182,34 @@ describe('AnnotationToolbox', () => {
     expect(onCreate).toHaveBeenLastCalledWith('icon', { icon: 'circle' });
   });
 
-  it('calls onCreate with the vote_dot kind and no options', () => {
+  it('calls onCreate with the vote_dot kind and the slot’s current colour', () => {
+    // vote_dot is a collapsed slot now, like shape and icon, where the variant
+    // IS the colour — placing a run of dots in one colour was otherwise eight
+    // trips through the property editor to recolour each default-grey dot.
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
 
     fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('vote_dot', undefined);
+    expect(onCreate).toHaveBeenLastCalledWith('vote_dot', { color: '#94a3b8' });
+  });
+
+  it('creates the colour picked in the vote-dot slot, and previews it on the button', () => {
+    const onCreate = vi.fn();
+    render(<AnnotationToolbox onCreate={onCreate} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: /choose a vote dot colour/i }));
+    const picker = screen.getByRole('group', { name: /^vote dot colours$/i });
+    fireEvent.click(within(picker).getByRole('button', { name: '#eab308' }));
+
+    expect(onCreate).toHaveBeenLastCalledWith('vote_dot', { color: '#eab308' });
+    // The slot shows the colour it will place, so the toolbox answers "which
+    // colour am I about to drop?" without opening the picker.
+    const swatch = screen
+      .getByRole('button', { name: /^vote dot$/i })
+      .querySelector('.annotation-toolbox-visual--vote-dot');
+    expect(swatch.style.backgroundColor).toBe('rgb(234, 179, 8)');
   });
 
   it('accepts a labels override so the host app can localize it', () => {

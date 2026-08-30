@@ -18,6 +18,7 @@ import {
   TEXT_ALIGN_STYLES,
   isAnnotationDraggable,
   ATTACHABLE_OVERLAY_KINDS,
+  GENERIC_ANNOTATION_COLORS,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
@@ -41,6 +42,16 @@ const DEFAULT_COLOR = '#94a3b8';
 // so this is exactly that set.)
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 
+// Which kinds actually get a rotation control in the property bar. A
+// `vote_dot` is a plain circle — every rotation of it looks identical, so the
+// control was a no-op that spent a slot in the bar and invited the user to
+// try. It stays in ROTATABLE_OVERLAY_KINDS, which is the serialization
+// contract (a stored `data.rotation` on one still round-trips untouched);
+// this is only about what the editor offers.
+const ROTATION_EDITABLE_KINDS = new Set(
+  [...ROTATABLE_OVERLAY_KINDS].filter((kind) => kind !== 'vote_dot')
+);
+
 // The generic kinds whose `color` field is actually painted by a branch
 // below — text's text colour, icon's border, vote_dot's fill. `image`
 // carries a `color` in the model (GENERIC_OVERLAY_FIELDS in
@@ -52,21 +63,9 @@ const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 // generic single-colour editor at all.
 const COLORABLE_KINDS = new Set(['text', 'icon', 'vote_dot']);
 
-// Palette for the generic kinds' colour picker. Saturated rather than the
-// pastels NoteNode/LabelNode use, because these paint borders, glyphs and
-// small filled dots rather than a large sticky-note ground — a pastel
-// vote_dot on a light canvas is nearly invisible. DEFAULT_COLOR leads so the
-// picker can always return an annotation to the colour it was created with.
-const GENERIC_COLORS = [
-  DEFAULT_COLOR,
-  '#ef4444',
-  '#f97316',
-  '#eab308',
-  '#22c55e',
-  '#3b82f6',
-  '#a855f7',
-  '#0f172a',
-];
+// The shared palette (utils/annotations.js), so the toolbox's vote-dot slot
+// offers exactly the colours this editor does.
+const GENERIC_COLORS = GENERIC_ANNOTATION_COLORS;
 
 // The swatch options for `shape`'s fill/border editors: every GENERIC_COLORS
 // choice, plus `'transparent'` — the setting that subsumes what the retired
@@ -359,7 +358,10 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const selectedClass = selected ? ' selected' : '';
   // Rotation is applied to the rendered element, not to the ReactFlow node
   // wrapper, so drag hit-testing keeps using the unrotated bounding box.
-  const rotation = rotationStyle(kind, data?.rotation);
+  const rotation = rotationStyle(kind, data?.rotation, {
+    flipX: Boolean(data?.flipX),
+    flipY: Boolean(data?.flipY),
+  });
 
   // Typography for EDITABLE_TEXT_KINDS (`text`, `shape`) —
   // task-annotation-text-alignment-and-font. Computed unconditionally (not
@@ -1382,40 +1384,42 @@ function ContextMenuPortal({
           </div>
         </AnnotationMenuGroup>
       )}
-      <AnnotationMenuGroup
-        groupKey="rotation"
-        label={gl('rotation', 'Rotation')}
-        glyph="⟳"
-        open={openGroup === 'rotation'}
-        onToggle={toggleGroup}
-      >
-        <div className="context-menu-rotate">
-          <button
-            type="button"
-            className="rotate-button"
-            aria-label={labels.rotateLeft}
-            onClick={() => onChangeRotation(rotation - ROTATE_STEP)}
-          >
-            ⟲
-          </button>
-          <button
-            type="button"
-            className="rotate-button rotate-reset"
-            aria-label={labels.rotateReset}
-            onClick={() => onChangeRotation(0)}
-          >
-            {Math.round(rotation)}°
-          </button>
-          <button
-            type="button"
-            className="rotate-button"
-            aria-label={labels.rotateRight}
-            onClick={() => onChangeRotation(rotation + ROTATE_STEP)}
-          >
-            ⟳
-          </button>
-        </div>
-      </AnnotationMenuGroup>
+      {ROTATION_EDITABLE_KINDS.has(kind) && (
+        <AnnotationMenuGroup
+          groupKey="rotation"
+          label={gl('rotation', 'Rotation')}
+          glyph="⟳"
+          open={openGroup === 'rotation'}
+          onToggle={toggleGroup}
+        >
+          <div className="context-menu-rotate">
+            <button
+              type="button"
+              className="rotate-button"
+              aria-label={labels.rotateLeft}
+              onClick={() => onChangeRotation(rotation - ROTATE_STEP)}
+            >
+              ⟲
+            </button>
+            <button
+              type="button"
+              className="rotate-button rotate-reset"
+              aria-label={labels.rotateReset}
+              onClick={() => onChangeRotation(0)}
+            >
+              {Math.round(rotation)}°
+            </button>
+            <button
+              type="button"
+              className="rotate-button"
+              aria-label={labels.rotateRight}
+              onClick={() => onChangeRotation(rotation + ROTATE_STEP)}
+            >
+              ⟳
+            </button>
+          </div>
+        </AnnotationMenuGroup>
+      )}
       <AnnotationMenuGroup
         groupKey="opacity"
         label={gl('opacity', 'Opacity')}

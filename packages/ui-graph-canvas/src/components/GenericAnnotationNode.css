@@ -48,6 +48,16 @@
    data.textAlign, defaulting to the centre/centre this rule used to hardcode). */
 .graph-generic-annotation-shape-text {
   display: flex;
+  /* Column direction is load-bearing, exactly as it is for the alignment
+     picker's preview dot (NoteNode.css). TEXT_ALIGN_STYLES defines
+     `justifyContent` as the VERTICAL position and `alignItems` as the
+     horizontal one, which only holds for a column-direction container. In the
+     default `row` direction the two axes swap, so every off-diagonal choice
+     placed the caption at its own transpose: picking "top centre" put the text
+     at middle left. The picker itself was corrected first, which left the
+     buttons previewing the right position while the shape still applied the
+     wrong one — the two have to agree, and this is the half that applies. */
+  flex-direction: column;
   overflow: hidden;
   pointer-events: none;
 }

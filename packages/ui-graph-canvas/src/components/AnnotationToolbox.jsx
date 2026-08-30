@@ -6,6 +6,7 @@ import {
   DEFAULT_ANNOTATION_ICON,
   resolveAnnotationIcon,
 } from '../utils/annotationIcons';
+import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
 import { ToolSlotPicker } from './ToolSlotPicker';
 import './AnnotationToolbox.css';
 
@@ -77,8 +78,19 @@ const ICON_VARIANT_KEYS = ICON_VARIANTS.map((variant) => variant.icon);
 const ICON_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
 const ICON_SLOT_ITEM_KEY = 'icon-slot';
 
+// Every colour a vote dot can be created in — the same list its property
+// editor offers afterwards (GENERIC_ANNOTATION_COLORS), so the two cannot
+// drift apart.
+const VOTE_DOT_VARIANTS = GENERIC_ANNOTATION_COLORS.map((color) => ({
+  color,
+  glyph: { kind: 'vote-dot-swatch', color },
+  label: color,
+}));
+const VOTE_DOT_VARIANT_KEYS = VOTE_DOT_VARIANTS.map((variant) => variant.color);
+const VOTE_DOT_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:vote-dot-slot';
+const VOTE_DOT_SLOT_ITEM_KEY = 'vote-dot-slot';
+
 const TOOLBOX_ITEMS_TRAILING = [
-  { kind: 'vote_dot', glyph: { kind: 'toolbox-glyph', name: 'vote-dot' }, labelKey: 'voteDot' },
   // Opens a file picker rather than creating an object directly — there is
   // nothing to pick up and carry, so this item stays click-only (see
   // `isDraggableKind` below).
@@ -120,6 +132,18 @@ const MODE_KINDS = new Set(['select', 'eraser', 'freehand']);
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
 
 function renderGlyph(glyph) {
+  // The vote-dot slot previews the colour it will create in, so the toolbox
+  // answers "which colour am I about to place?" without opening the picker —
+  // the same job the shape slot's outline and the icon slot's glyph do.
+  if (glyph?.kind === 'vote-dot-swatch') {
+    return (
+      <span
+        className="annotation-toolbox-visual annotation-toolbox-visual--vote-dot"
+        style={{ backgroundColor: glyph.color }}
+        aria-hidden="true"
+      />
+    );
+  }
   if (glyph?.kind === 'shape-swatch') {
     return (
       <span
@@ -249,10 +273,19 @@ function AnnotationToolbox({
     DEFAULT_ANNOTATION_ICON
   );
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [currentVoteDotColor, setCurrentVoteDotColor] = useToolSlotSelection(
+    VOTE_DOT_SLOT_STORAGE_KEY,
+    VOTE_DOT_VARIANT_KEYS,
+    DEFAULT_GENERIC_COLOR
+  );
+  const [voteDotPickerOpen, setVoteDotPickerOpen] = useState(false);
   const shapeSlotRef = useRef(null);
   const shapeCornerButtonRef = useRef(null);
   const iconSlotRef = useRef(null);
   const iconCornerButtonRef = useRef(null);
+  const voteDotSlotRef = useRef(null);
+  const voteDotCornerButtonRef = useRef(null);
+  const voteDotMainButtonRef = useRef(null);
   // Lets the picker's onSelect callback focus the slot itself after a
   // selection, the same way the slot's own onClick already does — see
   // renderShapeSlot below.
@@ -266,6 +299,7 @@ function AnnotationToolbox({
     if (!expanded) {
       setShapePickerOpen(false);
       setIconPickerOpen(false);
+      setVoteDotPickerOpen(false);
     }
   }, [expanded]);
   // Sole purpose: swallow the click that follows a completed pointer drag
@@ -437,6 +471,8 @@ function AnnotationToolbox({
     iconPickerOpen: 'Choose an icon',
     iconPicker: 'Icons',
     voteDot: 'Vote dot',
+    voteDotPickerOpen: 'Choose a vote dot colour',
+    voteDotPicker: 'Vote dot colours',
     image: 'Image',
     freehand: 'Freehand',
     select: 'Select',
@@ -802,6 +838,104 @@ function AnnotationToolbox({
     );
   };
 
+  // The vote-dot slot: same collapsed-slot pattern as shape and icon, but the
+  // variant IS the colour. A vote dot has no other property worth choosing at
+  // creation time, and picking the colour afterwards through the property
+  // editor meant every dot was placed in the default grey first — laborious
+  // for the one annotation kind people place many of in a row.
+  const renderVoteDotSlot = () => {
+    const variant =
+      VOTE_DOT_VARIANTS.find((candidate) => candidate.color === currentVoteDotColor) ??
+      VOTE_DOT_VARIANTS[0];
+    const options = { color: variant.color };
+    const pickerOptions = VOTE_DOT_VARIANTS.map((candidate) => ({
+      key: candidate.color,
+      glyph: candidate.glyph,
+      label: candidate.label,
+    }));
+
+    return (
+      <div className="annotation-toolbox-slot" key="vote-dot-slot" ref={voteDotSlotRef}>
+        <button
+          ref={voteDotMainButtonRef}
+          type="button"
+          className="annotation-toolbox-item annotation-toolbox-item--draggable"
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            setVoteDotPickerOpen(false);
+          }}
+          onClick={(event) => {
+            setVoteDotPickerOpen(false);
+            event.currentTarget.focus();
+            if (consumeSuppressedClick(VOTE_DOT_SLOT_ITEM_KEY)) return;
+            setHovered(null);
+            activateTool('vote_dot', options);
+          }}
+          aria-label={lbl.voteDot}
+          aria-pressed={activeKind === 'vote_dot'}
+          aria-describedby={hovered?.key === 'voteDot' ? TOOLTIP_ID : undefined}
+          onMouseEnter={(e) => showTip(e, 'voteDot')}
+          onMouseLeave={() => setHovered(null)}
+          onFocus={(e) => showTip(e, 'voteDot')}
+          onBlur={() => setHovered(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setVoteDotPickerOpen(true);
+          }}
+          draggable={!touch}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(
+              'application/annotation-kind',
+              JSON.stringify({ kind: 'vote_dot', ...options })
+            );
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onPointerDown={
+            touch
+              ? (e) => {
+                  if (e.button === 0) setVoteDotPickerOpen(false);
+                  handlePointerDown(e, 'vote_dot', options, variant.glyph, VOTE_DOT_SLOT_ITEM_KEY);
+                }
+              : undefined
+          }
+        >
+          <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+            {renderGlyph(variant.glyph)}
+          </span>
+          <span className="annotation-toolbox-item-label">{lbl.voteDot}</span>
+        </button>
+        <button
+          ref={voteDotCornerButtonRef}
+          type="button"
+          className="annotation-toolbox-slot-corner"
+          aria-label={lbl.voteDotPickerOpen}
+          aria-haspopup="true"
+          aria-expanded={voteDotPickerOpen}
+          onClick={() => setVoteDotPickerOpen(true)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+        {voteDotPickerOpen && (
+          <ToolSlotPicker
+            anchorRef={voteDotSlotRef}
+            returnFocusRef={voteDotCornerButtonRef}
+            ariaLabel={lbl.voteDotPicker}
+            options={pickerOptions}
+            currentKey={variant.color}
+            renderGlyph={renderGlyph}
+            onSelect={(key) => {
+              setCurrentVoteDotColor(key);
+              setVoteDotPickerOpen(false);
+              activateTool('vote_dot', { color: key });
+              voteDotMainButtonRef.current?.focus();
+            }}
+            onClose={() => setVoteDotPickerOpen(false)}
+          />
+        )}
+      </div>
+    );
+  };
+
   return (
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
@@ -831,6 +965,7 @@ function AnnotationToolbox({
           {TOOLBOX_ITEMS_LEADING.map(renderToolboxItem)}
           {renderShapeSlot()}
           {renderIconSlot()}
+          {renderVoteDotSlot()}
           {TOOLBOX_ITEMS_TRAILING.map(renderToolboxItem)}
         </div>
       )}

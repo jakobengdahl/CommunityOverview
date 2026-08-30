@@ -460,14 +460,24 @@ describe('GenericAnnotationNode property editor', () => {
   });
 
   it('does not show a shape picker for a non-shape kind', () => {
-    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
-    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
-    // A vote_dot gets no Shape group at all, so there is nothing to open and
-    // the subtype swatches stay unreachable — which is the point here.
+    const { container } = render(
+      <GenericAnnotationNode id="t1" type="text" data={{ text: 'x' }} />
+    );
+    fireEvent.contextMenu(container.querySelector('.kind-text'));
+    // No Shape group at all on a non-shape kind, so there is nothing to open
+    // and the subtype swatches stay unreachable — which is the point here.
     openGroup('Shape');
-    expect(screen.queryByLabelText('circle')).toBeNull();
+    expect(screen.queryByLabelText('triangle')).toBeNull();
+    // The rest of the editor is still there.
     openGroup('Rotation');
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+  });
+
+  it('offers no rotation control for a vote_dot, whose every rotation looks the same', () => {
+    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
+    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    expect(screen.queryByRole('button', { name: 'Rotation' })).toBeNull();
+    expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
   });
 
   // task-annotation-render-direct-manipulation remaining_scope: "no icon
@@ -555,7 +565,11 @@ describe('GenericAnnotationNode property editor', () => {
     expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
   });
 
-  it.each(['text', 'shape', 'icon', 'vote_dot', 'image'])(
+  // `vote_dot` is deliberately absent: it is a plain circle, so every
+  // rotation of it looks identical and the control is a no-op the property
+  // bar no longer offers (see ROTATION_EDITABLE_KINDS). A stored
+  // `data.rotation` on one still round-trips — this is only about the UI.
+  it.each(['text', 'shape', 'icon', 'image'])(
     'rotates right by 15° and normalizes into [0, 360) for a %s',
     (kind) => {
       const data = { rotation: 350, text: 'x', icon: 'flag', image: {} };
@@ -601,10 +615,10 @@ describe('GenericAnnotationNode property editor', () => {
           labels: { rotateReset: 'Reset rotation', delete: 'Delete', rotation: 'Rotation' },
         }}
       >
-        <GenericAnnotationNode id="v1" type="vote_dot" data={{}} />
+        <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />
       </AnnotationContext.Provider>
     );
-    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    fireEvent.contextMenu(container.querySelector('.kind-icon'));
     openGroup('Rotation');
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(notifyChange).toHaveBeenCalledTimes(1);
@@ -834,8 +848,10 @@ describe('GenericAnnotationNode property editor', () => {
   });
 
   it('closes the context menu on Escape', async () => {
-    const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
-    fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    const { container } = render(
+      <GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />
+    );
+    fireEvent.contextMenu(container.querySelector('.kind-icon'));
     openGroup('Rotation');
     expect(screen.getByLabelText('Reset rotation')).toBeInTheDocument();
     // The dismiss listeners are wired up on a setTimeout(0) (so the very

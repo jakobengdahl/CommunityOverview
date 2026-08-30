@@ -257,8 +257,17 @@ export function buildFreehandPath(points, smoothing = 0) {
 // Stroke-width scaling range applied to a point's pressure (0-1): a light
 // touch draws thinner than baseWidth, a hard press draws thicker, but neither
 // end collapses to zero or balloons unreadably wide.
-const MIN_PRESSURE_WIDTH_FACTOR = 0.4;
-const MAX_PRESSURE_WIDTH_FACTOR = 1.6;
+//
+// Widened from 0.4-1.6 (a 4x ratio) to 0.25-2.6 (a ~10x ratio) because the
+// original range was reported as barely visible in use: a stylus rarely
+// spans the full 0-1 pressure scale in one stroke, so a 4x range across the
+// FULL scale leaves maybe a 2x difference across the range a hand actually
+// applies — close enough to uniform that the feature looked broken. The
+// floor stays well clear of zero so a feather-light stroke is still a
+// visible line, and the ceiling is bounded so a hard press cannot swamp the
+// drawing.
+const MIN_PRESSURE_WIDTH_FACTOR = 0.25;
+const MAX_PRESSURE_WIDTH_FACTOR = 2.6;
 
 /**
  * Whether any point in the array carries a real pressure sample. Used to

@@ -220,12 +220,19 @@
   background: #831843;
 }
 
+/* The slot paints its own `background-color` inline, from whichever colour is
+   currently selected, so the button previews the dot it will place. The value
+   here is only the fallback for a glyph rendered without one. The inset ring
+   is dropped: it read as a doughnut rather than as the solid dot the canvas
+   actually draws, which defeated the point of previewing the colour. */
 .annotation-toolbox-visual--vote-dot {
   width: 22px;
   height: 22px;
   border-radius: 999px;
   background: #22c55e;
-  box-shadow: inset 0 0 0 3px rgba(240, 253, 244, 0.65);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 1px 3px rgba(0, 0, 0, 0.45);
 }
 
 .annotation-toolbox-visual--image {
@@ -317,35 +324,24 @@
    renders differently on every platform and a font icon would pull in a
    dependency the canvas package does not have. */
 
-/* A cursor arrow: one triangle (the head) plus one rotated bar (the tail). */
+/* The standard cursor arrow, as ONE clipped shape. It was previously a
+   triangle plus a separately rotated bar for the tail, and the two never met
+   cleanly — the joint read as a kink, which is what made the icon look
+   crooked. A single polygon has no joint to misalign. */
 .annotation-toolbox-visual--select {
   width: 25px;
   height: 25px;
 }
 
-.annotation-toolbox-visual--select::before,
-.annotation-toolbox-visual--select::after {
+.annotation-toolbox-visual--select::before {
   content: '';
   position: absolute;
-}
-
-.annotation-toolbox-visual--select::before {
-  left: 7px;
+  left: 8px;
   top: 3px;
-  width: 11px;
-  height: 15px;
+  width: 14px;
+  height: 19px;
   background: #f8fafc;
-  clip-path: polygon(0 0, 100% 62%, 45% 66%, 30% 100%);
-}
-
-.annotation-toolbox-visual--select::after {
-  left: 13px;
-  bottom: 3px;
-  width: 3px;
-  height: 8px;
-  border-radius: 1px;
-  background: #f8fafc;
-  transform: rotate(-20deg);
+  clip-path: polygon(0 0, 0 76%, 24% 56%, 42% 100%, 60% 92%, 43% 50%, 72% 46%);
 }
 
 /* An eraser block: the rubber (angled, filled) over the surface it clears. */
