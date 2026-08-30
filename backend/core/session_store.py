@@ -67,6 +67,23 @@ _LEGACY_ANNOTATION_ALIASES = {"arrow": "line"}
 _DEFAULT_MAX_ANNOTATIONS = 2000
 _DEFAULT_RING_SIZE = 500
 
+# Per-annotation versioning (task-smallfix-whole-annotation-clobber-on-
+# concurrent-different-field-edit / dec-annotation-field-patches-and-
+# conflicts). "version" bumps by 1 on every applied annotation_created
+# (upsert-in-place) or annotation_updated; "field_versions" records, per
+# content field, the version at which that field's value last actually
+# changed. Together they let a patch that names a `base_version` be checked
+# per-field instead of whole-annotation: a field the patch does not touch,
+# or touches with a value unchanged since base_version, can never conflict —
+# only a field genuinely re-set to a different value *and* changed by someone
+# else since base_version does. These are server-owned bookkeeping, not
+# editable annotation content: any caller-supplied "version"/"field_versions"
+# in an incoming payload is ignored and overwritten, never trusted as input.
+_INITIAL_ANNOTATION_VERSION = 1
+_ANNOTATION_META_FIELDS = frozenset(
+    {"id", "type", "kind", "version", "field_versions", "created_by", "updated_at"}
+)
+
 # State-mutating ops that are persisted, sequenced and mirrored to catch-up.
 STATE_OPS = {
     "nodes_added",
@@ -124,6 +141,61 @@ def _empty_state() -> Dict[str, Any]:
 
 class OpError(ValueError):
     """Raised when an op payload fails validation at the boundary."""
+
+
+class AnnotationFieldConflict(Exception):
+    """A field-level version conflict on ``annotation_updated``
+    (dec-annotation-field-patches-and-conflicts): the incoming op named a
+    ``base_version`` older than the last time one or more of the fields it is
+    trying to change actually changed, so applying it as-is would silently
+    clobber a concurrent edit to that same field.
+
+    Deliberately **not** an ``OpError`` subclass: callers that blanket-catch
+    ``OpError`` to mean "reject this op with a generic 400" must not also
+    swallow this one — it needs its own structured 409 handling (see
+    ``rest_api.py``'s ``/ops`` endpoint and the ``update_annotation`` MCP
+    tool) so a client can tell "your patch was malformed" apart from "your
+    patch raced a real concurrent edit, re-read and retry."
+
+    Only raised when the incoming op supplies ``base_version`` at all — an op
+    that omits it (an older/legacy full-object client, or an MCP caller that
+    has not opted in) gets the unprotected pre-existing shallow-merge
+    behaviour instead, same as before this task (see ``apply_state_op``'s
+    ``annotation_updated`` branch, and docs/ANNOTATION_CONTRACT.md's note on
+    legacy full-object writers). A field the patch does not actually change
+    (its value already equals what is stored) is never conflict-checked
+    either, so a client that happens to still resend an untouched field's
+    *current* value cannot trip this — only a field it is trying to move to a
+    genuinely different value can.
+
+    A single ``annotation_updated`` op is all-or-nothing (no CRDT — D2): if
+    *any* touched field conflicts, the whole op is refused rather than
+    partially applied, even when other touched fields in the same patch do
+    not conflict. The caller re-derives a smaller/fresher patch from
+    ``server_annotation`` (this exception's own snapshot of current server
+    state) rather than blindly retrying the same rejected content — see
+    ``dec-annotation-field-patches-and-conflicts`` for why partial-apply
+    inside one op was judged out of scope for this simpler, non-CRDT model.
+    """
+
+    def __init__(
+        self,
+        annotation_id: str,
+        conflicts: Dict[str, int],
+        server_annotation: Dict[str, Any],
+    ) -> None:
+        self.annotation_id = annotation_id
+        self.conflicts = conflicts
+        self.server_annotation = server_annotation
+        self.server_version = server_annotation.get(
+            "version", _INITIAL_ANNOTATION_VERSION
+        )
+        fields = ", ".join(sorted(conflicts))
+        super().__init__(
+            f"annotation {annotation_id!r} field(s) {fields} changed since "
+            f"base_version; re-read the current annotation (version "
+            f"{self.server_version}) and retry with a fresh patch"
+        )
 
 
 @dataclass
@@ -833,7 +905,27 @@ class SessionStore:
                         f"{existing.get('type')!r}; cannot change type via upsert"
                     )
                 prior = copy.deepcopy(existing)
+                # A same-id create is an idempotent-retry upsert, not a
+                # field-scoped edit (no base_version protocol here — see
+                # AnnotationFieldConflict's docstring) — but version/
+                # field_versions bookkeeping still advances so a later
+                # genuine annotation_updated from another client can compare
+                # against it correctly.
+                field_versions = dict(existing.get("field_versions") or {})
+                changed_fields = [
+                    k
+                    for k in annotation
+                    if k not in _ANNOTATION_META_FIELDS
+                    and annotation[k] != existing.get(k)
+                ]
                 existing.update(annotation)
+                new_version = (
+                    int(prior.get("version") or _INITIAL_ANNOTATION_VERSION) + 1
+                )
+                existing["version"] = new_version
+                for field in changed_fields:
+                    field_versions[field] = new_version
+                existing["field_versions"] = field_versions
                 existing["updated_at"] = _now_iso()
                 applied["annotation"] = existing
                 activity_kwargs = {
@@ -853,6 +945,11 @@ class SessionStore:
                     annotation["id"] = secrets.token_hex(8)
                 annotation.setdefault("created_by", op.get("client_id"))
                 annotation["updated_at"] = _now_iso()
+                # Server-owned bookkeeping (see AnnotationFieldConflict):
+                # always (re)initialised here, never trusted from the
+                # caller's payload.
+                annotation["version"] = _INITIAL_ANNOTATION_VERSION
+                annotation["field_versions"] = {}
                 state["annotations"].append(annotation)
                 applied["annotation"] = annotation
                 activity_kwargs = {
@@ -882,8 +979,44 @@ class SessionStore:
                 )
             if not trusted_replay:
                 _require_ingested_image(incoming, target)
+
+            # Field-level version check (dec-annotation-field-patches-and-
+            # conflicts): computed by *value*, not by key presence, so a
+            # patch that happens to resend a field's current value (a legacy
+            # whole-object client, or an undo replay's full prior snapshot)
+            # never counts as "touching" it — only a field genuinely moving
+            # to a different value is checked or bumped. This is what lets
+            # two clients editing different fields merge silently while a
+            # true same-field race is still caught.
+            field_versions = dict(target.get("field_versions") or {})
+            changed_fields = [
+                k
+                for k in incoming
+                if k not in _ANNOTATION_META_FIELDS and incoming[k] != target.get(k)
+            ]
+            base_version = op.get("base_version")
+            if not trusted_replay and base_version is not None:
+                if not isinstance(base_version, int) or isinstance(base_version, bool):
+                    raise OpError(
+                        "annotation_updated: 'base_version' must be an integer"
+                    )
+                conflicts = {
+                    f: field_versions.get(f, _INITIAL_ANNOTATION_VERSION)
+                    for f in changed_fields
+                    if field_versions.get(f, _INITIAL_ANNOTATION_VERSION) > base_version
+                }
+                if conflicts:
+                    raise AnnotationFieldConflict(
+                        target["id"], conflicts, copy.deepcopy(target)
+                    )
+
             prior = copy.deepcopy(target)
             target.update(incoming)
+            new_version = int(prior.get("version") or _INITIAL_ANNOTATION_VERSION) + 1
+            target["version"] = new_version
+            for field in changed_fields:
+                field_versions[field] = new_version
+            target["field_versions"] = field_versions
             target["updated_at"] = _now_iso()
             applied["annotation"] = target
             activity_kwargs = {

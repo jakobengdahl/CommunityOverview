@@ -720,8 +720,8 @@ node content is rehydrated from the graph on load via `?resolve=true`.
 | GET | `/api/sessions/{id}` | Get a session (meta + state + presence roster); `?resolve=true` also returns rehydrated nodes/edges |
 | PATCH | `/api/sessions/{id}` | Rename a session (`{name, client_id?}`). get-or-create: materialises the session server-side if it only existed client-side. Routed through the op protocol as a `session_renamed` state op, so the rename is sequenced and visible to `since_seq` catch-up, not just a full snapshot — design §8.2 R7/R8 |
 | DELETE | `/api/sessions/{id}` | Delete a session (`?client_id=` names the deleter in the broadcast) |
-| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path only; see docs/ANNOTATION_CONTRACT.md's "Remaining gap" note for what MCP-issued writes still bypass. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
-| POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
+| POST | `/api/sessions/{id}/ops` | Apply an ordered op batch (`{client_id, base_seq, ops}` → `{applied, seq}`); server-ordered LWW, monotonic `seq`. Bounded per batch by op count (≤ 500) **and** body size (≤ 256 KB → `413` — an op carrying a validated embedded image is budgeted separately instead, per "Image annotation tool" below), plus the session's cumulative image/document totals checked after each batch, plus a per-client token bucket (200 burst, 100 ops/s refill → `429`) — design §3.9. An op that would update/delete an annotation another client currently holds a live **edit lease** on is rejected whole-batch (`409`, `LeaseConflict`) rather than silently overriding it — this is the browser write path; the synchronous MCP write path checks the same lease at its own mutation boundary too (`task-mcp-annotation-human-edit-guard`), surfaced there as `lease_conflict` rather than an HTTP status — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. The batch also handles `edit_lease_acquired`/`edit_lease_released` themselves (task-annotation-exclusive-edit-leases): first-actual-editor-wins, unlike the advisory `selection_claimed`/`selection_released` presence pair — see "Edit leases vs. selection claims" below |
+| POST | `/api/sessions/{id}/annotations/image` | Human GUI clipboard-paste / file-upload image ingest (`{client_id, x, y, image_data\|image_url, ...}` → `{annotation, revision}`). Runs the same `image_ingest.py` validate/optimize/embed pipeline and `SessionManager.upsert_image_annotation` budgets as the MCP `create_image_annotation` tool — see "Image annotation tool" below. Body is checked against a pre-parse `Content-Length` cap (2× `DEFAULT_MAX_SOURCE_IMAGE_BYTES` → `413`) before it is buffered, the same reasoning as `POST .../ops` above; `image_ingest.py`'s own checks apply the tight per-image bound once the body is decoded. The response is informational only: the annotation is attributed to a dedicated `human-image-ingest` client id (not the caller's `client_id`) so the pasting browser's own SSE subscription receives and applies the embedded result instead of the echo being dropped as a self-authored op. Replacing an existing image annotation another client holds a live edit lease on is rejected the same way (`409`), checked against the posting browser's real `client_id` before the marker substitution above applies. That pre-check only catches a lease that already existed before the (awaited) fetch/optimize step; the authoritative check inside `SessionManager.upsert_image_annotation` itself catches one acquired by another client during that step too, surfaced as the same `409`/`LeaseConflict` — see docs/ANNOTATION_CONTRACT.md's "Operation timing and leases" section. Because that marker is the same string for every human upload, the `429` token bucket here is keyed on the request source (the spoof-resistant key `GET /api/sessions/{id}` already throttles on) rather than on the marker or on the caller-supplied `client_id` — the former would put every user on the server in one bucket, the latter is a browser-held value a caller could rotate to mint fresh budgets. It is a bucket of its own, not the `/ops` one, so the two keyspaces cannot collide. This depends on `TRUSTED_PROXY_HOPS` being set to match the deployment: left at `0` behind a reverse proxy, every request resolves to the proxy's own address and the per-user separation collapses back into one bucket — the same caveat docs/MULTI_USER_SESSIONS_DESIGN.md records for the lookup throttle |
 | GET | `/api/sessions/{id}/stream` | SSE fan-out: presence, applied ops, selection claims, edit leases, and broadcast MCP commands (`{"type": "command", ...}` — every connected client applies these, not just one browser). Query `client_id`, `name`, `since_seq` (op catch-up or full-snapshot fallback). A slow consumer whose queue overflows is sent a fresh full snapshot rather than diverging. EventSource-opened, so it bypasses Basic Auth (protected by the unguessable session id — design §3.9) |
 | GET | `/api/sessions/{id}/activity` | Recent per-session annotation/canvas activity, newest first (`?actor=`, `?limit=` up to 500) — `backend/core/session_activity.py`, persisted with the session, bounded to 500 records / 7 days. Covers the `UNDOABLE_OPS` kinds (annotation create/update/delete, node move, layout apply, node show/hide); other state ops (nodes_added/removed, edges_*, group/session renames) are out of scope for this log |
 | POST | `/api/sessions/{id}/undo` | Revert the requesting actor's own latest not-yet-undone activity record (`{client_id, expected_revision?}` → `{undone_activity_id, undone_op, applied, revision}`), replaying its stored inverse op through the same synchronous op path as a direct write (broadcast over the stream like any other op). `404` if the actor has nothing eligible, `409` if the affected state changed since (conflict), if the annotation the inverse op would touch is held by another client's live edit lease (`LeaseConflict` — undo is a browser write and answers to the same rule as `POST /ops`; actor-scoping does not cover it, since the action is the caller's own but the annotation may have come under another client's lease since — retryable, unlike the state-changed conflict), or the session is mid-write (retry), `429` rate-limited. A mismatched `expected_revision` is a fourth `409` (`expected revision N, session is at M`). All four are distinguished only by their prose `detail`; the web UI branches on it in `classifyUndoError` so the retryable ones do not read as permanent — it never sends `expected_revision`, so it handles three of the four. Surfaced in the web UI as the Activity drawer's Session tab (`frontend/web/src/components/ActivityDrawer.jsx`) |
@@ -1008,7 +1008,14 @@ tools use. Coordinates are model space, matching the layout tools above.
 Writes share the layout tools' optimistic-concurrency contract: read
 `revision` from `list_sticky_notes`, thread it into `expected_revision` on a
 write, and a stale write returns `revision_conflict` with the current
-revision rather than silently clobbering a concurrent edit.
+revision rather than silently clobbering a concurrent edit. A write that
+would touch an annotation another (browser) client currently holds a live
+**edit lease** on returns `lease_conflict` (with `annotation_id`/`held_by`)
+instead of silently overriding it — a collaboration-courtesy refusal, not an
+authorization check; see docs/ANNOTATION_CONTRACT.md's "Operation timing and
+leases". Re-read current state before retrying, the same as
+`revision_conflict`; this tool never acquires a lease of its own
+(`task-mcp-annotation-human-edit-guard`).
 
 `create_sticky_note` doubles as an upsert: passing an `annotation_id` that
 already exists replaces that note (idempotent for a retried call with the
@@ -1019,6 +1026,13 @@ and a position-only or size-only update leaves the other half exactly as it
 was. `delete_sticky_note` and `update_sticky_note` both resolve
 `annotation_id` against notes only — an id that names a different annotation
 type (e.g. a `line`) reports `not_found` rather than editing across types.
+`update_sticky_note` also accepts the same optional `base_version` the
+generic `update_annotation` tool does (docs/ANNOTATION_CONTRACT.md's
+"Field-level patches and base_version"): given, a write that touches a field
+someone else has changed since — including a position-only move's carried-
+forward `w`/`h`, since `geometry` is always resent as a whole sub-object —
+is rejected as `field_conflict` instead of silently clobbering a concurrent
+edit to that field.
 
 `create_sticky_note` and `update_sticky_note` are also where a note's
 `rotation`, `z` and `locked` are set — the generic `reorder_annotation`/
@@ -1038,7 +1052,11 @@ model: `text`, `label`, `line` (`arrow` accepted as a legacy alias),
 creating one (see the image annotation tool below). They share the
 sticky-note tools' session/revision contract — model-space coordinates,
 `revision` / `expected_revision` optimistic concurrency, `revision_conflict`
-on a stale write — over the same annotation document.
+on a stale write, `lease_conflict` on a live human edit lease — over the same
+annotation document. `create_group_annotation`/`update_group_members`/
+`delete_group_annotation` and `create_image_annotation` (below) share it too;
+all thirteen MCP tools that can mutate an existing annotation check the same
+lease at the actual mutation boundary and never acquire one themselves.
 
 `note` keeps its own dedicated tool set above and `group` (node-membership
 boxes) keeps its own below ("Group annotation tools"); neither is exposed
@@ -1104,9 +1122,23 @@ docs/ANNOTATION_CONTRACT.md's acceptance matrix), so do not read a stored
 rotation on those two as something a viewer can see.
 
 `update_annotation` is a partial update over that same envelope plus
-`content`; `reorder_annotation` and
+`content`. It also accepts an optional `base_version` — read from a prior
+`list_annotations`/write result's `annotation.version` — for field-level
+conflict detection finer than `expected_revision`: a concurrent change to a
+*different* field of the same annotation since `base_version` still merges
+silently, and only a genuine change to a field *this* call is itself trying
+to set raises `field_conflict` (`{success: false, error: "field_conflict",
+conflicting_fields, server_version, annotation}` — the current server value,
+so a caller can re-derive a fresh patch instead of blindly retrying the
+rejected one). Omitted, the write applies unconditionally as it always has
+(docs/ANNOTATION_CONTRACT.md's [Field-level patches and
+base_version](ANNOTATION_CONTRACT.md#field-level-patches-and-base_version)
+has the full wire contract and the tests that pin it).
+`reorder_annotation` and
 `set_annotation_lock` are single-purpose wrappers over `z` and `locked`
-respectively; `duplicate_annotation` copies an existing annotation
+respectively — narrow enough that the whole-annotation clobber this
+mechanism exists for was never their exposure, so neither accepts
+`base_version` yet; `duplicate_annotation` copies an existing annotation
 (including its `content`/`style`) to a new id at an optional offset,
 translating a `line`'s endpoints and a `freehand` stroke's `points` by the
 same `dx`/`dy` as the envelope so the copy keeps its shape instead of the

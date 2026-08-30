@@ -130,8 +130,14 @@ describe('NoteNode', () => {
       <NoteNode id="note-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // 4 text-size buttons followed by 4 opacity-level buttons
+    // (task-annotation-responsive-bottom-toolbox's AnnotationOpacityControl,
+    // added after this menu's text-size row) — both groups share the
+    // `.size-button` styling class, same as this menu's rotation row sharing
+    // classes with others; text size renders first, so the first 4 are still
+    // exactly the ones this test means to click.
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[3]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
@@ -188,8 +194,10 @@ describe('LabelNode', () => {
       <LabelNode id="label-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // Same two-group `.size-button` layout as NoteNode's equivalent test
+    // above (text size, then AnnotationOpacityControl's opacity levels).
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[2]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];

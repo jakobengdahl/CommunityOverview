@@ -116,6 +116,25 @@ class TestBuildAnnotation:
         assert annotation["z"] == 5
         assert annotation["locked"] is True
 
+    def test_shape_defaults_to_z_minus_one(self):
+        # task-annotation-render-direct-manipulation's "semantic default
+        # layers": a shape starts one layer behind the 0 everything else
+        # (including graph nodes) is created at, so it opens already behind
+        # content instead of needing a manual send-to-back.
+        annotation = build_annotation(type="shape", x=0, y=0)
+        assert annotation["z"] == -1
+
+    @pytest.mark.parametrize("kind", sorted(GENERIC_ANNOTATION_TYPES - {"shape"}))
+    def test_every_other_generic_type_still_defaults_to_zero(self, kind):
+        annotation = build_annotation(type=kind, x=0, y=0)
+        assert annotation["z"] == 0
+
+    def test_explicit_z_overrides_the_shape_default(self):
+        # An explicit z=0 for a shape must stick, not be treated as "absent"
+        # and fall through to the -1 default.
+        annotation = build_annotation(type="shape", x=0, y=0, z=0)
+        assert annotation["z"] == 0
+
     def test_content_is_merged_verbatim(self):
         annotation = build_annotation(
             type="line",

@@ -176,6 +176,28 @@ class TestCreateGroupAnnotation:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, annotation_tools):
+        """task-mcp-annotation-human-edit-guard: create-by-id targeting a
+        group another (browser) client holds a live edit lease on is
+        refused."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, annotation_id="group-1", label="A"
+        )
+        manager.leases.acquire(session.id, "browser-1", ["group-1"])
+
+        result = tools_map["create_group_annotation"](
+            session_id=session.id, x=9, y=9, annotation_id="group-1", label="hijacked"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "group-1"
+        assert result["held_by"] == "browser-1"
+        listed = tools_map["list_annotations"](session_id=session.id)["annotations"]
+        assert listed[0]["content"]["label"] == "A"
+
     def test_session_not_found(self, annotation_tools):
         tools_map, _manager = annotation_tools
 
@@ -336,6 +358,28 @@ class TestUpdateGroupMembers:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_change_membership(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](
+            session_id=session.id, x=0, y=0, member_node_ids=["n1"]
+        )
+        gid = created["group"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [gid])
+
+        result = tools_map["update_group_members"](
+            session_id=session.id, group_id=gid, add_member_node_ids=["n2"]
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == gid
+        assert result["held_by"] == "browser-1"
+        listed = tools_map["list_annotations"](session_id=session.id)["annotations"]
+        assert listed[0]["content"]["member_node_ids"] == ["n1"]
+
     def test_two_sequential_calls_each_add_a_different_member(self, annotation_tools):
         """Each call re-reads the group's current membership at call time,
         so a second add call (issued after the first has returned) sees the
@@ -487,6 +531,23 @@ class TestDeleteGroupAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
+        assert len(session.state["annotations"]) == 1
+
+    def test_lease_conflict_is_reported_and_does_not_delete(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_group_annotation"](session_id=session.id, x=0, y=0)
+        gid = created["group"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [gid])
+
+        result = tools_map["delete_group_annotation"](
+            session_id=session.id, group_id=gid
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == gid
+        assert result["held_by"] == "browser-1"
         assert len(session.state["annotations"]) == 1
 
     def test_session_not_found(self, annotation_tools):

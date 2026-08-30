@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import GroupNode from '../src/components/GroupNode';
 import { AnnotationContext } from '../src/components/AnnotationContext';
 
-const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ setNodes: vi.fn(), nodes: [] }));
 
 vi.mock('reactflow', () => ({
   // Expose onResizeEnd via a clickable stub so the test can fire a resize.
@@ -11,20 +11,32 @@ vi.mock('reactflow', () => ({
   // locked group; the real NodeResizer renders nothing when it is false.
   NodeResizer: ({ onResizeEnd, isVisible }) =>
     isVisible ? <button data-testid="resize" onClick={() => onResizeEnd?.()} /> : null,
-  useReactFlow: () => ({ setNodes: hoisted.setNodes }),
+  // `getNodes` backs the group-order control's resolveGroupOrderZ lookup
+  // (handleChangeGroupLayer) — seeded per test via `hoisted.nodes`, the same
+  // idiom GroupLockRoundTrip.test.jsx uses for its own seeded canvas.
+  useReactFlow: () => ({ setNodes: hoisted.setNodes, getNodes: () => hoisted.nodes }),
 }));
+
+const LABELS = {
+  unlock: 'Unlock',
+  groupLayer: 'Group order',
+  groupLayerFront: 'Bring forward',
+  groupLayerBack: 'Send backward',
+};
 
 function renderGroup(
   data = { label: 'G', color: '#646cff' },
   notifyChange = vi.fn(),
-  notifyRemoteLockedAttempt = vi.fn()
+  notifyRemoteLockedAttempt = vi.fn(),
+  { canvasNodes } = {}
 ) {
+  hoisted.nodes = canvasNodes || [{ id: 'group-1', type: 'group', data }];
   return {
     notifyChange,
     notifyRemoteLockedAttempt,
     ...render(
       <AnnotationContext.Provider
-        value={{ notifyChange, notifyRemoteLockedAttempt, labels: { unlock: 'Unlock' } }}
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: LABELS }}
       >
         <GroupNode id="group-1" data={data} selected />
       </AnnotationContext.Provider>
@@ -271,18 +283,31 @@ describe('GroupNode locked context menu', () => {
   // its subtree count above. What slips through both is a differently-worded
   // non-button control (`<div role="button">Archive Group</div>`); that gap is
   // real and accepted, but it is a gap, not a policy of letting the menu grow.
-  it('offers colour and delete on an unlocked group, and nothing that hides', () => {
+  it('offers colour, group order and delete on an unlocked group, and nothing that hides', () => {
     renderGroup();
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('button', { name: /delete group/i })).toBeInTheDocument();
-    expect(document.querySelector('.context-menu-title').textContent).toBe('Group Color');
+    expect(screen.getByRole('button', { name: /bring forward/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /send backward/i })).toBeInTheDocument();
+    const titles = [...document.querySelectorAll('.context-menu-title')].map((n) => n.textContent);
+    // The third, empty title is AnnotationSizeControl's own
+    // `<div className="context-menu-title">{labels.width}</div>` — this
+    // suite's LABELS constant does not define `width`, so it renders empty
+    // rather than absent; still a real title slot, just an untranslated one
+    // in this test's fixture.
+    expect(titles).toEqual(['Group Color', 'Group order', '']);
     expect(document.querySelectorAll('.color-button')).toHaveLength(6);
     const menu = document.querySelector('.graph-group-context-menu');
     // Not `queryByRole('button', …)`: a `div` or `a` labelled Hide Group is a
     // working control that a role query reports as absent. Text sees it.
     expect(menu.textContent).not.toMatch(/hid(e|den|ing)/i);
-    // Six swatches and Delete Group, and no eighth button.
-    expect(menu.querySelectorAll('button')).toHaveLength(7);
+    // Six swatches, two group-order buttons, the non-drag size control's
+    // Apply button (task-annotation-accessible-shared-controls'
+    // AnnotationSizeControl — its two <input type="number"> elements are not
+    // <button>s, so only this one adds to the count) and Delete Group — ten
+    // total, consciously updated from the pre-existing nine per this test's
+    // own comment above.
+    expect(menu.querySelectorAll('button')).toHaveLength(10);
   });
 
   it('unlocks the group and publishes the change', () => {
@@ -415,5 +440,124 @@ describe('GroupNode locked context menu', () => {
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
     expect(hoisted.setNodes).not.toHaveBeenCalled();
     expect(notifyChange).not.toHaveBeenCalled();
+  });
+});
+
+// smallfix-group-annotation-has-no-layer-control /
+// dec-annotation-group-background-layering: group backgrounds relative to
+// each other only. Never against a graph node or any other annotation kind
+// (that invariant is structural — reorderNodesForParentChild's own
+// bucketing plus GroupNode.css's z-index pin — and covered at the
+// reorderNodesForParentChild/resolveGroupOrderZ level, not here), and never
+// touching member position/z/parentId (also covered at that level, in
+// reorderNodesForParentChild.test.js). What is specific to this component:
+// the buttons themselves, and the two guards every other mutation here has
+// (persisted lock, live remote edit lease).
+describe('GroupNode group-order layer control', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('bring forward writes a z past the other group and reorders the canvas', () => {
+    const other = { id: 'group-2', type: 'group', data: { z: 0 } };
+    const { notifyChange } = renderGroup({ label: 'G', color: '#646cff' }, vi.fn(), vi.fn(), {
+      canvasNodes: [
+        { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff' } },
+        other,
+      ],
+    });
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: /bring forward/i }));
+    expect(notifyChange).toHaveBeenCalledWith('style');
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    const result = updater([
+      { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff' } },
+      other,
+    ]);
+    const g1 = result.find((n) => n.id === 'group-1');
+    expect(g1.data.z).toBe(1);
+    // The other group's own data is untouched — only the clicked group's z
+    // changed, matching resolveGroupOrderZ's single-write contract.
+    expect(result.find((n) => n.id === 'group-2').data).toEqual({ z: 0 });
+  });
+
+  it('send backward writes a z behind the other group', () => {
+    const other = { id: 'group-2', type: 'group', data: { z: 0 } };
+    renderGroup({ label: 'G', color: '#646cff' }, vi.fn(), vi.fn(), {
+      canvasNodes: [
+        { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff' } },
+        other,
+      ],
+    });
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: /send backward/i }));
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    const result = updater([
+      { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff' } },
+      other,
+    ]);
+    expect(result.find((n) => n.id === 'group-1').data.z).toBe(-1);
+  });
+
+  it('is a silent no-op when this is the only group on the canvas', () => {
+    const { notifyChange } = renderGroup(); // renderGroup's default seeds only this one group
+    fireEvent.contextMenu(screen.getByText('G'));
+    fireEvent.click(screen.getByRole('button', { name: /bring forward/i }));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('is a silent no-op when this group is already alone at that end among groups', () => {
+    const other = { id: 'group-2', type: 'group', data: { z: -5 } };
+    const { notifyChange } = renderGroup({ label: 'G', color: '#646cff', z: 0 }, vi.fn(), vi.fn(), {
+      canvasNodes: [
+        { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff', z: 0 } },
+        other,
+      ],
+    });
+    fireEvent.contextMenu(screen.getByText('G'));
+    // group-1 (z 0) is already in front of group-2 (z -5).
+    fireEvent.click(screen.getByRole('button', { name: /bring forward/i }));
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('refuses and surfaces the attempt under a live remote edit lease, publishing nothing', () => {
+    const other = { id: 'group-2', type: 'group', data: { z: 0 } };
+    const { notifyChange, notifyRemoteLockedAttempt, rerender } = renderGroup(
+      { label: 'G', color: '#646cff' },
+      vi.fn(),
+      vi.fn(),
+      {
+        canvasNodes: [
+          { id: 'group-1', type: 'group', data: { label: 'G', color: '#646cff' } },
+          other,
+        ],
+      }
+    );
+    fireEvent.contextMenu(screen.getByText('G'));
+    rerender(
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt, labels: LABELS }}
+      >
+        <GroupNode
+          id="group-1"
+          data={{ label: 'G', color: '#646cff', remoteLease: REMOTE_CLAIM }}
+          selected
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.click(screen.getByRole('button', { name: /bring forward/i }));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyChange).not.toHaveBeenCalled();
+  });
+
+  it('the row is absent entirely on a locked group, closing the same hole a bare markup check would leave', () => {
+    // Mirrors the existing "offers unlock and nothing else" pin: locked
+    // withholds recolour/delete AND the new group-order row, all in one
+    // Unlock-only branch.
+    renderGroup({ label: 'G', color: '#646cff', locked: true });
+    fireEvent.contextMenu(screen.getByText('G'));
+    expect(screen.queryByRole('button', { name: /bring forward/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /send backward/i })).toBeNull();
   });
 });

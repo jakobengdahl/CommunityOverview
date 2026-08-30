@@ -91,14 +91,20 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
 // either a colour or the literal string `'transparent'`, so a shape can be a
 // solid fill with no border (the old plain-shape look), a transparent fill
 // with a coloured border (what `frame` used to draw), both, or neither.
+// `opacity` (0-1, task-annotation-responsive-bottom-toolbox's edit-surface
+// half) is appended to every one of these five kinds' field lists — it was
+// previously a `freehand`-only control (see that kind's own list below); an
+// omitted value keeps rendering fully opaque, the same "absent field = no
+// change from before this task" contract every other newly-added optional
+// field here already follows.
 const GENERIC_OVERLAY_FIELDS = {
-  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment'],
+  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment', 'opacity'],
   // `text` here is a `shape`'s optional caption
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font'],
-  icon: ['icon', 'color', 'attachment'],
+  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font', 'opacity'],
+  icon: ['icon', 'color', 'attachment', 'opacity'],
   // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
   // no `value` (the number it used to render and the stepper that changed
   // it are both gone) and no `attachment` (it is not in
@@ -107,8 +113,8 @@ const GENERIC_OVERLAY_FIELDS = {
   // change simply never has it projected onto the live node — see this
   // object's own doc comment above for why that is enough, with no
   // migration, to make old data render correctly.
-  vote_dot: ['color'],
-  image: ['image', 'alt', 'color'],
+  vote_dot: ['color', 'opacity'],
+  image: ['image', 'alt', 'color', 'opacity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -393,6 +399,15 @@ export function overlayToFlowNode(overlay) {
   // that dropped it would diff back out on the next autosave as a rotation
   // reset, silently overwriting whatever an agent or collaborator had set.
   const rotation = overlay.rotation ?? 0;
+  // `version`/`field_versions` are server-owned same-field-conflict bookkeeping
+  // (dec-annotation-field-patches-and-conflicts), carried the same envelope way
+  // as z/locked/rotation rather than defaulted — an annotation that has never
+  // round-tripped through the server (a brand-new local creation) legitimately
+  // has neither yet, and inventing 0/{} here would make a later diff think the
+  // server had already assigned one. Read-only from this file's point of view:
+  // nothing here ever changes them, only carries whatever was last read.
+  const version = overlay.version;
+  const fieldVersions = overlay.field_versions;
   if (overlay.kind === 'note') {
     return {
       ...base,
@@ -400,8 +415,11 @@ export function overlayToFlowNode(overlay) {
         text: overlay.text || '',
         color: overlay.color,
         fontSize: overlay.fontSize,
+        opacity: overlay.opacity,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       style: overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
@@ -418,15 +436,18 @@ export function overlayToFlowNode(overlay) {
         color: overlay.color,
         fontSize: overlay.fontSize,
         attachment: overlay.attachment,
+        opacity: overlay.opacity,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       draggable: !locked,
       zIndex,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
-    const data = { locked, rotation };
+    const data = { locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
@@ -454,10 +475,13 @@ export function overlayToFlowNode(overlay) {
     dx: overlay.dx ?? 160,
     dy: overlay.dy ?? 0,
     color: overlay.color,
+    opacity: overlay.opacity,
     startArrow: overlay.startArrow ?? false,
     endArrow: overlay.endArrow ?? true,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
@@ -486,16 +510,24 @@ export function flowNodeToOverlay(node) {
   const z = node.zIndex ?? 0;
   const locked = Boolean(node.data?.locked);
   const rotation = node.data?.rotation ?? 0;
+  // Mirrors overlayToFlowNode's version/field_versions handling above: read
+  // whatever the live node carries, default to nothing (never invent a
+  // version an annotation hasn't actually been assigned server-side yet).
+  const version = node.data?.version;
+  const fieldVersions = node.data?.field_versions;
   if (node.type === 'note') {
     return {
       ...base,
       text: node.data?.text || '',
       color: node.data?.color,
       fontSize: node.data?.fontSize,
+      opacity: node.data?.opacity,
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (node.type === 'label') {
@@ -505,13 +537,16 @@ export function flowNodeToOverlay(node) {
       color: node.data?.color,
       fontSize: node.data?.fontSize,
       attachment: node.data?.attachment,
+      opacity: node.data?.opacity,
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
-    const out = { ...base, z, locked, rotation };
+    const out = { ...base, z, locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
@@ -528,11 +563,14 @@ export function flowNodeToOverlay(node) {
     dx: node.data?.dx ?? 160,
     dy: node.data?.dy ?? 0,
     color: node.data?.color,
+    opacity: node.data?.opacity,
     startArrow: node.data?.startArrow ?? false,
     endArrow: node.data?.endArrow ?? true,
     z,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;
@@ -658,18 +696,109 @@ export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
 // on an internal field the user has no reason to remember they set. Keeping
 // `shape` uniformly attachable is the smaller, more predictable change, and
 // the more consistent one now that `frame` is no longer a distinct type.
+// Builds the `content.attachment` shape for a point attaching to `target`,
+// shared by computeDroppedAttachment (nearest-target-within-radius, for a
+// drag release) and computeAttachmentToTarget (an explicit, caller-chosen
+// target, for the non-drag "Attach to…" mode below) so the two attachment
+// entry points can never drift into two different field shapes.
+function buildAttachment(position, target) {
+  const center = target && nodeCenter(target);
+  if (!center) return null;
+  return {
+    target_id: target.id,
+    target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
+    offset: { x: position.x - center.x, y: position.y - center.y },
+  };
+}
+
 export function computeDroppedAttachment(position, nodes, excludeId) {
   const candidates = nodes.filter((n) => n.type !== 'group');
   const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
   if (!targetId) return null;
   const target = candidates.find((n) => n.id === targetId);
-  const center = target && nodeCenter(target);
-  if (!center) return null;
-  return {
-    target_id: targetId,
-    target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
-    offset: { x: position.x - center.x, y: position.y - center.y },
-  };
+  return buildAttachment(position, target);
+}
+
+// The non-drag "Attach to…" mode's own attachment computation
+// (task-annotation-accessible-shared-controls, closing the audit's
+// "attaching an EXISTING annotation to a target" gap): the caller has
+// already resolved an explicit target (via a target-tap/click, not a
+// proximity search), so this only has to build the attachment shape for it —
+// reusing buildAttachment rather than a second implementation. Keeps the
+// annotation's current on-screen offset from the target's centre (the
+// contract's "free fine adjustment"), the same behaviour a drop that snapped
+// onto this exact target would have produced, rather than jumping the
+// annotation onto the target's centre. `node` is the flow node being
+// attached (its own `.position`, not the target's); `group` targets are
+// rejected by the caller before this is reached (a group is a containment
+// construct, not an attachment target — see computeDroppedAttachment's own
+// comment), so this does not re-check it.
+export function computeAttachmentToTarget(node, target) {
+  const position = node?.position;
+  if (!position) return null;
+  return buildAttachment(position, target);
+}
+
+// Whether `node` is a valid target for the "Attach to…" mode: any node or
+// annotation except a group (a containment/visual construct, not an
+// attachment target — matches computeDroppedAttachment's own candidate
+// filter) or the annotation being attached itself.
+export function isEligibleAttachTarget(node, selfId) {
+  return Boolean(node) && node.id !== selfId && node.type !== 'group';
+}
+
+// Per-kind screen-reader accessible name (dec-annotation-v1-accessibility-
+// and-touch's bar: "role + accessible name per annotation, e.g. 'sticky
+// note, Budget Q3'" — a name that SAYS WHAT THE THING IS, not merely
+// whatever an accname algorithm happens to fall back to). One shared
+// function rather than ten per-kind fixes, per the accessibility audit's own
+// root-cause note (docs/ANNOTATION_CONTRACT.md's "Keyboard, touch and
+// screen-reader controls audit" section): every caller that builds or
+// hydrates a ReactFlow node writes this onto `node.ariaLabel`, the only field
+// ReactFlow itself ever reads for a node's `aria-label` (`@reactflow/core`'s
+// `NodeRenderer`).
+//
+// `labels` carries the kind words with English defaults, following this
+// package's own props-with-defaults i18n rule (see AnnotationContext.js) —
+// never a bare English literal, so a host with Swedish `labels` gets a
+// Swedish accessible name too. Shape subtype names (`rectangle`, `process_
+// arrow`, …) and icon names are left untranslated, matching the existing
+// precedent of GenericAnnotationNode.jsx's own shape/icon picker buttons
+// (`aria-label={name}`) — this file adds no new translation surface for
+// vocabulary that was already untranslated elsewhere in the same menu.
+export function computeAnnotationAriaLabel(kind, data, labels = {}) {
+  const d = data || {};
+  const withDetail = (kindWord, detail) => (detail ? `${kindWord}, ${detail}` : kindWord);
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
+  switch (kind) {
+    case 'note':
+      return withDetail(labels.ariaKindNote || 'Sticky note', text(d.text));
+    case 'label':
+      return withDetail(labels.ariaKindLabel || 'Label', text(d.text));
+    case 'text':
+      return withDetail(labels.ariaKindText || 'Text', text(d.text));
+    case 'shape': {
+      const shapeName = (d.shape || 'rectangle').replace(/_/g, ' ');
+      const kindWord = `${shapeName} ${labels.ariaKindShape || 'shape'}`;
+      return withDetail(kindWord, text(d.text));
+    }
+    case 'icon': {
+      const kindWord = labels.ariaKindIcon || 'icon';
+      return d.icon ? `${d.icon} ${kindWord}` : kindWord;
+    }
+    case 'vote_dot':
+      return labels.ariaKindVoteDot || 'Vote dot';
+    case 'image':
+      return withDetail(labels.ariaKindImage || 'Image', text(d.alt));
+    case 'arrow':
+      return labels.ariaKindArrow || 'Arrow';
+    case 'freehand':
+      return labels.ariaKindFreehand || 'Freehand stroke';
+    case 'group':
+      return withDetail(labels.ariaKindGroup || 'Group', text(d.label));
+    default:
+      return '';
+  }
 }
 
 // Recompute an attached overlay's position from its target's current centre
@@ -680,6 +809,46 @@ export function computeDroppedAttachment(position, nodes, excludeId) {
 // yet loaded, or deleted): the overlay keeps its last resolved position rather
 // than being recomputed or reset (contract: "detaches and keeps its last
 // resolved model-space geometry").
+// Fallback hit-box half-size (flow px) for a kind with no explicit
+// style.width/height (icon/vote_dot's fixed intrinsic size, and arrow/text/
+// freehand's boxless geometry) — see nodesAtPoint's own comment for why a
+// zero-size box would otherwise never register as "clicked".
+const POINTLESS_KIND_HIT_RADIUS = 16;
+
+// Every node whose box contains `point` (flow coordinates) — the overlap-
+// object picker's own hit test (task-annotation-accessible-shared-controls,
+// closing the audit's "Overlapping objects: a visible way to choose which
+// one you mean | MISSING" row). Deliberately independent of ReactFlow's own
+// pointer-event hit testing (which already resolved one specific node before
+// a click handler ever sees it, by DOM z-order): this recomputes candidacy
+// geometrically so a caller can tell "exactly one node here" (nothing to
+// disambiguate) apart from "several nodes here" (offer a picker) using the
+// same `nodes` array GraphCanvas already holds.
+//
+// Uses each node's *stored* box (nodeSize/position), not its rotated visual
+// outline — a rotated annotation's axis-aligned bounding box is a
+// conservative approximation of what it actually paints, not a pixel-exact
+// hit test. `group` is excluded: a group is a containment/visual backdrop
+// almost always larger than whatever sits on it, so including it would
+// nearly always "overlap" and defeat the picker's purpose of disambiguating
+// genuinely stacked objects.
+export function nodesAtPoint(nodes, point) {
+  if (!point) return [];
+  return nodes.filter((n) => {
+    if (n.type === 'group') return false;
+    const pos = n.positionAbsolute || n.position;
+    if (!pos) return false;
+    const { w, h } = nodeSize(n);
+    if (!w || !h) {
+      const r = POINTLESS_KIND_HIT_RADIUS;
+      return (
+        point.x >= pos.x - r && point.x <= pos.x + r && point.y >= pos.y - r && point.y <= pos.y + r
+      );
+    }
+    return point.x >= pos.x && point.x <= pos.x + w && point.y >= pos.y && point.y <= pos.y + h;
+  });
+}
+
 export function resolveAttachedPosition(node, centers) {
   const targetId = node.data?.attachment?.target_id;
   if (!targetId) return null;

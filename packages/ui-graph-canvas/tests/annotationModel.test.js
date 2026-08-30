@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   ANNOTATION_SCHEMA_VERSION,
   ANNOTATION_SHAPES,
+  ANNOTATION_TYPES,
   applyAnnotationOperation,
   createAnnotation,
+  defaultAnnotationZ,
   normalizeAnnotationDocument,
   normalizeShapeName,
 } from '../src/utils/annotationModel';
@@ -423,5 +425,62 @@ describe('annotationModel contract v1', () => {
     expect(doc.annotations.map((a) => a.id)).toEqual(['note-1']);
     expect(onSkipped).toHaveBeenCalledTimes(1);
     expect(onSkipped.mock.calls[0][0]).toMatchObject({ id: 'f-1', type: 'frame' });
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
+  // `field_versions` (dec-annotation-field-patches-and-conflicts) are
+  // server-owned same-field-conflict bookkeeping, carried the same envelope
+  // way as created_by/updated_by/created_at/updated_at — never per-kind
+  // content, so this must hold for every type this function builds, not just
+  // one. A regression here is exactly what made a real browser's
+  // `base_version` always come out `undefined` (dropped before
+  // sessionSyncClient.js's computeOps ever saw the annotation), silently
+  // disabling the field-conflict protection for every real browser write.
+  it.each(['note', 'label', 'shape', 'icon', 'text'])(
+    'carries version/field_versions through for a %s annotation when present on input',
+    (type) => {
+      const annotation = createAnnotation({
+        id: `${type}-1`,
+        type,
+        position: { x: 0, y: 0 },
+        version: 7,
+        field_versions: { text: 7, geometry: 5 },
+      });
+      expect(annotation.version).toBe(7);
+      expect(annotation.field_versions).toEqual({ text: 7, geometry: 5 });
+    }
+  );
+
+  it('does not invent a version when the input has none', () => {
+    const annotation = createAnnotation({ id: 'note-1', type: 'note' });
+    expect(annotation.version).toBeUndefined();
+    expect(annotation.field_versions).toBeUndefined();
+  });
+
+  // task-annotation-render-direct-manipulation's remaining "semantic default
+  // layers" scope: a per-kind default `z` at creation, narrow by design (see
+  // docs/ANNOTATION_CONTRACT.md's Layer order section and this file's own
+  // `defaultAnnotationZ` comment) — only `shape` moves off the shared 0.
+  describe('semantic default layer at creation', () => {
+    it('defaults a freshly created shape to z -1, one layer behind everything else', () => {
+      expect(createAnnotation({ type: 'shape' }).z).toBe(-1);
+      expect(defaultAnnotationZ('shape')).toBe(-1);
+    });
+
+    it.each(ANNOTATION_TYPES.filter((type) => type !== 'shape'))(
+      'still defaults %s to z 0, unchanged',
+      (type) => {
+        expect(createAnnotation({ type }).z).toBe(0);
+        expect(defaultAnnotationZ(type)).toBe(0);
+      }
+    );
+
+    it('an explicit z 0 on a shape is honoured, not treated as absent', () => {
+      expect(createAnnotation({ type: 'shape', z: 0 }).z).toBe(0);
+    });
+
+    it('an explicit z on a shape overrides the -1 default', () => {
+      expect(createAnnotation({ type: 'shape', z: 42 }).z).toBe(42);
+    });
   });
 });

@@ -208,21 +208,30 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
-the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
-simply no longer grouped. The deletion is recorded in the session panel
-(see [Recent activity](#52-recent-activity-audit-log)) and can be undone from there while it
-is still your most recent undoable action.
+A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
+where they appear, and are simply no longer grouped. The deletion is recorded in the
+session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
+from there while it is still your most recent undoable action.
+
+**Group order** moves a group's background forward or backward *among your other group
+boxes only* — it never changes where a group sits relative to your graph nodes or to any
+other annotation, which stays fixed: a group background is always behind everything else
+on the canvas, whatever you do here. With only one group on the board the two buttons have
+nothing to do and do nothing; add a second overlapping group and they let you pick which
+one shows through where the two boxes overlap. Reordering groups this way never moves,
+resizes or re-groups anything inside either box — only the boxes themselves change places.
 
 If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
 what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
 it is the same action you were already getting, named for what it does.
 
 A group box can also be locked, the same way an annotation can. A locked group stays where
-it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
-it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
-menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
-not lock yourself may already be locked when you open a shared board.
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, reorder it
+against your other groups, or delete it. Its right-click menu has a single action —
+**Unlock** — and choosing it gives the full menu back. Locking is done by an assistant or
+an agent on your behalf, so a group you did not lock yourself may already be locked when
+you open a shared board.
 
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
@@ -245,6 +254,44 @@ an empty area of the canvas and choosing one of:
 Annotations are part of the session, not the knowledge graph: they are stored with the
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
+
+**Editing an existing annotation.** Right-click still opens the property menu described
+below, but selecting any annotation — a group box included — also shows a small round
+**✎ Edit** button in its corner — a visible way in that works by click or tap alone, and by
+keyboard: Tab to the button and press Enter or Space, or press **Shift+F10** (or the
+keyboard's Menu key) while the annotation itself is focused. It opens the exact same menu
+right-click does, positioned next to the button instead of at a pointer position, and moves
+keyboard focus into the menu — closing it (Escape, an outside click, or picking an action)
+returns focus to wherever it was before. Inside an open menu, **arrow keys** move between
+its options and **Tab** cycles within it rather than leaving it. On a phone (or any narrow,
+touch screen), tapping it opens the annotation's editor in the same bottom sheet the
+**Annotate** slot uses for creating one (see [9. On a phone](#9-on-a-phone)) — no need to
+long-press, which has always been unreliable across browsers and is never the *only* way in.
+
+A freshly created annotation (from the toolbox, the right-click "add" menu, or a
+drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
+without having to click or tap to find it first.
+
+Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
+device with no fine pointer:
+
+- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+  handle) also get a numeric width and height in their menu, with an **Apply** button, so
+  resizing doesn't require dragging a corner handle precisely.
+- **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
+  or another annotation) get an **Attach to…** button. Choosing it puts the canvas into a
+  "pick a target" mode (a banner names it, with its own Cancel button, and Escape also
+  backs out); tapping or clicking any eligible node or annotation next attaches the one you
+  started from to it, keeping it exactly where it currently sits relative to the target —
+  the same result dragging it there would have given. Once attached, the same menu offers
+  **Detach**.
+- **Multiple objects here** — if you tap or click a point where more than one annotation
+  overlaps, a small list appears naming each one so you can pick which you meant, instead of
+  only ever getting whichever one happens to be drawn on top.
+- **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
+  toggles a mode where tapping adds each node to the selection instead of replacing it — the
+  touch equivalent of holding Shift or Ctrl while clicking. Tap empty canvas to clear the
+  selection.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
@@ -312,6 +359,12 @@ way Icon does. Icon annotations do support that same attach behaviour as labels 
 placed: drag one near a node or another annotation to attach it.
 
 Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
+images all also have an **Opacity** row in their menu, offering four levels (30%, 50%,
+75%, 100%) — useful for fading a shape or note behind the nodes it's framing without
+hiding it entirely. Freehand strokes have had this since drawing shipped; every other
+kind gets it from the same row now too.
+
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
 images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
 underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
@@ -322,9 +375,13 @@ it stays put and tells you to unlock it first.
 
 Send to back normally goes all the way back, behind your graph's own nodes and edges —
 which is what you want for a shape you're using to frame a group of nodes visually. Bring
-it forward again with **Bring to front**. One gap worth knowing: a group box can be layered
-*against* by other annotations, but cannot be layered itself — its own menu has no Layer
-row.
+it forward again with **Bring to front**.
+
+A group box does not have this Layer row — it is not a member of this set — because a
+group background is *always* behind your graph's own nodes and every other annotation,
+unconditionally; there is nothing to bring to front or send to back it against. What a
+group box has instead is its own **Group order** row, described above, which only reorders
+group boxes against each other. See [2.5 Groups and annotations](#25-groups-and-annotations).
 
 The same set of annotations — notes, labels, arrows, freehand strokes, text,
 shapes, icons, voting dots and images — also has a **Duplicate** action in their
@@ -970,6 +1027,15 @@ open, so the canvas is never covered by more than one panel at once. On a phone
 the annotation toolbox is *only* reachable through the **Annotate** slot; unlike
 on desktop, it does not also float over the canvas as a small always-visible
 strip, so it never competes with the bottom navigation for space.
+
+**Editing an existing annotation on a phone.** Tap an annotation to select it, then tap
+the small **✎ Edit** button that appears on it. That opens its property editor — colour,
+opacity, rotation, layer, duplicate, delete, and whatever else that kind offers — in a
+seventh sheet, laid out full-width for a thumb the same way the Annotate sheet is, and
+subject to the same "only one panel open" rule as everything else in the list above
+(opening it closes Annotate/Search/Create/Chat/Menu, and opening any of those closes it).
+It has no bottom-nav slot of its own — it only opens contextually, from the annotation's
+own Edit button, since it always needs an annotation to edit.
 
 **Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
 the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,

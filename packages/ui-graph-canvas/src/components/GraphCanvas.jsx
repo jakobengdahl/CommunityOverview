@@ -63,12 +63,17 @@ import {
   nodeSize,
   resolveAnchoredArrow,
   computeDroppedAttachment,
+  computeAttachmentToTarget,
+  isEligibleAttachTarget,
+  computeAnnotationAriaLabel,
+  nodesAtPoint,
   resolveAttachedPosition,
   ICON_INTRINSIC_SIZE,
   VOTE_DOT_INTRINSIC_SIZE,
   NEARBY_ATTACH_OFFSET,
 } from '../utils/annotations';
 import { DEFAULT_ANNOTATION_ICON } from '../utils/annotationIcons';
+import { defaultAnnotationZ } from '../utils/annotationModel';
 import {
   directNeighborIds,
   neighborStartPositions,
@@ -109,6 +114,21 @@ import './GraphCanvas.css';
  * ReactFlow requires this ordering for parent-child relationships to work.
  * Groups are placed first so they render behind regular nodes in the DOM,
  * allowing clicks to reach the custom nodes on top.
+ *
+ * Within that groups-first bucket, groups are further ordered against EACH
+ * OTHER by their own `data.z` (ascending — a lower z paints earlier, i.e.
+ * further back among group backgrounds), never against any other bucket:
+ * every group still precedes every non-group node regardless of z, so this
+ * sort can only change which group backdrop sits closest to the front of
+ * the group layer, not whether a group sits behind regular content
+ * (dec-annotation-group-background-layering; see utils/groupLayers.js for
+ * the arithmetic behind the layer-row click that writes this z, and its own
+ * docstring for why a group's z is a separate space from an overlay's
+ * CSS-facing `zIndex`). The sort is stable on ties via the explicit index
+ * tie-break below (not relying on Array.prototype.sort's own stability),
+ * so the overwhelmingly common case — every group still at the shared
+ * default z of 0, nobody having used the new control — keeps exactly the
+ * relative order this function already produced before this sort existed.
  */
 export function reorderNodesForParentChild(nodes) {
   const groups = [];
@@ -125,7 +145,12 @@ export function reorderNodesForParentChild(nodes) {
     }
   }
 
-  return [...groups, ...nonGroupWithoutParent, ...withParent];
+  const orderedGroups = groups
+    .map((n, index) => ({ n, index, z: Number.isFinite(n.data?.z) ? n.data.z : 0 }))
+    .sort((a, b) => a.z - b.z || a.index - b.index)
+    .map(({ n }) => n);
+
+  return [...orderedGroups, ...nonGroupWithoutParent, ...withParent];
 }
 
 /**
@@ -310,6 +335,27 @@ function GraphCanvasInner({
   // still gets a working annotation toolbox rather than losing it silently.
   // Desktop (isCompact false) never consults this prop.
   annotationToolboxPortalContainer = null,
+  // The EDIT-time counterpart of annotationToolboxPortalContainer above
+  // (task-annotation-responsive-bottom-toolbox): the contextual "Edit"
+  // surface for an already-selected annotation portals its property editor
+  // into this host-owned DOM node on a compact/integrated host, instead of
+  // the floating menu every kind's right-click path already renders. Read
+  // only through AnnotationContext's `editSheet.container` (see that
+  // context's doc comment); node components never read this prop directly.
+  annotationEditSheetPortalContainer = null,
+  // Asks the host to open its mobile edit sheet (bound to `MobileShell`'s
+  // `'detail'` surface in `frontend/web`) — called by a node's Edit button
+  // before the container above has necessarily mounted; the button's own
+  // menu state is set to sheet mode regardless, and picks up the container
+  // once the host's next render supplies it. Its presence (not
+  // `isCompact`/`touch` alone) is what makes `editSheet.capable` true, the
+  // same "does the host support this" signal `annotationToolboxPortalContainer`
+  // effectively already is for the creation toolbox.
+  onRequestAnnotationEditSheet = null,
+  // Asks the host to close the mobile edit sheet again — called when the
+  // node's own menu-dismiss logic (outside click, Escape, an action that
+  // closes the menu) fires while it was opened in sheet mode.
+  onCloseAnnotationEditSheet = null,
   // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
   // package has no access to the host app's viewport-mode hook, so
   // detection must be self-contained. 'on'/'off' force the mode (mainly for
@@ -415,10 +461,39 @@ function GraphCanvasInner({
     annotationLayer: 'Layer',
     annotationLayerFront: 'Bring to front',
     annotationLayerBack: 'Send to back',
+    // Group backgrounds relative to each other only
+    // (dec-annotation-group-background-layering) — a separate control from
+    // the annotationLayer* row above, not a relabelling of it. See
+    // GroupNode.jsx and utils/groupLayers.js.
+    groupLayer: 'Group order',
+    groupLayerFront: 'Bring forward',
+    groupLayerBack: 'Send backward',
     annotationNearbyMenu: 'Add nearby',
     annotationNearbyLabel: 'Label',
     annotationNearbyIcon: 'Icon',
     annotationNearbyText: 'Text',
+    annotationOpacity: 'Opacity',
+    editAnnotation: 'Edit',
+    // task-annotation-accessible-shared-controls.
+    ariaKindNote: 'Sticky note',
+    ariaKindLabel: 'Label',
+    ariaKindText: 'Text',
+    ariaKindShape: 'shape',
+    ariaKindIcon: 'icon',
+    ariaKindVoteDot: 'Vote dot',
+    ariaKindImage: 'Image',
+    ariaKindArrow: 'Arrow',
+    ariaKindFreehand: 'Freehand stroke',
+    ariaKindGroup: 'Group',
+    annotationWidth: 'Width',
+    annotationHeight: 'Height',
+    annotationApplySize: 'Apply size',
+    annotationAttachTo: 'Attach to…',
+    annotationDetach: 'Detach',
+    annotationAttachToHint: 'Choose a target to attach to — Escape to cancel',
+    annotationAttachToCancel: 'Cancel attaching',
+    annotationMultiSelectMode: 'Select multiple',
+    annotationOverlapPickerTitle: 'Multiple objects here — choose one',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -469,8 +544,28 @@ function GraphCanvasInner({
   const [edgeContextMenu, setEdgeContextMenu] = useState(null);
   const [notification, setNotification] = useState(null);
   const [selectedNodes, setSelectedNodes] = useState([]);
+  // Mirrors `selectedNodes`, read (not subscribed to) by `onNodeClick`'s
+  // multi-select-mode branch below, so that handler's own identity does not
+  // change on every selection change.
+  const selectedNodesRef = useRef([]);
   const [selectedEdges, setSelectedEdges] = useState([]);
   const [paneContextMenu, setPaneContextMenu] = useState(null);
+  // Non-drag "Attach to…" target-tap mode (task-annotation-accessible-shared-
+  // controls) — the id of the annotation currently choosing a target, or null
+  // when the mode is inactive. Only one attach-in-progress at a time; opening
+  // the mode for a different annotation, or cancelling, simply replaces this.
+  const [attachModeId, setAttachModeId] = useState(null);
+  // Explicit touch multi-select mode (task-annotation-accessible-shared-
+  // controls, closing the accessibility audit's "no touch equivalent of
+  // holding Shift/Ctrl while clicking" gap): while true, tapping a node ADDS
+  // it to the current selection instead of replacing it — see the ReactFlow
+  // `onNodeClick` handler below.
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  // The overlap-object picker (task-annotation-accessible-shared-controls) —
+  // shown when a click's flow position lands inside more than one
+  // annotation's box, so a user can say which one they meant instead of
+  // whichever ReactFlow's own DOM-order hit test happened to resolve to.
+  const [overlapPicker, setOverlapPicker] = useState(null);
   // True while an MCP-driven layout tween is in flight, so the canvas can show a
   // non-interactive badge that an assistant is arranging the view.
   const [agentArranging, setAgentArranging] = useState(false);
@@ -681,6 +776,12 @@ function GraphCanvasInner({
     (targetId, kind) => attachNearbyAnnotationRef.current?.(targetId, kind),
     []
   );
+  // Non-drag "Attach to…" target-tap mode (task-annotation-accessible-
+  // shared-controls) — entering it is as simple as remembering which
+  // annotation is choosing a target; resolving a chosen target happens in
+  // `onNodeClick` below, next to the overlap picker it shares a click with.
+  const enterAttachMode = useCallback((id) => setAttachModeId(id), []);
+  const cancelAttachMode = useCallback(() => setAttachModeId(null), []);
   // Surfaced by an annotation component when a mutation is refused because
   // another client currently holds a live edit lease on the annotation
   // (task-annotation-exclusive-edit-leases — first-actual-editor-wins, never
@@ -737,6 +838,18 @@ function GraphCanvasInner({
       beginEditing,
       endEditing,
       attachNearby,
+      enterAttachMode,
+      // task-annotation-responsive-bottom-toolbox's edit-surface half — see
+      // AnnotationContext's own doc comment on this field for what each part
+      // means. `isCompact` alone (not `isTouchMode`) is the gate, mirroring
+      // exactly how `annotationToolboxPortalContainer`'s own compact-vs-desktop
+      // branch below is decided.
+      editSheet: {
+        capable: isCompact && Boolean(onRequestAnnotationEditSheet),
+        container: annotationEditSheetPortalContainer,
+        requestOpen: onRequestAnnotationEditSheet,
+        requestClose: onCloseAnnotationEditSheet,
+      },
       labels: {
         color: cml.annotationColor,
         fill: cml.annotationFill,
@@ -775,11 +888,31 @@ function GraphCanvasInner({
         layer: cml.annotationLayer,
         layerFront: cml.annotationLayerFront,
         layerBack: cml.annotationLayerBack,
+        groupLayer: cml.groupLayer,
+        groupLayerFront: cml.groupLayerFront,
+        groupLayerBack: cml.groupLayerBack,
         brokenAnnotation: cml.annotationBroken,
         nearbyMenu: cml.annotationNearbyMenu,
         nearbyLabel: cml.annotationNearbyLabel,
         nearbyIcon: cml.annotationNearbyIcon,
         nearbyText: cml.annotationNearbyText,
+        opacity: cml.annotationOpacity,
+        editAnnotation: cml.editAnnotation,
+        ariaKindNote: cml.ariaKindNote,
+        ariaKindLabel: cml.ariaKindLabel,
+        ariaKindText: cml.ariaKindText,
+        ariaKindShape: cml.ariaKindShape,
+        ariaKindIcon: cml.ariaKindIcon,
+        ariaKindVoteDot: cml.ariaKindVoteDot,
+        ariaKindImage: cml.ariaKindImage,
+        ariaKindArrow: cml.ariaKindArrow,
+        ariaKindFreehand: cml.ariaKindFreehand,
+        ariaKindGroup: cml.ariaKindGroup,
+        width: cml.annotationWidth,
+        height: cml.annotationHeight,
+        applySize: cml.annotationApplySize,
+        attachTo: cml.annotationAttachTo,
+        detach: cml.annotationDetach,
       },
     }),
     [
@@ -788,6 +921,13 @@ function GraphCanvasInner({
       beginEditing,
       endEditing,
       attachNearby,
+      enterAttachMode,
+      isCompact,
+      onRequestAnnotationEditSheet,
+      annotationEditSheetPortalContainer,
+      onCloseAnnotationEditSheet,
+      cml.annotationOpacity,
+      cml.editAnnotation,
       cml.annotationColor,
       cml.annotationFill,
       cml.annotationBorder,
@@ -825,11 +965,29 @@ function GraphCanvasInner({
       cml.annotationLayer,
       cml.annotationLayerFront,
       cml.annotationLayerBack,
+      cml.groupLayer,
+      cml.groupLayerFront,
+      cml.groupLayerBack,
       cml.annotationBroken,
       cml.annotationNearbyMenu,
       cml.annotationNearbyLabel,
       cml.annotationNearbyIcon,
       cml.annotationNearbyText,
+      cml.ariaKindNote,
+      cml.ariaKindLabel,
+      cml.ariaKindText,
+      cml.ariaKindShape,
+      cml.ariaKindIcon,
+      cml.ariaKindVoteDot,
+      cml.ariaKindImage,
+      cml.ariaKindArrow,
+      cml.ariaKindFreehand,
+      cml.ariaKindGroup,
+      cml.annotationWidth,
+      cml.annotationHeight,
+      cml.annotationApplySize,
+      cml.annotationAttachTo,
+      cml.annotationDetach,
       reportAnnotationRenderError,
     ]
   );
@@ -851,6 +1009,7 @@ function GraphCanvasInner({
   useOnSelectionChange({
     onChange: ({ nodes: selected, edges: selectedE }) => {
       setSelectedNodes(selected);
+      selectedNodesRef.current = selected;
       setSelectedEdges(selectedE || []);
       if (onSelectionChange) {
         onSelectionChange(selected);
@@ -1701,8 +1860,22 @@ function GraphCanvasInner({
           // look (a transparent box with a coloured border) is now reached by
           // right-clicking a created shape and setting fill to transparent,
           // not by a separate creation-time default.
+          //
+          // `zIndex` is the one per-kind semantic default this creation
+          // function sets (task-annotation-render-direct-manipulation's
+          // "semantic default layers" — see annotationModel.js's
+          // `defaultAnnotationZ` and docs/ANNOTATION_CONTRACT.md's Layer
+          // order section for the reasoning): a shape starts one layer
+          // behind the 0 every other kind (and every graph node) still
+          // starts at, so it opens already behind content instead of
+          // needing a manual send-to-back. Every other branch below omits
+          // `zIndex` on purpose, which resolves to that same unchanged 0
+          // through the existing `zIndex ?? 0` fallbacks
+          // (annotationLayers.js's `layerOf`, annotations.js's
+          // `flowNodeToOverlay`) — nothing here regresses their behavior.
           data: { shape, text: '', fill: undefined, border: undefined },
           style: newShapeSize(shape),
+          zIndex: defaultAnnotationZ(kind),
         };
       } else if (kind === 'icon') {
         // No `style` box — icon renders at a fixed intrinsic size
@@ -1748,11 +1921,51 @@ function GraphCanvasInner({
           data: { dx: 160, dy: 0, color: undefined, startArrow: false, endArrow: true },
         };
       }
-      setNodes((nds) => reorderNodesForParentChild([...nds, newNode]));
+      // Selected and focused immediately (task-annotation-accessible-shared-
+      // controls, closing the audit's "Activating one creates at a sensible
+      // location, focused, ready to edit | ⚠ PARTIAL" row — the location was
+      // already sensible; selection/focus were the missing half): a keyboard
+      // user who activates a toolbox button no longer has to Tab/click
+      // around to find what they just created — its Edit button (or, for a
+      // keyboard user, Shift+F10/Tab+Enter on the now-focused wrapper) is
+      // immediately reachable. Mirrors `selectAndFocusNode`'s own
+      // deselect-others-then-select-this shape, inlined here (rather than
+      // reused via that callback) because `newNode` is not yet in `nds` when
+      // this runs, so there is nothing for `selectAndFocusNode`'s own
+      // `nodes.find` to have selected yet.
+      setNodes((nds) =>
+        reorderNodesForParentChild([
+          ...nds.map((n) => (n.selected ? { ...n, selected: false } : n)),
+          { ...newNode, selected: true },
+        ])
+      );
       setPaneContextMenu(null);
       onAnnotationChangeRef.current?.('create');
+      // The focus-after-create above must never fire while the mobile
+      // `'annotate'` BottomSheet (aria-modal="true") is still open — that
+      // sheet never auto-closes on creation, so moving DOM focus onto the new
+      // node (rendered behind the still-visible sheet) would silently break
+      // the sheet's own modal-focus contract, which only intercepts Tab, not
+      // a programmatic .focus() from here. `isCompact && annotationToolbox
+      // PortalContainer` is exactly the host's existing signal for "that
+      // sheet is currently mounted" (the same condition that portals the
+      // sheet-variant AnnotationToolbox into it above, and disarms
+      // prevAnnotationPortalContainerRef's stash), so this reuses it rather
+      // than inventing a new one. Desktop (isCompact false, no portal
+      // container) always takes the focus branch unchanged — the
+      // keyboard-accessibility case this behaviour exists for in the first
+      // place.
+      const modalSheetOpen = isCompact && Boolean(annotationToolboxPortalContainer);
+      if (!modalSheetOpen) {
+        requestAnimationFrame(() => {
+          const el = reactFlowWrapper.current?.querySelector(
+            `.react-flow__node[data-id="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`
+          );
+          el?.focus();
+        });
+      }
     },
-    [setNodes]
+    [setNodes, isCompact, annotationToolboxPortalContainer]
   );
 
   // The "Nearby object menu" creation entry point
@@ -2026,7 +2239,118 @@ function GraphCanvasInner({
   const handlePaneClick = useCallback(() => {
     closeAllMenus();
     clearSelection();
+    // Clicking empty canvas cancels an in-progress "Attach to…" pick — the
+    // same "click away to back out" convention every menu here already uses.
+    setAttachModeId(null);
+    setOverlapPicker(null);
   }, [closeAllMenus, clearSelection]);
+
+  // Shared by the "Attach to…" target-tap mode and the overlap-object picker
+  // (task-annotation-accessible-shared-controls) — both need to know exactly
+  // which node a click landed on and, crucially, whether OTHER annotations'
+  // boxes also cover that same point, so they share the one handler that
+  // computes it rather than each re-deriving the click's flow position.
+  //
+  // Deliberately never calls `event.preventDefault()`/`stopPropagation()`:
+  // ReactFlow's own default click-to-select behaviour for `clickedNode` must
+  // keep running exactly as it does today (a plain click still selects that
+  // node) — this only ever ADDS a follow-up action (resolving an attach
+  // target, or offering a picker) alongside it, never replaces it. That is
+  // also why the overlap picker does not suppress the normal selection: the
+  // node ReactFlow resolved is still selected, and the picker is an
+  // additional way to say "no, I meant this OTHER one".
+  const onNodeClick = useCallback(
+    (event, clickedNode) => {
+      if (attachModeId) {
+        if (attachModeId === clickedNode.id) return;
+        if (!isEligibleAttachTarget(clickedNode, attachModeId)) return;
+        const source = nodes.find((n) => n.id === attachModeId);
+        if (!source) {
+          setAttachModeId(null);
+          return;
+        }
+        if (isRemoteLocked(source.data) || source.data?.locked) {
+          notifyRemoteLockedAttempt();
+          setAttachModeId(null);
+          return;
+        }
+        const attachment = computeAttachmentToTarget(source, clickedNode);
+        if (attachment) {
+          setNodes((nds) =>
+            nds.map((n) => (n.id === attachModeId ? { ...n, data: { ...n.data, attachment } } : n))
+          );
+          notifyAnnotationChange('style');
+        }
+        setAttachModeId(null);
+        return;
+      }
+      // Explicit touch multi-select mode: ReactFlow's own click-to-select
+      // already ran (clearing every other selection and selecting only
+      // `clickedNode`) by the time this handler fires — restore whichever
+      // OTHER nodes were selected immediately before this click, so the net
+      // effect is "add `clickedNode` to the selection" rather than replacing
+      // it. `selectedNodes` (state, updated by the onSelectionChange
+      // subscription below) is read via a ref rather than as a dependency
+      // here so this handler's own identity does not change on every
+      // selection change — see `selectedNodesRef` above.
+      if (multiSelectMode) {
+        const previouslySelected = selectedNodesRef.current.filter((n) => n.id !== clickedNode.id);
+        if (previouslySelected.length > 0) {
+          onNodesChange(
+            previouslySelected.map((n) => ({ id: n.id, type: 'select', selected: true }))
+          );
+        }
+      }
+      const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const candidates = nodesAtPoint(nodes, flowPoint);
+      if (candidates.length > 1) {
+        setOverlapPicker({
+          x: event.clientX,
+          y: event.clientY,
+          candidates: candidates.map((n) => ({
+            id: n.id,
+            label:
+              computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels) || n.id,
+          })),
+        });
+      } else {
+        setOverlapPicker(null);
+      }
+    },
+    [
+      attachModeId,
+      multiSelectMode,
+      nodes,
+      setNodes,
+      onNodesChange,
+      notifyAnnotationChange,
+      notifyRemoteLockedAttempt,
+      screenToFlowPosition,
+      annotationContextValue.labels,
+    ]
+  );
+
+  // Selects exactly one node (used by the overlap picker's own buttons and by
+  // Escape-cancelling attach mode's "nothing to select" case alike) and moves
+  // DOM focus to it — the same "land on the thing you just picked" contract
+  // as `createAnnotation`'s own focus-after-create below.
+  const selectAndFocusNode = useCallback(
+    (id) => {
+      const deselects = nodes.filter((n) => n.selected && n.id !== id);
+      const changes = [
+        ...deselects.map((n) => ({ id: n.id, type: 'select', selected: false })),
+        { id, type: 'select', selected: true },
+      ];
+      onNodesChange(changes);
+      requestAnimationFrame(() => {
+        const el = reactFlowWrapper.current?.querySelector(
+          `.react-flow__node[data-id="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`
+        );
+        el?.focus();
+      });
+    },
+    [nodes, onNodesChange]
+  );
 
   const onNodeDragStart = useCallback(
     (event, draggedNode, allDraggedNodes) => {
@@ -2385,6 +2709,13 @@ function GraphCanvasInner({
           // flag revert on the next autosave, whatever the translators did.
           z: g.data.z ?? 0,
           locked: Boolean(g.data.locked),
+          // Same envelope treatment as z/locked above, for the same reason:
+          // server-owned same-field-conflict bookkeeping
+          // (dec-annotation-field-patches-and-conflicts) that must survive
+          // the canvas leg unchanged, not be dropped and re-invented on the
+          // next autosave.
+          version: g.data.version,
+          field_versions: g.data.field_versions,
         })),
       annotations: viewNodes
         .filter((n) => OVERLAY_TYPES.has(n.type))
@@ -2900,7 +3231,45 @@ function GraphCanvasInner({
         }
       }
 
+      // Keyboard way IN to the property menu (task-annotation-accessible-
+      // shared-controls, closing the accessibility audit's still-real
+      // "Shift+F10/Menu key on the FOCUSED node wrapper never opens the
+      // menu" gap — see docs/ANNOTATION_CONTRACT.md's audit, area 1). A
+      // keyboard-dispatched `contextmenu` event still never reaches any
+      // kind's own `onContextMenu` handler (bound on a DOM descendant of the
+      // focused ReactFlow node wrapper, so a bubbling event whose target IS
+      // that wrapper never reaches it) — rather than reworking six kinds'
+      // event wiring, or trying to intercept a `contextmenu` event ReactFlow
+      // itself never lets escape its own node wrapper, this reuses the
+      // Edit button task-annotation-responsive-bottom-toolbox already added
+      // to five of six kinds (and this task adds to the sixth, `group`) as
+      // the keyboard target: Shift+F10 or the Menu key, while focus is on an
+      // annotation's node wrapper, clicks that same visible, focus-managed
+      // button — the one real entry point every kind already has, rather
+      // than a second, parallel mechanism.
+      if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        const wrapper = e.target.closest?.('.react-flow__node');
+        const trigger = wrapper?.querySelector('.annotation-edit-trigger');
+        if (trigger) {
+          e.preventDefault();
+          trigger.click();
+          return;
+        }
+      }
+
       if (e.key === 'Escape') {
+        // The non-drag "Attach to…" mode takes priority over the generic
+        // Escape-clears-selection/closes-menus branch below — cancelling it
+        // must not also drop whatever selection the user had before opening
+        // the annotation's menu.
+        if (attachModeId) {
+          setAttachModeId(null);
+          return;
+        }
+        if (overlapPicker) {
+          setOverlapPicker(null);
+          return;
+        }
         if (freehandActive) {
           setFreehandActive(false);
           return;
@@ -2940,6 +3309,8 @@ function GraphCanvasInner({
     handleRedo,
     deleteSelectedNodes,
     freehandActive,
+    attachModeId,
+    overlapPicker,
   ]);
 
   // Create group when signal changes (triggered from toolbar). Unlike
@@ -3008,6 +3379,8 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            version: g.version,
+            field_versions: g.field_versions,
           },
           style: g.style || { width: 300, height: 200 },
           // A locked group box stays selectable but cannot be dragged; its
@@ -3274,6 +3647,8 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            version: g.version,
+            field_versions: g.field_versions,
           },
           style: g.style || { width: 300, height: 200 },
           draggable: g.locked ? false : undefined,
@@ -3470,6 +3845,32 @@ function GraphCanvasInner({
     };
   }, []);
 
+  // Screen-reader accessible name (task-annotation-accessible-shared-
+  // controls, closing the accessibility audit's ten-row "no kind has a
+  // designed accessible name" gap): the one place every annotation/group
+  // node's `ariaLabel` field is derived, rather than ten separate call sites
+  // across every creation/hydration/remote-op path (createAnnotation,
+  // overlayToFlowNode, commitFreehandStroke, handleAddGroup, the drop-Group
+  // branch, the saved-view group restore, the remote upsert-group branch —
+  // several of which build a fresh node object on every edit, e.g. a rename).
+  // Deriving it here instead means it is always current, for every kind,
+  // with none of those call sites needing to know this field exists — a
+  // stale label after a rename/recolour/retype is structurally impossible.
+  // Reuses the identity of any node whose computed label already matches
+  // (including every non-annotation graph node, for which
+  // computeAnnotationAriaLabel returns '' and this leaves the node
+  // untouched), so `memo()`-wrapped node components still skip re-rendering
+  // when nothing about them actually changed.
+  const nodesWithAriaLabels = useMemo(
+    () =>
+      nodes.map((n) => {
+        const ariaLabel = computeAnnotationAriaLabel(n.type, n.data, annotationContextValue.labels);
+        if (!ariaLabel || n.ariaLabel === ariaLabel) return n;
+        return { ...n, ariaLabel };
+      }),
+    [nodes, annotationContextValue.labels]
+  );
+
   const marksLegend = useMemo(() => {
     const seen = new Map();
     for (const mark of Object.values(nodeMarks)) {
@@ -3525,7 +3926,7 @@ function GraphCanvasInner({
           }}
         >
           <ReactFlow
-            nodes={nodes}
+            nodes={nodesWithAriaLabels}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -3538,6 +3939,7 @@ function GraphCanvasInner({
             onEdgeContextMenu={onEdgeContextMenu}
             onSelectionContextMenu={onSelectionContextMenu}
             onNodeDoubleClick={handleNodeDoubleClick}
+            onNodeClick={onNodeClick}
             onPaneClick={handlePaneClick}
             onDragOver={onDragOver}
             onDrop={onDrop}
@@ -3631,6 +4033,25 @@ function GraphCanvasInner({
                 title={compactFitViewLabel}
               >
                 ⤢
+              </button>
+              {/* Explicit touch multi-select mode (task-annotation-
+                  accessible-shared-controls, closing the accessibility
+                  audit's "Multi-select ... reachable via tap-based multi-
+                  selection | MISSING — pointer/modifier-key-only today"
+                  row): the touch-equivalent of holding Shift/Ctrl while
+                  clicking. While active, `onNodeClick` above adds each
+                  tapped node to the selection instead of replacing it;
+                  tapping empty canvas (handlePaneClick) clears the
+                  selection, the same as it always has. */}
+              <button
+                type="button"
+                className={`graph-compact-control${multiSelectMode ? ' active' : ''}`}
+                onClick={() => setMultiSelectMode((v) => !v)}
+                aria-pressed={multiSelectMode}
+                aria-label={cml.annotationMultiSelectMode}
+                title={cml.annotationMultiSelectMode}
+              >
+                ⛶
               </button>
               {activeFocusRootId ? (
                 <button
@@ -3780,7 +4201,49 @@ function GraphCanvasInner({
               </div>
             </>
           )}
+
+          {/* Non-drag "Attach to…" target-tap mode's own visible status
+              (task-annotation-accessible-shared-controls) — mirrors the
+              freehand drawing hint above: a real, focus-independent `status`
+              region (works for a screen-reader user too) plus a real button,
+              never a bare instruction to "long-press" or hold a gesture. */}
+          {attachModeId && (
+            <div className="graph-attach-mode-hint" role="status" aria-live="polite">
+              <span>{cml.annotationAttachToHint}</span>
+              <button type="button" onClick={cancelAttachMode}>
+                {cml.annotationAttachToCancel}
+              </button>
+            </div>
+          )}
         </div>
+
+        {/* The overlap-object picker (task-annotation-accessible-shared-
+            controls) — offered whenever a click's flow position lands
+            inside more than one annotation's box (see `onNodeClick` above).
+            A plain, keyboard/touch-reachable button list, the same shape as
+            every other menu here; picking one selects exactly that node and
+            moves focus to it, the same "land on the thing you picked"
+            contract `createAnnotation` now gives a fresh annotation. */}
+        {overlapPicker && (
+          <div
+            className="graph-context-menu graph-overlap-picker"
+            style={{ left: overlapPicker.x, top: overlapPicker.y }}
+          >
+            <div className="context-menu-title">{cml.annotationOverlapPickerTitle}</div>
+            {overlapPicker.candidates.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  selectAndFocusNode(c.id);
+                  setOverlapPicker(null);
+                }}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <NodeContextMenu
           menu={nodeContextMenu}

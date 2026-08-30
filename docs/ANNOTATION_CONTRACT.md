@@ -135,6 +135,37 @@ MCP. The required entry points are:
   `frontend/widget`, which mounts `GraphCanvas` directly with no
   `MobileShell` to portal into) still gets that compact strip, rendered
   inline, on a narrow viewport — never no toolbox at all.
+- **Contextual Edit surface** (task-annotation-responsive-bottom-toolbox,
+  2026-08-30) — the entry point for editing an annotation that already
+  exists, as distinct from the three surfaces above, which all create one.
+  Selecting a single annotation shows a small **✎ Edit** button on it (`note`,
+  `label`, `arrow`, `freehand`, and every `GenericAnnotationNode` kind —
+  `text`/`shape`/`icon`/`vote_dot`/`image`; `group` is out of scope, see
+  below); activating it — click, tap, or Tab then Enter/Space — opens the
+  same property editor `onContextMenu` (right-click, or a long-press that
+  synthesizes it) already opens, which keeps working unchanged alongside it.
+  Desktop and a compact host with no `MobileShell` (e.g. `frontend/widget`)
+  get that same editor as a floating menu anchored to the button; a compact,
+  integrated host portals it into the shared mobile bottom sheet instead —
+  the pre-existing `'detail'` surface `useSurfaceManager` had reserved but
+  left unused (`frontend/web/src/hooks/useSurfaceManager.js`) — via
+  `GraphCanvas`'s new `annotationEditSheetPortalContainer`/
+  `onRequestAnnotationEditSheet`/`onCloseAnnotationEditSheet` props, the
+  edit-time counterpart of `annotationToolboxPortalContainer` above. One
+  shared hook, `hooks/useAnnotationEditTrigger.js`, drives the button and the
+  floating-vs-sheet decision for every kind alike, rather than five
+  hand-copied implementations — it does not touch the property-editing UI
+  itself (each kind's own menu body, and the mutation handlers behind it,
+  are the exact same code the right-click path already called). Opening via
+  the button also moves focus into the menu and restores it to the button on
+  close, scoped to that one entry path — the pre-existing right-click path is
+  unaffected. `group`'s own Edit affordance, arrow-key navigation *within*
+  the open menu, a full focus *trap*, and generalising focus-move/-restore to
+  the right-click path too all remain open — see the [accessibility
+  audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)'s
+  "Update, 2026-08-30" note for the exact boundary. Also new alongside this
+  surface: an **Opacity** row (four levels — 30/50/75/100%) on every one of
+  those same kinds' menus, previously offered only by `freehand`.
 
 ### Desktop wireframe
 
@@ -220,8 +251,12 @@ it is not in the rotatable set (see [Canvas rendering](#canvas-rendering) on
 why rotation is not drawn for it), so it has no rotation control. The
 dedicated `note`/`label`/`line`/`freehand` editors and the generic one alike
 also carry the shared bring-to-front/send-to-back layer row described under
-[Layer order](#layer-order); `group`'s own context menu does not. What the
-editors still do not cover: `note`/`label` still have only a text-size
+[Layer order](#layer-order), and — new as of task-annotation-responsive-
+bottom-toolbox — a shared **Opacity** row (four levels: 30/50/75/100%),
+previously `freehand`-only; `group`'s own context menu has neither. Every one
+of these menus — right-click, or now the [Edit button](#human-authoring-
+surfaces) — is reachable without a mouse. What the editors still do not
+cover: `note`/`label` still have only a text-size
 picker, not the alignment/font-family control `text`/`shape` now have, and
 cropping/replacing an `image`'s pixel content is still unsupported.
 `label`, `text` and `icon` can now also be attached to a node or
@@ -280,8 +315,9 @@ An annotation's `z` orders it against the other annotations on the canvas.
 The `note`, `label`, `line`, `freehand` and generic-kind context menus each
 carry the same layer row (`AnnotationLayerControls`), offering **bring to
 front** and **send to back**. `group` has its own context menu and does *not*
-carry the row — a group box can be ordered against by other annotations but
-cannot be reordered itself.
+carry that row — it carries a separate one, described in [Group background
+layer order](#group-background-layer-order) below, that reorders a group
+against other groups only, never against these five kinds.
 
 The same five menus (not `group`) also carry a **duplicate** action, covered
 below alongside the locked-menu correction it makes to this section's
@@ -306,14 +342,16 @@ CSSOM accepts the fractional value that a real browser discards.
 
 Front/back rather than a one-step forward/back is a deliberate trade. A true
 one-step swap needs distinct integer levels to step between, and every
-annotation is created at `z = 0`, so the common case is a pile of ties.
-Breaking those ties one step at a time means renumbering the annotations
-around the one that moved — and an `annotation_updated` op carries the
-*whole* annotation, which for an embedded image is its entire data URI. A
-renumber touching a few images would exceed the session op batch's byte cap
-and be rejected atomically. Front/back always writes exactly one annotation,
-so it cannot reach that cap. One-step forward/back, and the level compaction
-it would need, are not implemented.
+annotation but `shape` is created at `z = 0` (see [Semantic default
+layers](#semantic-default-layers) below for the one exception), so the common
+case is still a pile of ties — now two piles, one at 0 and one at `shape`'s
+own -1, rather than one. Breaking those ties one step at a time means
+renumbering the annotations around the one that moved — and an
+`annotation_updated` op carries the *whole* annotation, which for an embedded
+image is its entire data URI. A renumber touching a few images would exceed
+the session op batch's byte cap and be rejected atomically. Front/back always
+writes exactly one annotation, so it cannot reach that cap. One-step
+forward/back, and the level compaction it would need, are not implemented.
 
 An annotation tied with the current front is not treated as already in front —
 the tie is what the click exists to break — so it moves. A click that would
@@ -398,15 +436,111 @@ largely its membership, so "a locked group is protected" is true of its box
 and false of its contents. Tracked separately; stated here so this section's
 account of what the flag reaches is not read as more than it claims.
 
-What `group` still lacks is the layer row, not the lock: see
-[Layer order](#layer-order) above. Its `z` is carried through the same
-translators so a value set over MCP survives the canvas round trip, but
-nothing reads it — a group's paint order is array order
-(`reorderNodesForParentChild` puts groups first so they sit behind their
-members as backdrops), and groups are ReactFlow parents whose members carry
-`parentId`. Giving a group a GUI layer control therefore needs a decision
-about how group layering relates to that parent/child backdrop model, which
-has not been taken.
+`group` now has a layer control of its own — narrower than
+[Layer order](#layer-order) above by design; see [Group background layer
+order](#group-background-layer-order) immediately below for the mechanism
+(`dec-annotation-group-background-layering`, resolved by
+`smallfix-group-annotation-has-no-layer-control`).
+
+### Group background layer order
+
+`dec-annotation-group-background-layering` (founder-accepted 2026-08-30)
+draws a hard line: a group background **always** stays behind every graph
+node and every other annotation kind. The **only** thing a user or agent may
+change is the order of group backgrounds **relative to each other**, when two
+or more groups exist. This section is the mechanism that decision resolved
+to, replacing the "has not been taken" note this paragraph used to carry.
+
+**Behind everything is structural, not a `z` comparison.** A group's paint
+order was already array order, not `z` (`reorderNodesForParentChild` in
+`GraphCanvas.jsx` places every group node ahead of every non-group node in the
+ReactFlow array, unconditionally — see [Layer order](#layer-order)'s original
+description of this, unchanged). `GroupNode.css` backs that with
+`.react-flow__node-group { z-index: -1 !important }` against
+`.react-flow__node-custom { z-index: 1 !important }`, so even if two nodes
+ever landed at the same array position a group could not paint over regular
+content. Nothing described below touches either of these — no group-vs-group
+write is ever compared against a `shape`'s `z`, a graph node, or any other
+kind, and no write can move a group out of the groups-first bucket. That is
+deliberate: the follow-up task's own brief was to keep a group behind every
+`shape` position a user could reach by hand (including `shape`'s own `-1`
+[semantic default](#semantic-default-layers) and anywhere bring-to-front/
+send-to-back can move it), in both directions, unconditionally — a numeric
+comparison against `shape`'s `z` could not promise that once `shape` moves
+outside its default; array-order bucketing can, because it never depends on
+what number either side holds.
+
+**Group-to-group order reuses the group's own `z`.** `group` already carried
+a `z` field that round-tripped end to end (`create_group_annotation`,
+`annotationsToGroups`/`groupsToAnnotations` in
+`frontend/web/src/utils/sessionAnnotations.js`) but was never read — this is
+what now reads it, and only for this one purpose. `reorderNodesForParentChild`
+sorts the groups bucket it already builds by each group's own `data.z`
+(ascending — a lower `z` paints earlier, i.e. further back among group
+backgrounds), stable on ties via an explicit index tie-break so the common
+case — every group still at the shared default `z = 0`, nobody having touched
+the new control — keeps exactly the relative order the function already
+produced before this sort existed. No new envelope field, and no new
+plumbing on either translator leg:
+`packages/ui-graph-canvas/src/utils/annotations.js` never touches `group` at
+all (it is a different kind's translator — see its own module comment), and
+`z`/`locked` already flowed through both `annotationsToGroups`/
+`groupsToAnnotations` (`frontend/web/src/utils/sessionAnnotations.js`) before
+this task, verified rather than assumed as part of it.
+
+**The control.** `GroupNode`'s context menu now carries a "Group order"
+section, two buttons: bring this group forward among groups, or send it
+backward among groups (`GROUP_LAYER_FRONT`/`GROUP_LAYER_BACK`,
+`utils/groupLayers.js`). `resolveGroupOrderZ` mirrors `resolveLayerZ`'s
+arithmetic and no-op rules exactly (integer strictly past every other value;
+a tie with the current front is not already in front; both CSS-safe-integer
+bounds checked in both directions) but over the groups-only `data.z` space —
+it never reads a `zIndex`, never reads a non-group node's `z`, and returns
+`null` (a silent no-op, publishing nothing) when there is nothing to order
+the group against: the only group on the canvas, or already alone at that
+end among groups. Always rendered rather than conditionally hidden below two
+groups, the same convention `AnnotationLayerControls` already uses. One write:
+only the clicked group's `data.z` changes; every other group's `data`, and
+every member's `parentId`/position/`z`, are untouched — `reorderNodesForParentChild`
+reorders the *array*, it does not rewrite any node's fields beyond the
+one the click targeted.
+
+**Locks and leases, the same pattern as every other layer control.** The row
+is entirely absent from a locked group's menu (which offers Unlock alone, as
+before); `handleChangeGroupLayer` refuses independently as the hook-level
+backstop, the same two-layer discipline `AnnotationLayerControls`/
+`useAnnotationLayer` already establishes: a live remote edit lease
+(`isRemoteLocked`) refuses and surfaces the attempt via
+`notifyRemoteLockedAttempt`; the persisted `locked` flag refuses silently,
+since the menu already explains itself with Unlock. No new guard was
+invented — this reuses the existing pattern rather than adding a third one.
+
+**Persistence.** Every path that writes a group node already funnels through
+`reorderNodesForParentChild` (local create, this control's own click, the
+`upsert-group` remote op, the `groupsToRestore` saved-view/session-restore
+effect, delete/membership ops) — see [Layer order](#layer-order)'s original
+description of the function. The click's own write is exactly the shape
+`handleSaveView`'s existing `z: g.data.z ?? 0` re-emission and the
+`upsert-group` remote-op handler already carry, so it reaches a saved view, a reload
+and every other connected client through paths that already existed and
+already round-tripped `z`/`locked` for `group` — nothing new was added to
+either leg to make that true.
+
+**Reachable today from the group's own context menu only.** A second,
+related work item — a toolbox-hosted contextual Edit sheet reachable from an
+ordinary tap, not only right-click — was landing on a separate lane in the
+same round this control shipped in and had not yet merged when it did.
+Wiring "Group order" into that surface once it lands is a follow-up, not a
+redesign: the surface would call the same `resolveGroupOrderZ`/
+`reorderNodesForParentChild` path this section describes, the same way the
+sheet is expected to reuse `AnnotationLayerControls`' `useAnnotationLayer` for
+every other kind rather than reimplementing layer arithmetic a second time.
+
+**Rectangular `shape` annotations are unaffected.** This decision and this
+section are about group-vs-group order only. `shape`'s own free layering
+(manual bring-to-front/send-to-back, and its `-1` semantic default at
+creation) is untouched — see [Layer order](#layer-order) and [Semantic
+default layers](#semantic-default-layers).
 
 ### Multi-select align and distribute
 
@@ -534,17 +668,19 @@ Contrast an edit lease, which the server does enforce for browser writes.
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
 same as staying within the graph's own band, and should not be read as such.
-Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
-created annotation, while send-to-back writes one below the backmost
+Graph nodes carry no layer of their own, so they sit at 0 alongside every
+annotation kind except a freshly created `shape` (see [Semantic default
+layers](#semantic-default-layers) below — `shape` now starts one level behind
+that 0 on its own), while send-to-back writes one below the backmost
 annotation. Whenever that backmost annotation is itself at or below 0 — the
-default, since every annotation is created at 0 — the result is negative and
-does place the annotation behind the graph's nodes and edges. That is
-intended and useful, and it is how a `shape` with a transparent fill
-(standing in for the retired `frame`) gets behind the nodes it frames;
-it is not, however, a guarantee. Once every annotation has been pushed above
-0, send-to-back lands at 0 or higher — level with the graph (where paint
-order falls back to document order) or in front of it, but no longer behind
-it.
+default for every kind but `shape`, since every kind but `shape` is still
+created at 0 — the result is negative and does place the annotation behind
+the graph's nodes and edges. That is intended and useful, and it is how a
+`shape` with a transparent fill (standing in for the retired `frame`) gets
+behind the nodes it frames; it is not, however, a guarantee. Once every
+annotation has been pushed above 0, send-to-back lands at 0 or higher — level
+with the graph (where paint order falls back to document order) or in front
+of it, but no longer behind it.
 
 A layer is only ever written when it is an integer strictly past every other
 annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
@@ -554,10 +690,101 @@ down to the bound would land level with the neighbour it is meant to pass,
 recreating the tie the control exists to break while publishing an operation
 that changes nothing on screen.
 
-Semantic default layers — a per-kind default `z` at creation time, so a
-transparent-fill shape starts behind the annotations it frames — are **not**
-implemented; every
-annotation is created at `z = 0` and ordered manually from there.
+### Semantic default layers
+
+A per-kind default `z` at creation time (task-annotation-render-direct-
+manipulation's remaining scope) is implemented, narrowly: **only `shape`
+moves off the shared 0.** A freshly created `shape` is now given `z = -1` —
+one level behind the 0 every graph node and every other annotation kind
+(`note`, `text`, `label`, `line`, `icon`, `vote_dot`, `image`, `freehand`,
+`group`) is still created at — so it opens already behind content instead of
+needing a manual send-to-back to get there. That is exactly the relationship
+the paragraph above already describes send-to-back producing for a shape by
+hand (the transparent-fill-standing-in-for-`frame` case); this makes it the
+shape's starting position rather than a step a user or agent has to take
+themselves.
+
+**Why only `shape`.** A shape is the decorative kind most often used as a
+background or frame that other annotations get drawn over — the merged-in
+`frame` look (a transparent fill with a coloured border) is the clearest
+case, but even a filled shape is commonly a backdrop a label or icon sits on
+top of. No other kind carries that same "usually a backdrop" reading strongly
+enough to default it below the rest without guessing at a use the contract
+has no worked example for. `image` was considered — a pasted screenshot or
+diagram is sometimes used the same way, as a backdrop for icons/labels drawn
+over it — but left at 0 deliberately: the contract's own illustrative case
+for this feature names only `shape`, and widening the change to a second kind
+on an inference the contract does not state would be exactly the "guessed"
+default this section exists to avoid. If a real backdrop-image complaint
+shows up in practice, revisit it as its own decision rather than folding it
+into this task's scope.
+
+**Backward compatibility.** The default is applied once, at the moment of
+creation — never retroactively. An annotation already stored before this
+change (every kind, `shape` included) keeps whatever `z` it already has,
+typically 0, exactly as it does for every other envelope field. That old
+`shape` and a *new* `shape` created after this change end up on different
+layers purely because of when each was created — the old one at 0, the new
+one at -1 — which is a real, visible difference: the newer shape now renders
+*behind* the older one by default, opposite of the usual last-created-is-
+on-top expectation. This is judged acceptable rather than confusing because
+(a) `shape` is the one kind this section deliberately treats as a
+backdrop, so "the newest shape is furthest back" reads as the feature working
+as intended, not as a bug, and (b) the manual layer row
+(`AnnotationLayerControls`, described above) still works exactly as before on
+both — a user who wants the new shape back in front of the old one just
+clicks bring-to-front, the same single action this whole feature exists to
+make unnecessary for the *common* case, not to forbid for the exceptional
+one. No stored annotation's `z` is rewritten by this change, and no migration
+was written or is needed. An old `shape` and a newly created non-`shape`
+annotation (say, a `label`) never had this concern in the first place: the
+label still defaults to 0 exactly as it always has, so it ties with the old
+shape exactly as any two same-era annotations already could.
+
+**Both creation paths agree.** The GUI's one-click/drag-to-create toolbox
+path (`GraphCanvas.jsx`'s own node-builder `createAnnotation`, which sets
+`zIndex` explicitly only on the `shape` branch it builds) and the MCP/REST
+creation path (`create_annotation`, `create_image_annotation`, and the image
+REST ingest endpoint, all funnelling through `session_annotations.py`'s
+`build_annotation`) apply the identical `shape → -1, everything else → 0`
+mapping, so a GUI-created and an MCP-created shape start on the same layer.
+`packages/ui-graph-canvas/src/utils/annotationModel.js`'s `createAnnotation` —
+the shared client-side model both the canvas's document normalizer and the
+session save/restore translators route through — carries the same mapping
+too, for the same reason: the model documented as the v1 annotation shape's
+source of truth should not disagree with what actually gets created.
+`duplicate_annotation` (backend) and the GUI's own duplicate action
+(`AnnotationDuplicateControl`) are both unaffected by design — each copies
+the *source's own stored* `z` verbatim rather than passing through the
+default at all, the same as every other envelope field a duplicate carries
+over (see the Layer order section above).
+
+**Explicitly out of scope, tracked separately.** `group` is deliberately
+*not* given a non-zero default here, even though
+dec-annotation-group-background-layering also wants group backgrounds behind
+all content: a group's paint order does not read its `z` at all today (it
+comes from ReactFlow parent/child array order — see the Layer order section
+above), so a default here would be inert, and that decision's own mechanism
+is the smallfix-group-annotation-has-no-layer-control task's to design, not
+this one's. That follow-up task should treat `shape`'s `-1` as the
+one already-claimed layer immediately behind the graph-node baseline: since
+`shape` is "the freely layered decorative alternative" (the decision's own
+phrase) and can be brought forward or back by hand like anything else,
+whatever mechanism the group task builds needs to guarantee a group
+background stays behind *every* `shape` position a user could manually
+reach, in both directions — not just behind `shape`'s -1 default — since
+dec-annotation-group-background-layering requires "behind all content"
+unconditionally, not "behind content's starting position." The true one-step
+forward/back "level compaction" this task's own history flags as unsafe (the
+op-batch byte cap issue described above) is equally out of scope here and
+remains unimplemented.
+
+That follow-up task (`smallfix-group-annotation-has-no-layer-control`) has
+since shipped, meeting exactly the brief above: see [Group background layer
+order](#group-background-layer-order) for the mechanism it built —
+array-order bucketing, not a numeric comparison against `shape`'s `z`, is
+precisely why it can guarantee "behind everything" unconditionally rather
+than only behind `shape`'s starting position.
 
 ## Operation layer
 
@@ -684,20 +911,53 @@ mutation on the round trip; the server-side `LeaseConflict` check above
 remains the authoritative backstop for the rare case where that background
 acquisition loses a race.
 
-**Remaining gap:** the exclusive edit lease is scoped to browser-originated
-writes only. The synchronous MCP write path (`upsert_annotation`/
-`update_annotation`/`delete_annotation`/`apply_layout`/`add_node_refs`, all
-keyed to the shared `mcp-agent` client id — `backend/service/mcp_tools.py`)
-never goes through `apply_ops` and does not acquire or check leases at all in
-v1: an MCP agent still silently overrides a live human edit lease exactly as
-before, the same way it already bypasses the client-side exclusivity UI and
-the `locked` flag today. This is a deliberate v1 boundary, not an oversight —
-`dec-mcp-agent-ops-vs-annotation-claimmap` (accepted 2026-08-30) decided
-human edit leases are exclusive while leaving MCP writes unchanged for now;
-making MCP-issued writes respect a live human lease (never acquiring one of
-its own — v1 has no per-agent identity to make that meaningful) is
-`task-mcp-annotation-human-edit-guard`'s separate, deliberately-sequenced-after
-scope. Actor-scoped conditional undo *is* implemented
+**Gap closed (`task-mcp-annotation-human-edit-guard`).** The synchronous MCP
+write path — every `SessionManager` method that can mutate an existing
+annotation and that a `mcp_tools.py` tool calls directly rather than through
+`apply_ops` (`upsert_annotation`, `upsert_image_annotation`,
+`update_annotation`, `delete_annotation`, `set_group_members`; all keyed to
+the shared `mcp-agent` client id) — now checks the same live `LeaseMap`
+immediately before its own mutation and raises the same `LeaseConflict` a
+browser write does (`SessionManager._reject_if_leased`). This covers every
+generic/note/group/image MCP tool that ends up calling one of those five: 13
+tools currently wrap them, including `create_sticky_note`/`update_sticky_note`/
+`delete_sticky_note`, `create_annotation`/`update_annotation`/
+`delete_annotation`/`reorder_annotation`/`set_annotation_lock`/
+`duplicate_annotation`, `create_image_annotation` (and, on the human side, the
+`POST /sessions/{id}/annotations/image` ingest endpoint the task description
+calls out by name — both routes end at the one authoritative check inside
+`upsert_image_annotation`), and `create_group_annotation`/
+`update_group_members`/`delete_group_annotation` (`group_membership_changed`
+is now itself a lease-checkable op — see `_claimed_annotation_target` — which
+closes the same gap for the **browser's own** group-membership panel too,
+since it sends that op through the identical `apply_ops` batch path).
+`apply_layout`/`add_node_refs`/`rename_session_sync`/`delete_session_sync`
+stay unguarded because none of their ops can mutate an annotation at all —
+out of scope by construction, not merely unaddressed. Each MCP tool surfaces
+the refusal as `{"success": false, "error": "lease_conflict", "annotation_id",
+"held_by"}`, the MCP-tool-layer mirror of the REST/`LeaseConflict` 409.
+
+**What this guard is, and is not.** It is a *refusal*, checked at the actual
+mutation boundary (immediately before the write, after every other
+precondition — revision, existence, budget checks — so a conflict leaves
+state completely unchanged) and safe against the same "preflight races a
+concurrent acquisition" failure mode a check taken earlier and cached would
+have: nothing between the lease read and the mutation ever awaits, and while
+an `apply_ops` batch is genuinely mid-flight the guarded method refuses with
+`LayoutBusy` instead of running against a pre-commit view. It is **not**
+authorization or identity verification: `client_id` — on either side of the
+check — is caller-supplied and unauthenticated, so `held_by` names whichever
+string currently holds the lease, not a verified human. An MCP agent never
+acquires, renews, releases or takes over a lease itself in v1 — it only ever
+checks against one — matching `dec-mcp-agent-ops-vs-annotation-claimmap`
+("agents do not acquire, reserve or take over human edit leases in v1").
+After a `lease_conflict`, an agent must re-read current state (e.g.
+`list_annotations`) before retrying rather than blindly resubmitting the same
+write; the retry succeeds once the lease is released or its 30 s TTL expires.
+Full per-agent identities and agent-to-agent leases remain out of scope for
+v1; field-level conflict protection for *unleased* concurrent edits is the
+separate `dec-annotation-field-patches-and-conflicts` mechanism described
+below, not this one. Actor-scoped conditional undo *is* implemented
 (`backend/core/session_activity.py`).
 
 ### Two-client conflict matrix
@@ -722,42 +982,252 @@ second writer is still refused, `409`, with the first writer's edit standing)
 — what changed is *how* the first writer comes to hold it (editing must have
 actually started, not merely been selected) and *what* the server checks
 (`LeaseConflict` against `LeaseMap`, not `ClaimConflict` against `ClaimMap`).
-The **"no lease held" column and the whole-annotation-clobber finding below
-are unaffected by this task** — a lease narrows the collision window (two
-clients can no longer race to edit the same annotation with neither one
-protected) but does not add field-level granularity; the clobber case, and
-its fix (per-field patches), remain `dec-annotation-field-patches-and-
-conflicts`' separate, still-open scope. Do not read this task as having
-closed that finding — it has not.
+**Update for `dec-annotation-field-patches-and-conflicts` (accepted
+2026-08-30).** The "no lease held" column and the whole-annotation-clobber
+finding below were exactly the open item that decision closed — a lease
+narrows the collision window (two clients can no longer race to edit the
+same annotation with neither one protected) but never added field-level
+granularity on its own; field-level patches plus per-field version checking
+is the complementary layer for whenever a lease is not (yet) held. Both
+mechanisms stay in place and do not compete: a live lease still refuses the
+whole write outright the instant one is held, unchanged by this update; the
+matrix below shows what changed only in the unleased column.
 
-**The mechanism the matrix rests on.** Two facts, each already documented
-elsewhere in this file, combine into a property that is not obvious from
-either alone:
+**The mechanism the matrix rested on, before the fix.** Two facts, each
+already documented elsewhere in this file, used to combine into a property
+that was not obvious from either alone:
 
-1. The browser always re-sends the **whole** annotation object on every
-   publish — text, geometry, style and all — never a per-field delta
-   (`sessionSyncClient.js`'s `diffState`/`syncState`; already noted above for
-   images, but it is true of every field on every kind).
-2. `SessionStore.apply_state_op`'s `annotation_updated` handler applies an
+1. The browser re-sent the **whole** annotation object on every publish —
+   text, geometry, style and all — never a per-field delta.
+2. `SessionStore.apply_state_op`'s `annotation_updated` handler applied an
    incoming write as `target.update(incoming)` — a shallow, **top-level**
-   merge of whatever keys `incoming` happens to carry.
+   merge of whatever keys `incoming` happened to carry.
 
-Combined: an `annotation_updated` op is not "patch this one field" so much as
-"replace every top-level key my own local copy currently holds" — and a
+Combined: an `annotation_updated` op was not "patch this one field" so much
+as "replace every top-level key my own local copy currently holds" — and a
 client's local copy is only ever as fresh as the last remote op it has
 actually received. Two clients editing genuinely *different* fields of the
-same annotation therefore do **not** safely merge the way the mechanism might
-suggest at a glance: whichever op lands second overwrites every top-level key
-its sender's local copy held at commit time, including one the *other* client
-changed in the meantime and this client hasn't caught up on yet. This is
-whole-annotation last-write-wins, not field-level last-write-wins — a real,
-verified property, not a guess, and surprising enough relative to "merges
-rather than replaces" (this file's own words for the same code, describing a
-different scenario — a single client's own successive writes, where it is
-true) that it is called out here explicitly rather than left to be inferred.
-**This is a documented finding of this slice, not a bug fixed by it**: fixing
-it would mean moving to per-field patches, a bigger design change out of this
-slice's scope — see this section's closing paragraph.
+same annotation therefore did **not** safely merge the way the mechanism
+might suggest at a glance: whichever op landed second overwrote every
+top-level key its sender's local copy held at commit time, including one the
+*other* client changed in the meantime and this client hadn't caught up on
+yet. This was whole-annotation last-write-wins, not field-level
+last-write-wins — surprising enough relative to "merges rather than
+replaces" (this file's own words for the same code, describing a different
+scenario — a single client's own successive writes, where it is true) that
+it was called out explicitly. `dec-annotation-field-patches-and-conflicts`
+(accepted 2026-08-30, realised by
+`task-smallfix-whole-annotation-clobber-on-concurrent-different-field-edit`)
+closed it; the fix is described next, and its effect on the matrix follows.
+
+**The fix.** Two changes, deliberately kept to a simpler versioned-patch-
+with-explicit-conflict model rather than a general-purpose CRDT/operational-
+transform editor (out of scope — see "What this does not change" below):
+
+1. **Field-diffed publish.** `sessionSyncClient.js`'s `computeOps` now
+   computes the field-level difference between the last-synced baseline and
+   the current local value (`diffAnnotationFields`) before emitting an
+   `annotation_updated` op — a field this client never touched is simply
+   absent from the outgoing patch, so there is nothing left for it to
+   clobber, independent of whether the sender's local mirror has caught up
+   with a concurrent peer's edit to that field. This alone closes the
+   different-field cell of the matrix below, with no version bookkeeping
+   involved at all.
+2. **Per-field version checking.** Every annotation now carries a
+   server-owned `version` (an integer, bumped by one on every applied
+   `annotation_created`-as-upsert or `annotation_updated`) and
+   `field_versions` (the `version` at which each individual content field
+   last actually changed — never touched by a client, always recomputed by
+   the server from a real *value* diff, so resending a field's current,
+   unchanged value never marks it as "touched"). An op can additionally
+   carry `base_version`: the annotation `version` the sender last synced.
+   `SessionStore.apply_state_op` checks, only for the fields the incoming
+   patch genuinely changes, whether that field's `field_versions` entry is
+   newer than `base_version` — an unrelated field changing in between never
+   blocks the write; only a field the patch is itself trying to move to a
+   different value, that someone else has *also* moved since, is a real
+   conflict. See [Field-level patches and
+   base_version](#field-level-patches-and-base_version) below for the exact
+   wire shape and the all-or-nothing-per-op rule.
+
+**A caller that supplies no `base_version` at all** — an older cached browser
+bundle, or an MCP tool call that has not opted in (see the MCP subsection
+below for which tools do) — keeps the pre-fix whole-object shallow-merge
+behaviour verbatim: `target.update(incoming)`, unconditionally, no conflict
+ever raised. This is the documented, deliberate fallback
+(`AnnotationFieldConflict`'s docstring in `session_store.py`), not an
+oversight left open by this task: a legacy full-object write is not made any
+*more* dangerous by this change, it simply does not participate in the new
+protection. A real (post-fix) browser never produces an op shaped like that
+any more — `computeOps` always emits a field-diffed patch with `base_version`
+set — so this fallback is now purely a compatibility path, not the default.
+
+**Update — this was not actually true for a real browser until
+smallfix-annotation-version-dropped-by-browser-pipeline (fixed after
+`dec-annotation-field-patches-and-conflicts` was accepted).** `computeOps`
+itself always did the right thing — `diffAnnotationFields` correctly excludes
+`version`/`field_versions` from the outgoing content diff and reads
+`before.version` for `base_version` (see `sessionSyncClient.js` and its own
+tests) — but every annotation the *rest* of the browser pipeline handed to it
+had already lost both fields before `computeOps` ever saw them:
+`useSharedSession.js`'s `serverStateToMirror` (session hydration),
+`sessionAnnotations.js`'s `annotationsToOverlays`/`overlaysToAnnotations`, the
+live-canvas round trip in `packages/ui-graph-canvas/src/utils/annotations.js`
+(`overlayToFlowNode`/`flowNodeToOverlay`), and `createAnnotation` in
+`annotationModel.js` all built or read their output from a fixed field
+whitelist that did not include `version`/`field_versions`. The result: a real
+browser's `base_version` was `undefined` on *every* `annotation_updated` op it
+ever sent — `JSON.stringify` drops the key entirely — so every real
+browser-originated write landed on exactly the legacy fallback this paragraph
+says a real browser "never produces... any more". The matrix row below and the
+"A real client" language throughout this section describe the *protocol* as
+verified against `SessionManager.update_annotation` directly
+(`TestFieldVersionedPatches`, `test_session_manager.py`) with a hand-supplied
+`base_version` — correct for that path, but not a description of what a real
+browser tab was actually sending before this fix. Both translator layers now
+carry `version`/`field_versions` through unconditionally (the same envelope
+treatment `z`/`locked`/`rotation` already got), so the "A real (post-fix)
+browser" claim above is accurate as of this fix, not before it.
+
+**Update — a *single* real client can still race its own prior write, not
+just a second collaborator (round 2 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+same-client self-conflict follow-up).** `annotationChangeScheduler.js`
+publishes most annotation field changes (style, geometry, create, delete)
+immediately, with no debounce — only `text` coalesces over ~300 ms — so one
+user can fire two rapid edits to the *same* field of the *same* annotation
+(two quick color picks, say) before the first op's round trip completes.
+`sessionSyncClient.js`'s `syncState` used to assign its internal baseline
+straight from the live canvas snapshot on every call; the canvas's own copy
+of `version`/`field_versions` only catches up asynchronously, through the
+first op's ack round-tripping back onto the canvas node
+(`onLocalAnnotationsApplied`) — so the second edit, computed before that ack
+landed, read back the identical pre-send version and sent an identical,
+already-stale `base_version`. The server correctly refused the resulting
+batch with `field_conflict` — there genuinely was a `field_versions` entry
+newer than what the op claimed — but the only client the write conflicted
+with was itself: a single browser tab, no second collaborator anywhere in
+the picture, seeing its own most recent edit rejected and reverted by
+`onDropped`'s resync, under a notice worded for a two-client conflict.
+
+The fix (`predictAnnotationVersionsForSend`/`foldAckedAnnotationOp` in
+`sessionSyncClient.js`) has the client predict, the moment an op is sent
+rather than only once its ack arrives, the `version`/`field_versions` the
+server is expected to bump a touched annotation to — mirroring
+`session_store.py`'s own bump exactly, so a same-field re-edit computed
+before the first ack lands already carries a fresh `base_version` instead of
+a stale one. The prediction is reconciled against the server's authoritative
+ack afterwards without ever regressing a *later*, still-unacked local
+prediction on the same annotation (the ack is only authoritative as of the
+earlier op it is acking) — closing the general case, not only the
+back-to-back two-edit one: three or more rapid same-field edits, and a
+same-field re-edit with a different field's edit interleaved in between, are
+all covered by the same mechanism and test-covered
+(`frontend/web/tests/sessionSyncClient.test.js`, "same-client self-conflict
+race"). This is purely a client-side prediction; nothing about the server's
+`AnnotationFieldConflict` check, the wire shape, or a *genuine* two-client
+race (the matrix below) changes.
+
+**Update — a genuinely different collaborator's own EARLIER write could still
+regress this client's baseline, via the SSE broadcast channel rather than the
+POST-ack channel (round 3 review of
+smallfix-annotation-version-dropped-by-browser-pipeline, fixed by the
+remote-broadcast-reordering follow-up).** The fix above closes the race
+between *this client's own* predicted and acked versions of the *same*
+op-in-flight. It left a related, genuinely two-client gap open: this client's
+own POST-ack channel and its SSE `'op'` broadcast stream are two independent
+HTTP connections with no cross-ordering guarantee (`sessionSyncClient.js`'s
+own `_appliedSeq` comment documents this as an accepted architectural
+property — a concurrent op's broadcast can still be in flight when this
+client's own later op's ack has already landed). So a genuinely different
+collaborator B's broadcast for a chronologically **earlier** op could arrive
+*after* this client A's own already-acked **later** op on the same
+annotation. Before this fix, `_handleEvent`'s `'op'` case folded every remote
+broadcast into the baseline unconditionally (`applyOpToMirror`, no guard at
+all) — so B's late, stale broadcast would silently regress both
+`version`/`field_versions` and content back to B's pre-A-edit snapshot. A's
+*next* edit would then diff against that reverted baseline and send a stale
+`base_version`, which the server correctly refuses as `field_conflict` — the
+exact same class of spurious conflict the round-2 fix closed, this time from
+a genuine two-client interleaving rather than a same-client race, and
+untouched by that fix since it only ever guarded the ack path.
+
+The fix (`foldRemoteAnnotationOp` in `sessionSyncClient.js`, used only by
+`_handleEvent`'s `'op'` case for an op attributed to a different client)
+rejects a stale/reordered remote broadcast atomically — both its
+`version`/`field_versions` and its content — whenever its `version` is lower
+than what the baseline already holds for that annotation, rather than
+`foldAckedAnnotationOp`'s own approach of merging `version`/`field_versions`
+to the higher value while still taking content from the incoming op
+unconditionally. That merge-not-reject approach is correct for the ack path
+(the ack is always this client's own trustworthy write, just possibly behind
+a further not-yet-confirmed local prediction) but would be wrong for a
+remote broadcast: since the server hands back the *whole* annotation record
+on every `annotation_created`/`annotation_updated` op (`session_store.py`
+mutates the one shared server-side object in place, never emits a diff), a
+lower-versioned broadcast is a strictly older, already-superseded snapshot in
+full — accepting even one of its fields would produce a version number and a
+content field from two different points in time that no real server
+snapshot ever actually was. Dropping the whole stale op is also safe: the
+server applies ops for one annotation strictly in sequence against that same
+shared object, so whichever of two ops landed first server-side is already
+folded into whichever landed second — nothing a rejected stale broadcast
+could have contributed is ever permanently lost, because this client's own
+next ack (always a full, cumulative snapshot too) recovers it if needed.
+Test-covered end-to-end through the real `SessionSyncClient`/`_handleEvent`
+path with a genuine simulated SSE `'op'` event
+(`frontend/web/tests/sessionSyncClient.test.js`, "remote broadcast reordering
+vs. an already-acked own write"), plus pure-function coverage for
+`foldRemoteAnnotationOp` itself. A version tie or a genuinely newer broadcast
+still applies normally — this guard only ever changes behaviour for an
+actual regression.
+
+**Update — the related canvas-layer gap this fix originally left open is now
+closed (round 5, smallfix-applyremoteop-canvas-no-version-guard).** An
+earlier revision of this section recorded a "known related gap" here:
+`App.jsx`'s `applyRemoteOp` (the handler `onRemoteOps` invokes) applied an
+annotation broadcast's content straight onto the *live canvas* React store
+unconditionally, with no version check of its own, so a stale broadcast this
+guard correctly kept out of `sessionSyncClient.js`'s internal baseline could
+still flash onto the canvas itself via that separate path. That revision
+described the canvas as "self-healing once this client's own ack (or a
+later, genuinely newer broadcast) lands" — that framing oversold the actual
+risk and was corrected once traced through in full: nothing *automatically*
+corrects a wrongly-applied stale annotation. A remote apply alone triggers no
+save (`GraphCanvas.jsx`'s remote-annotation-ops effect only clears the queue,
+via `onRemoteAnnotationsApplied`), so the stale content simply sits on the
+canvas until the *next*, entirely unrelated autosave trigger (a node drag, a
+different annotation edit, Save View). That autosave builds its outgoing
+snapshot from whatever the canvas currently shows — the stale, reverted
+content, never corrected — and diffs it against the sync baseline, which
+(thanks to this same guard) is correctly still at the true higher version.
+`predictAnnotationVersionsForSend` computes a valid-looking `base_version`
+for the resulting patch, the server has no way to distinguish this from a
+genuine edit and accepts it as a new version, and a collaborator's confirmed
+change is silently overwritten and re-broadcast to everyone as real — the
+same data-loss class this whole four-round chain exists to close, reachable
+through ordinary two-collaborator editing, not only a narrow race window a
+self-heal could plausibly outrun.
+
+The fix reuses this guard's own comparison rather than adding a second,
+independently-maintained version check at the canvas layer: `_handleEvent`'s
+`'op'` case now computes `isAnnotationOpStale` (the same predicate
+`foldRemoteAnnotationOp` above acts on, factored out as its own pure
+function) against the pre-fold baseline and, when the incoming
+`annotation_created`/`annotation_updated` broadcast is stale, never invokes
+`onRemoteOps` for it at all. `App.jsx`'s `applyRemoteOp`/
+`applyAnnotationUpsertToCanvas` are consequently never called with a stale
+annotation broadcast in the first place — the canvas and the sync baseline
+are now gated by the exact same decision, computed once, so the two cannot
+independently drift into disagreeing with each other the way two separately
+maintained checks could. A brand-new annotation (no baseline entry yet)
+still applies unconditionally, and a genuinely newer broadcast still reaches
+the canvas normally — this only ever changes behaviour for an actual
+regression. Test-covered at the sync-client layer (`frontend/web/tests/
+sessionSyncClient.test.js`, the "remote broadcast reordering" describe block
+now also asserts on `onRemoteOps`) and end-to-end through the real
+`SessionSyncClient`/`sessionAnnotations.js`/`GraphCanvas` chain
+(`frontend/web/tests/annotationRemoteCanvasVersionGuard.test.jsx`).
 
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
@@ -774,41 +1244,150 @@ generic kinds plus `note`.
 
 | A's edit | B's edit (no lease held by A) | Outcome, no lease | B's edit (A holds the lease) | Outcome, A holds the lease |
 |---|---|---|---|---|
-| text | text (same field) | Accepted — B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_lease_second_writer_wins`) | text | 409 `LeaseConflict`; A's edit stands (`TestLeaseEnforcement.test_non_holder_update_is_rejected`) |
-| text | geometry (different field) | Accepted, but B's write silently **clobbers A's text** back to whatever B's stale local copy held — the documented finding above (`test_geometry_edit_from_a_stale_client_clobbers_a_concurrent_text_edit`) | geometry | 409 `LeaseConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a leased annotation (`test_lease_blocks_a_different_field_edit_too_not_only_same_field`) |
-| (any) | style | Accepted, same whole-document LWW as the text/text row — an unrelated style write can clobber a concurrent edit the same way | style | 409 `LeaseConflict` (`test_non_holder_style_edit_is_rejected_while_leased`) |
-| (any) | lock toggle | Accepted, same mechanism — `locked` is an ordinary field on an `annotation_updated` op, not a separate op type | lock toggle | 409 `LeaseConflict` (`test_non_holder_lock_toggle_is_rejected_while_leased`) — a non-holder cannot lock out from under the lease holder either |
-| (any) | delete | Accepted — the annotation is gone; no field survives to clobber | delete | 409 `LeaseConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_leased`, mirroring the existing `note` case) |
+| text | text (same field) | A **real client**: 409 `field_conflict`, explicit — never a silent overwrite (`TestFieldVersionedPatches.test_same_field_conflict_is_explicit_not_a_silent_overwrite`); B re-derives from the conflict's own `server_annotation`/`server_version` and its retry then succeeds (`test_stale_write_is_rejected_then_succeeds_after_rederiving`). A **legacy caller with no `base_version`**: unchanged, B's text wins, whole-document LWW (`test_same_field_text_edits_without_a_lease_second_writer_wins`) | text | 409 `LeaseConflict`; A's edit stands (`TestLeaseEnforcement.test_non_holder_update_is_rejected`) |
+| text | geometry (different field) | A **real client**: both survive — B's field-diffed patch never even mentions "text" at all, so there is nothing to check or clobber, independent of `base_version` (`test_geometry_edit_from_a_stale_client_no_longer_clobbers_a_concurrent_text_edit`). A **legacy full-object write**: still clobbers exactly as before this task (`test_legacy_whole_object_write_without_base_version_still_clobbers`) | geometry | 409 `LeaseConflict` — refused regardless of which field B touches, so A's text edit is never at risk from a leased annotation (`test_lease_blocks_a_different_field_edit_too_not_only_same_field`) |
+| (any) | style | Same rule as the different-field row above — merges for a field-diffed write, still whole-document LWW for a legacy no-`base_version` write | style | 409 `LeaseConflict` (`test_non_holder_style_edit_is_rejected_while_leased`) |
+| (any) | lock toggle | Same rule — `locked` is an ordinary field, checked/versioned like any other on an `annotation_updated` op, not a separate op type | lock toggle | 409 `LeaseConflict` (`test_non_holder_lock_toggle_is_rejected_while_leased`) — a non-holder cannot lock out from under the lease holder either |
+| (any) | delete | Unaffected by this task — `annotation_deleted` has no field-level granularity to protect; still just removes the annotation, no field survives to clobber | delete | 409 `LeaseConflict`, annotation intact (`test_non_holder_delete_of_a_shape_is_rejected_while_leased`, mirroring the existing `note` case) |
 
-Reading the matrix: the **leased** column is the safe one for every row —
-holding the lease protects every field of the annotation, not merely the one
-the holder itself is editing, because the check is per-annotation-id, not
-per-field. The **unleased** column is whole-document last-write-wins for
-every row, including the different-field (text/geometry) row where that is
-easy to mis-read as a safe merge. In practice that unleased race is narrow — a
-remote op is folded into a connected client's own baseline as soon as its SSE
-delivery arrives (typically well under the round trip a human drag/keystroke
-takes), so the window is bounded by network latency, not by anything in this
-document's control — but it is real, not eliminated, and this section exists
-so nobody has to rediscover it under a poor network to learn it. A live edit
-lease closes the window only for the annotation it was actually acquired
-on — it does not retroactively protect a write that never went through a
-lease-acquiring entry point, and it does not make the *leased* column's own
-per-field granularity any finer than before.
+Reading the matrix: the **leased** column is unchanged by this task and
+remains the safe one for every row regardless of `base_version` — holding the
+lease protects every field of the annotation, not merely the one the holder
+itself is editing, because the check is per-annotation-id, not per-field. The
+**unleased** column now depends on whether B's write opted into the new
+protocol: a real (field-diffed, `base_version`-carrying) write merges
+independent fields silently and surfaces a genuine same-field race as an
+explicit `field_conflict` instead of ever silently overwriting it; the
+documented legacy fallback (no `base_version` at all) keeps the old
+whole-document-LWW behaviour verbatim, unprotected exactly as before. A live
+edit lease still closes the window outright for the annotation it was
+actually acquired on, unaffected by either case above — it does not
+retroactively protect a write that never went through a lease-acquiring
+entry point, and field-level patches do not change what the *leased* column
+enforces.
 
-**What this does not change.** No code changed for `task-annotation-shared-
-session-realtime`'s original run of this section — only tests and
-documentation; `task-annotation-exclusive-edit-leases` later changed the
-enforcement mechanism itself (advisory selection claim → exclusive edit
-lease, see [Operation timing and leases](#operation-timing-and-leases)) but
-did **not** touch this clobber finding. The clobber case is a property of the
-existing whole-annotation-resend/shallow-merge design (both already shipped,
-both individually reasonable), not a regression either slice introduced or
-should quietly patch. Closing it for real would mean per-field patch ops
-instead of whole-annotation resends — a bigger design change tracked as
-`dec-annotation-field-patches-and-conflicts`, separate from and not resolved
-by the edit-lease work above. It is recorded here as a finding rather than
-fixed.
+**What this does not change.** The edit-lease mechanism itself (`LeaseMap`,
+[Operation timing and leases](#operation-timing-and-leases)) is untouched by
+`dec-annotation-field-patches-and-conflicts` — the two layers are
+complementary, not overlapping: a lease still refuses a write outright the
+instant one is held, and field-level patches only ever apply in the unleased
+window a lease does not (yet) cover. This is deliberately **not** a
+general-purpose CRDT or operational-transform editor — no automatic
+character-level text merge, no arbitrary multi-field 3-way merge inside one
+op. A single `annotation_updated` op is still all-or-nothing: if any field it
+touches genuinely conflicts, the whole op is refused, even when other fields
+in the same patch do not conflict, and the caller re-derives a smaller/fresher
+patch rather than the server attempting a partial apply. That scope decision
+is recorded in `dec-annotation-field-patches-and-conflicts` itself.
+
+### Field-level patches and base_version
+
+**Stored/broadcast shape.** Every annotation carries two server-owned
+bookkeeping fields, alongside its ordinary content — never caller-settable
+(a payload that supplies either is silently overwritten, not merged in):
+
+- `version` (int, starts at `1` on create) — bumped by one on every applied
+  `annotation_updated` and on an `annotation_created` upsert-in-place
+  (a same-id create retry); read-only, returned in every read/write
+  (`list_annotations`/`list_sticky_notes`, `create_annotation`,
+  `update_annotation`'s result) as `annotation.version`.
+- `field_versions` (`{field_name: version}`) — the `version` at which each
+  individual content field last actually *changed value* (never merely
+  present in an incoming payload with the same value it already held).
+  Internal bookkeeping only, not projected to MCP callers or the browser's
+  content payload — a caller only ever needs `version`, to hand straight
+  back as `base_version` on its next write.
+
+**The `annotation_updated` op.** `annotation` carries only the fields the
+sender actually changed, plus the `id`/`type`/`kind` identifying/validating
+triple every update must carry regardless. `base_version`, alongside
+`annotation`, is optional:
+
+```json
+{
+  "op": "annotation_updated",
+  "annotation": { "id": "shape-1", "type": "shape", "kind": "shape",
+                   "geometry": { "x": 40, "y": 40, "w": 160, "h": 96 } },
+  "base_version": 3
+}
+```
+
+- **Given:** for each field the patch is genuinely changing (a value diff
+  against current stored state, computed server-side — a field whose
+  incoming value already matches what is stored is never "touched", however
+  it got there), the server compares that field's `field_versions` entry to
+  `base_version`. A field with no entry defaults to the annotation's
+  creation version (`1`). If every touched field's version is `<=
+  base_version`, the op applies and bumps `version` + the touched fields'
+  `field_versions` to the new value. If **any** touched field's version is
+  `> base_version`, the whole op is refused with `AnnotationFieldConflict` —
+  never a partial apply (see "What this does not change" above).
+- **Omitted:** the pre-fix, unconditional whole-object shallow merge
+  (`target.update(incoming)`) — the documented legacy fallback.
+
+**The conflict response.** `AnnotationFieldConflict` surfaces as HTTP 409
+wherever a browser or MCP write can raise it:
+
+- `POST /sessions/{id}/ops` (`rest_api.py`): `detail` is a structured object
+  — `{"error": "field_conflict", "annotation_id", "conflicting_fields":
+  {field: server_version}, "server_version", "message"}` — distinct from
+  `LeaseConflict`'s plain-string `detail` on the same status code, so
+  `sessionSyncClient.js`'s terminal-rejection handling (already shared for
+  every 409, per [Operation timing and leases](#operation-timing-and-leases))
+  can tell the two apart for an accurate notice (`App.jsx`'s `onDropped`:
+  "someone else changed this at the same time", not the lease-specific
+  "someone else is editing this").
+- The `update_annotation` MCP tool (`backend/service/mcp_tools.py`) accepts
+  an optional `base_version` argument and, on conflict, returns
+  `{"success": false, "error": "field_conflict", "conflicting_fields",
+  "server_version", "annotation": <current server value>}` — the same
+  information, MCP-shaped.
+
+**Re-derive, never blindly retry** ("do not silently retry a stale value
+against a newer version" — `dec-annotation-field-patches-and-conflicts`'s own
+words): a client that gets `field_conflict` reads the conflict response's own
+current annotation/`server_version` and computes a fresh patch from that,
+rather than resending the same rejected content once whatever blocked it has
+changed again. `sessionSyncClient.js` inherits this for free from the
+pre-existing 409/`LeaseConflict` terminal-rejection path
+(`task-annotation-exclusive-edit-leases`): a dropped op is removed from the
+outbound queue and never automatically resent — the *next* local edit
+computes an entirely new field diff against the (now resynced) baseline
+rather than replaying the stale one.
+
+**MCP path parity — which tools opt in.** `SessionManager.update_annotation`
+(the shared chokepoint every MCP annotation-patch tool calls into, exactly
+like the browser's `POST /ops`) accepts `base_version` uniformly, so the
+version/conflict semantics are identical for both entry points, not a
+separate mechanism. The generic `update_annotation` MCP tool exposes
+`base_version` to its caller, and so does `update_sticky_note` (added by
+smallfix-annotation-version-dropped-by-browser-pipeline): a note's
+`build_note_patch` still resends the whole `geometry` sub-object on any
+position/size/rotation change (see that function's shallow-merge note above),
+so without `base_version` a position-only move silently clobbered a
+concurrent geometry-subfield edit — e.g. a resize — with no conflict raised,
+exactly the class of bug this section otherwise closes. `reorder_annotation`
+and `set_annotation_lock` still omit `base_version` and so stay on the
+documented legacy-fallback (unconditional merge) path; each of those two
+patches exactly one field it alone manages (`z`, `locked`), so there is no
+second field in the same patch for a concurrent edit to race against, unlike
+`update_sticky_note`'s combined geometry write. Widening those two to accept
+`base_version` too is straightforward follow-up, not a correctness gap this
+task leaves open.
+
+**Reconnect/catch-up and undo.** Neither needed a protocol change:
+`SessionStore.apply_state_op` already returns (and always did) the **whole**
+post-update annotation as the applied op's `annotation` — the ring buffer
+(`ops_since`, used for `catch_up`) and the full-state `snapshot` path both
+therefore already carry `version`/`field_versions` through to a reconnecting
+client with no code change on that side; only what a client *publishes* had
+to change. `undo_last_action` replays a stored full-object inverse op under
+`trusted_replay=True`, which skips `base_version` checking entirely — the
+replayed content is this session's own recorded prior state, not fresh
+caller input, so there is nothing to conflict-check against. `version` still
+only ever moves forward on an undo (never restored to its pre-edit value),
+so a client's `base_version` bookkeeping stays monotonic across an undo the
+same way `updated_at` already did before this task.
 
 ## Attachment and detach behavior
 
@@ -1052,6 +1631,11 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 / `annotation_deleted`) and share its optimistic-concurrency contract
 (`expected_revision` / `revision_conflict`) — see
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
+`update_sticky_note` additionally accepts the same optional `base_version` as
+the generic `update_annotation` tool, rejecting a stale same-field write with
+`field_conflict` instead of silently merging it — see [Field-level patches and
+base_version](#field-level-patches-and-base_version) and "MCP path parity"
+above.
 
 The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
 accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
@@ -1059,7 +1643,14 @@ accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,
 `list_annotations` / `create_annotation` / `update_annotation` /
 `delete_annotation` / `reorder_annotation` / `set_annotation_lock` /
 `duplicate_annotation`, over the same session op protocol and
-optimistic-concurrency contract. This includes `freehand`: an earlier
+optimistic-concurrency contract. `update_annotation` additionally accepts an
+optional `base_version` (read from a prior `list_annotations`/write result's
+`annotation.version`) for the finer-grained, per-field conflict check
+described in [Field-level patches and
+base_version](#field-level-patches-and-base_version) — omitted, this tool
+and every other write in this section keep the coarser
+`expected_revision`/session-wide contract this paragraph already describes,
+unchanged. This includes `freehand`: an earlier
 revision of this document claimed it had no MCP tool at all, but
 `freehand` has been a member of `GENERIC_ANNOTATION_TYPES`
 (`backend/core/session_annotations.py`) since the type was added (#422),
@@ -1566,11 +2157,11 @@ below means the same six components: `NoteNode.jsx`, `LabelNode.jsx`,
 
 | Mechanism | Status | Evidence |
 |---|---|---|
-| Keyboard way IN to the property editor (Shift+F10 / Menu key, or a visible on-focus affordance) | **MISSING**, all six kinds | Test: `AnnotationAccessibilityAudit.test.jsx` — a `contextmenu` event dispatched on the *focused* node wrapper does not open the menu. Code: every kind binds `onContextMenu` on its own inner content div, a DOM descendant of the focused wrapper ReactFlow renders (`NoteNode.jsx` ~L207, `LabelNode.jsx` ~L147, `GenericAnnotationNode.jsx`'s `openContextMenu` L411-420 bound per-kind at L759/809/881/900/920/942, `ArrowNode.jsx` ~L240, `GroupNode.jsx`'s `handleContextMenu` L151-159, `FreehandAnnotationNode.jsx`'s `openContextMenu` L127-135). A keyboard-dispatched `contextmenu` event targets the currently-focused element and only bubbles upward from there, so it never reaches a handler on a nested child — confirmed, not assumed, for `note` and `text` by the test above; the other four kinds share the identical wiring pattern (own root `onContextMenu`, no ancestor-level catch), read directly. Owner: `task-annotation-accessible-shared-controls` — the fix is a shared mechanism (e.g. binding on the ReactFlow wrapper via the existing per-kind `openContextMenu`/equivalent, or a synthetic keydown handler), not a per-kind one-off. |
-| Arrow-key navigation between menu items | **MISSING**, all six kinds | Code: `ContextMenus.jsx`'s `useRootMenuKeyNav` (L91-102) implements exactly this — ArrowUp/ArrowDown/Home/End roving focus — but it is wired only into `NodeContextMenu`/`MultiNodeContextMenu`/`EdgeContextMenu`/`PaneContextMenu` (the graph-node/pane menu system), never into any of the six annotation kinds' own `<div className="graph-annotation-context-menu">` portals, which are plain `<button>` lists with no `data-menu-item="root"` markers and no keydown handler of their own beyond a bare Escape-to-close (e.g. `NoteNode.jsx` L60-61). Tab still moves between the buttons (they are real `<button>` elements), just not via the arrow-key roving convention the rest of the app already has. Owner: `task-annotation-accessible-shared-controls` — reuse `useRootMenuKeyNav`/`useMenuOpenFocus` rather than inventing a second implementation. |
-| Focus trap while open | **MISSING**, all six kinds | Code: none of the six menus call `.focus()` on open or constrain Tab — confirmed by reading `NoteNode.jsx`, `LabelNode.jsx`, `GenericAnnotationNode.jsx`, `ArrowNode.jsx`, `GroupNode.jsx`, `FreehandAnnotationNode.jsx` in full; only `ContextMenus.jsx`'s `useMenuOpenFocus` (L48-74) does this, again only for the graph-node/pane menu system. Owner: `task-annotation-accessible-shared-controls`. |
-| Focus restored to the object on close | **MISSING**, all six kinds | Code: same absence as the row above — no menu close path (`setContextMenu(null)`, on Escape/outside-click/action) calls `.focus()` on the annotation. Contrast: `ToolSlotPicker.jsx` (a different, unrelated fold-out — the toolbox's shape/icon picker) *does* auto-focus on open (L62) and restore focus on close (L83-92), and `ContextMenus.jsx`'s `useMenuOpenFocus` does the same for the graph-node menu system — so the pattern exists twice elsewhere in this codebase and is not used by any of the six annotation menus. Owner: `task-annotation-accessible-shared-controls`. |
-| Touch: visible "Edit" entry point (tap object → visible Edit → contextual sheet), vs. still only right-click/long-press | **MISSING**, all six kinds | Code: every kind's property menu opens only from `onContextMenu` (native right-click on desktop; a long-press synthesizes a `contextmenu` event on touch, per the affected browsers' own behaviour — not this app's code). No kind renders a visible "Edit" button, and no `isTouchMode`-conditional UI exists in any of the six node components (grepped; none reference `isTouchMode`/`touch` at all — that prop only reaches `AnnotationToolbox`, the *creation* surface). The mobile "Annotate" sheet (`MobileShell.jsx` L174-178, `surface.isOpen('annotate')`) is reachable only from the phone bottom nav and hosts `AnnotationToolbox` in `variant="sheet"` — a **creation** surface (see area 3); it has no path from tapping an *existing* annotation. Owner: `task-annotation-accessible-shared-controls`, per the decision's accepted flow (tap → visible Edit → contextual bottom sheet with format/duplicate/delete/lock/layer). |
+| Keyboard way IN to the property editor (Shift+F10 / Menu key, or a visible on-focus affordance) | **WORKS**, all six kinds — closed 2026-08-30 in two steps: `task-annotation-responsive-bottom-toolbox`'s edit-surface half (five of six, below), then `task-annotation-accessible-shared-controls` (the Shift+F10/Menu-key path itself, plus `group`'s own Edit button) | As of the first close: "a visible on-focus affordance" was no longer missing: `NoteNode.jsx`, `LabelNode.jsx`, `ArrowNode.jsx`, `FreehandAnnotationNode.jsx` and `GenericAnnotationNode.jsx` (covering `text`/`shape`/`icon`/`vote_dot`/`image`) each render a real `<button aria-label="Edit">` while selected, wired through the shared `hooks/useAnnotationEditTrigger.js`, that opens the same menu on click **or** Tab+Enter/Space — a genuine, always-visible, non-gesture path in, real Tab order and native activation, no synthetic-event trick needed. `GroupNode.jsx` was out of that task's scope and still had none. Test: `tests/AnnotationEditTrigger.test.jsx`. **Closed 2026-08-30** by `task-annotation-accessible-shared-controls`: `GraphCanvas.jsx`'s document-level keydown handler now also matches `e.key === 'ContextMenu'` or Shift+F10 while focus is on a `.react-flow__node` wrapper and clicks that wrapper's own `.annotation-edit-trigger` button (reusing the Edit button above rather than the dead `contextmenu`-dispatch approach), and `GroupNode.jsx` now gets that same Edit button too — see the "Update, 2026-08-30 (task-annotation-accessible-shared-controls — this task)" section below for the full mechanism and tests. |
+| Arrow-key navigation between menu items | **WORKS**, all six kinds — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: `ContextMenus.jsx`'s `useRootMenuKeyNav` (L91-102) implemented exactly this — ArrowUp/ArrowDown/Home/End roving focus — but was wired only into `NodeContextMenu`/`MultiNodeContextMenu`/`EdgeContextMenu`/`PaneContextMenu` (the graph-node/pane menu system), never into any of the six annotation kinds' own `<div className="graph-annotation-context-menu">` portals. **Closed 2026-08-30**: a new shared hook, `useAnnotationMenuKeyNav` (`ContextMenus.jsx`, reusing the same roving-index algorithm), is now wired onto all six kinds' own menu containers via `onKeyDown` — true whether the menu was opened by right-click or by the Edit button, since both render the identical menu markup. Test: `AnnotationAccessibleSharedControls.test.jsx`'s "menu keyboard navigation and focus trap" cases. |
+| Focus trap while open | **WORKS**, all six kinds — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: a menu opened via the Edit button moved focus to its first item on open, but nothing constrained Tab from leaving the menu while it stayed open — only `ContextMenus.jsx`'s `useMenuOpenFocus` (L48-74) did, again only for the graph-node/pane menu system. **Closed 2026-08-30**: the same `useAnnotationMenuKeyNav` hook that closed the row above also makes Tab on the last item / Shift+Tab on the first wrap rather than escaping the menu — a real, if minimal, trap. Test: `AnnotationAccessibleSharedControls.test.jsx`'s "Tab on the last item wraps to the first…" case. |
+| Focus restored to the object on close | **WORKS**, all six kinds, both entry paths — closed 2026-08-30 in two steps: `task-annotation-responsive-bottom-toolbox`'s edit-surface half (Edit-button path, five of six), then `task-annotation-accessible-shared-controls` (generalised to the right-click path too, and to `group`) | As of the first close: a menu opened via the Edit button moved focus to its first item on open and returned focus to that same Edit button on close, but a menu opened the pre-existing way, by right-click, was completely unchanged (no focus move on open, no restore on close) — `hooks/useAnnotationEditTrigger.js`, test-covered in `tests/AnnotationEditTrigger.test.jsx`. **Closed 2026-08-30**: `useAnnotationEditTrigger.js` no longer gates that behaviour on `openedViaButtonRef` — every menu, however it opened, now moves focus to its first item on open; on close it restores to the Edit button for the button path, or to whatever had focus immediately before for the right-click path (mirroring `ContextMenus.jsx`'s `useMenuOpenFocus`). `group` gets the same Edit button (and so the same restore behaviour) for the first time too. |
+| Touch: visible "Edit" entry point (tap object → visible Edit → contextual sheet), vs. still only right-click/long-press | **WORKS**, all six kinds — closed 2026-08-30 in two steps: `task-annotation-responsive-bottom-toolbox`'s edit-surface half (five of six), then `task-annotation-accessible-shared-controls` (`group`) | The same Edit button named above is the visible entry point the decision's flow describes: tapping it on a compact, integrated host (MobileShell wired via GraphCanvas's new `annotationEditSheetPortalContainer`/`onRequestAnnotationEditSheet` props) opens the identical property editor inside the shared mobile bottom sheet, on the pre-existing `'detail'` surface `useSurfaceManager` already reserved (`frontend/web/src/hooks/useSurfaceManager.js` — present, tested, unused until now). A non-integrated host (no `MobileShell`, e.g. `frontend/widget`) or a desktop pointer gets the same button opening a floating menu anchored to it instead — never nothing. Long-press/right-click keeps working unchanged alongside it; this is an addition, not a replacement. Test: `tests/AnnotationEditTrigger.test.jsx`, `frontend/web/tests/MobileShell.test.jsx`'s "Edit sheet (detail surface)" cases. `group` was out of that task's scope; **closed 2026-08-30** by `task-annotation-accessible-shared-controls` wiring `GroupNode.jsx` through the same `useAnnotationEditTrigger`. |
 
 ### 2. Canvas focus
 
@@ -1586,24 +2177,24 @@ below means the same six components: `NoteNode.jsx`, `LabelNode.jsx`,
 |---|---|---|
 | Every toolbox button keyboard-activatable (desktop toolbar and, since PR #525, the mobile sheet) | **WORKS** | Code: `AnnotationToolbox.jsx`'s `renderToolboxItem` (L437-508) and the shape/icon slot's main button (L520-648, L650-738) are all real `<button type="button">` elements with `aria-label` — native Tab/Enter/Space support, no pointer-only wiring. The mobile sheet (`variant="sheet"`, L206-210) renders the exact same component/buttons, just always-expanded with no collapse toggle — same keyboard path. |
 | Shape/icon tool-slot pickers (their own fold-out UI) keyboard-operable | **WORKS** | Code: the corner button opening each picker is a second, independently focusable real `<button>` (`aria-haspopup`, `aria-expanded` — `AnnotationToolbox.jsx` L612-622, L709-719); `ToolSlotPicker.jsx` auto-focuses its first option on open (L62), traps Escape to close (L116-125), and restores focus to the corner button on close (L83-92) unless focus already moved elsewhere. This is the "owner-directed accessible affordance (2026-08-26)" the component's own doc comment names, and it is real, not aspirational — read directly, matching the pre-existing `ContextMenus.jsx` focus-restore pattern (area 1's contrast). |
-| Activating one creates at a sensible location, focused, ready to edit | **⚠ PARTIAL** | Code: `createAnnotationAtViewportCenter`/`createAnnotation` (`GraphCanvas.jsx` L1580-1681) places the new node at the viewport centre (sensible location: ✅) but never sets `selected: true` and never focuses the new DOM node or opens its text editor — confirmed by reading every branch of `createAnnotation`; no branch touches `selected` or calls `.focus()`. So a keyboard user who presses Enter/Space on a toolbox button gets an unselected, unfocused new annotation with no way to immediately edit it without first tabbing/clicking to find it. Owner: `task-annotation-accessible-shared-controls` (or could reasonably be scoped as a small addition to the toolbox's own creation path — naming both rather than picking one, since it touches `createAnnotation`, a shared mechanism `task-annotation-accessible-shared-controls` already owns). |
+| Activating one creates at a sensible location, focused, ready to edit | **WORKS** (toolbox click/keyboard creation) — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: `createAnnotationAtViewportCenter`/`createAnnotation` (`GraphCanvas.jsx`) placed the new node at the viewport centre (sensible location: ✅) but never set `selected: true` and never focused the new DOM node — confirmed by reading every branch of `createAnnotation`; no branch touched `selected` or called `.focus()`. **Closed 2026-08-30**: `createAnnotation` now marks the new node `selected: true` (deselecting whatever was selected before) and focuses its DOM wrapper one frame later, so a keyboard user who activates a toolbox button lands on a selected, focused annotation with its Edit button one Tab away. Scoped to click/keyboard toolbox creation; `freehand`'s own pointer-drawn creation is unchanged (there is no keyboard equivalent to make "ready" for a gesture-drawn stroke). The focus call itself is now also conditional: it is skipped while the mobile `'annotate'` `BottomSheet` (`aria-modal="true"`) is still open, so it never moves DOM focus onto a canvas node hidden behind that modal sheet — a bug found and closed in the same task's own follow-up review, see `GraphCanvas.jsx`'s `createAnnotation` and `GraphCanvasAccessibleSharedControls.test.jsx`'s "creation focus must never escape an open modal mobile sheet" cases. Test: `AnnotationAccessibleSharedControls.test.jsx`'s "keyboard creation lands selected and focused" case. |
 
 ### 4. Move, resize, rotation, attachment (non-drag alternatives)
 
 | Mechanism | Status | Evidence |
 |---|---|---|
 | Non-drag position (nudge) | **WORKS**, all six kinds when unlocked/unanchored (whatever `isDraggable` already allows for that kind — e.g. an anchored `arrow` endpoint stays undraggable either way) | Same evidence as area 2's arrow-key row — ReactFlow's built-in 5px/20px-shift nudge fires for any selected node whose `draggable` is true, which every kind computes the same way for both mouse-drag and this keyboard path (`isAnnotationDraggable`, `utils/annotations.js`). |
-| Non-drag rotation | **⚠ PARTIAL** | Code: `NoteNode.jsx` L289-315, `LabelNode.jsx` L226-252, `GenericAnnotationNode.jsx`'s rotation row L1182-1208 all render ±15°-step buttons plus a reset — real `<button>`s, keyboard-operable **once the menu is open**. Since opening the menu is itself keyboard-unreachable (area 1), this control is currently only reachable by a user who can right-click/long-press to open the menu and then Tab/click the rotate buttons — not a *keyboard-only* path end to end. Owner: `task-annotation-accessible-shared-controls`, and closing area 1's menu-entry gap closes this one for free. |
-| Non-drag resize | **❌ MISSING** | Code: resize is exposed only via ReactFlow's `NodeResizer` drag handles (`NoteNode.jsx`, `GenericAnnotationNode.jsx`'s `resizer`, `GroupNode.jsx`) — no numeric width/height input exists anywhere in any of the six context menus (grepped every menu's JSX; none renders a size `<input>`). Owner: `task-annotation-accessible-shared-controls`. |
-| Non-drag attachment — attaching an **existing** annotation to a target ("Attach to" enters target-tap mode) | **❌ MISSING** | Code: grepped `GraphCanvas.jsx`/`utils/annotations.js` for an attach-mode/target-tap mechanism — none exists. The only two attach paths are (a) drag-to-snap (`computeDroppedAttachment`, a drag gesture) and (b) the "Nearby object menu" (`NearbyObjectMenuSection`, `ContextMenus.jsx` L365-387), which only ever creates a **new**, pre-attached label/icon/text at creation time (`attachNearbyAnnotation`, `GraphCanvas.jsx` L1721-1740) — it has no path to attach an annotation that already exists. Both of the two existing paths are themselves reached only from a right-click menu (area 1), so on touch neither is a visible affordance either. Owner: `task-annotation-accessible-shared-controls` — the decision's "Attach to enters target-tap mode" is new mechanism, not a wiring fix. |
-| Overlapping objects: a visible way to choose which one you mean | **❌ MISSING** | Code: grepped `GraphCanvas.jsx` for any overlap/cycle/z-order-pick mechanism (`overlap`, `cycle`, `stacked` — zero matches). Clicking a point with multiple annotations stacked on it hits whichever ReactFlow's own top-most-in-DOM-order hit test picks, with no alternative offered. Owner: `task-annotation-accessible-shared-controls`. |
+| Non-drag rotation | **WORKS** — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: `NoteNode.jsx` L289-315, `LabelNode.jsx` L226-252, `GenericAnnotationNode.jsx`'s rotation row L1182-1208 all rendered ±15°-step buttons plus a reset — real `<button>`s, keyboard-operable **once the menu is open** — but opening the menu was itself keyboard-unreachable (area 1), so this control was only reachable by a user who could right-click/long-press. **Closed 2026-08-30**: closing area 1's Shift+F10/Menu-key gap closes this one for free, exactly as predicted — the same rotate buttons are now reachable keyboard-only end to end via the Edit button/Shift+F10 path. |
+| Non-drag resize | **WORKS** — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: resize was exposed only via ReactFlow's `NodeResizer` drag handles (`NoteNode.jsx`, `GenericAnnotationNode.jsx`'s `resizer`, `GroupNode.jsx`) — no numeric width/height input existed anywhere in any of the six context menus. **Closed 2026-08-30**: a new shared component, `AnnotationSizeControl.jsx` — two real `<input type="number">` fields (`aria-label`ed Width/Height) plus an Apply button — reads the node's current `style.width`/`height` on mount and commits via the same `setNodes`/`notifyChange('geometry')` path a drag-resize uses, offered by every kind that already has a NodeResizer box: `NoteNode`, `GenericAnnotationNode`'s `shape`/`image`, and `GroupNode`. On a rotated Note/shape/image it compensates `position` the same way drag-resize's own `resolveRotatedResizeGeometry` does (a follow-up bug fix, same task — the control originally left a rotated box's position uncompensated, visibly jumping it on apply; see `resolveRotatedResizeGeometry`'s own comment in `utils/annotations.js` for why a rotated box's centre has to shift). Test: `AnnotationAccessibleSharedControls.test.jsx`'s "non-drag width/height" cases, including the rotated-position regression coverage. |
+| Non-drag attachment — attaching an **existing** annotation to a target ("Attach to" enters target-tap mode) | **WORKS** — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: no attach-mode/target-tap mechanism existed anywhere in `GraphCanvas.jsx`/`utils/annotations.js`. The only two attach paths were (a) drag-to-snap (`computeDroppedAttachment`, a drag gesture) and (b) the "Nearby object menu" (`NearbyObjectMenuSection`), which only ever created a **new**, pre-attached label/icon/text at creation time — no path to attach an annotation that already exists, and both existing paths were themselves reached only from a right-click menu. **Closed 2026-08-30**: an annotation's own menu (for the three `ATTACHABLE_OVERLAY_KINDS` — `label`, `text`, `icon`) now gets an "Attach to…" button that puts `GraphCanvas.jsx` into a one-annotation attach-pending state, surfaced by a real `status`-role banner with a Cancel button; the next click on an eligible node/annotation resolves the attachment via a new `computeAttachmentToTarget` helper (refactored out of `computeDroppedAttachment` so the two share one implementation). A new "Detach" button (same three kinds) clears it without dragging. Escape, or clicking empty canvas, cancels the mode. Test: `AnnotationAccessibleSharedControls.test.jsx`'s "non-drag 'Attach to…' wiring" cases. |
+| Overlapping objects: a visible way to choose which one you mean | **WORKS** — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: no overlap/cycle/z-order-pick mechanism existed — clicking a point with multiple annotations stacked on it hit whichever ReactFlow's own top-most-in-DOM-order hit test picked, with no alternative offered. **Closed 2026-08-30**: `GraphCanvas.jsx`'s new `onNodeClick` handler computes every node whose stored box contains the click's flow position (`nodesAtPoint`, `group` excluded as a near-always-overlapping backdrop) without calling `preventDefault`/`stopPropagation` — ReactFlow's own default selection still happens exactly as before. When more than one candidate exists, a small picker (labelled by each candidate's own computed accessible name) offers the rest; picking one selects and focuses exactly that node. A rotated annotation's true outline is not checked — the hit test is the stored axis-aligned box, a stated approximation, not a silent one. Test: `GraphCanvasAccessibleSharedControls.test.jsx`'s "the overlap-object picker" cases. |
 
 ### 5. Touch
 
 | Mechanism | Status | Evidence |
 |---|---|---|
-| Editing an **existing** annotation via tap alone (tap → visible Edit → sheet) | **MISSING**, all six kinds | Same evidence as area 1's touch row. Today, reaching an existing annotation's property menu on touch depends entirely on a long-press synthesizing a `contextmenu` event (browser/OS behaviour, not app-authored) — exactly the "hidden behind long-press... alone" state the decision requires closing. Long press itself staying *optional* (not the *only* path) is the gap, not long-press existing at all. Owner: `task-annotation-accessible-shared-controls`. |
-| Multi-select and its align/distribute actions (PR #524) reachable via tap-based multi-select | **❌ MISSING** — pointer/modifier-key-only today | Code: `GraphCanvas.jsx`'s `<ReactFlow>` sets `multiSelectionKeyCode={['Shift', 'Meta', 'Control']}` (L3452) — ReactFlow's own modifier-held-while-clicking convention, which has no touch equivalent (a touchscreen has no Shift key to hold). Grepped for a dedicated "select multiple" mode toggle (`selectMultipleMode`, `multiSelectMode`, "Select multiple" — zero matches anywhere in `packages/ui-graph-canvas` or `frontend/web`). The align/distribute actions themselves (`alignSelectedNodes`/`distributeSelectedNodes`, `GraphCanvas.jsx` L1543-1564, surfaced via `MultiNodeContextMenu` — PR #524) are real and reachable once a multi-selection exists, but nothing gets a touch user to that multi-selection in the first place. Owner: `task-annotation-accessible-shared-controls`, per the decision's accepted "Select multiple enables tap-based multi-selection with shared bulk actions." |
+| Editing an **existing** annotation via tap alone (tap → visible Edit → sheet) | **WORKS**, all six kinds — closed 2026-08-30 in two steps: `task-annotation-responsive-bottom-toolbox`'s edit-surface half (five of six), then `task-annotation-accessible-shared-controls` (`group`) | Same evidence as area 1's touch row. Long-press/right-click still works too (never removed), but is no longer the only path — the decision's "hidden behind long-press... alone" bar is met. `group` was out of the first task's scope; **closed 2026-08-30** by `task-annotation-accessible-shared-controls` wiring `GroupNode.jsx` through the same trigger. |
+| Multi-select and its align/distribute actions (PR #524) reachable via tap-based multi-select | **WORKS** — closed 2026-08-30 by `task-annotation-accessible-shared-controls` | As of the audit: `GraphCanvas.jsx`'s `<ReactFlow>` set `multiSelectionKeyCode={['Shift', 'Meta', 'Control']}` — ReactFlow's own modifier-held-while-clicking convention, with no touch equivalent, and no dedicated "select multiple" mode toggle existed anywhere. The align/distribute actions themselves (`alignSelectedNodes`/`distributeSelectedNodes`, surfaced via `MultiNodeContextMenu` — PR #524) were real and reachable once a multi-selection existed, but nothing got a touch user to that multi-selection. **Closed 2026-08-30**: a new toggle (`aria-pressed`, labelled "Select multiple") in the compact/touch control cluster (`isCompact` only). While active, `onNodeClick` restores whichever other nodes were selected immediately before the tap ReactFlow's own click-to-select just cleared — net effect, each tap ADDS to the selection, the touch equivalent of holding Shift/Ctrl. Toggling an already-selected node back OFF individually is not yet supported (tapping empty canvas still clears the whole selection) — a stated scope boundary, not a hidden one. Test: `GraphCanvasAccessibleSharedControls.test.jsx`'s "explicit touch multi-select mode" cases. |
 | Real touch-hardware behaviour (hit-testing at coarse-pointer precision, long-press timing, palm contact) | **UNTESTABLE-HERE** | Needs physical touch/pen hardware, same category `freehand`'s own [Physical device acceptance](#physical-device-acceptance) section already names for that kind — deferred to `task-annotation-manual-accessibility-touch-acceptance`. |
 
 ### 6. Screen-reader semantics (role + accessible name)
@@ -1612,18 +2203,20 @@ The decision's own bar is explicit: *"role + accessible name per annotation,
 e.g. 'sticky note, Budget Q3'"* — a name that **says what the thing is**, not
 merely any string an accname algorithm happens to fall back to.
 
+All ten rows below are **WORKS — closed 2026-08-30 by `task-annotation-accessible-shared-controls`**. The "Accessible name today" column is left as the pre-fix, audit-time description (still true of the raw ReactFlow/DOM fallback these kinds no longer rely on); the fix is one shared function, `computeAnnotationAriaLabel` (`utils/annotations.js`), wired at `GraphCanvas.jsx`'s `nodesWithAriaLabels` (a `useMemo` over `nodes`, writing `node.ariaLabel` immediately before `<ReactFlow>`) so every kind's name recomputes on the very next render rather than going stale after a later edit. Every kind word is an i18n-props `labels` default (`ariaKindNote`, `ariaKindIcon`, …), not hardcoded English. Test: `AnnotationAccessibleSharedControls.test.jsx`'s `computeAnnotationAriaLabel` suite; `AnnotationAccessibleNameContent.test.jsx` (pre-fix baseline, now historical).
+
 | Kind | Role | Accessible name today | Status |
 |---|---|---|---|
-| `note` | `role="button"` (ReactFlow default, area 2) | Falls back to its own text, or the placeholder word "Note" when empty | **MISSING** — Test: `AnnotationAccessibleNameContent.test.jsx` — `{text:'Budget Q3'}` computes to exactly `"Budget Q3"`, not `"sticky note, Budget Q3"`; an empty note computes to `"Note"` only, indistinguishable from every other empty note. |
-| `label` | same | Falls back to its own text | **MISSING** — same pattern, no kind word at all (not even "Note"'s placeholder). |
-| `text` | same | Falls back to its own text; empty when uncaptioned | **MISSING** |
-| `shape` | same | Falls back to its caption when set (any subtype); **empty** when uncaptioned | **MISSING** — a rectangle, circle, triangle, rhombus, hexagon and process-arrow are all indistinguishable from each other and from nothing at all, by name. |
-| `icon` | same | Falls back to the rendered **glyph character** (e.g. "★"), not the icon's name ("star") — `title={data.icon}` (`GenericAnnotationNode.jsx`, the `kind === 'icon'` branch) is never reached because the glyph's own text content wins the accname computation first | **MISSING** — confirmed by test, and notable because the code visibly *tries* to offer a name via `title` and the browser's own accname algorithm bypasses it. |
-| `vote_dot` | same | **Empty** — no text, no title anywhere in its markup | **MISSING** |
-| `image` | same | Falls back to `alt` when set, empty otherwise | **MISSING** — never says "image annotation", just repeats whatever `alt` text (if any) was set. |
-| `arrow`/`line` | same | **Empty** — pure SVG, no text or title anywhere | **MISSING** — whatever two objects it connects, the connector itself has no name at all. |
-| `freehand` | same | **Empty** — pure SVG path(s), no text or title | **MISSING** |
-| `group` | same | Falls back to its header text (folder glyph + label) when named; `"📁 Group"` (the untranslated English default) when not | **MISSING** — never says "group" as a category, and the untranslated fallback also does not respect the host app's i18n for an unnamed group. |
+| `note` | `role="button"` (ReactFlow default, area 2) | **Closed:** `"Sticky note, {text}"`, or `"Sticky note"` when empty | Previously fell back to its own text, or the placeholder word "Note" when empty — `AnnotationAccessibleNameContent.test.jsx`'s `{text:'Budget Q3'}` computed to exactly `"Budget Q3"`, not `"sticky note, Budget Q3"`. |
+| `label` | same | **Closed:** `"Label, {text}"` | Previously fell back to its own text with no kind word at all. |
+| `text` | same | **Closed:** `"Text, {text}"` | Previously fell back to its own text; empty when uncaptioned. |
+| `shape` | same | **Closed:** `"{subtype} shape, {caption}"`, e.g. `"rectangle shape, Phase 1"` — every subtype distinguishable by name | Previously fell back to its caption when set, **empty** when uncaptioned — a rectangle, circle, triangle, rhombus, hexagon and process-arrow were indistinguishable from each other and from nothing at all. |
+| `icon` | same | **Closed:** `"{name} icon"`, e.g. `"star icon"` | Previously fell back to the rendered **glyph character** (e.g. "★"), not the icon's name — `title={data.icon}` was never reached because the glyph's own text content won the accname computation first. |
+| `vote_dot` | same | **Closed:** a fixed `"Vote dot"` | Previously **empty** — no text, no title anywhere in its markup. |
+| `image` | same | **Closed:** `"Image, {alt}"`, or `"Image"` alone | Previously fell back to `alt` when set, empty otherwise — never said "image annotation". |
+| `arrow`/`line` | same | **Closed:** a fixed `"Arrow"` | Previously **empty** — pure SVG, no text or title anywhere. |
+| `freehand` | same | **Closed:** a fixed `"Freehand stroke"` | Previously **empty** — pure SVG path(s), no text or title. |
+| `group` | same | **Closed:** `"Group, {label}"`, or `"Group"` alone — never the untranslated `"📁 Group"` fallback | Previously fell back to its header text (folder glyph + label) when named, `"📁 Group"` (untranslated) when not. |
 
 **Root cause, one line for all ten rows:** `overlayToFlowNode` and
 `createAnnotation` (`packages/ui-graph-canvas/src/utils/annotations.js`
@@ -1641,6 +2234,13 @@ with a sensible untranslated-but-present fallback for an empty caption/label)
 and writes it onto `data.ariaLabel`/the node's `ariaLabel` field at both
 `overlayToFlowNode` (hydration) and `createAnnotation` (creation).
 
+*(This paragraph is the pre-fix, audit-time diagnosis, kept for the reasoning
+trail — see the table above and `computeAnnotationAriaLabel` in
+`utils/annotations.js` for what actually shipped 2026-08-30, which took the
+`node.ariaLabel`-on-write approach sketched above and generalised it into one
+`useMemo` over every node rather than writing it at each individual mutation
+site.)*
+
 **UNTESTABLE-HERE for all ten rows:** how a real screen reader actually
 announces `role="button"` plus whatever name ships (current or fixed) —
 verb choice ("button" vs. no role announcement at all for some AT/browser
@@ -1654,16 +2254,162 @@ Of roughly 40 mechanism × kind cells audited: real, verified **WORKS** exist
 for keyboard node selection, arrow-key position nudge, and toolbox creation
 (all three real ReactFlow/app defaults, not assumptions) — genuine progress a
 stale writeup would have missed, per PR #524/#525 and the earlier shape/icon
-picker and typography work. The decision's headline touch flow (tap → visible
-Edit → contextual sheet) does **not** exist for any kind yet: every property
-editor, on every kind, on every input method, is reachable only through
-`onContextMenu` (right-click, or a long-press that happens to synthesize the
-same native event) — no visible on-focus/on-tap affordance exists anywhere.
-No kind has a role-appropriate accessible name. No touch multi-select mode,
-attach-to-target mode, or overlap picker exists. Every one of these shared
-gaps is scoped to `task-annotation-accessible-shared-controls`, which this
-audit's evidence (test files above, plus this section's file:line citations)
-gives a concrete starting point rather than a re-discovery task.
+picker and typography work.
+
+**Update, 2026-08-30 (same day, later in the sorting order):**
+`task-annotation-responsive-bottom-toolbox`'s edit-surface half closed the
+audit's headline finding — the decision's touch flow (tap → visible Edit →
+contextual sheet) now exists, for five of the six kinds (`note`, `label`,
+`arrow`, `text`/`shape`/`icon`/`vote_dot`/`image` via
+`GenericAnnotationNode`, `freehand`; `group` was out of that task's scope). A
+real `<button aria-label="Edit">`, shown on selection, is a second, always-
+visible path into the exact same property editor `onContextMenu` already
+opened — reachable by tap, by mouse click, and by keyboard (Tab, then Enter
+or Space) — and on a compact, integrated host it opens inside the shared
+mobile bottom sheet (the pre-existing, previously-unused `'detail'` surface)
+rather than a floating menu. Long-press/right-click keep working exactly as
+before; this is additive. Opening via the new button also moves focus into
+the menu and restores it to the button on close — the "focus restored to the
+object" row now partly closed too, scoped to that one entry path. See areas 1
+and 5 above for the row-level detail, and `hooks/useAnnotationEditTrigger.js`
+for the mechanism every one of those five kinds shares.
+
+**Still open**, unaffected by the above: arrow-key navigation *within* an
+open menu, a real focus *trap*, generalising focus-move/-restore to the
+right-click path too, `group`'s own Edit affordance, non-drag resize,
+attach-to-target mode for an existing annotation, an overlap-object picker,
+touch multi-select, and a role-appropriate accessible name for any kind.
+Every one of these remains scoped to `task-annotation-accessible-shared-
+controls`, which this audit's evidence (test files above, plus this
+section's file:line citations — now naming the code as it stood before the
+update above; re-verify a citation before treating it as current) gives a
+concrete starting point rather than a re-discovery task.
+
+**Update, 2026-08-30 (task-annotation-accessible-shared-controls — this
+task).** Closes the "Still open" list above, in full, across all six kinds
+plus `group`, verified by three new test files
+(`AnnotationAccessibleSharedControls.test.jsx`,
+`GraphCanvasAccessibleSharedControls.test.jsx`,
+`AnnotationEditTriggerReachability.test.jsx` — the last one real-`reactflow`,
+unmocked, following `AnnotationAccessibilityAudit.test.jsx`'s own pattern for
+exactly the reason that file states: jsdom's `visibility:hidden` artifact
+would otherwise mask a mock-only pass):
+
+- **Accessible name (area 6, all ten rows).** One shared function,
+  `computeAnnotationAriaLabel` (`utils/annotations.js`), derives a per-kind
+  name — `"Sticky note, {text}"`, `"Label, {text}"`, `"Text, {text}"`,
+  `"{shape} shape, {caption}"`, `"{icon} icon"`, `"Vote dot"`, `"Image,
+  {alt}"`, `"Arrow"`, `"Freehand stroke"`, `"Group, {label}"` — matching the
+  decision's own "sticky note, Budget Q3" bar. It is wired at exactly one
+  point, `GraphCanvas.jsx`'s `nodesWithAriaLabels` (a `useMemo` mapped over
+  `nodes` immediately before the `<ReactFlow>` element, writing `node.
+  ariaLabel` for the array ReactFlow actually renders), rather than at
+  `overlayToFlowNode`/`createAnnotation`/every remote-op/group-upsert branch
+  individually — a node's `ariaLabel` is therefore always current (a rename,
+  recolour or retype recomputes it on the very next render) rather than
+  something that could go stale the way a value written once at creation
+  time would after the annotation is later edited. Every kind word is a
+  `labels`-prop default (`ariaKindNote`, `ariaKindIcon`, …), following this
+  package's existing i18n-props rule — not a hardcoded English string —
+  threaded through `AnnotationContext`, `GraphCanvas.jsx`'s own `cml`
+  defaults, `App.jsx` and both `en.json`/`sv.json`.
+- **Keyboard way in (area 1) — the literal Shift+F10/Menu-key gap.**
+  `GraphCanvas.jsx`'s existing document-level keydown handler now also
+  matches `e.key === 'ContextMenu'` or `Shift+F10`: when either fires while
+  focus is on a `.react-flow__node` wrapper, it finds that wrapper's own
+  `.annotation-edit-trigger` button and clicks it — reusing the exact visible
+  Edit button task-annotation-responsive-bottom-toolbox built, rather than
+  trying to make the dead `contextmenu`-event-on-the-wrapper dispatch work.
+  `group` gets that same Edit button for the first time (it was the one kind
+  task-annotation-responsive-bottom-toolbox left out), wired through
+  `useAnnotationEditTrigger` exactly like the other five, so the Shift+F10
+  path — and the pointer/touch Edit-button path — now reach it too.
+- **Arrow-key menu navigation and a focus trap (area 1).** A new shared hook,
+  `useAnnotationMenuKeyNav` (`ContextMenus.jsx`, alongside — and reusing the
+  same roving-index algorithm as — the pre-existing `useRootMenuKeyNav` the
+  graph-node/pane menu system already had), wired onto all six kinds' own
+  menu containers via `onKeyDown`: ArrowUp/ArrowDown/Home/End rove focus
+  across the menu's real `<button>`s, and Tab on the last item / Shift+Tab on
+  the first wraps rather than escaping the menu.
+- **Focus move-in/restore-out generalised to the right-click path (area 1).**
+  `useAnnotationEditTrigger.js` no longer gates its focus-move-on-open/
+  restore-on-close behaviour on `openedViaButtonRef` — every menu, however it
+  opened, now moves focus to its first item on open; on close it restores to
+  the Edit button for the button path, or to whatever had focus immediately
+  before for the right-click path (mirroring `ContextMenus.jsx`'s
+  `useMenuOpenFocus`).
+- **Ready to edit on create (area 3).** `createAnnotation`
+  (`GraphCanvas.jsx`) now marks the new node `selected: true` (deselecting
+  whatever was selected before) and focuses its DOM wrapper one frame later —
+  a keyboard user who activates a toolbox button lands on a selected,
+  focused annotation with its Edit button one Tab away, rather than having to
+  hunt for what was just created. Scoped to click/keyboard toolbox creation;
+  `freehand`'s own pointer-drawn creation is unchanged (drawing a stroke is
+  inherently a pointer gesture — there is no keyboard equivalent to make
+  "ready" here beyond what area-2's existing keyboard selection already
+  gives the finished stroke).
+- **Non-drag resize (area 4).** A new shared component,
+  `AnnotationSizeControl.jsx` — two real `<input type="number">` fields (`aria-label`ed Width/Height) plus an Apply button, reading the node's current
+  `style.width`/`height` on mount and committing via the same `setNodes`/
+  `notifyChange('geometry')` path a drag-resize uses — offered by every kind
+  that already has a NodeResizer box: `NoteNode`, `GenericAnnotationNode`'s
+  `shape`/`image` (its `RESIZABLE_KINDS`), and `GroupNode`. `label`/`text`/
+  `icon`/`vote_dot`/`arrow`/`freehand` render it nowhere, matching exactly
+  what their own drag handles already do (or do not) offer — see [Canvas
+  rendering](#canvas-rendering) for which kinds have no box to resize at all.
+- **Non-drag "Attach to…" target-tap mode (area 4).** A new cross-cutting
+  mechanism: an annotation's own menu (for the three `ATTACHABLE_OVERLAY_
+  KINDS` — `label`, `text`, `icon`) gets an "Attach to…" button that puts
+  `GraphCanvas.jsx` into a one-annotation attach-pending state
+  (`attachModeId`), surfaced by a real `status`-role banner with a Cancel
+  button (never only "long-press" or a bare instruction); the next click on
+  an eligible node/annotation (any kind but `group` or the annotation itself
+  — `isEligibleAttachTarget`, matching `computeDroppedAttachment`'s own
+  candidacy rule) resolves the attachment via a new `computeAttachmentToTarget`
+  helper (refactored out of `computeDroppedAttachment` so the two share one
+  implementation), keeping the annotation's current on-screen offset from the
+  target's centre — the same "free fine adjustment" a drop-to-snap gives. A
+  new "Detach" button (same three kinds, shown once `data.attachment` is set)
+  clears it without needing to drag the annotation away. Escape, or clicking
+  empty canvas, cancels the mode.
+- **Overlap-object picker (area 4).** `GraphCanvas.jsx`'s new `onNodeClick`
+  handler (previously unset — node click-to-select was entirely ReactFlow's
+  own default) computes every node whose *stored* box contains the click's
+  flow position (`nodesAtPoint`, a new `utils/annotations.js` export;
+  `group` excluded as a near-always-overlapping backdrop) without ever
+  calling `preventDefault`/`stopPropagation` — ReactFlow's own default
+  selection of the clicked node still happens exactly as before. When more
+  than one candidate exists, a small picker (`role`-plain button list, each
+  labelled by its own computed accessible name) offers the rest; picking one
+  selects exactly that node and focuses it. A rotated annotation's true
+  outline is not checked — the hit test is the stored axis-aligned box, a
+  conservative approximation stated plainly rather than silently shipped.
+- **Explicit touch multi-select mode (area 5).** A new toggle
+  (`aria-pressed`, labelled "Select multiple") in the compact/touch control
+  cluster (`isCompact` only — this is specifically the touch-first
+  equivalent of holding Shift/Ctrl, which a touchscreen has no key for).
+  While active, `onNodeClick` restores whichever other nodes were selected
+  immediately before the tap ReactFlow's own click-to-select just cleared —
+  net effect, each tap ADDS to the selection. Toggling an already-selected
+  node back OFF individually is not yet supported (tapping empty canvas
+  still clears the whole selection, same as always) — stated as a real, not
+  hidden, scope boundary rather than claimed as done. The pre-existing align/
+  distribute bulk actions (PR #524) are reachable from that multi-selection
+  exactly as they already were from a Shift/Ctrl-built one.
+
+**Still genuinely open, not fabricated as done:** everything this section's
+own **UNTESTABLE-HERE** rows named all along — a real screen reader's actual
+announcement of any of the above, and real touch/pen hardware behaviour for
+the new touch-first controls (multi-select toggle, Attach-to/overlap-picker
+taps, the size-control number inputs on a real on-screen keyboard) — both
+still deferred to `task-annotation-manual-accessibility-touch-acceptance`; no
+physical-device or live-AT pass happened in this task, and none is claimed
+here. The mixed-selection/type exception matrix (locked, remote-leased, vote-
+dot-unattachable, group's own background rule) is exercised by this task's
+own tests per mechanism (each new control's own lock/lease guard, matching
+the pattern every existing menu action already used) rather than gathered
+into one separate table — the per-kind/per-mechanism rows above and the
+acceptance matrix below are that mapping.
 
 ## Acceptance matrix
 
@@ -1676,17 +2422,17 @@ rule](#downstream-closure-rule).
 
 | Type | GUI create/edit | MCP create/edit | Persistence/reload/saved views | Realtime/collaboration | Activity/undo | Accessibility/device |
 |---|---|---|---|---|---|---|
-| `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer/duplicate (right-click) | ✅ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground | ✅ | ✅ op broadcast + revision | ✅ actor-scoped undo | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): keyboard node selection + arrow-key nudge work (ReactFlow default); property menu, rotation control and text-edit entry are right-click/long-press only, no visible touch "Edit" affordance, no designed accessible name |
-| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/duplicate/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape); no colour chosen defaults to `#94a3b8`, `GenericAnnotationNode.jsx`'s `DEFAULT_COLOR` — shared by `icon`/`vote_dot` below and by `shape`'s own unset-fill default), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Text — pre-wired with the identical `content.attachment` shape); no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared gaps as `note` — menu/edit only right-click/long-press, no accessible name (empty when uncaptioned) |
-| `label` | ✅ toolbox create, inline edit, drag, rotate/recolor/resize-text/layer/duplicate (right-click; no colour chosen defaults to `#64748b`, `LabelNode.jsx`'s `DEFAULT_LABEL_COLOR`), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Label) — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles (this row previously claimed "resize" here — corrected, `smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay also carries only `color` and `fontSize` out of `style`, so any other style key an agent sets — `opacity` among them — is dropped on the same leg (`smallfix-label-overlay-drops-nonvisual-style-keys`). `text`, colour, font size, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared gaps as `note` — menu/edit only right-click/long-press, accessible name falls back to its own text with no "label" kind word |
-| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/duplicate/unlock (right-click; no colour chosen defaults to `#111827`, `ArrowNode.jsx`'s `DEFAULT_ARROW_COLOR`); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay carries only `color` out of `style`, so any other style key an agent sets is dropped on the same leg as the box — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only). `rotation`, `z`, `locked`, arrowheads, colour and the GUI's own anchors all survive | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — pure SVG, no text or title anywhere |
-| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) — and no duplicate action either, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the header text (folder glyph + label), or the untranslated `"📁 Group"` default when unnamed |
-| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, independent Fill and Border swatch sections (each a colour or `"transparent"` — task-annotation-merge-frame-into-shape-rectangle, see [Fill and border](#fill-and-border-shape); unset fill defaults to `#94a3b8` same as `text` above, unset border defaults to transparent — this is also where the retired `frame` kind's GUI cell merged into, since a transparent-fill, coloured-border shape is what `frame` used to be, with the border-rendering limitation for the four clip-path variants noted there), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`, `style.fill`/`style.border`) | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the caption when set (any subtype), **empty** when uncaptioned — every subtype indistinguishable by name |
-| `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Icon); right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour (same `#94a3b8` default as `text` above), layer and duplicate | ✅ generic tool set | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the rendered glyph CHARACTER (e.g. "★"), not the icon's name — the `title={data.icon}` attribute is never reached |
-| `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — no text, no title anywhere in its markup |
-| `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to `alt` when set, empty otherwise — never says "image annotation" |
-| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps as every other kind; accessible name is **empty** — pure SVG path(s), no text or title |
-| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path still bypasses `LeaseMap` entirely, by deliberate sequencing rather than an open decision — that is `task-mcp-annotation-human-edit-guard`'s own scope ([gap](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered, including a whole-document-last-write-wins finding for concurrent different-field edits when neither side holds the lease; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ❌ the biggest gaps are shared/cross-type, not per-kind: no keyboard way into any property menu (Shift+F10/Menu-key dispatches to the focused wrapper, not the descendant div every kind's `onContextMenu` is bound on), no visible touch "Edit" entry point (long-press-only), no touch multi-select mode, no attach-to-target mode for an existing annotation, no overlap-object picker, no menu focus-trap/restore/arrow-nav (the pattern exists in `ContextMenus.jsx`/`ToolSlotPicker.jsx` but isn't reused here). Keyboard node selection and arrow-key nudge (ReactFlow defaults) and toolbox creation (this repo's own, real accessible wiring) do already work. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline); owner for all of the above is `task-annotation-accessible-shared-controls` |
+| `note` | ✅ toolbox create, inline edit, drag/resize, rotate/recolor/resize-text/layer/duplicate/opacity (right-click or, since task-annotation-responsive-bottom-toolbox, the Edit button — see [Human authoring surfaces](#human-authoring-surfaces)) | ⚠ `create_sticky_note`/`update_sticky_note` take `rotation`, `z` and `locked` (mirroring the generic tools' fields for the same); `list_sticky_notes` reports all three back — the generic `reorder_annotation`/`set_annotation_lock` still refuse note ids by design, but the dedicated tools now cover the same ground. Neither dedicated tool takes `style`/`opacity` at all, unlike the generic create/update tools' `style` dict — a note's new opacity control is GUI-only; an agent cannot set it | ✅ (the GUI-set value survives the round trip; an agent simply has no tool parameter to set it in the first place — see the previous column) | ✅ op broadcast + revision | ✅ actor-scoped undo | ⚠ audited 2026-08-30, updated same day by `task-annotation-responsive-bottom-toolbox` (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): keyboard node selection + arrow-key nudge work (ReactFlow default); a visible Edit button now opens the same property menu by click/tap/keyboard — text-edit entry (double-click) is still mouse/touch-only. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** a designed accessible name ("Sticky note, {text}"), Shift+F10 keyboard reachability, menu arrow-nav/focus-trap, non-drag resize and selected-and-focused-on-create are now real and test-covered (see the audit's own later dated addendum); a real screen-reader/physical-device pass is still deferred to `task-annotation-manual-accessibility-touch-acceptance` |
+| `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/duplicate/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape); no colour chosen defaults to `#94a3b8`, `GenericAnnotationNode.jsx`'s `DEFAULT_COLOR` — shared by `icon`/`vote_dot` below and by `shape`'s own unset-fill default), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Text — pre-wired with the identical `content.attachment` shape); no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ⚠ audited 2026-08-30, updated same day (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same as `note` — a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("Text, {text}", or just "Text" when empty), Shift+F10 reachability, menu arrow-nav/focus-trap, an "Attach to…"/Detach pair (`text` is one of `ATTACHABLE_OVERLAY_KINDS`) and selected-and-focused-on-create; screen-reader/physical-device verification still deferred |
+| `label` | ✅ toolbox create, inline edit, drag, rotate/recolor/resize-text/layer/duplicate (right-click; no colour chosen defaults to `#64748b`, `LabelNode.jsx`'s `DEFAULT_LABEL_COLOR`), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Label) — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles (this row previously claimed "resize" here — corrected, `smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay used to carry only `color` and `fontSize` out of `style`, dropping any other style key an agent set; `opacity` is no longer one of them — task-annotation-responsive-bottom-toolbox's opacity control needed the same leg wired both ways and closed it for that one key while adding the control (`smallfix-label-overlay-drops-nonvisual-style-keys` — partially closed; a hypothetical future style key beyond `color`/`fontSize`/`opacity` would still be dropped, since the translator still lists fields explicitly rather than passing `style` through). `text`, colour, font size, opacity, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ⚠ audited 2026-08-30, updated same day (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same as `note` — a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("Label, {text}"), Shift+F10 reachability, menu arrow-nav/focus-trap, an "Attach to…"/Detach pair and selected-and-focused-on-create; screen-reader/physical-device verification still deferred |
+| `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/duplicate/unlock (right-click; no colour chosen defaults to `#111827`, `ArrowNode.jsx`'s `DEFAULT_ARROW_COLOR`); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay used to carry only `color` out of `style` — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only); `opacity` was added alongside `label`'s own fix and is no longer dropped, same caveat about a hypothetical future style key. `rotation`, `z`, `locked`, arrowheads, colour, opacity and the GUI's own anchors all survive | ✅ | ✅ | ⚠ audited 2026-08-30, updated same day (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("Arrow", a fixed word — a line has no caption to include), Shift+F10 reachability and menu arrow-nav/focus-trap; not one of `ATTACHABLE_OVERLAY_KINDS` (it attaches per-endpoint, its own separate mechanism, unchanged) so it gets no "Attach to…"/Detach pair; screen-reader/physical-device verification still deferred |
+| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); a group-vs-group-only "Group order" layer row (bring forward / send backward among groups — see [Group background layer order](#group-background-layer-order); `z` is still never drawn as CSS, this row writes it purely as the groups-bucket sort key) — and no duplicate action, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): was the one kind task-annotation-responsive-bottom-toolbox left out entirely (no Edit button, no accessible name). **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has an Edit button (click/tap/keyboard, incl. Shift+F10), the same menu arrow-nav/focus-trap and focus-move/-restore as the other five kinds, a non-drag size control, and a designed accessible name ("Group, {label}", never the untranslated "📁 Group" fallback); screen-reader/physical-device verification still deferred |
+| `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, independent Fill and Border swatch sections (each a colour or `"transparent"` — task-annotation-merge-frame-into-shape-rectangle, see [Fill and border](#fill-and-border-shape); unset fill defaults to `#94a3b8` same as `text` above, unset border defaults to transparent — this is also where the retired `frame` kind's GUI cell merged into, since a transparent-fill, coloured-border shape is what `frame` used to be, with the border-rendering limitation for the four clip-path variants noted there), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`, `style.fill`/`style.border`) | ✅ | ✅ | ✅ | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("{subtype} shape, {caption}" — e.g. "hexagon shape, Phase 2" — every subtype now distinguishable by name, not just by caption), Shift+F10 reachability, menu arrow-nav/focus-trap and a non-drag size control (one of `RESIZABLE_KINDS`); screen-reader/physical-device verification still deferred |
+| `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Icon); right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour (same `#94a3b8` default as `text` above), layer and duplicate | ✅ generic tool set | ✅ | ✅ | ✅ | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("{name} icon", e.g. "star icon" — the configured NAME, computed centrally rather than left to the accname algorithm's own glyph-content fallback), Shift+F10 reachability, menu arrow-nav/focus-trap and an "Attach to…"/Detach pair (one of `ATTACHABLE_OVERLAY_KINDS`); screen-reader/physical-device verification still deferred |
+| `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed, fixed accessible name ("Vote dot") and Shift+F10/menu arrow-nav/focus-trap reachability; deliberately gets no "Attach to…" — `vote_dot` was removed from `ATTACHABLE_OVERLAY_KINDS` by task-annotation-vote-dot-simplify and stays that way here; screen-reader/physical-device verification still deferred |
+| `image` | ✅ clipboard paste, OS file drop, and the toolbox's file-picker item all ingest through `POST /api/sessions/{id}/annotations/image` (same pipeline as MCP); move/resize/rotate (right-click)/layer/duplicate/delete via the generic annotation context menu once created — no `lock` control exists in any annotation context menu (only `Unlock`, on an already-locked annotation; locking a generic annotation is MCP-only, `set_annotation_lock`). This row previously overclaimed `lock` and `copy` both when neither GUI action existed (`smallfix-contract-image-row-claims-absent-lock-and-copy`); `copy`/duplicate has since shipped as a client-side action (`AnnotationDuplicateControl`) that never calls `duplicate_annotation` itself — see [Layer order](#layer-order) — while `lock` remains MCP-only, so only half of that correction still applies | ✅ `create_image_annotation` ingests; generic create/update refuse image content, and no session annotation write can persist a *new* non-embedded image URL — note the duplicate, saved-view and budget limits in [enforcement](#image-ingest-enforcement) | ✅ | ✅ | ⚠ actor-scoped undo works, but the op is attributed to a dedicated server client id rather than the pasting browser's own (required so the pasting browser's own SSE subscription sees the embedded result instead of dropping it as a self-authored echo — see `_HUMAN_IMAGE_INGEST_CLIENT_ID` in `rest_api.py`), so only that marker's own undo call reverts it, not the pasting browser's | ⚠ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed accessible name ("Image, {alt}", or just "Image" — always says what it is, not only an echo of whatever `alt` happens to be), Shift+F10 reachability, menu arrow-nav/focus-trap and a non-drag size control (one of `RESIZABLE_KINDS`); screen-reader/physical-device verification still deferred |
+| `freehand` | ⚠ toolbox "Freehand" item arms a one-shot pointer-capture drawing mode (coalesced samples, device pressure when reported, constant-width fallback otherwise, concurrent-input suppressed with a notice); right-click property editor for color/width/smoothing/opacity plus the shared layer and duplicate rows (a stroke drawn without choosing a colour is black — the previous near-white default was invisible on the canvas as rendered); a `rotation` on the document model is still never drawn, and a `w`/`h` resize likewise changes nothing on screen; unlike that rotation, the `w`/`h` is also not preserved across a browser round trip (`smallfix-browser-clobbers-unsized-annotation-geometry`). Both are tracked gaps, not decided non-goals (see Canvas rendering) | ✅ generic tool set — `freehand` has been in `GENERIC_ANNOTATION_TYPES` since #422, so create/update/reorder/lock/delete already worked; `duplicate_annotation` was missing the `translate_freehand_points` call `update_annotation`'s patch builder already had (a duplicated stroke kept its original `points` at a moved envelope position), fixed here | ⚠ the document model round-trips it, but the canvas translator drops `geometry.w`/`h` (`smallfix-browser-clobbers-unsized-annotation-geometry`), so a `w`/`h` an agent set is reset to the model default by the next autosave that ships the stroke, and by any saved view. `points` (with their per-point pressure), `smoothing`, `strokeWidth`, `pointerType`, `pressureSource`, colour, `opacity`, `rotation`, `z` and `locked` all survive | ✅ same op broadcast as every other type — MCP creation now gives a way to exercise this live | ✅ `translate_freehand_points` covers move, and undo restores the sampled points, not just the envelope (`test_undo_of_a_freehand_move_restores_its_sampled_points`) | ❌ no physical stylus/touch pass — the GUI wiring above is verified only under mouse-event emulation, not a real device. Also audited 2026-08-30 for keyboard/screen-reader controls (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): a visible Edit button (via its own right-click menu — freehand's own opacity control stayed a separate implementation, see the audit's "Update, 2026-08-30" note) now opens the menu. **Update 2026-08-30 (task-annotation-accessible-shared-controls):** now has a designed, fixed accessible name ("Freehand stroke"), Shift+F10 reachability and menu arrow-nav/focus-trap; no size control (a stroke's geometry is its sampled points, not a box — see [Canvas rendering](#canvas-rendering)) and no "Attach to…" (not one of `ATTACHABLE_OVERLAY_KINDS`); screen-reader/physical-device verification still deferred (unchanged from the "no physical stylus/touch pass" line above, which this does not close) |
+| cross-type | — | — | — | ⚠ create/delete/style/geometry publish immediately and note/label/text/shape text is now live-synced and debounced at 300 ms, split out from the general autosave debounce; every annotation kind now distinguishes a purely cosmetic selection claim (`ClaimMap`, unenforced) from an exclusive edit lease (`LeaseMap`) acquired only when actual editing starts — first-actual-editor-wins, enforced client-side and server-side alike, with the server rejecting a browser write (ops, image ingest and undo alike) against a lease someone else holds (`dec-mcp-agent-ops-vs-annotation-claimmap`, task-annotation-exclusive-edit-leases); the MCP write path's own bypass is now closed too (`task-mcp-annotation-human-edit-guard`): every synchronous MCP write method that can mutate an existing annotation checks the same `LeaseMap` at its own mutation boundary and never acquires one itself ([gap closed](#operation-timing-and-leases)); the two-real-client conflict matrix ([above](#two-client-conflict-matrix)) is now documented and test-covered; the whole-document-last-write-wins finding it originally recorded for concurrent different-field edits with no lease held is now fixed by field-level patches and per-field `base_version` checking (`dec-annotation-field-patches-and-conflicts`, [Field-level patches and base_version](#field-level-patches-and-base_version)) — a legacy caller that supplies no `base_version` at all keeps the old unprotected behaviour as a documented fallback, not a live gap for a real client; a per-kind reconnect/catch-up/duplicate-suppression/lock-ownership audit across `text`/`shape`/`icon`/`vote_dot`/`image`/`freehand` (`GraphCanvasRemote.test.jsx`, `TestPerKindReconnectCatchUpAndLocks`) found no kind-specific gap | ✅ actor-scoped conditional undo (`session_activity.py`) | ⚠ **Update 2026-08-30 (task-annotation-accessible-shared-controls):** every shared/cross-type gap this row used to name is now closed and test-covered — Shift+F10/Menu-key now finds and clicks the visible Edit button (`GraphCanvas.jsx`'s document-level keydown handler); a touch multi-select mode (a real toggle, tap-to-add); a non-drag "Attach to…" target-tap mode plus Detach, for `label`/`text`/`icon`; an overlap-object picker (`onNodeClick`, `nodesAtPoint`); a menu focus-trap/arrow-nav shared by all six kinds' own menus (`useAnnotationMenuKeyNav`); focus-move/-restore generalised to the right-click path too (`useAnnotationEditTrigger.js`); non-drag resize for the kinds that carry a box; and a per-kind designed accessible name (`computeAnnotationAriaLabel`, wired once for every kind via `GraphCanvas.jsx`'s `nodesWithAriaLabels`). Keyboard node selection and arrow-key nudge (ReactFlow defaults), toolbox creation, and a visible, keyboard/tap-reachable Edit entry point on all six kinds now (including `group`), do already work. Every lock/lease/type exception each new control respects is exercised by its own test alongside the mechanism (locked → unlock/duplicate only; `isRemoteLocked` → refuse + `notifyRemoteLockedAttempt`; `vote_dot` excluded from attach; `group` excluded from the overlap picker and from non-drag attach targeting). **Still genuinely open, not fabricated as done:** a real screen reader's actual announcement of any of the above, and real touch/pen hardware behaviour for the new touch-first controls — both deferred to `task-annotation-manual-accessibility-touch-acceptance`, which is why this row is ⚠, not ✅, per the [Downstream closure rule](#downstream-closure-rule)'s own "not merely coded" bar. See [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline) |
 
 ## Downstream closure rule
 

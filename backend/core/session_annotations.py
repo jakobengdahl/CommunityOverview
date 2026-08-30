@@ -101,6 +101,13 @@ _RESERVED_ANNOTATION_KEYS = {
     "updated_at",
     "created_by",
     "updated_by",
+    # Server-owned versioning bookkeeping (dec-annotation-field-patches-and-
+    # conflicts) — see session_store.py's _ANNOTATION_META_FIELDS. Never
+    # caller-settable; "version" is surfaced read-only by project_note/
+    # project_annotation so a caller can supply it back as base_version, but
+    # neither belongs inside a content/patch payload.
+    "version",
+    "field_versions",
 }
 
 # The `content.shape` variants a `shape` annotation accepts
@@ -130,6 +137,21 @@ ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
 # packages/ui-graph-canvas/src/utils/annotations.js). No migration was
 # written for a vote_dot already stored with one.
 ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"})
+
+# Semantic default layer at creation (task-annotation-render-direct-
+# manipulation's remaining scope: "semantic default layers - a per-kind
+# default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
+# Mirrors `DEFAULT_ANNOTATION_Z_BY_TYPE`/`defaultAnnotationZ` in
+# packages/ui-graph-canvas/src/utils/annotationModel.js exactly — see that
+# file's comment for the full reasoning (only `shape` moves, everything else
+# including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
+# annotation and a GUI-created one of the same kind start on the same layer.
+SHAPE_DEFAULT_Z = -1
+DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {"shape": SHAPE_DEFAULT_Z}
+
+
+def default_annotation_z(annotation_type: Optional[str]) -> float:
+    return DEFAULT_ANNOTATION_Z_BY_TYPE.get(annotation_type, 0)
 
 
 def _attachment_error(value: Any, *, field: str) -> Optional[str]:
@@ -395,6 +417,14 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "rotation": geometry.get("rotation", 0),
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
+        # Read-only bookkeeping (dec-annotation-field-patches-and-conflicts):
+        # bumped on every applied write. `update_sticky_note` does not accept
+        # it back as a `base_version` yet (unlike the generic
+        # `update_annotation` tool) — projected here regardless so a future
+        # caller/UI has it available, and so this shape matches
+        # `project_annotation`'s. Defaults to 1 for an annotation stored
+        # before this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),
@@ -753,7 +783,7 @@ def build_annotation(
         "kind": type,
         "position": {"x": x, "y": y},
         "geometry": geometry,
-        "z": z if z is not None else 0,
+        "z": z if z is not None else default_annotation_z(type),
         "locked": bool(locked),
     }
     if w is not None or h is not None:
@@ -921,6 +951,11 @@ def project_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
         "content": content,
+        # Read-only: pass straight back as update_annotation's base_version
+        # to opt into field-level conflict checking on a later write
+        # (dec-annotation-field-patches-and-conflicts). Defaults to 1 for an
+        # annotation stored before this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),

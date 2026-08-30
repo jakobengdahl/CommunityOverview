@@ -45,6 +45,53 @@ describe('overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half)
+  // was previously freehand-only; every kind now round-trips it the same way.
+  it('round-trips opacity on a note, label and arrow', () => {
+    const note = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.5,
+      size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(note).data.opacity).toBe(0.5);
+    expect(flowNodeToOverlay(overlayToFlowNode(note))).toEqual(note);
+
+    const label = {
+      id: 'label-1',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.75,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(label).data.opacity).toBe(0.75);
+    expect(flowNodeToOverlay(overlayToFlowNode(label))).toEqual(label);
+
+    const arrow = {
+      id: 'arrow-1',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      opacity: 0.3,
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(arrow).data.opacity).toBe(0.3);
+    expect(flowNodeToOverlay(overlayToFlowNode(arrow))).toEqual(arrow);
+  });
+
   // z (layer order), locked (the canvas UI's own edit-lock convention, set
   // via the generic MCP annotation tools) and rotation are envelope fields on
   // every v1 annotation type. A translator that dropped them would, on the
@@ -69,6 +116,33 @@ describe('overlay serialization', () => {
     expect(node.draggable).toBe(false);
     expect(node.data.locked).toBe(true);
     expect(node.data.rotation).toBe(30);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
+  // `field_versions` (dec-annotation-field-patches-and-conflicts) are the
+  // same kind of envelope field as z/locked/rotation above — a translator
+  // that dropped them silently disabled the same-field-conflict protection
+  // for a real browser, since sessionSyncClient.js's `computeOps` reads
+  // `version` off exactly this shape to compute `base_version`.
+  it('round-trips a server-assigned version and field_versions through the flow node', () => {
+    const overlay = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 1, y: 2 },
+      text: 'hi',
+      color: '#FEF08A',
+      fontSize: 18,
+      size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 7,
+      field_versions: { text: 7, geometry: 3 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(7);
+    expect(node.data.field_versions).toEqual({ text: 7, geometry: 3 });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -283,6 +357,25 @@ describe('generic annotation overlay serialization', () => {
     expect(OVERLAY_TYPES.has('frame')).toBe(false);
   });
 
+  it('round-trips opacity on every generic kind (text/shape/icon/vote_dot/image)', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
+      const overlay = {
+        id: `${kind}-1`,
+        kind,
+        position: { x: 0, y: 0 },
+        color: '#fff',
+        opacity: 0.5,
+        z: 0,
+        locked: false,
+        rotation: 0,
+        size: { w: 0, h: 0 },
+      };
+      const node = overlayToFlowNode(overlay);
+      expect(node.data.opacity).toBe(0.5);
+      expect(flowNodeToOverlay(node).opacity).toBe(0.5);
+    }
+  });
+
   it('round-trips a text overlay (colour/font size)', () => {
     const overlay = {
       id: 'text-1',
@@ -327,6 +420,53 @@ describe('generic annotation overlay serialization', () => {
       rotation: 0,
     });
     expect(node.zIndex).toBe(2);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: pins the same
+  // fix for a generic overlay and for an arrow/line, not just note/label —
+  // GENERIC_OVERLAY_FIELDS (the per-kind content whitelist) never carries
+  // version/field_versions on purpose; they must instead survive through the
+  // unconditional envelope handling next to z/locked/rotation.
+  it('round-trips version/field_versions on a generic (shape) overlay', () => {
+    const overlay = {
+      id: 'shape-versioned',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'rectangle',
+      fill: '#60A5FA',
+      border: 'transparent',
+      size: { w: 160, h: 96 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 4,
+      field_versions: { fill: 4 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(4);
+    expect(node.data.field_versions).toEqual({ fill: 4 });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips version/field_versions on an arrow overlay', () => {
+    const overlay = {
+      id: 'arrow-versioned',
+      kind: 'arrow',
+      position: { x: 5, y: 6 },
+      dx: 10,
+      dy: 20,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 2,
+      field_versions: { dx: 2 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(2);
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 

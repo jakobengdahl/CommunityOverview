@@ -190,6 +190,27 @@ class TestCreateStickyNote:
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, note_tools):
+        """task-mcp-annotation-human-edit-guard: create-by-id targeting a note
+        another (browser) client holds a live edit lease on is refused."""
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="v1", annotation_id="note-1"
+        )
+        manager.leases.acquire(session.id, "browser-1", ["note-1"])
+
+        result = tools_map["create_sticky_note"](
+            session_id=session.id, x=9, y=9, text="hijacked", annotation_id="note-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "note-1"
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_sticky_notes"](session_id=session.id)["notes"][0]
+        assert after["text"] == "v1"
+
     def test_busy_when_lock_held(self, note_tools):
         tools_map, manager = note_tools
         session = manager.create_session()
@@ -417,6 +438,26 @@ class TestUpdateStickyNote:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_mutate(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, text="v1"
+        )
+        note_id = created["note"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [note_id])
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, text="hijacked"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == note_id
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_sticky_notes"](session_id=session.id)["notes"][0]
+        assert after["text"] == "v1"
+
     def test_invalid_session_id(self, note_tools):
         tools_map, _ = note_tools
         result = tools_map["update_sticky_note"](
@@ -430,6 +471,133 @@ class TestUpdateStickyNote:
             session_id="9999-9999", annotation_id="note-1", text="x"
         )
         assert result["success"] is False
+
+
+class TestUpdateStickyNoteBaseVersion:
+    """smallfix-annotation-version-dropped-by-browser-pipeline: the same
+    field-level conflict protocol the generic ``update_annotation`` tool
+    already exposes (see TestUpdateAnnotationBaseVersion in
+    test_mcp_generic_annotation_tools.py, whose base_version tests this
+    mirrors), now wired through ``update_sticky_note`` too. The gap this
+    closes is narrower than the generic tool's: ``build_note_patch`` always
+    resends the whole ``geometry`` sub-object on any position/size/rotation
+    change, so a position-only move silently clobbered a concurrent resize
+    with zero conflict raised — exactly the scenario the second test below
+    reproduces.
+    """
+
+    def test_matching_base_version_applies_and_bumps_version(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+        assert created["note"]["version"] == 1
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id,
+            annotation_id=note_id,
+            text="v2",
+            base_version=created["note"]["version"],
+        )
+
+        assert result["success"] is True
+        assert result["note"]["text"] == "v2"
+        assert result["note"]["version"] == 2
+
+    def test_stale_base_version_on_a_genuinely_conflicting_field_is_refused(
+        self, note_tools
+    ):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+        starting_version = created["note"]["version"]
+
+        first = tools_map["update_sticky_note"](
+            session_id=session.id,
+            annotation_id=note_id,
+            text="writer A",
+            base_version=starting_version,
+        )
+        assert first["success"] is True
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id,
+            annotation_id=note_id,
+            text="writer B",
+            base_version=starting_version,  # stale: A already moved this field on
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "field_conflict"
+        assert "text" in result["conflicting_fields"]
+        assert result["server_version"] == first["note"]["version"]
+        assert result["note"]["text"] == "writer A"
+        stored = session.state["annotations"][0]
+        assert stored["text"] == "writer A"
+
+    def test_position_only_move_no_longer_clobbers_a_concurrent_resize(
+        self, note_tools
+    ):
+        """The gap this task closes: build_note_patch always resends the
+        current w/h inside `geometry` on a position-only move (it has to —
+        SessionStore's merge is shallow). Without base_version, a stale
+        position-only write silently reverted a resize that landed in
+        between, with no conflict raised at all — this pins that it now is.
+        """
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](
+            session_id=session.id, x=0, y=0, w=200, h=100
+        )
+        note_id = created["note"]["id"]
+        starting_version = created["note"]["version"]
+
+        resized = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, w=500, h=400
+        )
+        assert resized["success"] is True
+        assert resized["note"]["w"] == 500 and resized["note"]["h"] == 400
+
+        # A stale client, unaware of the resize, tries a position-only move
+        # from the pre-resize version.
+        result = tools_map["update_sticky_note"](
+            session_id=session.id,
+            annotation_id=note_id,
+            x=10,
+            y=20,
+            base_version=starting_version,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "field_conflict"
+        # geometry is the field build_note_patch actually touches for a move.
+        assert "geometry" in result["conflicting_fields"]
+        # The resize still stands — untouched by the refused move.
+        stored = session.state["annotations"][0]
+        assert stored["geometry"]["w"] == 500 and stored["geometry"]["h"] == 400
+
+    def test_omitted_base_version_keeps_the_legacy_unconditional_merge(
+        self, note_tools
+    ):
+        """No behaviour change for a caller that doesn't opt in — matches the
+        generic tool's documented fallback."""
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+
+        first = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, text="writer A"
+        )
+        assert first["success"] is True
+
+        result = tools_map["update_sticky_note"](
+            session_id=session.id, annotation_id=note_id, text="writer B"
+        )
+
+        assert result["success"] is True
+        assert result["note"]["text"] == "writer B"
 
 
 class TestDeleteStickyNote:
@@ -488,6 +656,23 @@ class TestDeleteStickyNote:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
         # The rejected delete left the note in place.
+        assert len(session.state["annotations"]) == 1
+
+    def test_lease_conflict_is_reported_and_does_not_delete(self, note_tools):
+        tools_map, manager = note_tools
+        session = manager.create_session()
+        created = tools_map["create_sticky_note"](session_id=session.id, x=0, y=0)
+        note_id = created["note"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [note_id])
+
+        result = tools_map["delete_sticky_note"](
+            session_id=session.id, annotation_id=note_id
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == note_id
+        assert result["held_by"] == "browser-1"
         assert len(session.state["annotations"]) == 1
 
     def test_invalid_session_id(self, note_tools):

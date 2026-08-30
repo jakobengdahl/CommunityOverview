@@ -10,7 +10,10 @@ import {
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './ArrowNode.css';
 
 /**
@@ -61,7 +64,14 @@ function ArrowNode({ id, data, selected }) {
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
   useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -234,6 +244,7 @@ function ArrowNode({ id, data, selected }) {
   const dx = Number(data.dx ?? 160);
   const dy = Number(data.dy ?? 0);
   const color = data.color || DEFAULT_ARROW_COLOR;
+  const opacity = Number.isFinite(data.opacity) ? data.opacity : 1;
   const locked = Boolean(data.locked);
   const startArrow = Boolean(data.startArrow);
   const endArrow = data.endArrow ?? true;
@@ -309,16 +320,23 @@ function ArrowNode({ id, data, selected }) {
             stroke="transparent"
             strokeWidth={16}
           />
-          <line
-            x1={originX}
-            y1={originY}
-            x2={endX}
-            y2={endY}
-            stroke={color}
-            strokeWidth={2.5}
-            markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
-            markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
-          />
+          {/* Opacity (task-annotation-responsive-bottom-toolbox) applies only
+              to the painted line — the transparent hit target above and the
+              endpoint handles below stay fully interactive/visible whatever
+              the arrow's opacity, matching FreehandAnnotationNode's own
+              `<g className="graph-freehand-stroke" opacity={opacity}>`. */}
+          <g opacity={opacity}>
+            <line
+              x1={originX}
+              y1={originY}
+              x2={endX}
+              y2={endY}
+              stroke={color}
+              strokeWidth={2.5}
+              markerStart={startArrow ? `url(#graph-arrow-tail-${id})` : undefined}
+              markerEnd={endArrow ? `url(#graph-arrow-head-${id})` : undefined}
+            />
+          </g>
           {selected && !locked && !remoteLocked && (
             <>
               <circle
@@ -347,13 +365,40 @@ function ArrowNode({ id, data, selected }) {
           )}
         </svg>
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected. An arrow has no box to anchor a corner to, so
+          this sits near the flow-position origin (the arrow's start point;
+          `overlayToFlowNode` puts the ReactFlow node there) rather than any
+          particular visual corner — a sibling of `.graph-arrow-node`, so its
+          own `marginLeft`/`marginTop` origin shift does not apply to it. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger annotation-edit-trigger-arrow nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               <>
@@ -383,6 +428,11 @@ function ArrowNode({ id, data, selected }) {
                   <span>{labels.arrowEndHead}</span>
                   <span>{endArrow ? '✔' : ''}</span>
                 </button>
+                <AnnotationOpacityControl
+                  labels={labels}
+                  opacity={opacity}
+                  onChangeOpacity={changeOpacity}
+                />
                 <AnnotationLayerControls
                   labels={labels}
                   locked={data.locked}
@@ -395,7 +445,7 @@ function ArrowNode({ id, data, selected }) {
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

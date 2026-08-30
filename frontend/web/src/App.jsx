@@ -186,6 +186,18 @@ function App() {
   // component doc comment and GraphCanvas's annotationToolboxPortalContainer
   // prop. null whenever the sheet is closed or MobileShell isn't mounted.
   const [mobileAnnotationContainer, setMobileAnnotationContainer] = useState(null);
+  // The EDIT-time counterpart of mobileAnnotationContainer above
+  // (task-annotation-responsive-bottom-toolbox): the mobile Edit sheet's own
+  // content DOM node, and the `{open, close}` pair MobileShell hands up so a
+  // node component deep inside GraphCanvas can ask MobileShell's own
+  // `useSurfaceManager` instance to open/close the `'detail'` surface — see
+  // MobileShell.jsx's component doc comment. Starts `null` (not stable
+  // no-ops): GraphCanvas's `editSheet.capable` is gated on this being
+  // present, so a node's Edit button correctly falls back to the floating
+  // menu rather than silently no-op'ing during the one-paint window between
+  // MobileShell mounting and its own ready-effect actually firing.
+  const [mobileAnnotationEditContainer, setMobileAnnotationEditContainer] = useState(null);
+  const [detailSheetController, setDetailSheetController] = useState(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
@@ -269,6 +281,42 @@ function App() {
   // touches only the entities the op names, so a concurrent local edit is never
   // clobbered (unlike a wholesale reload). The sync client has already folded
   // the op into its baseline, so the store changes here do not echo back out.
+  // The actual canvas-mutating half of an annotation create/update — shared by
+  // applyRemoteOp's claim-gated case below (a genuine remote op, or one of an
+  // image ingest's two racing deliveries — see createSelfEchoDedup) and by
+  // onLocalAnnotationsApplied (this client's own op just acked with a fresh
+  // server version — see sessionSyncClient.js's _flush). The two callers must
+  // NOT share the claim() gate: onLocalAnnotationsApplied's id was never
+  // markPending'd for an image-ingest race (that mechanism is scoped to the
+  // dedicated ingest endpoint, never the ops queue this ack comes from), but
+  // claim() cannot tell "an id that happens to collide with an unrelated
+  // in-flight ingest race" apart from "the second half of that race" — routing
+  // an ack through claim() risks consuming a marker the real echo still needs
+  // (e.g. an image annotation moved immediately after being pasted, before its
+  // own echo has arrived), silently reverting that move when the stale echo
+  // then lands unguarded.
+  const applyAnnotationUpsertToCanvas = useCallback(
+    (ann) => {
+      if (!ann || !ann.id) return false;
+      if (ann.kind === 'group') {
+        const [group] = annotationsToGroups([ann]).groups;
+        setRemoteAnnotationOps((prev) => [
+          ...(prev || []),
+          { action: 'upsert-group', group, members: ann.member_node_ids || [] },
+        ]);
+      } else {
+        const [overlay] = annotationsToOverlays([ann]);
+        if (overlay)
+          setRemoteAnnotationOps((prev) => [
+            ...(prev || []),
+            { action: 'upsert-overlay', overlay },
+          ]);
+      }
+      return true;
+    },
+    [setRemoteAnnotationOps]
+  );
+
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -412,6 +460,24 @@ function App() {
         case 'annotation_updated': {
           const ann = op.annotation;
           if (!ann || !ann.id) return false;
+          // No version check here on purpose (smallfix-applyremoteop-canvas-
+          // no-version-guard, round 5): a stale/reordered broadcast for this
+          // annotation is already filtered out before it ever reaches this
+          // function. Ops arrive here from three places — onRemoteOps
+          // (sessionSyncClient.js's `_handleEvent` now suppresses delivery
+          // for a stale annotation_created/annotation_updated the same
+          // `isAnnotationOpStale` check keeps out of its own sync baseline,
+          // so a genuine remote broadcast that gets here is never stale
+          // relative to what this canvas already shows); resyncFromServer's
+          // replay of this client's own not-yet-confirmed local ops (never
+          // "stale" — they are this client's own pending edits); and
+          // handleImageIngest's direct optimistic apply of a brand-new
+          // annotation this client just created (nothing to be stale
+          // relative to). Adding a second, separately-maintained version
+          // check here would risk it drifting from the one upstream rather
+          // than adding real protection — see sessionSyncClient.js's
+          // `isAnnotationOpStale` docstring.
+          //
           // This function is the one shared place both of an image ingest's
           // two deliveries end up — this browser's own direct optimistic
           // apply (handleImageIngest) and its confirming SSE echo (via
@@ -425,21 +491,7 @@ function App() {
           // loser must not, since the winner (or the winner's own baseline
           // fold, for the echo case) already did.
           if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) return false;
-          if (ann.kind === 'group') {
-            const [group] = annotationsToGroups([ann]).groups;
-            setRemoteAnnotationOps((prev) => [
-              ...(prev || []),
-              { action: 'upsert-group', group, members: ann.member_node_ids || [] },
-            ]);
-          } else {
-            const [overlay] = annotationsToOverlays([ann]);
-            if (overlay)
-              setRemoteAnnotationOps((prev) => [
-                ...(prev || []),
-                { action: 'upsert-overlay', overlay },
-              ]);
-          }
-          return true;
+          return applyAnnotationUpsertToCanvas(ann);
         }
         case 'annotation_deleted':
           if (op.annotation_id)
@@ -472,6 +524,7 @@ function App() {
       setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
+      applyAnnotationUpsertToCanvas,
     ]
   );
 
@@ -1926,6 +1979,21 @@ function App() {
       onRemoteOps: (ops) => {
         (ops || []).forEach((op) => applyRemoteOp(op));
       },
+      // This client's own annotation write just got acked with a fresh
+      // server version/field_versions (dec-annotation-field-patches-and-
+      // conflicts) — sessionSyncClient.js already folded it into its own
+      // sync baseline; thread it onto the *live canvas node* too, so the
+      // next local edit's autosave snapshot (which rebuilds from canvas node
+      // data, not from the sync baseline) carries the true version forward
+      // instead of the stale one from before this write. Without this, this
+      // client's own next edit to the same annotation would send a stale
+      // base_version and could spuriously conflict against nothing but its
+      // own prior write. Goes through applyAnnotationUpsertToCanvas directly
+      // rather than applyRemoteOp/its claim() gate — see that helper's own
+      // comment for why this ack must not touch the image-ingest dedup.
+      onLocalAnnotationsApplied: (ops) => {
+        (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
+      },
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
       onLeases: (l) => setRemoteLeases(l),
@@ -1967,19 +2035,28 @@ function App() {
       // permanently rejected.
       //
       // A 409 drop is the same "never retry this stale content" terminal
-      // handling, but a different cause: LeaseConflict
-      // (task-annotation-exclusive-edit-leases) means another client holds a
-      // live edit lease on the annotation this op targeted, not that the op
-      // itself is malformed. Show the same "someone else is editing this
-      // annotation" notice the direct-acquire denial already uses
-      // (GraphCanvas.jsx's annotationRemoteLocked) instead of the generic
-      // sync-error text, so the queued-op path — the actual enforcement point
-      // for most real edits per useAnnotationEditLease's own docstring — tells
-      // the user why their change didn't apply rather than staying silent.
-      onDropped: (batch, status) => {
+      // handling, but two distinct causes now share the status code:
+      // LeaseConflict (task-annotation-exclusive-edit-leases) means another
+      // client holds a live edit lease on the annotation this op targeted;
+      // AnnotationFieldConflict (dec-annotation-field-patches-and-conflicts)
+      // means no lease was held at all, but this op's base_version was stale
+      // for a field someone else genuinely changed since. The two read very
+      // differently to a user, so the response body (parsed by
+      // sessionSyncClient.js only for a terminal drop) tells them apart —
+      // `error: 'field_conflict'` is the REST /ops 409's structured detail
+      // for the second cause; anything else (including LeaseConflict's plain
+      // string detail) falls back to the pre-existing lease notice, the same
+      // "someone else is editing this annotation" text the direct-acquire
+      // denial already uses (GraphCanvas.jsx's annotationRemoteLocked).
+      onDropped: (batch, status, body) => {
         (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
         if (status === 409) {
-          showNotification('info', t('context_menu.annotation_remote_locked'));
+          const detail = body && typeof body.detail === 'object' ? body.detail : null;
+          if (detail && detail.error === 'field_conflict') {
+            showNotification('info', t('context_menu.annotation_field_conflict'));
+          } else {
+            showNotification('info', t('context_menu.annotation_remote_locked'));
+          }
         } else {
           showNotification('error', t('sessions.change_not_saved'));
         }
@@ -1990,6 +2067,7 @@ function App() {
     sessionId,
     resyncFromServer,
     applyRemoteOp,
+    applyAnnotationUpsertToCanvas,
     clearVisualization,
     resetSessionScopedUi,
     showNotification,
@@ -2511,10 +2589,34 @@ function App() {
             annotationLayer: t('context_menu.annotation_layer'),
             annotationLayerFront: t('context_menu.annotation_layer_front'),
             annotationLayerBack: t('context_menu.annotation_layer_back'),
+            groupLayer: t('context_menu.group_layer'),
+            groupLayerFront: t('context_menu.group_layer_front'),
+            groupLayerBack: t('context_menu.group_layer_back'),
             annotationNearbyMenu: t('context_menu.annotation_nearby_menu'),
             annotationNearbyLabel: t('context_menu.annotation_nearby_label'),
             annotationNearbyIcon: t('context_menu.annotation_nearby_icon'),
             annotationNearbyText: t('context_menu.annotation_nearby_text'),
+            annotationOpacity: t('context_menu.annotation_opacity'),
+            editAnnotation: t('context_menu.edit_annotation'),
+            ariaKindNote: t('context_menu.aria_kind_note'),
+            ariaKindLabel: t('context_menu.aria_kind_label'),
+            ariaKindText: t('context_menu.aria_kind_text'),
+            ariaKindShape: t('context_menu.aria_kind_shape'),
+            ariaKindIcon: t('context_menu.aria_kind_icon'),
+            ariaKindVoteDot: t('context_menu.aria_kind_vote_dot'),
+            ariaKindImage: t('context_menu.aria_kind_image'),
+            ariaKindArrow: t('context_menu.aria_kind_arrow'),
+            ariaKindFreehand: t('context_menu.aria_kind_freehand'),
+            ariaKindGroup: t('context_menu.aria_kind_group'),
+            annotationWidth: t('context_menu.annotation_width'),
+            annotationHeight: t('context_menu.annotation_height'),
+            annotationApplySize: t('context_menu.annotation_apply_size'),
+            annotationAttachTo: t('context_menu.annotation_attach_to'),
+            annotationDetach: t('context_menu.annotation_detach'),
+            annotationAttachToHint: t('context_menu.annotation_attach_to_hint'),
+            annotationAttachToCancel: t('context_menu.annotation_attach_to_cancel'),
+            annotationMultiSelectMode: t('context_menu.annotation_multi_select_mode'),
+            annotationOverlapPickerTitle: t('context_menu.annotation_overlap_picker_title'),
           }}
           annotationToolboxLabels={{
             toggleExpand: t('annotation_toolbox.toggle_expand'),
@@ -2551,6 +2653,9 @@ function App() {
             freehandHint: t('annotation_toolbox.freehand_hint'),
           }}
           annotationToolboxPortalContainer={isMobile ? mobileAnnotationContainer : null}
+          annotationEditSheetPortalContainer={isMobile ? mobileAnnotationEditContainer : null}
+          onRequestAnnotationEditSheet={isMobile ? (detailSheetController?.open ?? null) : null}
+          onCloseAnnotationEditSheet={isMobile ? (detailSheetController?.close ?? null) : null}
           nodeColorResolver={getNodeColor}
           sessionKey={sessionId}
           onViewportChange={(vp) => {
@@ -2565,6 +2670,8 @@ function App() {
           onClear={() => requestClear('button')}
           onOpenActivity={() => setActivityOpen(true)}
           onAnnotationSheetContainerChange={setMobileAnnotationContainer}
+          onAnnotationEditSheetContainerChange={setMobileAnnotationEditContainer}
+          onDetailSheetControllerReady={setDetailSheetController}
         />
       ) : (
         <DesktopShell

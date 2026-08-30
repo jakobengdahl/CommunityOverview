@@ -2,9 +2,101 @@ import { describe, it, expect } from 'vitest';
 import {
   annotationDocumentToLegacyMetadata,
   annotationsToGroups,
+  annotationsToOverlays,
   groupsToAnnotations,
   legacyMetadataToAnnotationDocument,
+  overlaysToAnnotations,
 } from './sessionAnnotations';
+
+// smallfix-annotation-version-dropped-by-browser-pipeline: this is the exact
+// pipeline the independent review traced and reproduced —
+// useSharedSession.js's serverStateToMirror pipes a raw server annotation
+// through annotationsToOverlays then overlaysToAnnotations before it is ever
+// handed to the sync client's baseline. Neither function used to read or
+// write `version`/`field_versions`, so a browser's own base_version was
+// always `undefined` on every real annotation_updated op it sent (JSON.
+// stringify drops the key), landing every real write on the server's
+// no-base_version legacy fallback instead of the same-field-conflict check
+// dec-annotation-field-patches-and-conflicts describes. These pin that a
+// server-assigned version now survives the full round trip, for every v1
+// annotation kind, not only note/label.
+describe('version/field_versions survive the server <-> overlay round trip', () => {
+  it.each([
+    { type: 'note', kind: 'note', extra: { text: 'hi' } },
+    { type: 'label', kind: 'label', extra: { text: 'L' } },
+    { type: 'line', kind: 'arrow', extra: { from: { x: 0, y: 0 }, to: { x: 10, y: 0 } } },
+    { type: 'shape', kind: 'shape', extra: { shape: 'rectangle' } },
+    { type: 'text', kind: 'text', extra: { text: 'hi' } },
+    { type: 'icon', kind: 'icon', extra: { icon: 'flag' } },
+    {
+      type: 'freehand',
+      kind: 'freehand',
+      extra: {
+        points: [
+          { x: 0, y: 0 },
+          { x: 5, y: 5 },
+        ],
+      },
+    },
+  ])(
+    'carries version through annotationsToOverlays for a $type annotation',
+    ({ type, kind, extra }) => {
+      const serverAnnotation = {
+        id: `${type}-1`,
+        type,
+        kind: type,
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 10, h: 10, rotation: 0 },
+        version: 7,
+        field_versions: { text: 7 },
+        ...extra,
+      };
+      const [overlay] = annotationsToOverlays([serverAnnotation]);
+      expect(overlay).toBeTruthy();
+      expect(overlay.kind).toBe(kind);
+      expect(overlay.version).toBe(7);
+      expect(overlay.field_versions).toEqual({ text: 7 });
+    }
+  );
+
+  it('round-trips version through annotationsToOverlays then back through overlaysToAnnotations (the exact hydration pipeline)', () => {
+    const serverAnnotation = {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      z: 0,
+      locked: false,
+      version: 7,
+      field_versions: { shape: 5 },
+    };
+    // This is exactly useSharedSession.js's serverStateToMirror pipeline.
+    const overlays = annotationsToOverlays([serverAnnotation]);
+    const annotations = overlaysToAnnotations(overlays);
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0].version).toBe(7);
+    expect(annotations[0].field_versions).toEqual({ shape: 5 });
+  });
+
+  it('round-trips version through the group translators (annotationsToGroups / groupsToAnnotations)', () => {
+    const { groups, parentIds } = annotationsToGroups([
+      { id: 'g1', kind: 'group', label: 'Team', position: { x: 0, y: 0 }, version: 3 },
+    ]);
+    expect(groups[0].version).toBe(3);
+    const [ann] = groupsToAnnotations(groups, parentIds);
+    expect(ann.version).toBe(3);
+  });
+
+  it('does not invent a version for a brand-new, never-synced overlay', () => {
+    const overlay = { id: 'note-new', kind: 'note', position: { x: 0, y: 0 }, text: 'new' };
+    const [annotation] = overlaysToAnnotations([overlay]);
+    expect(annotation.version).toBeUndefined();
+    expect(annotation.field_versions).toBeUndefined();
+  });
+});
 
 describe('group description round-trip (R12)', () => {
   it('carries description through groupsToAnnotations', () => {
@@ -269,5 +361,55 @@ describe('group envelope round-trip (locked, z)', () => {
       annotations: [],
     });
     expect(document.annotations[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+  });
+});
+
+// Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half) was
+// previously freehand-only on this leg too (`style.opacity`, freehand's own
+// pre-existing convention); every kind now carries it the same way.
+describe('opacity round-trip through the server annotation document', () => {
+  it('carries opacity into a note/label/line annotation as style.opacity', () => {
+    const [note, label, line] = overlaysToAnnotations([
+      { id: 'n1', kind: 'note', position: { x: 0, y: 0 }, text: 'x', opacity: 0.5 },
+      { id: 'l1', kind: 'label', position: { x: 0, y: 0 }, text: 'x', opacity: 0.75 },
+      { id: 'a1', kind: 'arrow', position: { x: 0, y: 0 }, dx: 160, dy: 0, opacity: 0.3 },
+    ]);
+    expect(note.style.opacity).toBe(0.5);
+    expect(label.style.opacity).toBe(0.75);
+    expect(line.style.opacity).toBe(0.3);
+  });
+
+  it('carries opacity into a generic (text/shape/icon/vote_dot/image) annotation as style.opacity', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
+      const [ann] = overlaysToAnnotations([
+        { id: `${kind}-1`, kind, position: { x: 0, y: 0 }, opacity: 0.4 },
+      ]);
+      expect(ann.style.opacity).toBe(0.4);
+    }
+  });
+
+  it('reads opacity back out of style.opacity for every kind (the inverse leg)', () => {
+    const overlays = annotationsToOverlays([
+      { id: 'n1', type: 'note', position: { x: 0, y: 0 }, text: 'x', style: { opacity: 0.6 } },
+      { id: 'l1', type: 'label', position: { x: 0, y: 0 }, text: 'x', style: { opacity: 0.6 } },
+      {
+        id: 'a1',
+        type: 'line',
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        style: { opacity: 0.6 },
+      },
+      { id: 't1', type: 'text', position: { x: 0, y: 0 }, style: { opacity: 0.6 } },
+    ]);
+    for (const overlay of overlays) {
+      expect(overlay.opacity).toBe(0.6);
+    }
+  });
+
+  it('leaves opacity absent by default, not forced to a value', () => {
+    const [note] = overlaysToAnnotations([
+      { id: 'n1', kind: 'note', position: { x: 0, y: 0 }, text: 'x' },
+    ]);
+    expect(note.style.opacity).toBeUndefined();
   });
 });

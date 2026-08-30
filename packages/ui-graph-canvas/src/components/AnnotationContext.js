@@ -44,6 +44,26 @@ import { createContext } from 'react';
  * mechanism the post-creation drag-to-attach path uses. `vote_dot` is not
  * offered here (task-annotation-vote-dot-simplify): it is no longer an
  * attachable kind.
+ *
+ * `editSheet` (task-annotation-responsive-bottom-toolbox) is the contextual
+ * "Edit" surface's mobile-sheet wiring, consumed by
+ * `hooks/useAnnotationEditTrigger.js` rather than read directly by node
+ * components:
+ *   - `capable`: true only on a compact/integrated host that has wired the
+ *     mobile edit sheet (GraphCanvas's `onRequestAnnotationEditSheet` prop) —
+ *     mirrors exactly how `annotationToolboxPortalContainer`'s presence gates
+ *     the creation toolbox's own sheet variant. False everywhere else (desktop,
+ *     or a compact host with no BottomSheet to portal into, e.g.
+ *     `frontend/widget`), so the Edit button there opens the same floating
+ *     menu the right-click path already renders, just anchored to the button.
+ *   - `container`: the host DOM node to portal the open menu's content into
+ *     while `capable` and the sheet is actually open; null otherwise (before
+ *     the request has been acted on, or once closed).
+ *   - `requestOpen`/`requestClose`: ask the host to open/close its mobile
+ *     edit sheet (bound to `useSurfaceManager`'s `'detail'` surface in
+ *     `frontend/web`'s `MobileShell`/`App.jsx`). The default below is a
+ *     no-op, `capable: false` context — the same "no host wired up" fail-safe
+ *     every other AnnotationContext field already defaults to.
  */
 export const AnnotationContext = createContext({
   notifyChange: () => {},
@@ -51,6 +71,7 @@ export const AnnotationContext = createContext({
   beginEditing: async (elementIds) => ({ granted: elementIds || [], denied: {} }),
   endEditing: () => {},
   attachNearby: () => {},
+  editSheet: { capable: false, container: null, requestOpen: () => {}, requestClose: () => {} },
   labels: {
     color: 'Colour',
     fill: 'Fill',
@@ -88,9 +109,35 @@ export const AnnotationContext = createContext({
     layer: 'Layer',
     layerFront: 'Bring to front',
     layerBack: 'Send to back',
+    groupLayer: 'Group order',
+    groupLayerFront: 'Bring forward',
+    groupLayerBack: 'Send backward',
     nearbyMenu: 'Add nearby',
     nearbyLabel: 'Label',
     nearbyIcon: 'Icon',
     nearbyText: 'Text',
+    opacity: 'Opacity',
+    editAnnotation: 'Edit',
+    // Accessible-name kind words (task-annotation-accessible-shared-controls) —
+    // see utils/annotations.js's computeAnnotationAriaLabel.
+    ariaKindNote: 'Sticky note',
+    ariaKindLabel: 'Label',
+    ariaKindText: 'Text',
+    ariaKindShape: 'shape',
+    ariaKindIcon: 'icon',
+    ariaKindVoteDot: 'Vote dot',
+    ariaKindImage: 'Image',
+    ariaKindArrow: 'Arrow',
+    ariaKindFreehand: 'Freehand stroke',
+    ariaKindGroup: 'Group',
+    // Non-drag geometry (task-annotation-accessible-shared-controls).
+    width: 'Width',
+    height: 'Height',
+    applySize: 'Apply size',
+    // Non-drag "Attach to…" target-tap mode.
+    attachTo: 'Attach to…',
+    attachToCancel: 'Cancel attaching',
+    detach: 'Detach',
+    attachToHint: 'Choose a target to attach to — Escape to cancel',
   },
 });

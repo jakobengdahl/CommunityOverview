@@ -101,6 +101,61 @@ function useRootMenuKeyNav(containerRef) {
   );
 }
 
+/**
+ * ArrowUp/ArrowDown/Home/End roving navigation plus a Tab focus trap, for the
+ * six annotation-kind context menus (NoteNode/LabelNode/ArrowNode/
+ * GenericAnnotationNode/FreehandAnnotationNode/GroupNode). Reuses
+ * `nextRovingIndex` — the same roving-index algorithm `useRootMenuKeyNav`
+ * above uses for the graph-node/pane menu system — rather than a third
+ * implementation (task-annotation-accessible-shared-controls, closing the
+ * accessibility audit's "Arrow-key navigation between menu items" and "Focus
+ * trap while open" gaps, both explicitly named MISSING for every annotation
+ * kind there).
+ *
+ * Deliberately NOT `useRootMenuKeyNav` itself: that hook (and
+ * `NodeContextMenu`/`MultiNodeContextMenu`, its callers) scope roving to
+ * `[data-menu-item="root"]` because those menus nest `<Submenu>` panels with
+ * their own, separately-roved `[data-menu-item="sub"]` items — a marker is
+ * needed there to tell the two levels apart. None of the six annotation
+ * menus has a submenu; every actionable element in one of their portals is a
+ * real top-level `<button>`, so this operates on `button:not([disabled])`
+ * directly and needs no markup changes across five files to add the marker.
+ *
+ * The focus trap is minimal by design: it does not fight Tab's natural
+ * document-order movement between the menu's own buttons (already correct,
+ * since they are real `<button>`s), only the two points where Tab would
+ * otherwise leave the menu — wrapping Tab on the last item to the first, and
+ * Shift+Tab on the first item to the last.
+ */
+export function useAnnotationMenuKeyNav(containerRef) {
+  return useCallback(
+    (event) => {
+      const container = containerRef.current;
+      if (!container) return;
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        const items = Array.from(container.querySelectorAll('button:not([disabled])'));
+        if (items.length === 0) return;
+        event.preventDefault();
+        items[nextRovingIndex(items, document.activeElement, event.key)]?.focus();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = Array.from(container.querySelectorAll('button:not([disabled])'));
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
+    },
+    [containerRef]
+  );
+}
+
 /** Combines an internal ref (used for focus/keynav) with an optional externally-owned ref. */
 function useMergedContainerRef(externalRef) {
   const containerRef = useRef(null);
