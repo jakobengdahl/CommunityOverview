@@ -14,14 +14,16 @@ import './AnnotationToolbox.css';
 // movement) from ever reaching the drag path.
 const DRAG_THRESHOLD_PX = 6;
 
-// The toolbox items that precede the shape slot. `frame` stays a distinct,
-// separate item here — collapsing it into the shape kind would change what
-// the shape slot even contains, so it is out of scope for this collapse.
+// The toolbox items that precede the shape slot. `frame` used to be a
+// distinct, separate item here (a plain box with no fill); it is now folded
+// into the shape kind (task-annotation-merge-frame-into-shape-rectangle) —
+// creating a shape and setting its fill to transparent, with a coloured
+// border, covers what the standalone `frame` button used to make in one
+// click. There is no longer a dedicated toolbox entry for it.
 const TOOLBOX_ITEMS_LEADING = [
   { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
   { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
   { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
-  { kind: 'frame', glyph: { kind: 'toolbox-glyph', name: 'frame' }, labelKey: 'frame' },
 ];
 
 // Every `content.shape` variant the model accepts (SHAPE_STYLES in
@@ -137,12 +139,12 @@ function renderGlyph(glyph) {
  * type list, so a user never confuses "create a graph node" with "annotate
  * the canvas".
  *
- * It creates note/text/label/frame, a shape (via the collapsed shape slot,
+ * It creates note/text/label, a shape (via the collapsed shape slot,
  * see `renderShapeSlot` below), an icon (via the collapsed icon slot, see
- * `renderIconSlot` below), vote_dot, and image (which opens a file
+ * `renderIconSlot` below), vote_dot (a plain coloured dot — task-annotation-
+ * vote-dot-simplify), and image (which opens a file
  * picker rather than adding a node directly — the host's onCreate handles
- * that distinction; see GraphCanvas's onImageIngest). vote_dot creates with a
- * fixed default value of 1 (see GraphCanvas's createAnnotation). The icon slot
+ * that distinction; see GraphCanvas's onImageIngest). The icon slot
  * creates whichever icon is currently selected, using the same vocabulary the
  * icon annotation's right-click property editor offers after creation.
  * `activeKind` (currently only meaningful for 'freehand') marks that item as
@@ -193,8 +195,19 @@ function AnnotationToolbox({
   compact = false,
   touch = false,
   activeKind = null,
+  // 'toolbar' (default): the collapsible pill this component has always
+  // been, own toggle button, starts collapsed. 'sheet': hosted inside a
+  // dedicated BottomSheet (see GraphCanvas's annotationToolboxPortalContainer)
+  // whose own header/close button is already the collapse affordance, so this
+  // variant renders no toggle of its own and is always expanded - matching
+  // FloatingToolbar's variant="sheet" (frontend/web), the same established
+  // idiom for "the same component, laid out for a full-width mobile sheet
+  // instead of a floating rail/pill".
+  variant = 'toolbar',
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const isSheet = variant === 'sheet';
+  const [expandedState, setExpandedState] = useState(false);
+  const expanded = isSheet ? true : expandedState;
   const [currentShape, setCurrentShape] = useToolSlotSelection(
     SHAPE_SLOT_STORAGE_KEY,
     SHAPE_VARIANT_KEYS,
@@ -380,7 +393,6 @@ function AnnotationToolbox({
     note: 'Note',
     text: 'Text',
     label: 'Label',
-    frame: 'Frame',
     shapeRectangle: 'Rectangle',
     shapeCircle: 'Circle',
     shapeTriangle: 'Triangle',
@@ -404,7 +416,6 @@ function AnnotationToolbox({
     noteHint: 'Add a sticky note',
     textHint: 'Add a block of text',
     labelHint: 'Add a label or callout',
-    frameHint: 'Add a frame to group things visually',
     shapeRectangleHint: 'Add a rectangle',
     shapeCircleHint: 'Add a circle',
     shapeTriangleHint: 'Add a triangle',
@@ -730,23 +741,25 @@ function AnnotationToolbox({
     <div
       className={`annotation-toolbox${expanded ? ' annotation-toolbox--expanded' : ''}${
         compact ? ' annotation-toolbox--compact' : ''
-      }${touch ? ' annotation-toolbox--touch' : ''}`}
+      }${touch ? ' annotation-toolbox--touch' : ''}${isSheet ? ' annotation-toolbox--sheet' : ''}`}
       data-testid="annotation-toolbox"
       role="toolbar"
       aria-label={lbl.toggleExpand}
     >
-      <button
-        type="button"
-        className="annotation-toolbox-toggle"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-        aria-label={expanded ? lbl.toggleCollapse : lbl.toggleExpand}
-      >
-        <span className="annotation-toolbox-toggle-glyph" aria-hidden="true">
-          {expanded ? '▾' : '▴'}
-        </span>
-        <span className="annotation-toolbox-toggle-label">{lbl.toggleExpand}</span>
-      </button>
+      {!isSheet && (
+        <button
+          type="button"
+          className="annotation-toolbox-toggle"
+          onClick={() => setExpandedState((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={expanded ? lbl.toggleCollapse : lbl.toggleExpand}
+        >
+          <span className="annotation-toolbox-toggle-glyph" aria-hidden="true">
+            {expanded ? '▾' : '▴'}
+          </span>
+          <span className="annotation-toolbox-toggle-label">{lbl.toggleExpand}</span>
+        </button>
+      )}
 
       {expanded && (
         <div className="annotation-toolbox-items">

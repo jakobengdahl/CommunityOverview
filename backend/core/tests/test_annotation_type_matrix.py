@@ -80,7 +80,6 @@ class TestAnnotationTypeMatrixFixture:
             "text",
             "label",
             "line",
-            "frame",
             "group",
             "shape",
             "icon",
@@ -280,7 +279,7 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
 
     This drives one such sequence across the complete v1 type set — the
     original non-note types PR #415 covered (`create_annotation`'s
-    text/label/line/frame/shape/icon/vote_dot) plus every type this task
+    text/label/line/shape/icon/vote_dot) plus every type this task
     added or extended MCP coverage for: `note`, `group`, `image`, and
     `freehand`. Each type contributes one guaranteed-valid create
     (interleaved with one guaranteed-invalid create for a *different*
@@ -387,27 +386,6 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
         assert bad["error"] == "invalid_content"
         _assert_only_confirmed_ids_present()
 
-        # frame: valid create, then a revision_conflict (frame has no
-        # type-specific content validation to trip).
-        ok = tools_map["create_annotation"](
-            session_id=session.id, type="frame", x=0, y=0, annotation_id="frame-1"
-        )
-        assert ok["success"] is True
-        confirmed_ids.append("frame-1")
-        _assert_only_confirmed_ids_present()
-
-        bad = tools_map["create_annotation"](
-            session_id=session.id,
-            type="frame",
-            x=0,
-            y=0,
-            annotation_id="frame-bad",
-            expected_revision=0,
-        )
-        assert bad["success"] is False
-        assert bad["error"] == "revision_conflict"
-        _assert_only_confirmed_ids_present()
-
         # group: valid create, then invalid_content (non-list member_node_ids).
         ok = tools_map["create_group_annotation"](
             session_id=session.id,
@@ -481,14 +459,17 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
         assert bad["error"] == "invalid_content"
         _assert_only_confirmed_ids_present()
 
-        # vote_dot: valid create, then invalid_content (malformed attachment).
+        # vote_dot: valid create, then invalid_content (a reserved content
+        # key — vote_dot is a plain coloured dot with no type-specific
+        # content field left to validate, since task-annotation-vote-dot-
+        # simplify retired both its `value` and its attachment behaviour;
+        # see ATTACHABLE_ANNOTATION_TYPES in session_annotations.py).
         ok = tools_map["create_annotation"](
             session_id=session.id,
             type="vote_dot",
             x=0,
             y=0,
             annotation_id="vote-dot-1",
-            content={"value": 3},
         )
         assert ok["success"] is True
         confirmed_ids.append("vote-dot-1")
@@ -500,7 +481,7 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
             x=0,
             y=0,
             annotation_id="vote-dot-bad",
-            content={"attachment": {"target_id": ""}},
+            content={"locked": True},
         )
         assert bad["success"] is False
         assert bad["error"] == "invalid_content"
@@ -561,6 +542,6 @@ class TestSequentialWritesDoNotRollBackEarlierSuccesses:
         # Final check: every type in the matrix contributed exactly one
         # surviving annotation, and no invalid call from any later type
         # reached back and undid an earlier type's success.
-        assert len(confirmed_ids) == 11  # every v1 type except the second shape variant
+        assert len(confirmed_ids) == 10  # every v1 type except the second shape variant
         listed = tools_map["list_annotations"](session_id=session.id)
         assert {a["id"] for a in listed["annotations"]} == set(confirmed_ids)

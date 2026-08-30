@@ -386,7 +386,7 @@ describe('annotation overlay translation', () => {
 });
 
 // The v1 annotation model (docs/ANNOTATION_CONTRACT.md) also defines text,
-// frame, shape, icon, vote_dot and image, created via the generic MCP
+// shape, icon, vote_dot and image, created via the generic MCP
 // annotation tools (c0edb4f). annotationsToOverlays used to only branch on
 // note/label/line, so these types were silently dropped from onSaveView and
 // from the annotation_created/annotation_updated live-op path in App.jsx —
@@ -451,7 +451,8 @@ describe('generic annotation overlay translation', () => {
         position: { x: 0, y: 0 },
         shape: 'hexagon',
         text: 'Step 2',
-        color: '#60A5FA',
+        fill: '#60A5FA',
+        border: 'transparent',
         fontSize: 18,
         textAlign: 'top-left',
         font: 'monospace',
@@ -463,7 +464,8 @@ describe('generic annotation overlay translation', () => {
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].style).toEqual({
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       fontSize: 18,
       textAlign: 'top-left',
       font: 'monospace',
@@ -471,13 +473,19 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips a frame annotation (size lives in geometry, not a payload field)', () => {
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` is retired,
+  // folded into `shape` — a transparent fill with a coloured border is what
+  // `frame` used to draw. See [Fill and border](docs/ANNOTATION_CONTRACT.md).
+  it('round-trips a shape with a transparent fill and a coloured border (size lives in geometry, not a payload field)', () => {
     const overlays = [
       {
-        id: 'frame-1',
-        kind: 'frame',
+        id: 'shape-frame-like',
+        kind: 'shape',
         position: { x: 0, y: 0 },
-        color: '#4ADE80',
+        shape: 'rectangle',
+        text: '',
+        fill: 'transparent',
+        border: '#4ADE80',
         size: { w: 300, h: 200 },
         z: 0,
         locked: false,
@@ -486,6 +494,7 @@ describe('generic annotation overlay translation', () => {
     ];
     const server = overlaysToAnnotations(overlays);
     expect(server[0].geometry).toMatchObject({ w: 300, h: 200 });
+    expect(server[0].style).toMatchObject({ fill: 'transparent', border: '#4ADE80' });
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
@@ -499,7 +508,8 @@ describe('generic annotation overlay translation', () => {
         // task-annotation-doubleclick-to-edit-text: shape now carries an
         // optional caption field, defaulting to '' like text/label's own.
         text: '',
-        color: '#60A5FA',
+        fill: '#60A5FA',
+        border: 'transparent',
         size: { w: 120, h: 120 },
         z: 4,
         locked: false,
@@ -532,13 +542,15 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
-  it('round-trips a vote_dot annotation', () => {
+  // task-annotation-vote-dot-simplify: a vote dot is a plain coloured dot —
+  // `color` is the only annotation-specific field either direction still
+  // carries for it (`value` no longer exists).
+  it('round-trips a vote_dot annotation (colour only, no value)', () => {
     const overlays = [
       {
         id: 'vote-1',
         kind: 'vote_dot',
         position: { x: 9, y: 9 },
-        value: 3,
         color: '#FB923C',
         size: { w: 24, h: 24 },
         z: 0,
@@ -547,8 +559,28 @@ describe('generic annotation overlay translation', () => {
       },
     ];
     const server = overlaysToAnnotations(overlays);
-    expect(server[0].value).toBe(3);
+    expect(server[0].style).toMatchObject({ color: '#FB923C' });
     expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  // Explicit regression: a vote_dot stored before this change may still
+  // carry `value` and/or `attachment` (no migration was written). Neither
+  // leg of this translation may resurrect either field on a live overlay.
+  it('drops a stale value and attachment on a stored vote_dot annotation', () => {
+    const server = [
+      {
+        id: 'vote-legacy',
+        type: 'vote_dot',
+        position: { x: 9, y: 9 },
+        value: 3,
+        attachment: { target_id: 'node-1', target_type: 'node' },
+        style: { color: '#FB923C' },
+      },
+    ];
+    const [overlay] = annotationsToOverlays(server);
+    expect(overlay.value).toBeUndefined();
+    expect(overlay.attachment).toBeUndefined();
+    expect(overlay.color).toBe('#FB923C');
   });
 
   it('round-trips an image annotation (URL content, alt, and colour)', () => {
@@ -575,12 +607,6 @@ describe('generic annotation overlay translation', () => {
   it('no longer drops the generic v1 types that used to be silently ignored', () => {
     const server = [
       { id: 't1', type: 'text', position: { x: 0, y: 0 }, text: 'hi' },
-      {
-        id: 'f1',
-        type: 'frame',
-        position: { x: 0, y: 0 },
-        geometry: { x: 0, y: 0, w: 160, h: 96 },
-      },
       { id: 's1', type: 'shape', position: { x: 0, y: 0 }, shape: 'rectangle' },
       { id: 'i1', type: 'icon', position: { x: 0, y: 0 }, icon: 'flag' },
       { id: 'v1', type: 'vote_dot', position: { x: 0, y: 0 }, value: 1 },
@@ -588,13 +614,31 @@ describe('generic annotation overlay translation', () => {
     ];
     const overlays = annotationsToOverlays(server);
     expect(overlays.map((o) => o.kind).sort()).toEqual([
-      'frame',
       'icon',
       'image',
       'shape',
       'text',
       'vote_dot',
     ]);
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` is retired and
+  // no longer a member of GENERIC_OVERLAY_TYPES — a stored `frame` (from
+  // before this task) must be quietly dropped here, not resurrected or
+  // thrown on, the same guarantee task-annotation-tolerate-unexpected-data
+  // built for any other unrecognised kind.
+  it('quietly drops a stored `frame` annotation (retired into `shape`) rather than throwing', () => {
+    const server = [
+      { id: 't1', type: 'text', position: { x: 0, y: 0 }, text: 'hi' },
+      {
+        id: 'f1',
+        type: 'frame',
+        position: { x: 0, y: 0 },
+        geometry: { x: 0, y: 0, w: 160, h: 96 },
+      },
+    ];
+    const overlays = annotationsToOverlays(server);
+    expect(overlays.map((o) => o.id)).toEqual(['t1']);
   });
 });
 

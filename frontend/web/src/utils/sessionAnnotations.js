@@ -90,11 +90,20 @@ export function annotationsToGroups(annotations) {
       // The same envelope fields every overlay kind's translator already
       // carries. A group could always be locked over MCP, but the flag stopped
       // here, so the canvas never saw it and the next save diffed it back to
-      // its default. `z` is carried for the same reason; group paint order is
-      // array order (reorderNodesForParentChild), so nothing reads it yet —
-      // preserving the value is not the same as offering a control for it.
+      // its default. `z` is carried for the same reason and is now also read:
+      // reorderNodesForParentChild sorts the groups bucket by `data.z`
+      // ascending, so group paint order is z among groups, array order among
+      // everything else.
       z: a.z ?? 0,
       locked: Boolean(a.locked),
+      // Same server-owned same-field-conflict bookkeeping as every other
+      // annotation kind (dec-annotation-field-patches-and-conflicts) — a
+      // group is an ordinary annotation server-side (session_store.py's
+      // version/field_versions handling is not type-scoped), so its label/
+      // description/color are just as subject to a same-field race as any
+      // generic annotation's content.
+      version: a.version,
+      field_versions: a.field_versions,
     });
     for (const m of a.member_node_ids || []) parentIds[m] = a.id;
   }
@@ -134,6 +143,8 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           member_node_ids: membersByGroup[g.id] || [],
           z: g.z ?? 0,
           locked: Boolean(g.locked),
+          version: g.version,
+          field_versions: g.field_versions,
         })
       );
     } catch (error) {
@@ -144,9 +155,9 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 }
 
 // The rest of the v1 annotation model (docs/ANNOTATION_CONTRACT.md) beyond
-// note/label/line: text, frame, shape, icon, vote_dot, image. Color lives
+// note/label/line: text, shape, icon, vote_dot, image. Color lives
 // under style.color (like label), and geometry.w/h lives in `geometry` for
-// all six of these types — createAnnotation has no dedicated `size` payload
+// all five of these types — createAnnotation has no dedicated `size` payload
 // field the way it does for note. `geometry.rotation` and `geometry.w/h` are
 // both carried on every overlay of these kinds (not only the kinds the
 // canvas currently renders as resizable) for the same reason as z/locked: a
@@ -159,7 +170,11 @@ export function groupsToAnnotations(viewGroups, parentIds) {
 // would make the next autosave diff it back to its default, silently
 // discarding a typography choice an agent or collaborator had just set (the
 // "unsized-geometry clobber" class of bug this task's own node warns about).
-const GENERIC_OVERLAY_TYPES = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']);
+// `shape` additionally carries `style.fill`/`style.border`
+// (task-annotation-merge-frame-into-shape-rectangle) instead of `style.color`
+// — each independently a colour or `'transparent'`, the setting that
+// subsumes what the retired `frame` kind was.
+const GENERIC_OVERLAY_TYPES = new Set(['text', 'shape', 'icon', 'vote_dot', 'image']);
 
 function genericAnnotationToOverlay(a) {
   const overlay = {
@@ -167,10 +182,23 @@ function genericAnnotationToOverlay(a) {
     kind: a.type,
     position: a.position || { x: 0, y: 0 },
     color: a.style?.color,
+    // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface
+    // half) — same `style.opacity` slot `freehand` has always used, now
+    // read for every generic kind (text/shape/icon/vote_dot/image).
+    opacity: a.style?.opacity,
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
     size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
+    // Server-owned same-field-conflict bookkeeping (dec-annotation-field-
+    // patches-and-conflicts) — the same envelope treatment as z/locked/
+    // rotation above, not per-kind content. See this module's own note on
+    // annotationsToOverlays/overlaysToAnnotations for why dropping it here
+    // is the bug this carries through: sessionSyncClient.js's
+    // diffAnnotationFields already reads `version` for `base_version` and
+    // never diffs it as content — it just never received a real value.
+    version: a.version,
+    field_versions: a.field_versions,
   };
   if (a.type === 'text') {
     overlay.text = a.text || '';
@@ -194,11 +222,17 @@ function genericAnnotationToOverlay(a) {
     overlay.fontSize = a.style?.fontSize;
     overlay.font = a.style?.font;
     overlay.textAlign = a.style?.textAlign;
+    // Independent fill/border (task-annotation-merge-frame-into-shape-
+    // rectangle) — `shape` no longer reads the generic `overlay.color` this
+    // function sets above (that field survives only because every other
+    // generic kind still uses it); the canvas package's GENERIC_OVERLAY_FIELDS
+    // for `shape` no longer lists `color`, so an agent-set `style.color` on a
+    // shape is simply not projected onto the live node, matching `frame`'s own
+    // retirement rather than silently resurrecting it under a new name.
+    overlay.fill = a.style?.fill;
+    overlay.border = a.style?.border;
   } else if (a.type === 'icon') {
     overlay.icon = a.icon || 'circle';
-    overlay.attachment = a.attachment;
-  } else if (a.type === 'vote_dot') {
-    overlay.value = a.value ?? null;
     overlay.attachment = a.attachment;
   } else if (a.type === 'image') {
     overlay.image = a.image || {};
@@ -215,15 +249,34 @@ function genericOverlayToAnnotation(o) {
     z: o.z ?? 0,
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
+    version: o.version,
+    field_versions: o.field_versions,
   };
   // `text` and `shape` (task-annotation-text-alignment-and-font) both carry
   // fontSize/font/textAlign under `style`, mirroring `text`'s pre-existing
   // fontSize convention rather than the plain `{color}` every other generic
-  // kind gets.
+  // kind gets. `shape` carries `fill`/`border` instead of `color`
+  // (task-annotation-merge-frame-into-shape-rectangle) — see
+  // genericAnnotationToOverlay's comment on the same fields.
   input.style =
-    o.kind === 'text' || o.kind === 'shape'
-      ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
-      : { color: o.color };
+    o.kind === 'shape'
+      ? {
+          fill: o.fill,
+          border: o.border,
+          fontSize: o.fontSize,
+          font: o.font,
+          textAlign: o.textAlign,
+          opacity: o.opacity,
+        }
+      : o.kind === 'text'
+        ? {
+            color: o.color,
+            fontSize: o.fontSize,
+            font: o.font,
+            textAlign: o.textAlign,
+            opacity: o.opacity,
+          }
+        : { color: o.color, opacity: o.opacity };
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;
@@ -232,9 +285,6 @@ function genericOverlayToAnnotation(o) {
     input.text = o.text || '';
   } else if (o.kind === 'icon') {
     input.icon = o.icon || 'circle';
-    input.attachment = o.attachment;
-  } else if (o.kind === 'vote_dot') {
-    input.value = o.value ?? null;
     input.attachment = o.attachment;
   } else if (o.kind === 'image') {
     input.image = o.image || {};
@@ -271,6 +321,8 @@ function freehandAnnotationToOverlay(a) {
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
+    version: a.version,
+    field_versions: a.field_versions,
   };
 }
 
@@ -295,6 +347,8 @@ function freehandOverlayToAnnotation(o) {
     z: o.z ?? 0,
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
+    version: o.version,
+    field_versions: o.field_versions,
   });
 }
 
@@ -314,10 +368,19 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.color,
         fontSize: a.fontSize,
+        // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface
+        // half) lives under `style` for every kind, freehand's pre-existing
+        // convention — note's own `color`/`fontSize` stay top-level fields
+        // (an established inconsistency this task does not touch), but a
+        // brand-new field has no legacy shape to match, so it follows the
+        // convention every other kind already uses.
+        opacity: a.style?.opacity,
         size: a.size,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       });
     } else if (a?.type === 'label') {
       out.push({
@@ -327,10 +390,13 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.style?.color,
         fontSize: a.style?.fontSize,
+        opacity: a.style?.opacity,
         attachment: a.attachment,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       });
     } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
@@ -342,11 +408,14 @@ export function annotationsToOverlays(annotations) {
         dx: to.x - from.x,
         dy: to.y - from.y,
         color: a.style?.color,
+        opacity: a.style?.opacity,
         startArrow: a.startArrow ?? false,
         endArrow: a.endArrow ?? true,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
@@ -387,10 +456,13 @@ export function overlaysToAnnotations(overlays) {
             text: o.text || '',
             color: o.color,
             fontSize: o.fontSize,
+            style: { opacity: o.opacity },
             size: o.size,
             z: o.z ?? 0,
             locked: Boolean(o.locked),
             rotation: o.rotation ?? 0,
+            version: o.version,
+            field_versions: o.field_versions,
           })
         );
         continue;
@@ -402,11 +474,13 @@ export function overlaysToAnnotations(overlays) {
             type: 'label',
             position: o.position || { x: 0, y: 0 },
             text: o.text || '',
-            style: { color: o.color, fontSize: o.fontSize },
+            style: { color: o.color, fontSize: o.fontSize, opacity: o.opacity },
             attachment: o.attachment,
             z: o.z ?? 0,
             locked: Boolean(o.locked),
             rotation: o.rotation ?? 0,
+            version: o.version,
+            field_versions: o.field_versions,
           })
         );
         continue;
@@ -432,12 +506,14 @@ export function overlaysToAnnotations(overlays) {
         position: { x: from.x, y: from.y },
         from: { x: from.x, y: from.y },
         to: { x: from.x + dx, y: from.y + dy },
-        style: { color: o.color },
+        style: { color: o.color, opacity: o.opacity },
         startArrow: o.startArrow ?? false,
         endArrow: o.endArrow ?? true,
         z: o.z ?? 0,
         locked: Boolean(o.locked),
         rotation: o.rotation ?? 0,
+        version: o.version,
+        field_versions: o.field_versions,
       };
       if (o.startAnchor) ann.startAnchor = o.startAnchor;
       if (o.endAnchor) ann.endAnchor = o.endAnchor;

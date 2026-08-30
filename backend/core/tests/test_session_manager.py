@@ -6,6 +6,7 @@ presence/claim lifecycle on connect/disconnect.
 """
 
 import asyncio
+import copy
 import json
 import threading
 
@@ -13,19 +14,21 @@ import pytest
 
 from backend.core import image_ingest
 from backend.core.session_annotations import build_annotation, build_annotation_patch
-from backend.core.session_hub import ClaimMap, InProcessEventBus
+from backend.core.session_hub import InProcessEventBus, LeaseMap
 from backend.core.session_store import (
+    AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
+    Session,
     SessionStore,
 )
 from backend.core.session_manager import (
     AnnotationNotFound,
     AnnotationRecentlyDeleted,
-    ClaimConflict,
     ImageBudgetExceeded,
     LayoutBusy,
+    LeaseConflict,
     NoUndoableAction,
     OpBatchTooLarge,
     RateLimited,
@@ -65,6 +68,54 @@ async def _drain(sub):
     while not sub.queue.empty():
         out.append(sub.queue.get_nowait())
     return out
+
+
+def _kind_annotation(kind: str, ann_id: str, *, variant: str = "a") -> dict:
+    """A minimal, valid v1 annotation dict of *kind* for a raw op.
+
+    Accepts the six v1 annotation kinds beyond note/label/group —
+    ``text``/``shape``/``icon``/``vote_dot``/``image``/``freehand`` —
+    task-annotation-shared-session-realtime's remaining_scope per-kind
+    reconnect/catch-up/duplicate-suppression/lock-ownership audit
+    (``TestPerKindReconnectCatchUpAndLocks`` below). ``frame`` is excluded: it
+    no longer exists as a separate kind (merged into ``shape``, PR #521); note/
+    label/group are excluded too — ``GraphCanvasRemote.test.jsx`` already
+    covers those three at the canvas-application layer.
+
+    Per-kind payload fields live at the annotation's own top level for a raw
+    op (mirroring what ``build_annotation``'s ``content`` merges onto the
+    annotation, and what the browser's own translators read/write — see
+    ``GENERIC_OVERLAY_FIELDS`` in ``packages/ui-graph-canvas/src/utils/
+    annotations.js``), not nested under a ``content`` key — matching every
+    existing raw-op test in this module (e.g. a note's top-level ``text``).
+
+    ``variant`` gives a second, distinguishable value for the same kind and
+    id, for cross-write conflict tests that need to tell "the first write"
+    and "the second write" apart in the stored result.
+    """
+    if kind == "image":
+        # image is exempt from _kind_annotation's variant knob: an ingested
+        # image's pixel content is the one field session_store's
+        # `_require_ingested_image` actually checks, so varying anything
+        # else is enough to distinguish two writes without touching it.
+        ann = _image_annotation(ann_id, data_bytes=64)
+        ann["alt"] = "a" if variant == "a" else "b"
+        return ann
+    ann: dict = {"id": ann_id, "type": kind}
+    if kind == "text":
+        ann["text"] = "hi" if variant == "a" else "bye"
+    elif kind == "shape":
+        ann["shape"] = "rectangle"
+        ann["text"] = "hi" if variant == "a" else "bye"
+    elif kind == "icon":
+        ann["icon"] = "flag" if variant == "a" else "star"
+    elif kind == "vote_dot":
+        ann["color"] = "#ef4444" if variant == "a" else "#22c55e"
+    elif kind == "freehand":
+        ann["points"] = [{"x": 0, "y": 0}, {"x": 10, "y": 10 if variant == "a" else 20}]
+    else:
+        raise ValueError(f"unhandled kind for _kind_annotation: {kind!r}")
+    return ann
 
 
 class TestApplyOps:
@@ -339,14 +390,267 @@ class TestClaimOps:
             await mgr.apply_ops(s.id, "c1", 0, [{"op": "selection_claimed"}])
 
 
-class TestClaimEnforcement:
+class TestSelectionNeverAcquiresLease:
+    """Core guarantee of ``dec-mcp-agent-ops-vs-annotation-claimmap``: selecting
+    (``selection_claimed``) is a purely cosmetic presence marker and must never
+    acquire, renew or block on an edit lease — only an explicit
+    ``edit_lease_acquired`` does. ``TestLeaseEnforcement``/
+    ``TestConflictMatrixTwoClients`` below prove the lease side; this class
+    proves selection stays outside it entirely.
+    """
+
+    async def _seeded(self, mgr, ann_id="note-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": ann_id, "type": "note"},
+                }
+            ],
+        )
+        return s
+
+    async def test_selecting_does_not_block_another_clients_write(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        # c1 merely selected note-1 — c2 can still edit it freely.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "c2 wrote"},
+                }
+            ],
+        )
+        assert s.state["annotations"][0]["text"] == "c2 wrote"
+        # No lease was ever created by the selection.
+        assert mgr.leases.snapshot(s.id) == {}
+
+    async def test_selecting_someone_elses_leased_annotation_does_not_steal_it(self):
+        """The exact bug this task closes: selection used to feed the same
+        LWW map a write was checked against, so selecting an annotation
+        someone else was editing silently took the lock away from them."""
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        # c2 selects the same annotation c1 is actively editing...
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        # ...c1's lease is completely unaffected by c2's selection.
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c1"}
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "note-1",
+                            "type": "note",
+                            "text": "c2 hijacked via selection",
+                        },
+                    }
+                ],
+            )
+
+    async def test_undo_is_unaffected_by_a_live_selection_claim(self):
+        mgr = _manager()
+        s = await self._seeded(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {"id": "note-1", "type": "note", "text": "mine"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+        )
+        # c2 merely selected — c1's undo of its own edit is not blocked.
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+
+
+class TestLeaseAcquisition:
+    """First-actual-editor-wins acquisition semantics for ``edit_lease_acquired``/
+    ``edit_lease_released`` themselves (task-annotation-exclusive-edit-leases):
+    atomic grant/deny, renewal, expiry and disconnect release. Whether a live
+    lease then blocks a *different* client's mutation is
+    ``TestLeaseEnforcement``'s concern; this class is about acquiring the
+    lease in the first place.
+    """
+
+    async def test_first_acquirer_is_granted(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        res = await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        applied = res["applied"][0]
+        assert applied["element_ids"] == ["note-1"]
+        assert applied["denied"] == {}
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c1"}
+
+    async def test_second_acquirer_is_denied_not_given_a_takeover(self):
+        """The exact first-holder-wins property the old ClaimMap.claim() (LWW)
+        never had: a second client's acquisition attempt is refused, and the
+        first client's lease is completely unaffected by the attempt."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        res = await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        applied = res["applied"][0]
+        assert applied["element_ids"] == []
+        assert applied["denied"] == {"note-1": "c1"}
+        # c1's lease still stands, untouched by c2's refused attempt.
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c1"}
+
+    async def test_two_concurrent_acquisitions_admit_only_one_editor(self):
+        """The atomicity guarantee behind first-holder-wins: apply_ops holds
+        the per-session asyncio.Lock across both the pre-batch lease snapshot
+        and the post-batch commit (see apply_ops' own comments), so two
+        `edit_lease_acquired` batches racing for the same never-before-held
+        annotation cannot both be granted — whichever enters the critical
+        section first wins, and the second sees it as already held. Run with
+        real concurrency (asyncio.gather, not sequential awaits) so a
+        would-be race is actually exercised rather than assumed serial."""
+        mgr = _manager()
+        s = mgr.create_session()
+        results = await asyncio.gather(
+            mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
+            ),
+            mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
+            ),
+        )
+        granted_by = [
+            (client, r["applied"][0]["element_ids"])
+            for client, r in zip(("c1", "c2"), results)
+        ]
+        winners = [client for client, ids in granted_by if ids == ["note-1"]]
+        losers = [client for client, ids in granted_by if ids == []]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        # The map agrees with whichever one actually won.
+        assert mgr.leases.snapshot(s.id) == {"note-1": winners[0]}
+
+    async def test_renewal_by_the_same_holder_extends_the_ttl(self):
+        clock = {"t": 0.0}
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()),
+            leases=LeaseMap(ttl=30.0, time_fn=lambda: clock["t"]),
+        )
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        clock["t"] += 25.0  # short of the 30s TTL, but a slow typist would be close
+        res = await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        assert res["applied"][0]["element_ids"] == ["note-1"]
+        clock["t"] += 25.0  # 50s since acquire, but only 25s since the renewal
+        # Still held by c1 — the renewal reset the TTL, so this is not expired.
+        res = await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
+        )
+        assert res["applied"][0]["denied"] == {"note-1": "c1"}
+
+    async def test_expired_lease_can_be_acquired_by_someone_else(self):
+        clock = {"t": 0.0}
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()),
+            leases=LeaseMap(ttl=30.0, time_fn=lambda: clock["t"]),
+        )
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        clock["t"] += 31.0  # past the TTL with no renewal
+        res = await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        assert res["applied"][0]["element_ids"] == ["note-1"]
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c2"}
+
+    async def test_explicit_release_reopens_acquisition_immediately(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_released", "element_ids": ["note-1"]}]
+        )
+        res = await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        assert res["applied"][0]["element_ids"] == ["note-1"]
+
+    async def test_disconnect_releases_the_departing_clients_leases(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        mgr.disconnect(s.id, "c1", sub)
+        assert mgr.leases.snapshot(s.id) == {}
+        res = await mgr.apply_ops(
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
+        )
+        assert res["applied"][0]["element_ids"] == ["note-1"]
+
+    async def test_lease_acquire_requires_element_ids(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            await mgr.apply_ops(s.id, "c1", 0, [{"op": "edit_lease_acquired"}])
+
+
+class TestLeaseEnforcement:
     """Server-side rejection of a browser (``apply_ops``) write to an
-    annotation another client holds a live selection claim on
-    (task-annotation-shared-session-realtime's server-side-claim-enforcement
-    slice). Covers both browser write paths — the ``apply_ops`` batch and
-    ``undo_last_action`` — while the last test in this class documents that
-    the synchronous MCP write path is deliberately left unaffected pending
-    the still-open agent-bypass decision.
+    annotation another client holds a live edit lease on
+    (task-annotation-exclusive-edit-leases' server-side-lease-enforcement
+    slice, superseding the old advisory-ClaimMap-based enforcement). Covers
+    both browser write paths — the ``apply_ops`` batch and
+    ``undo_last_action`` — while the last test in this class pins the
+    matching guarantee for the synchronous MCP write path, now covered by
+    ``task-mcp-annotation-human-edit-guard`` (see
+    ``TestSyncMcpWritePathsAndLeases`` below for the full per-method suite).
     """
 
     async def _seeded(self, mgr, ann_id="note-1"):
@@ -368,9 +672,9 @@ class TestClaimEnforcement:
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        with pytest.raises(ClaimConflict) as exc_info:
+        with pytest.raises(LeaseConflict) as exc_info:
             await mgr.apply_ops(
                 s.id,
                 "c2",
@@ -392,11 +696,11 @@ class TestClaimEnforcement:
         assert s.state["annotations"][0].get("text") != "hijacked"
 
     async def test_undo_of_own_action_is_rejected_while_another_client_holds_it(self):
-        """Actor-scoping is not a substitute for the claim check.
+        """Actor-scoping is not a substitute for the lease check.
 
         Undo reverts the caller's *own* past action, but the annotation it
-        touches can have been claimed by someone else in the meantime — which
-        is exactly the window this closes.
+        touches can be under someone else's live edit lease by the time the
+        undo runs — which is exactly the window this closes.
         """
         mgr = _manager()
         s = await self._seeded(mgr)
@@ -412,18 +716,18 @@ class TestClaimEnforcement:
             ],
         )
         await mgr.apply_ops(
-            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        with pytest.raises(ClaimConflict) as exc_info:
+        with pytest.raises(LeaseConflict) as exc_info:
             mgr.undo_last_action(s.id, "c1")
         assert exc_info.value.annotation_id == "note-1"
         assert exc_info.value.held_by == "c2"
         # Refused before anything was touched: the edit stands and the record
-        # is still undoable once the claim clears.
+        # is still undoable once the lease clears.
         assert s.state["annotations"][0]["text"] == "mine"
         assert any(not r.get("undone") for r in s.activity_log)
 
-    async def test_undo_is_allowed_while_the_caller_holds_the_claim(self):
+    async def test_undo_is_allowed_while_the_caller_holds_the_lease(self):
         mgr = _manager()
         s = mgr.create_session()
         # Seeded WITH text, so undoing an edit to it demonstrably restores the
@@ -453,13 +757,13 @@ class TestClaimEnforcement:
             ],
         )
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
         result = mgr.undo_last_action(s.id, "c1")
         assert result["undone_op"] == "annotation_updated"
         assert s.state["annotations"][0]["text"] == "original"
 
-    async def test_undo_is_allowed_when_nobody_holds_the_claim(self):
+    async def test_undo_is_allowed_when_nobody_holds_the_lease(self):
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
@@ -479,44 +783,44 @@ class TestClaimEnforcement:
     async def test_undo_of_a_delete_proceeds_since_the_annotation_is_gone(self):
         """The inverse op is an ``annotation_created`` for an id no longer in
         state, so ``_claimed_annotation_target`` reports no target and a stale
-        claim on the deleted id cannot block the restore."""
+        lease on the deleted id cannot block the restore."""
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
             s.id, "c1", 0, [{"op": "annotation_deleted", "annotation_id": "note-1"}]
         )
         await mgr.apply_ops(
-            s.id, "c2", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c2", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
         result = mgr.undo_last_action(s.id, "c1")
         assert result["undone_op"] == "annotation_deleted"
 
-    async def test_claim_conflict_message_matches_the_ui_classifier(self):
-        """The browser tells the retryable claim 409 apart from the permanent
+    async def test_lease_conflict_message_matches_the_ui_classifier(self):
+        """The browser tells the retryable lease 409 apart from the permanent
         "state changed since" 409 by matching this substring — see
         ``classifyUndoError`` in frontend/web/src/utils/sessionActivity.js.
         Nothing else carries the distinction over the wire (both are a bare
         409 with a prose ``detail``), so reword the message and the UI silently
         starts telling users a retryable refusal is permanent."""
-        assert "is claimed by another client" in str(ClaimConflict("note-1", "c2"))
+        assert "is being edited by another client" in str(LeaseConflict("note-1", "c2"))
 
     async def test_non_holder_delete_is_rejected(self):
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        with pytest.raises(ClaimConflict):
+        with pytest.raises(LeaseConflict):
             await mgr.apply_ops(
                 s.id, "c2", 0, [{"op": "annotation_deleted", "annotation_id": "note-1"}]
             )
         assert len(s.state["annotations"]) == 1
 
-    async def test_claim_holders_own_write_still_succeeds(self):
+    async def test_lease_holders_own_write_still_succeeds(self):
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
         await mgr.apply_ops(
             s.id,
@@ -531,14 +835,14 @@ class TestClaimEnforcement:
         )
         assert s.state["annotations"][0]["text"] == "mine"
 
-    async def test_a_new_annotation_id_has_no_claim_to_protect(self):
+    async def test_a_new_annotation_id_has_no_lease_to_protect(self):
         mgr = _manager()
         s = mgr.create_session()
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        # "note-1" is claimed but does not exist yet — creating it fresh is not
-        # a mutation of anything the claim holder has, so it is not blocked.
+        # "note-1" is leased but does not exist yet — creating it fresh is not
+        # a mutation of anything the lease holder has, so it is not blocked.
         await mgr.apply_ops(
             s.id,
             "c2",
@@ -556,10 +860,10 @@ class TestClaimEnforcement:
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_released", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_released", "element_ids": ["note-1"]}]
         )
         await mgr.apply_ops(
             s.id,
@@ -574,15 +878,15 @@ class TestClaimEnforcement:
         )
         assert s.state["annotations"][0]["text"] == "now free"
 
-    async def test_expired_claim_reopens_the_write_path(self):
+    async def test_expired_lease_reopens_the_write_path(self):
         clock = {"t": 0.0}
         mgr = SessionManager(
             SessionStore(InMemorySessionPersistenceBackend()),
-            claims=ClaimMap(ttl=30.0, time_fn=lambda: clock["t"]),
+            leases=LeaseMap(ttl=30.0, time_fn=lambda: clock["t"]),
         )
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
         clock["t"] += 31.0  # past the 30s TTL
         await mgr.apply_ops(
@@ -595,12 +899,12 @@ class TestClaimEnforcement:
                     "annotation": {
                         "id": "note-1",
                         "type": "note",
-                        "text": "expired claim",
+                        "text": "expired lease",
                     },
                 }
             ],
         )
-        assert s.state["annotations"][0]["text"] == "expired claim"
+        assert s.state["annotations"][0]["text"] == "expired lease"
 
     async def test_a_conflicting_op_rolls_back_the_whole_batch(self):
         """apply_ops is documented all-or-nothing: an earlier op in the same
@@ -608,9 +912,9 @@ class TestClaimEnforcement:
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        with pytest.raises(ClaimConflict):
+        with pytest.raises(LeaseConflict):
             await mgr.apply_ops(
                 s.id,
                 "c2",
@@ -629,29 +933,1377 @@ class TestClaimEnforcement:
             )
         assert s.state["node_refs"] == []
 
-    async def test_mcp_write_path_is_unaffected_by_a_live_claim(self):
-        """Deliberately unenforced for now — see ClaimConflict's docstring.
+    async def test_group_membership_change_is_blocked_by_a_live_lease_too(self):
+        """_claimed_annotation_target now covers group_membership_changed
+        (task-mcp-annotation-human-edit-guard) — the group annotation itself
+        is the thing a lease protects, the same way a note's edit lease
+        protects it against annotation_updated. This closes a gap that
+        predates this task: the browser's own group-membership panel sends
+        group_membership_changed through this same apply_ops batch path
+        (sessionSyncClient.js), and it was not lease-checked at all before
+        this change."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "group-1", "type": "group"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["group-1"]}]
+        )
+        with pytest.raises(LeaseConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "group_membership_changed",
+                        "group_id": "group-1",
+                        "member_node_ids": ["n1"],
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "group-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("member_node_ids") is None
 
-        upsert_annotation/update_annotation/delete_annotation are the
-        synchronous MCP tool write path (mcp_tools.py, all keyed to the
-        shared 'mcp-agent' client id) and never go through apply_ops, so
-        they are not checked against ClaimMap at all — an MCP write still
-        silently overrides a live human claim, exactly as before this
-        change. Whether that should change is the open decision named on
-        task-annotation-shared-session-realtime; this test documents and
-        pins the current (unaffected) behaviour rather than guessing at it.
+    async def test_group_membership_change_conflict_rolls_back_the_whole_mixed_batch(
+        self,
+    ):
+        """Same all-or-nothing guarantee as
+        test_a_conflicting_op_rolls_back_the_whole_batch, for the newly
+        covered op type: an earlier op in the same batch as a leased
+        group_membership_changed must not have taken effect either."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {"id": "group-1", "type": "group"},
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["group-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {"op": "nodes_added", "node_ids": ["n1"]},
+                    {
+                        "op": "group_membership_changed",
+                        "group_id": "group-1",
+                        "member_node_ids": ["n1"],
+                    },
+                ],
+            )
+        assert s.state["node_refs"] == []
+
+    async def test_mcp_write_path_is_now_blocked_by_a_live_lease(self):
+        """As of task-mcp-annotation-human-edit-guard: upsert_annotation/
+        update_annotation/delete_annotation/upsert_image_annotation/
+        set_group_members are the synchronous MCP tool write path
+        (mcp_tools.py, all keyed to the shared 'mcp-agent' client id) and
+        never go through apply_ops, but each now checks the same live
+        LeaseMap immediately before its own mutation — see
+        SessionManager._reject_if_leased and LeaseConflict's docstring.
+        TestSyncMcpWritePathsAndLeases below is the full per-method suite;
+        this test (renamed from test_mcp_write_path_is_unaffected_by_a_live_
+        lease) keeps pinning the specific regression this task closed.
         """
         mgr = _manager()
         s = await self._seeded(mgr)
         await mgr.apply_ops(
-            s.id, "c1", 0, [{"op": "selection_claimed", "element_ids": ["note-1"]}]
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}]
         )
-        result = mgr.update_annotation(
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id,
+                "mcp-agent",
+                {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("text") != "agent wrote anyway"
+
+
+class TestSyncMcpWritePathsAndLeases:
+    """task-mcp-annotation-human-edit-guard: the synchronous MCP write path
+    (``upsert_annotation``/``upsert_image_annotation``/``update_annotation``/
+    ``delete_annotation``/``set_group_members`` — ``mcp_tools.py``, all keyed
+    to the shared ``'mcp-agent'`` client id) never goes through ``apply_ops``,
+    so each method now checks the live lease itself, immediately before its
+    own mutation (``SessionManager._reject_if_leased``). This is the
+    per-method counterpart of ``TestLeaseEnforcement``, one method's write
+    path per section below.
+
+    "Same client already holds the lease" is deliberately not tested here.
+    An MCP write is always attributed to the shared ``'mcp-agent'`` client
+    id, and none of these five methods ever calls ``self.leases.acquire`` —
+    an MCP caller only ever *checks* against a lease, per
+    ``dec-mcp-agent-ops-vs-annotation-claimmap`` ("agents do not acquire,
+    reserve or take over human edit leases in v1"). So ``'mcp-agent'``
+    holding its own lease is not a state this guard, or anything else in the
+    system, can ever produce — asserting it would test a scenario the design
+    makes unreachable rather than real behaviour. What *is* tested
+    (``TestSyncMcpWriteLeaseRaceSafety`` below) is that the check cannot be
+    raced by a lease that becomes live between an earlier read and the
+    mutation.
+    """
+
+    async def _lease_held_by_browser(
+        self, mgr: SessionManager, session: Session, *, ann_id: str, holder: str = "c1"
+    ) -> None:
+        res = await mgr.apply_ops(
+            session.id,
+            holder,
+            0,
+            [{"op": "edit_lease_acquired", "element_ids": [ann_id]}],
+        )
+        assert res["applied"][0]["element_ids"] == [ann_id]  # sanity: actually granted
+
+    async def _release_lease(
+        self, mgr: SessionManager, session: Session, *, ann_id: str, holder: str = "c1"
+    ) -> None:
+        await mgr.apply_ops(
+            session.id,
+            holder,
+            0,
+            [{"op": "edit_lease_released", "element_ids": [ann_id]}],
+        )
+
+    # ---- upsert_annotation ----
+
+    async def test_upsert_annotation_replace_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        before = copy.deepcopy(s.state)
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before  # provably unchanged, not just "returned an error"
+
+    async def test_upsert_annotation_fresh_create_ignores_a_lease_on_the_same_id(self):
+        """Mirrors TestLeaseEnforcement.test_a_new_annotation_id_has_no_lease_
+        to_protect: a lease on an id that does not exist yet in this
+        session's annotations protects nothing."""
+        mgr = _manager()
+        s = mgr.create_session()
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        res = mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        assert res["annotation"]["id"] == "note-1"
+
+    async def test_upsert_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        await self._release_lease(mgr, s, ann_id="note-1")
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "now free"}
+        )
+        assert res["annotation"]["text"] == "now free"
+
+    async def test_upsert_annotation_retry_succeeds_after_the_lease_expires(self):
+        clock = {"t": 0.0}
+        mgr = SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend()),
+            leases=LeaseMap(ttl=30.0, time_fn=lambda: clock["t"]),
+        )
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        clock["t"] += 31.0  # past the 30s TTL
+        res = mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "expired lease"}
+        )
+        assert res["annotation"]["text"] == "expired lease"
+
+    # ---- upsert_image_annotation ----
+
+    async def test_upsert_image_annotation_replace_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
             s.id,
             "mcp-agent",
-            {"id": "note-1", "type": "note", "text": "agent wrote anyway"},
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
         )
-        assert result["annotation"]["text"] == "agent wrote anyway"
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        before = copy.deepcopy(s.state)
+        replacement = _image_annotation("img-1", data_bytes=64)
+        replacement["alt"] = "hijacked"
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.upsert_image_annotation(
+                s.id, "mcp-agent", replacement, optimized_image_bytes=64
+            )
+        assert exc_info.value.annotation_id == "img-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before
+
+    async def test_upsert_image_annotation_fresh_create_ignores_a_lease_on_the_same_id(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
+        )
+        assert res["annotation"]["id"] == "img-1"
+
+    async def test_upsert_image_annotation_retry_succeeds_after_the_lease_is_released(
+        self,
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-1", data_bytes=64),
+            optimized_image_bytes=64,
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="img-1")
+        replacement = _image_annotation("img-1", data_bytes=64)
+        replacement["alt"] = "hijacked"
+        with pytest.raises(LeaseConflict):
+            mgr.upsert_image_annotation(
+                s.id, "mcp-agent", replacement, optimized_image_bytes=64
+            )
+        await self._release_lease(mgr, s, ann_id="img-1")
+        replacement2 = _image_annotation("img-1", data_bytes=64)
+        replacement2["alt"] = "now free"
+        res = mgr.upsert_image_annotation(
+            s.id, "mcp-agent", replacement2, optimized_image_bytes=64
+        )
+        assert res["annotation"]["alt"] == "now free"
+
+    # ---- update_annotation ----
+
+    async def test_update_annotation_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        before = copy.deepcopy(s.state)
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state == before
+
+    async def test_update_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        await self._release_lease(mgr, s, ann_id="note-1")
+        res = mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "now free"}
+        )
+        assert res["annotation"]["text"] == "now free"
+
+    async def test_update_annotation_lease_check_precedes_the_field_version_check(self):
+        """LeaseConflict is raised before AnnotationFieldConflict gets a
+        chance to fire — the lease check runs first, mirroring apply_ops' own
+        ordering (lease check before the store's own state-level checks).
+        A stale base_version behind a live lease is reported as the lease
+        conflict, not the (also-true) field conflict."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.update_annotation(
+                s.id,
+                "mcp-agent",
+                {"id": "note-1", "type": "note", "text": "v2"},
+                base_version=999,
+            )
+
+    # ---- delete_annotation ----
+
+    async def test_delete_annotation_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        assert exc_info.value.annotation_id == "note-1"
+        assert exc_info.value.held_by == "c1"
+        assert len(s.state["annotations"]) == 1  # still there
+
+    async def test_delete_annotation_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        await self._lease_held_by_browser(mgr, s, ann_id="note-1")
+        with pytest.raises(LeaseConflict):
+            mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        await self._release_lease(mgr, s, ann_id="note-1")
+        mgr.delete_annotation(s.id, "mcp-agent", "note-1")
+        assert s.state["annotations"] == []
+
+    # ---- set_group_members ----
+
+    async def test_set_group_members_is_blocked_by_a_live_lease(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        await self._lease_held_by_browser(mgr, s, ann_id="group-1")
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        assert exc_info.value.annotation_id == "group-1"
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0].get("member_node_ids") is None
+
+    async def test_set_group_members_retry_succeeds_after_the_lease_is_released(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "group-1", "type": "group"})
+        await self._lease_held_by_browser(mgr, s, ann_id="group-1")
+        with pytest.raises(LeaseConflict):
+            mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        await self._release_lease(mgr, s, ann_id="group-1")
+        res = mgr.set_group_members(s.id, "mcp-agent", "group-1", ["n1"])
+        assert res["annotation"]["member_node_ids"] == ["n1"]
+
+    async def test_set_group_members_on_a_missing_group_still_raises_op_error_not_lease_conflict(
+        self,
+    ):
+        """No annotation exists at group_id, so _claimed_annotation_target
+        reports no target — there is nothing to lease-check yet, and the
+        store's own existence check still fires exactly as before this
+        task (TestSetGroupMembers.test_missing_group_raises_op_error)."""
+        mgr = _manager()
+        s = mgr.create_session()
+        with pytest.raises(OpError):
+            mgr.set_group_members(s.id, "mcp-agent", "ghost", ["n1"])
+
+
+class TestSyncMcpWriteLeaseRaceSafety:
+    """Proves the check happens at the mutation boundary itself, not from an
+    earlier-cached snapshot — the exact race
+    ``task-mcp-annotation-human-edit-guard`` names: "a concurrent lease
+    acquisition cannot race a preflight-only check".
+
+    Each of the five guarded methods never awaits (``apply_layout``'s
+    docstring documents the same property for the layout write path), so
+    once one starts running on the single-threaded event loop nothing else
+    can interleave until it returns. That leaves exactly two windows where a
+    lease could conceivably race one of these calls:
+
+    1. Before the call starts — covered by the ordinary blocked-write tests
+       in ``TestSyncMcpWritePathsAndLeases`` (the lease already exists in
+       ``self.leases`` by the time the method runs).
+    2. While an ``apply_ops`` batch holds the per-session lock mid-flight
+       (genuinely awaiting, e.g. during its persist step) and is about to
+       grant a lease as part of that same batch: the guarded method must not
+       run against the pre-batch (lease-free) state — it refuses with
+       ``LayoutBusy`` instead, the same protection ``apply_layout`` already
+       relies on, so by the time it *does* run (lock free), ``self.leases``
+       already reflects whatever that batch actually committed.
+
+    There is no third window: nothing between ``_reject_if_leased``'s
+    ``self.leases.snapshot`` read and the following ``_apply_op_sync`` call
+    ever awaits, so a lease cannot be acquired in that gap no matter how a
+    concurrent ``apply_ops`` batch is scheduled.
+    """
+
+    async def test_a_lease_granted_mid_persist_by_a_real_concurrent_batch_is_never_missed(
+        self,
+    ):
+        """Real concurrency (``asyncio.gather`` via ``asyncio.create_task``),
+        mirroring ``TestApplyLayout.
+        test_refuses_during_real_inflight_batch_and_preserves_seq_order``'s
+        proof style: a batch that both grants a lease on ``note-1`` *and*
+        mutates state (so it genuinely awaits mid-persist, holding the
+        per-session lock) is stalled there with a blocking persist hook. An
+        MCP write attempted in that exact window must not proceed against
+        the pre-batch, lease-free view — it refuses with ``LayoutBusy``.
+        Once the batch completes and the lock frees, the very next attempt
+        sees the lease the batch actually granted and is refused with
+        ``LeaseConflict`` — the state the lease exists to protect is never
+        touched by either attempt.
+        """
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "v1"}
+        )
+
+        entered = threading.Event()
+        proceed = threading.Event()
+        original = store.persist_snapshot
+
+        def slow_persist(snapshot):
+            entered.set()
+            proceed.wait(timeout=2)
+            original(snapshot)
+
+        store.persist_snapshot = slow_persist
+        apply_task = asyncio.create_task(
+            mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {"op": "edit_lease_acquired", "element_ids": ["note-1"]},
+                    {"op": "nodes_added", "node_ids": ["a"]},
+                ],
+            )
+        )
+        # Wait off the loop thread until the batch is inside persist with the
+        # per-session lock held and the lease grant not yet committed.
+        await asyncio.to_thread(entered.wait, 2)
+
+        assert mgr.leases.snapshot(s.id) == {}  # not committed yet
+        with pytest.raises(LayoutBusy):
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert s.state["annotations"][0]["text"] == "v1"
+
+        proceed.set()
+        await apply_task
+
+        # The lease is real now — the very next attempt sees it, not a stale
+        # lease-free view, and is refused for the right reason.
+        assert mgr.leases.snapshot(s.id) == {"note-1": "c1"}
+        with pytest.raises(LeaseConflict) as exc_info:
+            mgr.update_annotation(
+                s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hijacked"}
+            )
+        assert exc_info.value.held_by == "c1"
+        assert s.state["annotations"][0]["text"] == "v1"
+
+
+class TestConflictMatrixTwoClients:
+    """Two-*real*-client conflict matrix for docs/ANNOTATION_CONTRACT.md's new
+    "Two-client conflict matrix" section (task-annotation-shared-session-
+    realtime remaining_scope item 1: document + test what happens when two
+    clients edit the same annotation at close to the same time, broken out by
+    same-field vs different-field edits, claim-holder vs non-holder, and
+    mutation category).
+
+    Every test here drives ``SessionManager.apply_ops`` with two distinct
+    ``client_id``s against the same session — the real batch-apply/lease-
+    check/persist path a browser goes through — not just a call into the
+    ``LeaseMap`` helper directly the way a narrower unit test would.
+    ``TestLeaseEnforcement`` above already proves the lease-conflict half of
+    this for ``note``; this class adds the cross-field-clobber half the prior
+    slice's tests never exercised, plus one representative case per other
+    mutation category (style, lock) two clients can race on. "no claim held"
+    below now means "no lease held" — a lease closes the collision window
+    these clobber cases fall into.
+
+    ``dec-annotation-field-patches-and-conflicts`` closed the field-level gap
+    a lease does not cover: an op that names ``base_version`` (what
+    ``sessionSyncClient.js``'s ``diffAnnotationFields`` now always sends, and
+    what an opted-in MCP caller can pass to ``update_annotation``) is checked
+    per field it actually touches, not per whole annotation —
+    ``TestFieldVersionedPatches`` below is the matrix for that. The
+    same-field/different-field tests in *this* class that omit
+    ``base_version`` altogether still describe the older, unprotected
+    whole-object behaviour deliberately: that is the documented fallback for
+    a caller that has not opted in (an older cached browser bundle, or an
+    MCP tool call that omits it) — see ``AnnotationFieldConflict``'s
+    docstring — not a regression left unfixed.
+    """
+
+    async def _seeded_shape(self, mgr, ann_id="shape-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {
+                        "id": ann_id,
+                        "type": "shape",
+                        "shape": "rectangle",
+                        "text": "orig",
+                        "geometry": {"x": 0, "y": 0, "w": 160, "h": 96},
+                        "style": {"fill": "#94a3b8"},
+                    },
+                }
+            ],
+        )
+        return s
+
+    # --- Same-field, no lease held, no base_version: the documented legacy
+    # fallback (AnnotationFieldConflict's docstring) is still last-write-wins
+    # — see TestFieldVersionedPatches for the same race *with* base_version,
+    # where it is now an explicit conflict instead.
+    async def test_same_field_text_edits_without_a_lease_second_writer_wins(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "B's edit",
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "B's edit"
+
+    # --- Different-field, no lease held, no base_version: the pre-fix
+    # behaviour, preserved here as the documented legacy fallback (a caller
+    # that never adopts field-diffing or base_version — see
+    # AnnotationFieldConflict's docstring) rather than silently dropped. A
+    # real browser no longer produces an op shaped like this one (see the
+    # very next test) — sessionSyncClient.js's diffAnnotationFields only ever
+    # sends fields that actually changed locally, so it would never carry a
+    # stale copy of "text" at all — but a raw ops-batch write that (still)
+    # resends the whole object, the way this test constructs one by hand,
+    # keeps exactly the old whole-document-LWW semantics.
+    async def test_legacy_whole_object_write_without_base_version_still_clobbers(
+        self,
+    ):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "orig",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+        assert stored["text"] == "orig"
+
+    # --- The fix (dec-annotation-field-patches-and-conflicts): the same
+    # geometry-vs-text race PR #523 proved as a clobber, now driven the way a
+    # real (post-fix) browser actually publishes — a field-diff patch (only
+    # the keys that genuinely changed locally) plus base_version, exactly
+    # what sessionSyncClient.js's diffAnnotationFields + computeOps produce.
+    # B never touched "text" locally, so it is simply absent from B's patch
+    # — there is nothing left for it to clobber, independent of whether B's
+    # base_version happens to be stale relative to A's edit.
+    async def test_geometry_edit_from_a_stale_client_no_longer_clobbers_a_concurrent_text_edit(
+        self,
+    ):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        # A publishes a text-only change...
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        # ...B never received A's update yet (in-flight SSE, or B simply
+        # committed a fraction of a second sooner), but its own outgoing
+        # patch was computed as a genuine local diff — it only names the one
+        # field B actually changed, "geometry" — and base_version=1 reflects
+        # what B itself last synced, same starting point as A.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        # Both survive: B's geometry change applied, and A's text edit is
+        # untouched — the independent-field merge this task exists for.
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+        assert stored["text"] == "A's edit"
+        assert stored["version"] == 3  # create(1) -> A's update(2) -> B's update(3)
+
+    # --- A lease blocks a DIFFERENT-field edit too, not only a same-field one:
+    # the lease check is on the annotation id, not on which fields an op
+    # touches, so it also closes the clobber case above whenever the second
+    # writer is the one refused rather than racing in silently.
+    async def test_lease_blocks_a_different_field_edit_too_not_only_same_field(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["shape-1"]}]
+        )
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                }
+            ],
+        )
+        with pytest.raises(LeaseConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                        },
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "shape-1"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        # Refused, so neither the geometry write nor any clobber of A's text
+        # took effect — this is the safe cell of the matrix: holding the lease
+        # protects every field, not only the one the holder itself is editing.
+        assert stored["text"] == "A's edit"
+        assert stored["geometry"] == {"x": 0, "y": 0, "w": 160, "h": 96}
+
+    # --- style category, leased: a non-holder's style-only write is refused
+    # the same way a text or geometry write is (the check has no per-category
+    # special case).
+    async def test_non_holder_style_edit_is_rejected_while_leased(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "style": {"fill": "#ef4444"},
+                        },
+                    }
+                ],
+            )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["style"] == {"fill": "#94a3b8"}
+
+    # --- lock category, leased: a non-holder's lock toggle is an
+    # annotation_updated like any other write, so it is refused too — "locked"
+    # is not a separate op type with its own bypass.
+    async def test_non_holder_lock_toggle_is_rejected_while_leased(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "locked": True,
+                        },
+                    }
+                ],
+            )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored.get("locked") is not True
+
+    # --- delete category, leased, on a generic (non-note) kind: mirrors
+    # test_non_holder_delete_is_rejected above (which uses `note`) to confirm
+    # the same rule for a GENERIC_OVERLAY_TYPES kind.
+    async def test_non_holder_delete_of_a_shape_is_rejected_while_leased(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["shape-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [{"op": "annotation_deleted", "annotation_id": "shape-1"}],
+            )
+        assert any(a["id"] == "shape-1" for a in s.state["annotations"])
+
+
+class TestFieldVersionedPatches:
+    """``base_version``-gated per-field conflict checking
+    (task-smallfix-whole-annotation-clobber-on-concurrent-different-field-edit,
+    dec-annotation-field-patches-and-conflicts): the protection layer for
+    when no edit lease is held (or not yet acquired) — see ``LeaseConflict``'s
+    docstring for how leases and this layer divide the work.
+
+    ``TestConflictMatrixTwoClients`` above already covers the independent-
+    field-merge case (a real client's field-diffed patch just never mentions
+    a field it did not touch, so there is nothing left to conflict over).
+    This class covers what a ``base_version`` mismatch on a field the patch
+    *does* touch does: an explicit, structured conflict rather than a
+    silent overwrite — plus that the mechanism survives reconnect/catch-up
+    and undo unchanged.
+    """
+
+    async def _seeded_shape(self, mgr, ann_id="shape-1"):
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": {
+                        "id": ann_id,
+                        "type": "shape",
+                        "shape": "rectangle",
+                        "text": "orig",
+                        "geometry": {"x": 0, "y": 0, "w": 160, "h": 96},
+                        "style": {"fill": "#94a3b8"},
+                    },
+                }
+            ],
+        )
+        return s
+
+    async def test_created_annotation_starts_at_version_one(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        stored = s.state["annotations"][0]
+        assert stored["version"] == 1
+        assert stored["field_versions"] == {}
+
+    async def test_same_field_conflict_is_explicit_not_a_silent_overwrite(self):
+        """The exact scenario a lease would otherwise close: two clients
+        editing the SAME field with no lease held. With base_version, this
+        is now a raised, structured conflict — never a silent last-write-
+        wins — and the losing write's effect never reaches stored state, so
+        there is nothing to roll back: the caller's own draft (whatever it
+        holds locally) is simply never overwritten server-side, mirroring
+        how a rejected lease-conflict write leaves an editor's draft alone.
+        """
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        with pytest.raises(AnnotationFieldConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "B's edit",
+                        },
+                        "base_version": 1,  # stale: A already moved "text" to v2
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "shape-1"
+        assert exc_info.value.conflicts == {"text": 2}
+        assert exc_info.value.server_version == 2
+        assert exc_info.value.server_annotation["text"] == "A's edit"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit"
+        assert stored["version"] == 2  # B's rejected attempt never bumped it
+
+    async def test_stale_write_is_rejected_then_succeeds_after_rederiving(self):
+        """ "Do not silently retry a stale value against a newer version"
+        (dec-annotation-field-patches-and-conflicts): B's first attempt is
+        refused; re-reading current state and retrying at the fresh version
+        is a deliberate override, not a stale clobber, so it succeeds."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        with pytest.raises(AnnotationFieldConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "B's edit",
+                        },
+                        "base_version": 1,
+                    }
+                ],
+            )
+        fresh_version = exc_info.value.server_version
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "B's edit",
+                    },
+                    "base_version": fresh_version,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "B's edit"
+        assert stored["version"] == 3
+
+    async def test_a_resend_of_the_unchanged_current_value_never_conflicts(self):
+        """A patch that names a field but whose value already equals the
+        stored one (e.g. a client that still sends its whole local copy)
+        does not count as "touching" that field — only a genuine value
+        change is conflict-checked. This is what keeps an imperfect/legacy
+        payload from tripping a spurious conflict on fields it never
+        actually meant to change."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        # B's patch still mentions "text", but with the value already stored
+        # (a coincidence, or a client resending its full local copy) — not a
+        # real change, so base_version=1 must not be treated as stale for it.
+        await mgr.apply_ops(
+            s.id,
+            "c2",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                        "geometry": {"x": 40, "y": 40, "w": 160, "h": 96},
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit"
+        assert stored["geometry"] == {"x": 40, "y": 40, "w": 160, "h": 96}
+
+    async def test_non_integer_base_version_is_rejected(self):
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        with pytest.raises(OpError):
+            await mgr.apply_ops(
+                s.id,
+                "c1",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": {
+                            "id": "shape-1",
+                            "type": "shape",
+                            "text": "A's edit",
+                        },
+                        "base_version": "not-a-number",
+                    }
+                ],
+            )
+
+    async def test_caller_supplied_version_and_field_versions_are_ignored(self):
+        """version/field_versions are server-owned bookkeeping (session_
+        store.py's _ANNOTATION_META_FIELDS) — a payload cannot smuggle a
+        forged value through to corrupt future conflict checks."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                        "version": 999,
+                        "field_versions": {"text": 999},
+                    },
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["version"] == 2
+        assert stored["field_versions"] == {"text": 2}
+
+    async def test_catch_up_snapshot_carries_version_and_field_versions(self):
+        """Reconnect/catch-up (item 6): both the ring-buffer replay path and
+        the full-snapshot fallback already carry the *whole* post-update
+        annotation (session_store.py's applied["annotation"] = target, true
+        before and after this task) — so a reconnecting client's mirror
+        naturally picks up version/field_versions with no protocol change on
+        this side, only on what a client subsequently publishes."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        snapshot = mgr.catch_up(s.id, None)
+        assert snapshot["type"] == "snapshot"
+        ann = next(
+            a
+            for a in snapshot["session"]["state"]["annotations"]
+            if a["id"] == "shape-1"
+        )
+        assert ann["version"] == 2
+        assert ann["field_versions"] == {"text": 2}
+
+        missed = mgr.catch_up(s.id, 1)  # since_seq=1: client already has the create
+        assert missed["type"] == "catch_up"
+        op = next(o for o in missed["ops"] if o["op"] == "annotation_updated")
+        assert op["annotation"]["version"] == 2
+
+    async def test_undo_restores_content_and_still_advances_version_forward(self):
+        """Undo (item 6) replays the stored full-object inverse op under
+        trusted_replay, which skips the base_version check entirely (the
+        restored content is this session's own prior state, not caller
+        input) — but version keeps moving forward, never backward, so a
+        client's base_version bookkeeping stays monotonic across an undo."""
+        mgr = _manager()
+        s = await self._seeded_shape(mgr)
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit",
+                    },
+                    "base_version": 1,
+                }
+            ],
+        )
+        before_undo = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert before_undo["version"] == 2
+
+        result = mgr.undo_last_action(s.id, "c1")
+        assert result["undone_op"] == "annotation_updated"
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "orig"
+        assert stored["version"] == 3  # forward, not back to 1
+        assert stored["field_versions"]["text"] == 3
+
+        # And the annotation is still writable afterwards, at the new version.
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "shape-1",
+                        "type": "shape",
+                        "text": "A's edit again",
+                    },
+                    "base_version": stored["version"],
+                }
+            ],
+        )
+        stored = next(a for a in s.state["annotations"] if a["id"] == "shape-1")
+        assert stored["text"] == "A's edit again"
+
+
+class TestPerKindReconnectCatchUpAndLocks:
+    """Per-kind reconnect/catch-up, duplicate-op-suppression and lock-
+    ownership audit (task-annotation-shared-session-realtime remaining_scope
+    item 2) for the six v1 kinds beyond note/label/group — GraphCanvasRemote.
+    test.jsx already covers those three at the canvas-application layer, and
+    ``TestClaimEnforcement``/``TestCatchUp`` above already cover this
+    protocol layer for ``note`` specifically.
+
+    ``_claimed_annotation_target`` and ``SessionStore.apply_state_op`` are
+    keyed only on an annotation's ``id``, never on its ``type``/``kind`` (see
+    ``session_manager.py``), so in principle every one of these should already
+    hold uniformly — but that is exactly the kind of claim a per-kind test
+    audit exists to verify rather than assume, since the type-agnostic
+    ``sessionSyncClient.test.js`` coverage cannot see a kind-specific gap one
+    layer up (the canvas-side application logic GraphCanvasRemote.test.jsx
+    covers separately). No gap was found for any of the six: every test below
+    passes against the existing implementation.
+    """
+
+    # --- (a) reconnect / catch-up: a create made while a second client is
+    # "disconnected" (never subscribed, so it never saw the op live) is
+    # returned intact by catch_up once it asks for everything since its last
+    # known seq — the same mechanism TestCatchUp proves for plain node ops. ---
+    async def test_catch_up_returns_a_missed_create_for_text(self):
+        await self._assert_catch_up_returns_a_missed_create("text")
+
+    async def test_catch_up_returns_a_missed_create_for_shape(self):
+        await self._assert_catch_up_returns_a_missed_create("shape")
+
+    async def test_catch_up_returns_a_missed_create_for_icon(self):
+        await self._assert_catch_up_returns_a_missed_create("icon")
+
+    async def test_catch_up_returns_a_missed_create_for_vote_dot(self):
+        await self._assert_catch_up_returns_a_missed_create("vote_dot")
+
+    async def test_catch_up_returns_a_missed_create_for_image(self):
+        await self._assert_catch_up_returns_a_missed_create("image")
+
+    async def test_catch_up_returns_a_missed_create_for_freehand(self):
+        await self._assert_catch_up_returns_a_missed_create("freehand")
+
+    async def _assert_catch_up_returns_a_missed_create(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        since_seq = s.seq
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        cu = mgr.catch_up(s.id, since_seq)
+        assert cu["type"] == "catch_up"
+        # Ring-buffer entries (session_store.py's `applied` dict) are the flat
+        # op result shape — `entry["op"]` is the op-type string and
+        # `entry["annotation"]` the resulting annotation — not a nested
+        # `{"op": {...}}` envelope; matches the existing
+        # `[op["seq"] for op in cu["ops"]]` read in TestCatchUp above.
+        matches = [
+            entry
+            for entry in cu["ops"]
+            if entry.get("op") == "annotation_created"
+            and entry.get("annotation", {}).get("id") == "ann-1"
+        ]
+        assert len(matches) == 1
+        assert matches[0]["annotation"]["type"] == kind
+
+    # --- (b) duplicate-op suppression: a retried/re-delivered create with the
+    # same id is an idempotent upsert, never a second appended annotation —
+    # this is what makes a lost-response client retry, or the "delivered
+    # twice around the catch-up boundary" case R15 in sessionSyncClient.js
+    # documents, safe regardless of kind. ---
+    async def test_a_resent_create_is_idempotent_for_text(self):
+        await self._assert_resent_create_is_idempotent("text")
+
+    async def test_a_resent_create_is_idempotent_for_shape(self):
+        await self._assert_resent_create_is_idempotent("shape")
+
+    async def test_a_resent_create_is_idempotent_for_icon(self):
+        await self._assert_resent_create_is_idempotent("icon")
+
+    async def test_a_resent_create_is_idempotent_for_vote_dot(self):
+        await self._assert_resent_create_is_idempotent("vote_dot")
+
+    async def test_a_resent_create_is_idempotent_for_image(self):
+        await self._assert_resent_create_is_idempotent("image")
+
+    async def test_a_resent_create_is_idempotent_for_freehand(self):
+        await self._assert_resent_create_is_idempotent("freehand")
+
+    async def _assert_resent_create_is_idempotent(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        op = {"op": "annotation_created", "annotation": _kind_annotation(kind, "ann-1")}
+        await mgr.apply_ops(s.id, "c1", 0, [op])
+        # The exact same op, resent (a retried batch after a lost response).
+        await mgr.apply_ops(s.id, "c1", 0, [dict(op)])
+        matching = [a for a in s.state["annotations"] if a["id"] == "ann-1"]
+        assert len(matching) == 1
+
+    # --- (c) lock ownership: another client's live claim blocks a write to
+    # this kind identically to every other kind. ---
+    async def test_non_holder_update_is_rejected_for_text(self):
+        await self._assert_non_holder_update_is_rejected("text")
+
+    async def test_non_holder_update_is_rejected_for_shape(self):
+        await self._assert_non_holder_update_is_rejected("shape")
+
+    async def test_non_holder_update_is_rejected_for_icon(self):
+        await self._assert_non_holder_update_is_rejected("icon")
+
+    async def test_non_holder_update_is_rejected_for_vote_dot(self):
+        await self._assert_non_holder_update_is_rejected("vote_dot")
+
+    async def test_non_holder_update_is_rejected_for_image(self):
+        await self._assert_non_holder_update_is_rejected("image")
+
+    async def test_non_holder_update_is_rejected_for_freehand(self):
+        await self._assert_non_holder_update_is_rejected("freehand")
+
+    async def _assert_non_holder_update_is_rejected(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["ann-1"]}]
+        )
+        with pytest.raises(LeaseConflict) as exc_info:
+            await mgr.apply_ops(
+                s.id,
+                "c2",
+                0,
+                [
+                    {
+                        "op": "annotation_updated",
+                        "annotation": _kind_annotation(kind, "ann-1", variant="b"),
+                    }
+                ],
+            )
+        assert exc_info.value.annotation_id == "ann-1"
+        assert exc_info.value.held_by == "c1"
+
+    async def test_non_holder_delete_is_rejected_for_text(self):
+        await self._assert_non_holder_delete_is_rejected("text")
+
+    async def test_non_holder_delete_is_rejected_for_shape(self):
+        await self._assert_non_holder_delete_is_rejected("shape")
+
+    async def test_non_holder_delete_is_rejected_for_icon(self):
+        await self._assert_non_holder_delete_is_rejected("icon")
+
+    async def test_non_holder_delete_is_rejected_for_vote_dot(self):
+        await self._assert_non_holder_delete_is_rejected("vote_dot")
+
+    async def test_non_holder_delete_is_rejected_for_image(self):
+        await self._assert_non_holder_delete_is_rejected("image")
+
+    async def test_non_holder_delete_is_rejected_for_freehand(self):
+        await self._assert_non_holder_delete_is_rejected("freehand")
+
+    async def _assert_non_holder_delete_is_rejected(self, kind):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr.apply_ops(
+            s.id,
+            "c1",
+            0,
+            [
+                {
+                    "op": "annotation_created",
+                    "annotation": _kind_annotation(kind, "ann-1"),
+                }
+            ],
+        )
+        await mgr.apply_ops(
+            s.id, "c1", 0, [{"op": "edit_lease_acquired", "element_ids": ["ann-1"]}]
+        )
+        with pytest.raises(LeaseConflict):
+            await mgr.apply_ops(
+                s.id, "c2", 0, [{"op": "annotation_deleted", "annotation_id": "ann-1"}]
+            )
+        assert any(a["id"] == "ann-1" for a in s.state["annotations"])
 
 
 class TestCatchUp:

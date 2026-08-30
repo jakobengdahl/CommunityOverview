@@ -78,10 +78,31 @@ const MALFORMED = [
   { id: 'x4', kind: 'shape', position: { x: 0, y: 0 }, size: { w: '160px', h: 'tall' } },
   { id: 'x5', kind: 'freehand', position: { x: 0, y: 0 } },
   { id: 'x6', kind: 'freehand', position: { x: 0, y: 0 }, points: 'not-an-array' },
-  { id: 'x7', kind: 'vote_dot', position: { x: 0, y: 0 }, value: { legacy: true } },
+  // task-annotation-vote-dot-simplify retired both `value` and `attachment`
+  // for vote_dot with no migration (nobody used the annotation feature yet):
+  // a stored vote_dot from before this change may still carry either or both
+  // fields, and neither is read as anything any more — the dot must still
+  // render, plain, rather than throw on either.
+  {
+    id: 'x7',
+    kind: 'vote_dot',
+    position: { x: 0, y: 0 },
+    value: { legacy: true },
+    attachment: { target_id: 'ghost-node', target_type: 'node' },
+  },
   { id: 'x8', kind: 'icon', position: { x: 0, y: 0 }, icon: 42 },
   { id: 'x9', kind: 'image', position: { x: 0, y: 0 } },
   { id: 'x10', kind: 'arrow', position: { x: 0, y: 0 } },
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` was a real,
+  // recognised kind until this task retired it in favour of `shape` with a
+  // transparent fill. A session written before this task can still hold a
+  // `frame`-kind annotation, and the merge owes it exactly the same
+  // guarantee as any other now-unrecognised kind — it must degrade quietly,
+  // not take the canvas down. This is the explicit regression test for that:
+  // without it, this whole array would still pass just as well with `frame`
+  // silently reinstated, since 'wormhole' above already exercises "unknown
+  // kind" in general.
+  { id: 'x11', kind: 'frame', position: { x: 0, y: 0 }, color: '#94a3b8' },
   null,
   undefined,
   { kind: 'note', position: { x: 0, y: 0 } },
@@ -163,10 +184,47 @@ describe('the three crashes this closes, each at its own component', () => {
     }
   );
 
+  // task-annotation-vote-dot-simplify: a vote dot no longer has a `value` or
+  // an `attachment` at all — GENERIC_OVERLAY_FIELDS.vote_dot
+  // (utils/annotations.js) no longer lists either field, so neither one is
+  // ever passed to this component as `data` in a live session any more.
+  // A session stored before that change can still hand it both, though (no
+  // migration was written), so this pins that the component tolerates them
+  // explicitly — not by relying on the general "unknown field" coverage
+  // above to imply it holds for this specific case, which is exactly the
+  // kind of assumption this codebase has shipped bugs from before (one
+  // translator leg's tolerance not covering the render layer).
+  it('a vote dot carrying a stale stored value and attachment draws as a plain dot rather than throwing', () => {
+    expect(() =>
+      draw(
+        <GenericAnnotationNode
+          id="v1"
+          type="vote_dot"
+          data={{
+            color: '#3b82f6',
+            value: 3,
+            attachment: { target_id: 'node-1', target_type: 'node', offset: { x: 0, y: 0 } },
+          }}
+        />
+      )
+    ).not.toThrow();
+    noPlaceholder();
+    const dot = document.querySelector('.kind-vote_dot');
+    expect(dot).toBeTruthy();
+    // Renders as the plain dot the simplified kind now is: no rendered
+    // number, no vote-value stepper UI anywhere in the tree.
+    expect(dot.textContent).toBe('');
+    expect(document.querySelector('.vote-value-button')).toBeNull();
+    expect(document.querySelector('.vote-value-current')).toBeNull();
+  });
+
   it('a vote dot carrying a non-primitive value draws empty rather than throwing', () => {
     // React refuses an object as a child. An array would have rendered as its
     // joined members, which is why this coerces on type rather than testing
-    // for object-ness.
+    // for object-ness. Kept alongside the explicit stale-data regression
+    // above: GenericAnnotationNode no longer reads `data.value` for vote_dot
+    // at all, so this also confirms an object-shaped `value` cannot reach a
+    // render path that would throw on it.
     draw(<GenericAnnotationNode id="v1" type="vote_dot" data={{ value: { legacy: true } }} />);
     noPlaceholder();
     expect(document.querySelector('.kind-vote_dot').textContent).toBe('');
@@ -188,7 +246,6 @@ describe('the registered node types are the ones that are guarded', () => {
     'label',
     'arrow',
     'text',
-    'frame',
     'shape',
     'icon',
     'vote_dot',

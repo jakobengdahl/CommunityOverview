@@ -113,16 +113,46 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
     expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
+    // No regression from the "Nearby object menu" creation-time attachment
+    // entry point: today's plain one-click toolbox creation (no target
+    // anchor involved) must still produce an unattached annotation.
+    expect(text.data.attachment).toBeUndefined();
+    // Unlike `shape` (see the semantic-default-layer test below), every
+    // other kind gets no explicit `zIndex` at creation, which resolves to
+    // the unchanged 0 default through the existing `zIndex ?? 0` fallbacks.
+    expect(text.zIndex).toBeUndefined();
   });
 
-  it('creates a frame annotation via the toolbox with a default box size', () => {
+  // task-annotation-merge-frame-into-shape-rectangle: a toolbox-created shape
+  // leaves fill/border unset so GenericAnnotationNode's own defaults apply (a
+  // solid fill, no border) — the same "plain shape" look a shape always had.
+  // The retired `frame` toolbox button's look (transparent fill, coloured
+  // border) is reached afterwards via the right-click editor, not a separate
+  // creation-time default.
+  it('creates a rectangle shape via the toolbox with fill/border left unset', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
-    fireEvent.click(screen.getByRole('button', { name: /^frame$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
-    const frame = findCreatedNode('frame');
-    expect(frame).toBeTruthy();
-    expect(frame.style).toEqual({ width: 220, height: 160 });
+    const shape = findCreatedNode('shape');
+    expect(shape).toBeTruthy();
+    expect(shape.data.fill).toBeUndefined();
+    expect(shape.data.border).toBeUndefined();
+  });
+
+  // task-annotation-render-direct-manipulation's remaining "semantic default
+  // layers" scope: a shape is the one kind this creation path gives an
+  // explicit non-zero starting layer, so it opens one behind everything else
+  // (docs/ANNOTATION_CONTRACT.md's Layer order section) instead of needing a
+  // manual send-to-back. Every other kind stays at the unchanged 0 default —
+  // see the text creation test above for that side of the contrast.
+  it('creates a shape via the toolbox one layer behind the default (zIndex -1)', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
+
+    const shape = findCreatedNode('shape');
+    expect(shape.zIndex).toBe(-1);
   });
 
   it.each([
@@ -190,6 +220,9 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     // only, so it round-trips without becoming a resizable box (61d5cc7b).
     expect(icon.style).toBeUndefined();
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
+    // No regression: plain one-click creation with no nearby target produces
+    // an unattached icon, same as before the "Nearby object menu" entry point.
+    expect(icon.data.attachment).toBeUndefined();
   });
 
   it('creates the icon selected in the toolbox icon slot', () => {
@@ -206,16 +239,20 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     expect(icon.data.size).toEqual({ w: 32, h: 32 });
   });
 
-  it('creates a vote_dot annotation via the toolbox with a default value and size', () => {
+  // task-annotation-vote-dot-simplify: no `value` any more (there is nothing
+  // to count), and no `attachment` (it is not one of ATTACHABLE_OVERLAY_KINDS
+  // — created plain and never pre-wired to a target).
+  it('creates a vote_dot annotation via the toolbox with no value, no attachment, and a fixed size', () => {
     render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^vote dot$/i }));
 
     const voteDot = findCreatedNode('vote_dot');
     expect(voteDot).toBeTruthy();
-    expect(voteDot.data.value).toBe(1);
+    expect(voteDot.data.value).toBeUndefined();
     expect(voteDot.style).toBeUndefined();
     expect(voteDot.data.size).toEqual({ w: 24, h: 24 });
+    expect(voteDot.data.attachment).toBeUndefined();
   });
 
   it('creates a label annotation via the toolbox', () => {
@@ -225,6 +262,7 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     const label = findCreatedNode('label');
     expect(label).toBeTruthy();
+    expect(label.data.attachment).toBeUndefined();
   });
 
   it('honours a host-provided label override for i18n', () => {

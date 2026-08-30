@@ -130,8 +130,14 @@ describe('NoteNode', () => {
       <NoteNode id="note-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // 4 text-size buttons followed by 4 opacity-level buttons
+    // (task-annotation-responsive-bottom-toolbox's AnnotationOpacityControl,
+    // added after this menu's text-size row) — both groups share the
+    // `.size-button` styling class, same as this menu's rotation row sharing
+    // classes with others; text size renders first, so the first 4 are still
+    // exactly the ones this test means to click.
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[3]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
@@ -188,8 +194,10 @@ describe('LabelNode', () => {
       <LabelNode id="label-1" data={{ text: 'x' }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
+    // Same two-group `.size-button` layout as NoteNode's equivalent test
+    // above (text size, then AnnotationOpacityControl's opacity levels).
     const sizeButtons = document.querySelectorAll('.size-button');
-    expect(sizeButtons.length).toBe(4);
+    expect(sizeButtons.length).toBe(8);
     fireEvent.click(sizeButtons[2]);
     expect(notifyChange).toHaveBeenCalledTimes(1);
     const updater = hoisted.setNodes.mock.calls[0][0];
@@ -343,12 +351,12 @@ describe('ArrowNode', () => {
   });
 });
 
-describe('remote selection claim exclusivity (task-annotation-shared-session-realtime)', () => {
+describe('remote edit-lease exclusivity (task-annotation-exclusive-edit-leases)', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('NoteNode: refuses a text commit while another client holds the claim', () => {
+  it('NoteNode: refuses a text commit while another client holds the edit lease', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
-      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
     );
     fireEvent.doubleClick(screen.getByText('x'));
     // Blocked at the double-click too: no textarea is offered to type into.
@@ -358,23 +366,23 @@ describe('remote selection claim exclusivity (task-annotation-shared-session-rea
     expect(hoisted.setNodes).not.toHaveBeenCalled();
   });
 
-  it('NoteNode: refuses a colour change while another client holds the claim', () => {
+  it('NoteNode: refuses to open the menu (so a colour change is unreachable) while another client holds the lease', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
-      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
-    fireEvent.click(document.querySelectorAll('.color-button')[0]);
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
     expect(notifyChange).not.toHaveBeenCalled();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
   });
 
-  it('NoteNode: refuses delete while another client holds the claim', () => {
+  it('NoteNode: refuses to open the menu (so delete is unreachable) while another client holds the lease', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
-      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+      <NoteNode id="note-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
     );
     fireEvent.contextMenu(screen.getByText('x'));
-    fireEvent.click(screen.getByRole('button', { name: /delete/i }));
+    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
     expect(notifyChange).not.toHaveBeenCalled();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
@@ -390,9 +398,29 @@ describe('remote selection claim exclusivity (task-annotation-shared-session-rea
     expect(notifyChange).toHaveBeenCalledWith('text');
   });
 
+  it('NoteNode: a mere remoteSelection (no edit lease) never refuses entering edit mode', () => {
+    // task-annotation-exclusive-edit-leases: selection alone must never
+    // acquire or steal an edit lease.
+    const { notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.doubleClick(screen.getByText('x'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
+  it('NoteNode: a mere remoteSelection (no edit lease) never refuses opening the menu', () => {
+    const { notifyRemoteLockedAttempt } = renderWithContext(
+      <NoteNode id="note-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    expect(document.querySelectorAll('.color-button').length).toBeGreaterThan(0);
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+  });
+
   it('LabelNode: refuses a text commit while another client holds the claim', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
-      <LabelNode id="label-1" data={{ text: 'x', remoteSelection: REMOTE_CLAIM }} selected />
+      <LabelNode id="label-1" data={{ text: 'x', remoteLease: REMOTE_CLAIM }} selected />
     );
     fireEvent.doubleClick(screen.getByText('x'));
     expect(screen.queryByRole('textbox')).toBeNull();
@@ -400,16 +428,16 @@ describe('remote selection claim exclusivity (task-annotation-shared-session-rea
     expect(notifyChange).not.toHaveBeenCalled();
   });
 
-  it('ArrowNode: refuses a colour change while another client holds the claim', () => {
+  it('ArrowNode: refuses to open the menu (so a colour change is unreachable) while another client holds the lease', () => {
     const { notifyChange, notifyRemoteLockedAttempt } = renderWithContext(
       <ArrowNode
         id="arrow-1"
-        data={{ dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM }}
+        data={{ dx: 160, dy: 0, remoteLease: REMOTE_CLAIM }}
         selected={false}
       />
     );
     fireEvent.contextMenu(document.querySelector('.graph-arrow-node'));
-    fireEvent.click(document.querySelectorAll('.color-button')[0]);
+    expect(document.querySelectorAll('.color-button')).toHaveLength(0);
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
     expect(notifyChange).not.toHaveBeenCalled();
     expect(hoisted.setNodes).not.toHaveBeenCalled();
@@ -417,7 +445,7 @@ describe('remote selection claim exclusivity (task-annotation-shared-session-rea
 
   it('ArrowNode: hides endpoint handles while another client holds the claim, even when selected', () => {
     const { container } = renderWithContext(
-      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM }} selected />
+      <ArrowNode id="arrow-1" data={{ dx: 160, dy: 0, remoteLease: REMOTE_CLAIM }} selected />
     );
     expect(container.querySelectorAll('circle.graph-arrow-handle').length).toBe(0);
   });
@@ -443,7 +471,7 @@ describe('remote selection claim exclusivity (task-annotation-shared-session-rea
     const remotelyLockedNode = {
       id: 'arrow-1',
       position: { x: 0, y: 0 },
-      data: { dx: 160, dy: 0, remoteSelection: REMOTE_CLAIM },
+      data: { dx: 160, dy: 0, remoteLease: REMOTE_CLAIM },
     };
     const result = updater([remotelyLockedNode]);
     expect(result[0]).toBe(remotelyLockedNode);

@@ -101,6 +101,61 @@ function useRootMenuKeyNav(containerRef) {
   );
 }
 
+/**
+ * ArrowUp/ArrowDown/Home/End roving navigation plus a Tab focus trap, for the
+ * six annotation-kind context menus (NoteNode/LabelNode/ArrowNode/
+ * GenericAnnotationNode/FreehandAnnotationNode/GroupNode). Reuses
+ * `nextRovingIndex` — the same roving-index algorithm `useRootMenuKeyNav`
+ * above uses for the graph-node/pane menu system — rather than a third
+ * implementation (task-annotation-accessible-shared-controls, closing the
+ * accessibility audit's "Arrow-key navigation between menu items" and "Focus
+ * trap while open" gaps, both explicitly named MISSING for every annotation
+ * kind there).
+ *
+ * Deliberately NOT `useRootMenuKeyNav` itself: that hook (and
+ * `NodeContextMenu`/`MultiNodeContextMenu`, its callers) scope roving to
+ * `[data-menu-item="root"]` because those menus nest `<Submenu>` panels with
+ * their own, separately-roved `[data-menu-item="sub"]` items — a marker is
+ * needed there to tell the two levels apart. None of the six annotation
+ * menus has a submenu; every actionable element in one of their portals is a
+ * real top-level `<button>`, so this operates on `button:not([disabled])`
+ * directly and needs no markup changes across five files to add the marker.
+ *
+ * The focus trap is minimal by design: it does not fight Tab's natural
+ * document-order movement between the menu's own buttons (already correct,
+ * since they are real `<button>`s), only the two points where Tab would
+ * otherwise leave the menu — wrapping Tab on the last item to the first, and
+ * Shift+Tab on the first item to the last.
+ */
+export function useAnnotationMenuKeyNav(containerRef) {
+  return useCallback(
+    (event) => {
+      const container = containerRef.current;
+      if (!container) return;
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        const items = Array.from(container.querySelectorAll('button:not([disabled])'));
+        if (items.length === 0) return;
+        event.preventDefault();
+        items[nextRovingIndex(items, document.activeElement, event.key)]?.focus();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = Array.from(container.querySelectorAll('button:not([disabled])'));
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
+    },
+    [containerRef]
+  );
+}
+
 /** Combines an internal ref (used for focus/keynav) with an optional externally-owned ref. */
 function useMergedContainerRef(externalRef) {
   const containerRef = useRef(null);
@@ -328,6 +383,62 @@ function Submenu({ label, ariaLabel, items, panelClassName, resetKey }) {
   );
 }
 
+// The three attachable kinds the "Nearby object menu" contract entry point
+// (docs/ANNOTATION_CONTRACT.md "Human authoring surfaces") offers from an
+// existing node/annotation's own context menu. `arrow`/`line` is
+// deliberately not offered here: arrow's own drag-to-attach editing already
+// gives it a creation-adjacent docking preview via its selected endpoints,
+// so this stays scoped to the one-click kinds that had no creation-time
+// affordance at all. `vote_dot` used to be a member of this list — task-
+// annotation-vote-dot-simplify removed it along with the rest of its
+// attachment behaviour (see ATTACHABLE_OVERLAY_KINDS in utils/annotations.js):
+// a vote dot is now a plain coloured dot with nothing to pre-wire an
+// attachment to.
+const NEARBY_ATTACH_KINDS = [
+  { kind: 'label', labelKey: 'nearbyLabel' },
+  { kind: 'icon', labelKey: 'nearbyIcon' },
+  { kind: 'text', labelKey: 'nearbyText' },
+];
+
+/**
+ * The "Nearby object menu" section shared by every context menu that offers
+ * it (NodeContextMenu below, plus the annotation-kind menus in
+ * NoteNode/LabelNode/ArrowNode/GenericAnnotationNode/FreehandAnnotationNode).
+ * `onAttach(kind)` is called with one of NEARBY_ATTACH_KINDS' kinds; the
+ * caller already knows which target id this menu is anchored to.
+ *
+ * `labels` uses the short `nearbyMenu`/`nearbyLabel`/`nearbyIcon`/
+ * `nearbyText` keys — the same short-key convention
+ * AnnotationContext's own `labels` object already uses for every other
+ * annotation-menu string (e.g. `color` for `cml.annotationColor`). A caller
+ * holding the flat `cml` object instead (NodeContextMenu, which is not an
+ * annotation-node component and has no AnnotationContext to read from) maps
+ * its `annotationNearby*` keys down to these short ones at the call site,
+ * the same remapping GraphCanvas itself does when it builds
+ * AnnotationContext's `labels` from `cml`.
+ */
+export function NearbyObjectMenuSection({ labels, onAttach }) {
+  if (!onAttach) return null;
+  return (
+    <>
+      <div className="context-menu-title">{labels.nearbyMenu}</div>
+      <div className="context-menu-nearby">
+        {NEARBY_ATTACH_KINDS.map(({ kind, labelKey }) => (
+          <button
+            key={kind}
+            type="button"
+            data-menu-item="root"
+            className="context-menu-nearby-button"
+            onClick={() => onAttach(kind)}
+          >
+            + {labels[labelKey]}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export function NodeContextMenu({
   menu,
   labels: cml,
@@ -347,6 +458,7 @@ export function NodeContextMenu({
   onRestoreNodes,
   onDimEdges,
   onRestoreEdges,
+  onAttachNearby,
   onClose,
 }) {
   const [containerRef, setContainerRef] = useMergedContainerRef(null);
@@ -511,6 +623,23 @@ export function NodeContextMenu({
           </>
         );
       })()}
+      {onAttachNearby && (
+        <>
+          <div className="context-menu-separator"></div>
+          <NearbyObjectMenuSection
+            labels={{
+              nearbyMenu: cml.annotationNearbyMenu,
+              nearbyLabel: cml.annotationNearbyLabel,
+              nearbyIcon: cml.annotationNearbyIcon,
+              nearbyText: cml.annotationNearbyText,
+            }}
+            onAttach={(kind) => {
+              onAttachNearby(menu.node.id, kind);
+              onClose();
+            }}
+          />
+        </>
+      )}
       {onDelete && (
         <>
           <div className="context-menu-separator"></div>
@@ -543,6 +672,8 @@ export function MultiNodeContextMenu({
   onDeleteSelection,
   selectNodesByType,
   onOrganize,
+  onAlign,
+  onDistribute,
   dimmedNodeIds = [],
   dimmedEdgeIds = [],
   graphEdges = [],
@@ -580,6 +711,30 @@ export function MultiNodeContextMenu({
         },
         { key: 'vertical', label: cml.organizeVertical, onSelect: () => onOrganize('vertical') },
         { key: 'tree', label: cml.organizeTree, onSelect: () => onOrganize('tree') },
+      ]
+    : [];
+  const alignItems = onAlign
+    ? [
+        { key: 'left', label: cml.alignLeft, onSelect: () => onAlign('left') },
+        { key: 'centerX', label: cml.alignCenterHorizontal, onSelect: () => onAlign('centerX') },
+        { key: 'right', label: cml.alignRight, onSelect: () => onAlign('right') },
+        { key: 'top', label: cml.alignTop, onSelect: () => onAlign('top') },
+        { key: 'centerY', label: cml.alignCenterVertical, onSelect: () => onAlign('centerY') },
+        { key: 'bottom', label: cml.alignBottom, onSelect: () => onAlign('bottom') },
+      ]
+    : [];
+  const distributeItems = onDistribute
+    ? [
+        {
+          key: 'horizontal',
+          label: cml.distributeHorizontal,
+          onSelect: () => onDistribute('horizontal'),
+        },
+        {
+          key: 'vertical',
+          label: cml.distributeVertical,
+          onSelect: () => onDistribute('vertical'),
+        },
       ]
     : [];
 
@@ -628,6 +783,24 @@ export function MultiNodeContextMenu({
             resetKey={menu}
           />
         </>
+      )}
+      {onAlign && (
+        <Submenu
+          label={`📐 ${cml.align}`}
+          ariaLabel={cml.align}
+          items={alignItems}
+          panelClassName="align-list"
+          resetKey={menu}
+        />
+      )}
+      {onDistribute && (
+        <Submenu
+          label={`↔️ ${cml.distribute}`}
+          ariaLabel={cml.distribute}
+          items={distributeItems}
+          panelClassName="distribute-list"
+          resetKey={menu}
+        />
       )}
       {(onHideSelection || onHideMultiple || onHide) && (
         <button

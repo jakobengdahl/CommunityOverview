@@ -691,3 +691,110 @@ export function arrangeNodes(nodesToArrange, edges = [], mode = 'cluster') {
   }
   return result;
 }
+
+/**
+ * Align a set of already-placed, already-sized nodes to a shared edge or
+ * centre line, computed from their own bounding boxes — unlike arrangeNodes'
+ * fixed-cell layouts above, a node without a resolved `width`/`height` is
+ * treated as a zero-size point rather than a placeholder cell.
+ *
+ * modes:
+ *   'left'    — every box's left edge moves to the selection's minimum left edge
+ *   'right'   — every box's right edge moves to the selection's maximum right edge
+ *   'centerX' — every box's horizontal centre moves to the midpoint of the
+ *               selection's overall left/right extent
+ *   'top' / 'bottom' / 'centerY' — the same, on the vertical axis
+ *
+ * @param {Array<{id:string, position:{x:number,y:number}, width?:number, height?:number}>} nodesToAlign
+ * @param {string} mode - one of the modes above
+ * @returns {Map<string, {x:number,y:number}>} new position for every input node
+ */
+export function alignNodes(nodesToAlign, mode) {
+  const result = new Map();
+  if (!Array.isArray(nodesToAlign) || nodesToAlign.length < 2) return result;
+
+  const items = nodesToAlign
+    .filter((n) => n && n.position)
+    .map((n) => ({
+      id: n.id,
+      x: n.position.x,
+      y: n.position.y,
+      w: n.width || 0,
+      h: n.height || 0,
+    }));
+  if (items.length < 2) return result;
+
+  if (mode === 'left' || mode === 'right' || mode === 'centerX') {
+    const minLeft = Math.min(...items.map((n) => n.x));
+    const maxRight = Math.max(...items.map((n) => n.x + n.w));
+    for (const n of items) {
+      let x;
+      if (mode === 'left') x = minLeft;
+      else if (mode === 'right') x = maxRight - n.w;
+      else x = (minLeft + maxRight) / 2 - n.w / 2;
+      result.set(n.id, { x, y: n.y });
+    }
+  } else if (mode === 'top' || mode === 'bottom' || mode === 'centerY') {
+    const minTop = Math.min(...items.map((n) => n.y));
+    const maxBottom = Math.max(...items.map((n) => n.y + n.h));
+    for (const n of items) {
+      let y;
+      if (mode === 'top') y = minTop;
+      else if (mode === 'bottom') y = maxBottom - n.h;
+      else y = (minTop + maxBottom) / 2 - n.h / 2;
+      result.set(n.id, { x: n.x, y });
+    }
+  }
+  return result;
+}
+
+/**
+ * Spread a set of already-placed, already-sized nodes evenly along one axis,
+ * so the gap between each box and its neighbour is equal. The nodes nearest
+ * each end of the axis (by centre) keep their current position — everything
+ * between them redistributes to close the gaps evenly. Meaningless (and
+ * refused) below 3 nodes: with only 2 there is exactly one gap, already
+ * "even" by definition, so the caller's own eligibility check should keep
+ * this action off the menu entirely rather than relying on this empty-map
+ * return.
+ *
+ * @param {Array<{id:string, position:{x:number,y:number}, width?:number, height?:number}>} nodesToDistribute
+ * @param {'horizontal'|'vertical'} axis
+ * @returns {Map<string, {x:number,y:number}>} new position for every input node
+ */
+export function distributeNodes(nodesToDistribute, axis) {
+  const result = new Map();
+  if (!Array.isArray(nodesToDistribute) || nodesToDistribute.length < 3) return result;
+
+  const items = nodesToDistribute
+    .filter((n) => n && n.position)
+    .map((n) => ({
+      id: n.id,
+      x: n.position.x,
+      y: n.position.y,
+      w: n.width || 0,
+      h: n.height || 0,
+    }));
+  if (items.length < 3) return result;
+
+  const primary = axis === 'vertical' ? 'y' : 'x';
+  const size = axis === 'vertical' ? 'h' : 'w';
+  const other = axis === 'vertical' ? 'x' : 'y';
+
+  const sorted = [...items].sort((a, b) => a[primary] + a[size] / 2 - (b[primary] + b[size] / 2));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const totalSize = sorted.reduce((sum, n) => sum + n[size], 0);
+  const span = last[primary] + last[size] - first[primary];
+  const gap = (span - totalSize) / (sorted.length - 1);
+
+  let cursor = first[primary];
+  for (const n of sorted) {
+    result.set(n.id, {
+      [primary]: cursor,
+      [other]: n[other],
+    });
+    cursor += n[size] + gap;
+  }
+  return result;
+}

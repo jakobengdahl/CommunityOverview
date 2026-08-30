@@ -121,7 +121,7 @@ describe('LabelNode inline text editing', () => {
     expect(screen.getByText('Hello')).toBeInTheDocument();
   });
 
-  it('refuses to enter edit mode while another client holds the selection claim', () => {
+  it('refuses to enter edit mode while another client holds the edit lease', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     render(
       <AnnotationContext.Provider
@@ -133,7 +133,7 @@ describe('LabelNode inline text editing', () => {
       >
         <LabelNode
           id="l1"
-          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          data={{ text: 'Hello', remoteLease: { color: '#f00', displayName: 'Ada' } }}
           selected={false}
         />
       </AnnotationContext.Provider>
@@ -141,6 +141,26 @@ describe('LabelNode inline text editing', () => {
     fireEvent.doubleClick(screen.getByText('Hello'));
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mere remoteSelection (no edit lease) does not refuse entry into edit mode', () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          notifyRemoteLockedAttempt: vi.fn(),
+          labels: { labelPlaceholder: 'Label' },
+        }}
+      >
+        <LabelNode
+          id="l1"
+          data={{ text: 'Hello', remoteSelection: { color: '#f00', displayName: 'Ada' } }}
+          selected={false}
+        />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.doubleClick(screen.getByText('Hello'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
   // smallfix-locked-annotation-text-still-editable-by-doubleclick: the persisted lock gates every
@@ -323,5 +343,53 @@ describe('LabelNode duplicate control', () => {
     const copy = updated.find((n) => n.id !== 'l1');
     expect(copy.data.locked).toBe(false);
     expect(updated.find((n) => n.id === 'l1').data.locked).toBe(true);
+  });
+});
+
+// task-annotation-render-direct-manipulation / task-annotation-responsive-
+// bottom-toolbox's "Nearby object menu" contract entry point: a label is one
+// of the annotation kinds that can itself be the target this menu creates a
+// new attachable annotation near — see NearbyObjectMenuSection's own tests in
+// ContextMenus.test.jsx for the shared component's behaviour in isolation.
+describe('LabelNode "Nearby object menu"', () => {
+  it("calls the context attachNearby with this label's id and the picked kind", () => {
+    const attachNearby = vi.fn();
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby,
+          labels: {
+            labelPlaceholder: 'Label',
+            nearbyMenu: 'Add nearby',
+            nearbyLabel: 'Label',
+            nearbyIcon: 'Icon',
+            nearbyVoteDot: 'Vote dot',
+            nearbyText: 'Text',
+          },
+        }}
+      >
+        <LabelNode id="l1" data={{ text: 'a label' }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('a label'));
+    fireEvent.click(screen.getByRole('button', { name: '+ Icon' }));
+    expect(attachNearby).toHaveBeenCalledWith('l1', 'icon');
+  });
+
+  it("omits the section from a locked label's menu (capability baseline: only unlock/copy)", () => {
+    render(
+      <AnnotationContext.Provider
+        value={{
+          notifyChange: vi.fn(),
+          attachNearby: vi.fn(),
+          labels: { unlock: 'Unlock', duplicate: 'Duplicate', labelPlaceholder: 'Label' },
+        }}
+      >
+        <LabelNode id="l1" data={{ text: 'a label', locked: true }} selected={false} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('a label'));
+    expect(screen.queryByText('Add nearby')).toBeNull();
   });
 });

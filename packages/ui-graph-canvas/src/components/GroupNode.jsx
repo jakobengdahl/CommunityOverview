@@ -2,7 +2,13 @@ import { memo, useState, useRef, useEffect, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { NodeResizer, useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { isRemoteLocked } from '../utils/annotations';
+import { isRemoteLocked, remoteEditBadge } from '../utils/annotations';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { GROUP_LAYER_FRONT, GROUP_LAYER_BACK, resolveGroupOrderZ } from '../utils/groupLayers';
+import { reorderNodesForParentChild } from './GraphCanvas';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GroupNode.css';
 
 /**
@@ -21,18 +27,31 @@ function GroupNode({ id, data, selected }) {
   const inputRef = useRef(null);
   const groupRef = useRef(null);
   const contextMenuRef = useRef(null);
-  const { setNodes } = useReactFlow();
+  const { setNodes, getNodes } = useReactFlow();
   // Groups are annotations (design 3.1); reuse the annotation change notifier so
   // a rename, recolour, resize or delete schedules a session save (and, in a
   // shared session, an op) the same way note/label/arrow edits do.
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this group's lease exclusive (task-annotation-shared-session-realtime).
+  const { notifyChange, notifyRemoteLockedAttempt, labels, beginEditing, endEditing } =
+    useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
-  // The persisted flag, distinct from the remote claim above. It only started
+  // The persisted flag, distinct from the remote lease above. It only started
   // reaching this component when the group translators began carrying it;
   // before that a group locked over MCP rendered its full menu.
   const locked = Boolean(data?.locked);
+  useAnnotationEditLease(id, isEditing);
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  // task-annotation-accessible-shared-controls: `group` was the one kind the
+  // Edit-button/mobile-sheet work (task-annotation-responsive-bottom-toolbox)
+  // named as out of its scope — see docs/ANNOTATION_CONTRACT.md's audit —
+  // wired here the same way the other five kinds already are.
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -97,7 +116,7 @@ function GroupNode({ id, data, selected }) {
       return;
     }
     // A rename is an edit, so the persisted lock refuses it as the menu does.
-    // Silently, unlike the remote claim above: that one is somebody else
+    // Silently, unlike the remote lease above: that one is somebody else
     // holding the object right now and worth surfacing, while this one is a
     // standing state the menu already explains with its Unlock button.
     if (locked) return;
@@ -233,14 +252,64 @@ function GroupNode({ id, data, selected }) {
     notifyChange('style');
   };
 
+  // Reorders this group among OTHER group backgrounds only — group-vs-group
+  // is the only thing dec-annotation-group-background-layering leaves
+  // editable; a group background's position behind every graph node and
+  // every other annotation kind is structural (reorderNodesForParentChild's
+  // own bucketing plus GroupNode.css's `.react-flow__node-group` z-index
+  // pin — see utils/groupLayers.js's module docstring) and nothing this
+  // handler does can move it out of that bucket. Never touches membership,
+  // member position or member z — only this group node's own `data.z`.
+  // Mirrors AnnotationLayerControls' useAnnotationLayer guard order exactly:
+  // a live remote edit lease refuses and surfaces the attempt; the
+  // persisted lock refuses silently (the menu already withholds this
+  // section on a locked group below — this is the hook-level backstop the
+  // same way useAnnotationLayer's own comment describes for the generic
+  // row, so no future call site can reintroduce the hole by rendering the
+  // buttons without their own locked branch).
+  const handleChangeGroupLayer = (direction) => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    if (locked) return;
+    const z = resolveGroupOrderZ(getNodes(), id, direction);
+    if (z === null) {
+      // Already alone at that end among groups (or the only group on the
+      // canvas) — a no-op, not an error, matching resolveLayerZ's own
+      // no-op contract.
+      setContextMenu(null);
+      return;
+    }
+    setNodes((nds) =>
+      reorderNodesForParentChild(
+        nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, z } } : n))
+      )
+    );
+    setContextMenu(null);
+    notifyChange('style');
+    if (beginEditing) {
+      beginEditing([id]).then(({ denied } = {}) => {
+        if (denied?.[id]) notifyRemoteLockedAttempt();
+        endEditing?.([id]);
+      });
+    }
+  };
+
   const colors = ['#646cff', '#10B981', '#F97316', '#EF4444', '#A855F7', '#3B82F6'];
+  const groupBadge = remoteEditBadge(data);
 
   return (
     <>
       <NodeResizer
         minWidth={200}
         minHeight={150}
-        onResizeEnd={() => notifyChange('geometry')}
+        onResizeStart={() => beginEditing?.([id])}
+        onResizeEnd={() => {
+          notifyChange('geometry');
+          endEditing?.([id]);
+        }}
         isVisible={selected && !remoteLocked && !locked}
         lineStyle={{ stroke: data.color || '#646cff', strokeWidth: 4 }}
         handleStyle={{
@@ -257,17 +326,17 @@ function GroupNode({ id, data, selected }) {
         style={{
           borderColor: data.color || '#646cff',
           backgroundColor: `${data.color || '#646cff'}15`,
-          outline: remoteLocked ? `2px solid ${data.remoteSelection.color}` : undefined,
-          outlineOffset: remoteLocked ? '2px' : undefined,
+          outline: groupBadge ? `2px solid ${groupBadge.color}` : undefined,
+          outlineOffset: groupBadge ? '2px' : undefined,
         }}
       >
-        {remoteLocked && (
+        {groupBadge && (
           <div
             className="graph-node-remote-badge"
-            style={{ backgroundColor: data.remoteSelection.color }}
-            title={data.remoteSelection.displayName}
+            style={{ backgroundColor: groupBadge.color }}
+            title={groupBadge.displayName}
           >
-            {data.remoteSelection.displayName}
+            {groupBadge.displayName}
           </div>
         )}
         <div
@@ -294,21 +363,46 @@ function GroupNode({ id, data, selected }) {
         </div>
         {data.description && <div className="graph-group-description">{data.description}</div>}
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected — the keyboard/tap-reachable entry point this
+          kind was missing (task-annotation-accessible-shared-controls). */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-group-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-group-context-menu graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // A locked group offers Unlock and nothing else, the same as
-              // every other kind. The unlocked menu has exactly two other
-              // actions — recolour, which is an edit, and Delete Group, which
-              // destroys the box — so there is nothing a lock could allow
-              // through. Anything added to the unlocked menu later has to be
-              // decided against this branch as well, not just dropped in.
+              // every other kind. The unlocked menu has exactly four other
+              // actions — recolour, the group-order row, the non-drag size
+              // control, all edits, and Delete Group, which destroys the
+              // box — so there is nothing a lock could allow through.
+              // Anything added to the unlocked menu later has to be decided
+              // against this branch as well, not just dropped in.
               <button type="button" className="context-menu-unlock" onClick={unlock}>
                 🔓 {labels.unlock}
               </button>
@@ -325,13 +419,44 @@ function GroupNode({ id, data, selected }) {
                     />
                   ))}
                 </div>
+                {/* Group backgrounds relative to each other only — see
+                    handleChangeGroupLayer above. Always rendered, like the
+                    generic AnnotationLayerControls row: a click is a silent
+                    no-op when there is nothing to order this group against
+                    (the only group on the canvas, or already at that end),
+                    rather than the control disappearing depending on how
+                    many other groups happen to exist. */}
+                <div className="context-menu-title">{labels.groupLayer}</div>
+                <div className="context-menu-layer">
+                  <button
+                    type="button"
+                    className="layer-button"
+                    aria-label={labels.groupLayerBack}
+                    title={labels.groupLayerBack}
+                    onClick={() => handleChangeGroupLayer(GROUP_LAYER_BACK)}
+                  >
+                    ⤓
+                  </button>
+                  <button
+                    type="button"
+                    className="layer-button"
+                    aria-label={labels.groupLayerFront}
+                    title={labels.groupLayerFront}
+                    onClick={() => handleChangeGroupLayer(GROUP_LAYER_FRONT)}
+                  >
+                    ⤒
+                  </button>
+                </div>
+                {/* Non-drag alternative to the NodeResizer handles above —
+                    task-annotation-accessible-shared-controls. */}
+                <AnnotationSizeControl id={id} data={data} labels={labels} />
                 <button className="context-menu-delete" onClick={handleDeleteGroup}>
                   🗑️ Delete Group
                 </button>
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

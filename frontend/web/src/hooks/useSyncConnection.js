@@ -22,6 +22,11 @@ export function useSyncConnection(sessionId) {
   // Presence roster + remote selection markers for the active session (step 7).
   const [roster, setRoster] = useState([]);
   const [remoteSelections, setRemoteSelections] = useState({});
+  // Remote edit-lease markers (task-annotation-exclusive-edit-leases) — kept
+  // apart from remoteSelections above: selection stays a purely cosmetic
+  // presence marker, this is the exclusive one GraphCanvas actually gates
+  // editing on.
+  const [remoteLeases, setRemoteLeases] = useState({});
   // Whether the op-protocol stream has connected at least once for the active
   // session (first snapshot delivered). Once true, MCP commands arrive via the
   // op stream's broadcast `command` events, so the single-consumer legacy push
@@ -36,6 +41,7 @@ export function useSyncConnection(sessionId) {
     setRemoteAnnotationOps(null);
     setRoster([]);
     setRemoteSelections({});
+    setRemoteLeases({});
     setOpStreamReady(false);
   }, []);
 
@@ -78,6 +84,7 @@ export function useSyncConnection(sessionId) {
           onRemoteOps: (...a) => callIfCurrent('onRemoteOps', ...a),
           onPresence: (...a) => callIfCurrent('onPresence', ...a),
           onSelections: (...a) => callIfCurrent('onSelections', ...a),
+          onLeases: (...a) => callIfCurrent('onLeases', ...a),
           onSessionRenamed: (...a) => callIfCurrent('onSessionRenamed', ...a),
           onSessionDeleted: (...a) => callIfCurrent('onSessionDeleted', ...a),
           onCommand: (...a) => callIfCurrent('onCommand', ...a),
@@ -132,6 +139,8 @@ export function useSyncConnection(sessionId) {
     setRoster,
     remoteSelections,
     setRemoteSelections,
+    remoteLeases,
+    setRemoteLeases,
     opStreamReady,
     setOpStreamReady,
   };

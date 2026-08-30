@@ -210,11 +210,22 @@ describe('describeActivity', () => {
       });
     }
 
+    // `z: 0` is explicit on every fixture, not left to `createAnnotation`'s
+    // own default: these fixtures model an already-stored annotation's
+    // *current* z at the moment of the edit under test, which is a property
+    // of that annotation's history, not of what kind it is. Leaving it
+    // implicit would make the `before` snapshot pick up
+    // `defaultAnnotationZ('shape')` (-1, task-annotation-render-direct-
+    // manipulation's semantic default layers) for the `shape` case only,
+    // silently changing what "before" means between kinds and making the
+    // send-to-back case below (`z: -1`) a no-op for `shape` alone — the
+    // "before" and "after" z would both already be -1, so `changed.has('z')`
+    // would be false and the assertion would test nothing.
     const KINDS = [
-      { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 } },
-      { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 } },
-      { id: 'i1', type: 'icon', icon: 'circle', position: { x: 0, y: 0 } },
-      { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 } },
+      { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 }, z: 0 },
+      { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 }, z: 0 },
+      { id: 'i1', type: 'icon', icon: 'circle', position: { x: 0, y: 0 }, z: 0 },
+      { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 }, z: 0 },
     ];
 
     it.each(KINDS)('classifies a bring-to-front on $type as "raised", not "unlocked"', (base) => {
@@ -345,7 +356,6 @@ describe('describeActivity', () => {
       { name: 'text', ann: serverAnnotation('text', { text: 'hi' }) },
       { name: 'icon', ann: serverAnnotation('icon', { icon: 'star' }) },
       { name: 'vote_dot', ann: serverAnnotation('vote_dot') },
-      { name: 'frame', ann: serverAnnotation('frame') },
       { name: 'note', ann: serverAnnotation('note', { text: 'hi' }) },
     ];
 
@@ -462,7 +472,7 @@ describe('describeActivity', () => {
     it('still reports an agent resizing a dimension down to zero', () => {
       // build_annotation_patch accepts w=0; only MCP can reach this, since the
       // canvas resizer has a minimum.
-      const before = serverAnnotation('frame');
+      const before = serverAnnotation('shape');
       before.geometry = { x: 10, y: 20, w: 800, h: 400, rotation: 0 };
       const after = { ...before, geometry: { x: 10, y: 20, w: 0, h: 400, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
@@ -688,7 +698,7 @@ describe('describeActivity', () => {
       });
     }
 
-    it.each(['text', 'label', 'icon', 'vote_dot'])(
+    it.each(['text', 'label', 'icon'])(
       'does not report an attachment gaining target_type on a dragged %s as "attached"',
       (type) => {
         // normalizeAttachment fills target_type:'node'; the backend makes it
@@ -735,10 +745,10 @@ describe('describeActivity', () => {
     });
 
     it('still reports an agent resizing a kind whose overlay carries its size', () => {
-      // A frame's overlay preserves w/h, so 0 -> 160x96 there can only be an
+      // A shape's overlay preserves w/h, so 0 -> 160x96 there can only be an
       // agent resize. A guard keyed on the value rather than the round trip
       // swallowed exactly this.
-      const before = serverAnn('frame');
+      const before = serverAnn('shape');
       const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_resized'
@@ -1140,23 +1150,23 @@ describe('classifyUndoError', () => {
     expect(classifyUndoError({ status: 409, message: 'session busy, retry' })).toBe('busy');
   });
 
-  it('maps the ClaimConflict 409 to claimed (retryable), not to conflict', () => {
-    // Verbatim str(ClaimConflict) from backend/core/session_manager.py; the
+  it('maps the LeaseConflict 409 to claimed (retryable), not to conflict', () => {
+    // Verbatim str(LeaseConflict) from backend/core/session_manager.py; the
     // ids vary, so the classifier matches the invariant middle of the string.
     expect(
       classifyUndoError({
         status: 409,
         message:
-          "annotation 'note-1' is claimed by another client ('client-b'); " +
-          'wait for the claim to release or expire before editing it',
+          "annotation 'note-1' is being edited by another client ('client-b'); " +
+          'wait for the lease to release or expire before editing it',
       })
     ).toBe('claimed');
     expect(
       classifyUndoError({
         status: 409,
         message:
-          "annotation 'sticky-42' is claimed by another client ('someone-else'); " +
-          'wait for the claim to release or expire before editing it',
+          "annotation 'sticky-42' is being edited by another client ('someone-else'); " +
+          'wait for the lease to release or expire before editing it',
       })
     ).toBe('claimed');
   });
@@ -1189,10 +1199,11 @@ describe('describeActivity × i18n', () => {
     { before: { type: 'note', shape: 'rectangle' }, after: { type: 'note', shape: 'ellipse' } },
     { before: { type: 'note', locked: false }, after: { type: 'note', locked: true } },
     { before: { type: 'note', locked: true }, after: { type: 'note', locked: false } },
-    // `label`, not `note`: only label/text/icon/vote_dot carry an attachment
-    // through the overlay translators, so a note is never attached or
-    // detached and using one here would assert a transition that cannot
-    // happen.
+    // `label`, not `note`: only label/text/icon carry an attachment
+    // through the overlay translators (`vote_dot` used to be a fourth —
+    // task-annotation-vote-dot-simplify retired it), so a note is never
+    // attached or detached and using one here would assert a transition
+    // that cannot happen.
     { before: { type: 'label' }, after: { type: 'label', attachment: { target_id: 'n1' } } },
     { before: { type: 'label', attachment: { target_id: 'n1' } }, after: { type: 'label' } },
     {
@@ -1244,7 +1255,7 @@ describe('classifyUndoError × i18n', () => {
     { status: 429 },
     { status: 404, message: 'no undoable action' },
     { status: 409, message: 'session busy, retry' },
-    { status: 409, message: "annotation 'note-1' is claimed by another client ('c2'); wait" },
+    { status: 409, message: "annotation 'note-1' is being edited by another client ('c2'); wait" },
     { status: 409, message: 'affected state changed since this action' },
     { status: 500 },
   ];

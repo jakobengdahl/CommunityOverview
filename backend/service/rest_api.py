@@ -948,9 +948,9 @@ def _register_session_endpoints(
     """
     from backend.core.session_manager import (
         AnnotationRecentlyDeleted,
-        ClaimConflict,
         ImageBudgetExceeded,
         LayoutBusy,
+        LeaseConflict,
         NoUndoableAction,
         OpBatchTooLarge,
         RateLimited,
@@ -959,7 +959,11 @@ def _register_session_endpoints(
         SessionNotFound,
         UndoConflict,
     )
-    from backend.core.session_store import OpError, is_valid_session_id
+    from backend.core.session_store import (
+        AnnotationFieldConflict,
+        OpError,
+        is_valid_session_id,
+    )
 
     def _rate_limit_lookup(http_request: Request) -> None:
         """Throttle auth-bypassed session-id lookups by client address.
@@ -1079,8 +1083,27 @@ def _register_session_endpoints(
             raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="op batch too large")
-        except ClaimConflict as exc:
+        except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except AnnotationFieldConflict as exc:
+            # Same 409 status as LeaseConflict (both mean "this write raced a
+            # concurrent edit, don't retry it as-is" — sessionSyncClient.js's
+            # terminal-rejection handling is shared for the whole class), but
+            # a structured `detail` object rather than a bare string: the
+            # browser distinguishes the two causes (a live edit lease vs. a
+            # genuine field-version race) to show an accurate notice instead
+            # of always claiming "someone else is editing this" — see
+            # App.jsx's onDropped.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "field_conflict",
+                    "annotation_id": exc.annotation_id,
+                    "conflicting_fields": exc.conflicts,
+                    "server_version": exc.server_version,
+                    "message": str(exc),
+                },
+            )
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1154,21 +1177,21 @@ def _register_session_endpoints(
                         ),
                     )
                 # This replaces an existing annotation directly (not through
-                # apply_ops, so ClaimMap enforcement there never sees it) — the
+                # apply_ops, so LeaseMap enforcement there never sees it) — the
                 # pasting browser's own client_id is known here (unlike the op
                 # sent to upsert_image_annotation below, which is always
                 # attributed to the shared _HUMAN_IMAGE_INGEST_CLIENT_ID for SSE
                 # echo purposes — see that constant's docstring), so check it
-                # against the same live-claim snapshot apply_ops uses, before
+                # against the same live-lease snapshot apply_ops uses, before
                 # paying for the fetch/optimize below.
                 if existing is not None:
-                    holder = session_manager.claims.snapshot(session_id).get(
+                    holder = session_manager.leases.snapshot(session_id).get(
                         request.annotation_id
                     )
                     if holder is not None and holder != request.client_id:
                         raise HTTPException(
                             status_code=409,
-                            detail=str(ClaimConflict(request.annotation_id, holder)),
+                            detail=str(LeaseConflict(request.annotation_id, holder)),
                         )
 
         try:
@@ -1225,6 +1248,12 @@ def _register_session_endpoints(
                 _HUMAN_IMAGE_INGEST_CLIENT_ID,
                 annotation,
                 optimized_image_bytes=len(optimized.data),
+                # The lease check inside upsert_image_annotation must judge
+                # this against the real posting browser's identity, not the
+                # marker above — see lease_client_id's docstring. Without
+                # this, a browser replacing an image it holds its own lease
+                # on would be rejected as if a stranger held it.
+                lease_client_id=request.client_id,
                 # Throttle by request source, not by the marker above (which is
                 # the same string for every human upload server-wide, so it
                 # would put every user in one bucket) and not by the caller's
@@ -1251,6 +1280,16 @@ def _register_session_endpoints(
                     "by another collaborator; retry with a different id."
                 ),
             )
+        except LeaseConflict as exc:
+            # The pre-check above (before the fetch/optimize step) is a
+            # fail-fast UX nicety only; this is the authoritative check
+            # inside upsert_image_annotation itself, closing the race where a
+            # lease is acquired by someone else during the awaited
+            # fetch/optimize step — see LeaseConflict's docstring. Same 409
+            # shape as apply_session_ops/undo_session_action use for this
+            # exception, so the browser's shared terminal-rejection handling
+            # (sessionSyncClient.js) applies uniformly.
+            raise HTTPException(status_code=409, detail=str(exc))
         except LayoutBusy:
             raise HTTPException(status_code=409, detail="session busy, retry")
         except RateLimited:
@@ -1309,7 +1348,7 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="no undoable action")
         except UndoConflict as exc:
             raise HTTPException(status_code=409, detail=exc.reason)
-        except ClaimConflict as exc:
+        except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except RevisionConflict as exc:
             raise HTTPException(

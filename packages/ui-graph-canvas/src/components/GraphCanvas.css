@@ -501,6 +501,12 @@ body.graph-suppress-selection * {
   color: #ffffff;
 }
 
+.graph-compact-control.active {
+  border-color: #6366f1;
+  background: #4f46e5;
+  color: #ffffff;
+}
+
 /* Phone widths: the minimap is suppressed here (see GraphCanvas.jsx), so the
    224px dodge that kept the depth control clear of it no longer buys anything
    and only pushes the control off a 390px screen. Each surface gets its own
@@ -672,6 +678,111 @@ body.graph-suppress-selection * {
   pointer-events: none;
 }
 
+/* Non-drag "Attach to…" target-tap mode's own status banner
+   (task-annotation-accessible-shared-controls) — the same shape as the
+   freehand drawing hint above, but with `pointer-events: auto` and a real
+   Cancel button: unlike freehand's own one-shot pointer-capture gesture,
+   this mode is exited by a follow-up click/tap (on a target, or on this
+   button), not only by finishing a drawing motion. */
+.graph-attach-mode-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #b45309;
+  background: rgba(120, 53, 15, 0.92);
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.graph-attach-mode-hint button {
+  border: 1px solid #fde68a;
+  background: transparent;
+  color: #fde68a;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* The overlap-object picker (task-annotation-accessible-shared-controls) —
+   reuses `.graph-context-menu`'s base box/button styling (position: fixed,
+   dark menu chrome, hover state) via that shared class, added alongside
+   this one on the same element. */
+.graph-overlap-picker {
+  min-width: 180px;
+}
+
+/* Non-drag width/height inputs (task-annotation-accessible-shared-controls). */
+.context-menu-size-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 8px;
+}
+
+.context-menu-size-input {
+  width: 56px;
+  background: #1f2937;
+  border: 1px solid #4b5563;
+  border-radius: 4px;
+  color: #e5e7eb;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.context-menu-size-separator {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.context-menu-apply-size {
+  width: auto;
+  background: #374151;
+  border: 1px solid #4b5563;
+  border-radius: 4px;
+  color: #e6edf3;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.context-menu-apply-size:hover {
+  border-color: #666;
+  background: #4b5563;
+}
+
+/* Non-drag "Attach to…"/Detach buttons (task-annotation-accessible-shared-
+   controls) — same visual weight as `.context-menu-toggle`. */
+.context-menu-attach {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 6px;
+  transition: all 0.2s;
+}
+
+.context-menu-attach:hover {
+  border-color: #666;
+  background: #333;
+}
+
 @media (prefers-color-scheme: light) {
   .graph-marks-legend {
     background: rgba(255, 255, 255, 0.92);
@@ -693,5 +804,69 @@ body.graph-suppress-selection * {
 
   .graph-agent-arranging-label {
     color: #374151;
+  }
+}
+
+/* The contextual "Edit" surface's visible entry point
+   (task-annotation-responsive-bottom-toolbox), rendered by every annotation
+   kind's own component (NoteNode, LabelNode, ArrowNode,
+   GenericAnnotationNode, FreehandAnnotationNode) — one shared rule set here
+   rather than five copies, since the button is visually and behaviourally
+   identical everywhere. Positioned like `.graph-node-remote-badge`
+   (CustomNode.css): `position: absolute` against the nearest positioned
+   ancestor, which is ReactFlow's own `.react-flow__node` wrapper when this
+   renders as a direct sibling of a kind's content (every kind but
+   freehand/arrow, which anchor it near their own stroke/endpoint origin
+   instead — see their own inline `style` for why). Sits above the remote
+   badge (z-index 6) so the two never fight for a hover/click target when
+   both are showing. `nodrag nopan` (ReactFlow's own class-based opt-outs)
+   keep a click/tap on this button from ever starting a canvas pan or a node
+   drag. */
+.annotation-edit-trigger {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  z-index: 7;
+}
+
+.annotation-edit-trigger:hover {
+  background: #3a3a3a;
+}
+
+.annotation-edit-trigger:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+/* ArrowNode has no box to anchor a top-right corner to — see its own doc
+   comment on this button for why it sits near the flow-position origin
+   instead. */
+.annotation-edit-trigger-arrow {
+  top: -28px;
+  left: -12px;
+  right: auto;
+}
+
+@media (prefers-color-scheme: light) {
+  .annotation-edit-trigger {
+    background: #1f2937;
+  }
+
+  .annotation-edit-trigger:hover {
+    background: #374151;
   }
 }

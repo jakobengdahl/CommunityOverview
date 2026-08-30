@@ -4,7 +4,7 @@ import { useCallback, useState } from 'react';
 // (rather than letting callers pass arbitrary strings) is what lets
 // mutual-exclusion be enforced for real: open() rejects anything not in this
 // set instead of silently tracking an unknown surface as "the" open one.
-export const SURFACES = ['none', 'search', 'create', 'chat', 'menu', 'detail'];
+export const SURFACES = ['none', 'search', 'create', 'annotate', 'chat', 'menu', 'detail'];
 
 /**
  * useSurfaceManager - tracks which single mobile surface (bottom sheet,

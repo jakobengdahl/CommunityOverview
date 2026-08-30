@@ -293,7 +293,7 @@ class TestSessionOps:
         )
         assert resp.status_code == 400
 
-    def test_ops_write_to_claimed_annotation_by_another_client_409(
+    def test_ops_write_to_leased_annotation_by_another_client_409(
         self, test_app: TestClient
     ):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
@@ -306,7 +306,7 @@ class TestSessionOps:
                         "op": "annotation_created",
                         "annotation": {"id": "note-1", "type": "note"},
                     },
-                    {"op": "selection_claimed", "element_ids": ["note-1"]},
+                    {"op": "edit_lease_acquired", "element_ids": ["note-1"]},
                 ],
             },
         )
@@ -385,36 +385,36 @@ class TestSessionActivityAndUndo:
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"] == []
 
-    def test_undo_is_409_while_another_client_holds_the_claim(
+    def test_undo_is_409_while_another_client_holds_the_lease(
         self, test_app: TestClient
     ):
-        """Undo is a browser write, so it answers to the same claim rule
+        """Undo is a browser write, so it answers to the same edit-lease rule
         POST /ops does. Actor-scoping does not cover this: the action being
-        undone is the caller's own, but the annotation it touches was claimed
-        by someone else in between."""
+        undone is the caller's own, but the annotation it touches came under
+        someone else's live edit lease in between."""
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         self._create_note(test_app, sid, text="hello")
         test_app.post(
             f"/api/sessions/{sid}/ops",
             json={
                 "client_id": "c2",
-                "ops": [{"op": "selection_claimed", "element_ids": ["note-1"]}],
+                "ops": [{"op": "edit_lease_acquired", "element_ids": ["note-1"]}],
             },
         )
 
         resp = test_app.post(f"/api/sessions/{sid}/undo", json={"client_id": "c1"})
         assert resp.status_code == 409
-        assert "claimed by another client" in resp.json()["detail"]
+        assert "is being edited by another client" in resp.json()["detail"]
 
         # Refused without touching anything: the note is still there and the
-        # action is still undoable once the claim clears.
+        # action is still undoable once the lease clears.
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"][0]["text"] == "hello"
 
-    def test_undo_succeeds_once_the_claim_is_released(self, test_app: TestClient):
+    def test_undo_succeeds_once_the_lease_is_released(self, test_app: TestClient):
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         self._create_note(test_app, sid, text="hello")
-        for op in ("selection_claimed", "selection_released"):
+        for op in ("edit_lease_acquired", "edit_lease_released"):
             test_app.post(
                 f"/api/sessions/{sid}/ops",
                 json={
@@ -933,16 +933,16 @@ class TestSessionImageIngestEndpoint:
         assert len(state["annotations"]) == 1
         assert state["annotations"][0]["id"] == "img-1"
 
-    def test_replacing_a_claimed_image_annotation_is_rejected_409(
+    def test_replacing_a_leased_image_annotation_is_rejected_409(
         self, test_app: TestClient
     ):
         """This endpoint writes through upsert_image_annotation directly, not
-        apply_ops, so it needs its own claim check (rest_api.py) rather than
+        apply_ops, so it needs its own lease check (rest_api.py) rather than
         inheriting SessionManager.apply_ops'. The op broadcast for this write
         is always attributed to the shared human-image-ingest marker (see the
-        SSE-echo test above), but the *claim* check must use the real posting
+        SSE-echo test above), but the *lease* check must use the real posting
         browser's own client_id — 'browser-1' here — or a browser holding its
-        own claim would be locked out of replacing its own image."""
+        own lease would be locked out of replacing its own image."""
         sid = test_app.post("/api/sessions", json={}).json()["id"]
         first = test_app.post(
             f"/api/sessions/{sid}/annotations/image",
@@ -957,7 +957,7 @@ class TestSessionImageIngestEndpoint:
         assert first.status_code == 200
 
         mgr = test_app.app.state.session_manager
-        mgr.claims.claim(sid, "browser-2", ["img-1"])
+        mgr.leases.acquire(sid, "browser-2", ["img-1"])
 
         blocked = test_app.post(
             f"/api/sessions/{sid}/annotations/image",
@@ -976,7 +976,7 @@ class TestSessionImageIngestEndpoint:
             == first.json()["annotation"]["image"]["url"]
         )
 
-        # The claim holder's own replacement still succeeds.
+        # The lease holder's own replacement still succeeds.
         allowed = test_app.post(
             f"/api/sessions/{sid}/annotations/image",
             json={
@@ -988,6 +988,68 @@ class TestSessionImageIngestEndpoint:
             },
         )
         assert allowed.status_code == 200
+
+    def test_lease_acquired_during_fetch_races_the_authoritative_check_409(
+        self, test_app: TestClient, monkeypatch
+    ):
+        """The pre-check above only sees leases that already existed *before*
+        the awaited fetch/optimize step starts. If another browser's lease
+        acquisition lands *during* that await — after the pre-check passed,
+        before upsert_image_annotation runs — the pre-check cannot catch it;
+        the authoritative check inside upsert_image_annotation itself is
+        what has to (see LeaseConflict's docstring and
+        upsert_image_annotation's). Without `except LeaseConflict` around
+        that call in ingest_session_image, this scenario raises unhandled
+        out of the route handler instead of the expected 409."""
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+        first = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 0,
+                "y": 0,
+                "image_data": _png_data_url(color=(255, 0, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert first.status_code == 200
+
+        mgr = test_app.app.state.session_manager
+        real_fetch_and_optimize = rest_api_module._fetch_and_optimize_image
+
+        def _fetch_and_optimize_then_acquire_lease(image_data, image_url):
+            # Runs inside asyncio.to_thread, standing in for the "someone
+            # else's edit-lease acquisition landed while this request's
+            # fetch/optimize step was in flight" window — after this
+            # endpoint's own pre-check already found no lease, before
+            # upsert_image_annotation's authoritative check runs.
+            result = real_fetch_and_optimize(image_data, image_url)
+            mgr.leases.acquire(sid, "browser-2", ["img-1"])
+            return result
+
+        monkeypatch.setattr(
+            rest_api_module,
+            "_fetch_and_optimize_image",
+            _fetch_and_optimize_then_acquire_lease,
+        )
+
+        raced = test_app.post(
+            f"/api/sessions/{sid}/annotations/image",
+            json={
+                "client_id": "browser-1",
+                "x": 5,
+                "y": 5,
+                "image_data": _png_data_url(color=(0, 255, 0)),
+                "annotation_id": "img-1",
+            },
+        )
+        assert raced.status_code == 409
+
+        state = test_app.get(f"/api/sessions/{sid}").json()["state"]
+        assert (
+            state["annotations"][0]["image"]["url"]
+            == first.json()["annotation"]["image"]["url"]
+        )
 
 
 class TestImageIngestRateLimit:

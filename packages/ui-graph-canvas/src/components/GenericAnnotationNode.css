@@ -86,16 +86,24 @@
   word-break: break-word;
 }
 
-.graph-generic-annotation-node.kind-frame {
-  box-sizing: border-box;
-  border: 2px dashed #94a3b8;
-  border-radius: 4px;
-  background: transparent;
-}
-
 .graph-generic-annotation-node.kind-shape {
   box-sizing: border-box;
   border-radius: 4px;
+}
+
+/* The "transparent" swatch option in `shape`'s Fill/Border editors
+   (task-annotation-merge-frame-into-shape-rectangle) — a checkerboard is the
+   conventional way to depict "no colour" so it is never mistaken for an
+   unset/loading swatch, which a bare see-through button would look like. */
+.graph-annotation-context-menu .color-button-transparent {
+  background-color: #2a2a2a;
+  background-image:
+    linear-gradient(45deg, #55555d 25%, transparent 25%, transparent 75%, #55555d 75%),
+    linear-gradient(45deg, #55555d 25%, transparent 25%, transparent 75%, #55555d 75%);
+  background-size: 8px 8px;
+  background-position:
+    0 0,
+    4px 4px;
 }
 
 /* Per-variant shape geometry (circle's radius, the clip paths for triangle,
@@ -124,16 +132,17 @@
   text-transform: uppercase;
 }
 
+/* A plain coloured dot (task-annotation-vote-dot-simplify): no rendered
+   number any more, just its fill colour plus a fixed black ring and drop
+   shadow so it reads clearly against any canvas background regardless of
+   its own fill — unlike `color`, the ring/shadow are the same for every
+   dot, not one of the swatch choices. */
 .graph-generic-annotation-node.kind-vote_dot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  color: #1a1a1a;
-  font-size: 12px;
-  font-weight: 600;
+  border: 1px solid rgba(0, 0, 0, 0.85);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
 
 .graph-generic-annotation-node.kind-image {

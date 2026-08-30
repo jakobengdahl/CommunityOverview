@@ -67,7 +67,6 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByRole('button', { name: /^note$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^text$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^label$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^frame$/i })).toBeInTheDocument();
     // The shape slot shows the default shape (rectangle) as its own name;
     // every other variant now lives in the picker, not as a top-level button.
     expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
@@ -91,7 +90,7 @@ describe('AnnotationToolbox', () => {
     expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
   });
 
-  it('calls onCreate with the kind for note/text/label/frame', () => {
+  it('calls onCreate with the kind for note/text/label', () => {
     const onCreate = vi.fn();
     render(<AnnotationToolbox onCreate={onCreate} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
@@ -104,9 +103,6 @@ describe('AnnotationToolbox', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
     expect(onCreate).toHaveBeenLastCalledWith('label', undefined);
-
-    fireEvent.click(screen.getByRole('button', { name: /^frame$/i }));
-    expect(onCreate).toHaveBeenLastCalledWith('frame', undefined);
   });
 
   // Every accepted content.shape variant is still offered — now via the
@@ -344,7 +340,7 @@ describe('AnnotationToolbox', () => {
     expect(note.querySelector('.annotation-toolbox-visual--note')).toBeTruthy();
     expect(note.querySelector('.annotation-toolbox-item-glyph').textContent).not.toContain('🗒');
 
-    for (const name of ['text', 'label', 'frame', 'vote-dot', 'image', 'freehand']) {
+    for (const name of ['text', 'label', 'vote-dot', 'image', 'freehand']) {
       expect(document.querySelector(`.annotation-toolbox-visual--${name}`)).toBeTruthy();
     }
     expect(document.querySelector('.annotation-toolbox-icon-glyph')).toBeTruthy();
@@ -360,6 +356,41 @@ describe('AnnotationToolbox', () => {
     expect(screen.getByTestId('annotation-toolbox').className).toContain(
       'annotation-toolbox--compact'
     );
+  });
+
+  describe('variant="sheet" (mobile shared-surface integration)', () => {
+    it('is expanded from the start, with no toggle button to expand', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} variant="sheet" />);
+
+      expect(screen.queryByRole('button', { name: /add annotation/i })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /collapse annotation toolbox/i })
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^note$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^rectangle$/i })).toBeInTheDocument();
+    });
+
+    it('applies the sheet modifier class and not the toolbar toggle chrome', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} variant="sheet" />);
+      const toolbox = screen.getByTestId('annotation-toolbox');
+      expect(toolbox).toHaveClass('annotation-toolbox--sheet');
+      expect(toolbox.querySelector('.annotation-toolbox-toggle')).toBeNull();
+    });
+
+    it('still creates every kind exactly as the toolbar variant does', () => {
+      const onCreate = vi.fn();
+      render(<AnnotationToolbox onCreate={onCreate} variant="sheet" />);
+
+      fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+      expect(onCreate).toHaveBeenCalledWith('note', undefined);
+    });
+
+    it('defaults to the toolbar variant (collapsed, own toggle) when no variant prop is given', () => {
+      render(<AnnotationToolbox onCreate={vi.fn()} />);
+      expect(screen.getByTestId('annotation-toolbox')).not.toHaveClass('annotation-toolbox--sheet');
+      expect(screen.getByRole('button', { name: /add annotation/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^note$/i })).not.toBeInTheDocument();
+    });
   });
 
   describe('drag-to-create', () => {

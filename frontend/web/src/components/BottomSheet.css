@@ -3,7 +3,11 @@
   top: 0;
   left: 0;
   right: 0;
-  bottom: 0;
+  /* --keyboard-inset (set inline, in px, while an on-screen keyboard is
+     open) shrinks the scrim to the actually-visible visual viewport, so the
+     sheet's own percentage-of-scrim height (see .bottom-sheet below) scales
+     down and stays above the keyboard instead of rendering behind it. */
+  bottom: var(--keyboard-inset, 0px);
   background: rgba(0, 0, 0, 0.55);
   display: flex;
   align-items: flex-end;
@@ -109,6 +113,6 @@
 
 @media (pointer: coarse) {
   .bottom-sheet-scrim {
-    bottom: calc(64px + env(safe-area-inset-bottom));
+    bottom: calc(64px + env(safe-area-inset-bottom) + var(--keyboard-inset, 0px));
   }
 }

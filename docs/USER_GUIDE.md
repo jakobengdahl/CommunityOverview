@@ -172,14 +172,31 @@ arrangements are available from the keyboard: press **Ctrl/Cmd+O** with a
 multi-selection, then **A** (auto-tidy), **C** (cluster), **H** (horizontal), **V**
 (vertical) or **T** (tree).
 
+The same right-click menu also offers **Align** and **Distribute**, and — unlike
+Organize — both work across a selection mixing graph nodes with annotations (notes,
+labels, shapes, text, icons and the rest), not graph nodes alone. **Align** opens a
+submenu of six edge/centre choices: Align left, Align horizontal centers, Align right,
+Align top, Align vertical middles, Align bottom, each computed from the selection's
+actual on-canvas boxes. **Distribute** offers Distribute horizontally and Distribute
+vertically, spacing the selection with equal gaps between neighbouring boxes while the
+two outermost members stay put; it only appears once 3 or more members are eligible; a
+2-member selection can only be aligned. A locked annotation, one someone else is
+currently editing, and one already attached to another node or annotation (dragged
+close enough to snap onto it) are left out of either action — attached items keep
+following whatever they're attached to instead of being moved independently, which
+would otherwise fight the very effect that keeps them glued in place. When any of the
+selection was left out this way, a brief notice says why.
+
 Every context menu supports keyboard use: opening one moves focus to its first item,
 **↑/↓** move between items and wrap at the ends, **Home/End** jump to the first/last
 item, and **Escape** closes the menu and returns focus to wherever it was before the
-menu opened. A submenu trigger (**Change type**, **Organize**) also opens with **→**
-or **Enter**, and closes with **←** or **Escape** without closing the menu it belongs to.
+menu opened. A submenu trigger (**Change type**, **Organize**, **Align**, **Distribute**)
+also opens with **→** or **Enter**, and closes with **←** or **Escape** without closing
+the menu it belongs to.
 
-Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag or an
-Organize arrangement), and **Ctrl/Cmd+Shift+Z** (or **Ctrl/Cmd+Y**) reapplies it.
+Moving nodes can be undone: **Ctrl/Cmd+Z** reverses the last node move (a drag, an
+Organize arrangement, or an Align/Distribute), and **Ctrl/Cmd+Shift+Z** (or
+**Ctrl/Cmd+Y**) reapplies it.
 The undo history covers the layout you are looking at, so it is discarded whenever the
 canvas is repopulated — switching session, loading a saved view, or clearing the board.
 Moves made by other people in the session, or by an assistant arranging the view, do not
@@ -191,21 +208,30 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
-the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
-simply no longer grouped. The deletion is recorded in the session panel
-(see [Recent activity](#52-recent-activity-audit-log)) and can be undone from there while it
-is still your most recent undoable action.
+A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
+where they appear, and are simply no longer grouped. The deletion is recorded in the
+session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
+from there while it is still your most recent undoable action.
+
+**Group order** moves a group's background forward or backward *among your other group
+boxes only* — it never changes where a group sits relative to your graph nodes or to any
+other annotation, which stays fixed: a group background is always behind everything else
+on the canvas, whatever you do here. With only one group on the board the two buttons have
+nothing to do and do nothing; add a second overlapping group and they let you pick which
+one shows through where the two boxes overlap. Reordering groups this way never moves,
+resizes or re-groups anything inside either box — only the boxes themselves change places.
 
 If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
 what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
 it is the same action you were already getting, named for what it does.
 
 A group box can also be locked, the same way an annotation can. A locked group stays where
-it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
-it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
-menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
-not lock yourself may already be locked when you open a shared board.
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, reorder it
+against your other groups, or delete it. Its right-click menu has a single action —
+**Unlock** — and choosing it gives the full menu back. Locking is done by an assistant or
+an agent on your behalf, so a group you did not lock yourself may already be locked when
+you open a shared board.
 
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
@@ -229,9 +255,47 @@ Annotations are part of the session, not the knowledge graph: they are stored wi
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
 
+**Editing an existing annotation.** Right-click still opens the property menu described
+below, but selecting any annotation — a group box included — also shows a small round
+**✎ Edit** button in its corner — a visible way in that works by click or tap alone, and by
+keyboard: Tab to the button and press Enter or Space, or press **Shift+F10** (or the
+keyboard's Menu key) while the annotation itself is focused. It opens the exact same menu
+right-click does, positioned next to the button instead of at a pointer position, and moves
+keyboard focus into the menu — closing it (Escape, an outside click, or picking an action)
+returns focus to wherever it was before. Inside an open menu, **arrow keys** move between
+its options and **Tab** cycles within it rather than leaving it. On a phone (or any narrow,
+touch screen), tapping it opens the annotation's editor in the same bottom sheet the
+**Annotate** slot uses for creating one (see [9. On a phone](#9-on-a-phone)) — no need to
+long-press, which has always been unreliable across browsers and is never the *only* way in.
+
+A freshly created annotation (from the toolbox, the right-click "add" menu, or a
+drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
+without having to click or tap to find it first.
+
+Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
+device with no fine pointer:
+
+- **Width/Height fields** — Note, Group, Shape and Image boxes (the kinds with a resize
+  handle) also get a numeric width and height in their menu, with an **Apply** button, so
+  resizing doesn't require dragging a corner handle precisely.
+- **Attach to…** — Label, Text and Icon annotations (the kinds that can snap onto a node
+  or another annotation) get an **Attach to…** button. Choosing it puts the canvas into a
+  "pick a target" mode (a banner names it, with its own Cancel button, and Escape also
+  backs out); tapping or clicking any eligible node or annotation next attaches the one you
+  started from to it, keeping it exactly where it currently sits relative to the target —
+  the same result dragging it there would have given. Once attached, the same menu offers
+  **Detach**.
+- **Multiple objects here** — if you tap or click a point where more than one annotation
+  overlaps, a small list appears naming each one so you can pick which you meant, instead of
+  only ever getting whichever one happens to be drawn on top.
+- **Select multiple** — on a phone or touch screen, a button next to the zoom/fit controls
+  toggles a mode where tapping adds each node to the selection instead of replacing it — the
+  touch equivalent of holding Shift or Ctrl while clicking. Tap empty canvas to clear the
+  selection.
+
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
-**Note**, **Text**, **Label**, **Frame**, a **Shape**, **Icon**, **Vote dot**, **Image**,
+**Note**, **Text**, **Label**, a **Shape**, **Icon**, **Vote dot**, **Image**,
 or **Freehand**. Each is a single icon — hover one to see what it will add. On a touch
 screen, where there is no hover, the names are shown next to the icons instead. It is
 hidden while a focus view is active, since annotations are set aside during focus (see
@@ -278,32 +342,48 @@ difference; for a Text annotation, which always sizes itself to its own content,
 left/center/right currently make a visible difference, and only once the text spans more
 than one line.
 
-Right-click any Text, Frame, Shape, Icon or Image annotation for the same rotate control
-the note and label menus offer, plus a colour picker for everything that paints a colour
-(an image keeps its own pixels, so it gets no swatches). A Shape's menu also has a subtype
+Right-click any Text, Shape, Icon or Image annotation for the same rotate control
+the note and label menus offer, plus a colour picker for the kinds that paint one
+(an image keeps its own pixels, so it gets no swatches). A Shape's menu instead has
+independent **Fill** and **Border** swatch sections — each including a **Transparent**
+option — so you can give a shape a solid fill and no border (the classic look), a
+transparent fill with a coloured outline (a plain framing box, drawn around whatever
+it sits over — the "add a frame" toolbox button used to make exactly this, before it
+was folded into Shape), or any combination of the two. A Shape's menu also has a subtype
 picker to swap its variant (circle, triangle, and so on) after it's been placed. An
 **Icon** annotation starts with a generic default glyph — right-click it to open a picker
 grid covering the full icon vocabulary and choose the one you actually want. A **voting
-dot**'s menu has a value stepper, so you can raise or lower the count after it's been
-placed. Icon and voting-dot annotations also support the same attach behaviour as labels
-once placed: drag one near a node or another annotation to attach it.
+dot** is a plain coloured dot — right-click it for the same colour picker as the other
+kinds; it has no value to set and does not attach to a node or another annotation the
+way Icon does. Icon annotations do support that same attach behaviour as labels once
+placed: drag one near a node or another annotation to attach it.
 
-Notes, labels, arrows, freehand strokes, text, frames, shapes, icons, voting dots and
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
+images all also have an **Opacity** row in their menu, offering four levels (30%, 50%,
+75%, 100%) — useful for fading a shape or note behind the nodes it's framing without
+hiding it entirely. Freehand strokes have had this since drawing shipped; every other
+kind gets it from the same row now too.
+
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
 images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
 front** puts the annotation on top of the other annotations and **Send to back** puts it
-underneath, so you can pull a sticky note out from under a frame or tuck a shape behind a
-label. The buttons do nothing once an annotation is already alone at the front or the
-back, and a locked annotation has no Layer row at all — right-click it and choose
-**Unlock** first. Pressing **Delete** will not remove a locked annotation either;
+underneath, so you can pull a sticky note out from under a transparent-fill shape or tuck
+a shape behind a label. The buttons do nothing once an annotation is already alone at the
+front or the back, and a locked annotation has no Layer row at all — right-click it and
+choose **Unlock** first. Pressing **Delete** will not remove a locked annotation either;
 it stays put and tells you to unlock it first.
 
 Send to back normally goes all the way back, behind your graph's own nodes and edges —
-which is what you want for a frame that should sit behind the nodes it frames. Bring it
-forward again with **Bring to front**. One gap worth knowing: a group box can be layered
-*against* by other annotations, but cannot be layered itself — its own menu has no Layer
-row.
+which is what you want for a shape you're using to frame a group of nodes visually. Bring
+it forward again with **Bring to front**.
 
-The same set of annotations — notes, labels, arrows, freehand strokes, text, frames,
+A group box does not have this Layer row — it is not a member of this set — because a
+group background is *always* behind your graph's own nodes and every other annotation,
+unconditionally; there is nothing to bring to front or send to back it against. What a
+group box has instead is its own **Group order** row, described above, which only reorders
+group boxes against each other. See [2.5 Groups and annotations](#25-groups-and-annotations).
+
+The same set of annotations — notes, labels, arrows, freehand strokes, text,
 shapes, icons, voting dots and images — also has a **Duplicate** action in their
 right-click menu, just below Layer. It places a copy right next to the original, carrying
 over its colour, size, rotation and any attachment to a node or another annotation.
@@ -314,6 +394,18 @@ alone. The copy itself is never locked, even when the original is: it's a new,
 independent annotation you're free to edit right away. A group box does not get a
 Duplicate action — its substance is the graph nodes it groups, not its own content, so
 copying the box alone would not be a real duplicate.
+
+Right-click a node, or any annotation except a group box, and its menu has an
+**Add nearby** section with three buttons: **Label**, **Icon**, **Text**. (**Vote
+dot** is not offered here — it doesn't attach to anything, see above.)
+A transparent-fill shape is included here too — its menu offers "Add nearby" the
+same as any other shape.
+Choosing one creates that annotation already attached to whatever you right-clicked —
+positioned right next to it and following it if it moves — without the create-then-drag-near
+two steps that were previously the only way to attach a new label, icon or piece
+of text. Detach it afterward the same way as any attached annotation: drag it away from its
+target. Arrows are not offered here, since dragging either of a newly placed arrow's
+endpoints already snaps it onto a nearby target the moment you draw it.
 
 ### 2.6 Saved views
 
@@ -909,14 +1001,21 @@ On a phone-sized screen (roughly 768 px wide and below) the canvas swaps its
 desktop chrome — the header, search bar, toolbar, chat panel and session
 menu — for a layout that fits a thumb.
 
-**Navigation.** A compact top bar replaces the desktop header, and a five-slot
+**Navigation.** A compact top bar replaces the desktop header, and a six-slot
 bottom navigation bar replaces the toolbar and the hamburger menu:
 
 | Slot | Effect |
 |------|--------|
 | **Graph** | Closes any open panel and returns to the full-screen canvas |
 | **Search** | Opens the graph search in a sheet that slides up from the bottom |
-| **Create** | Opens the node-type picker in the same bottom sheet |
+| **Create** | Opens the node-type picker in the same bottom sheet, for adding a
+graph node (an Actor, Initiative, and so on) |
+| **Annotate** | Opens the annotation toolbox — notes, text, labels, frames,
+shapes, icons, vote dots, images and freehand drawing — in its own bottom
+sheet. Kept as a separate slot from **Create** on purpose: an annotation is a
+mark on the canvas, not a graph node, and the two creation flows stay visually
+and behaviorally distinct even though both live behind the same style of
+sheet |
 | **Chat** | Opens the AI assistant (only shown when it is available) |
 | **Menu** | Opens the session menu — the same panel described in
 [section 5](#5-session-menu-and-settings), as a full-width overlay with a
@@ -924,7 +1023,19 @@ dimmed scrim behind it on a phone, rather than the narrower panel desktop
 uses. Tap the scrim, tap the **✕**, or press **Escape** to close it. |
 
 Only one of these is ever open at a time — opening one closes whatever else was
-open, so the canvas is never covered by more than one panel at once.
+open, so the canvas is never covered by more than one panel at once. On a phone
+the annotation toolbox is *only* reachable through the **Annotate** slot; unlike
+on desktop, it does not also float over the canvas as a small always-visible
+strip, so it never competes with the bottom navigation for space.
+
+**Editing an existing annotation on a phone.** Tap an annotation to select it, then tap
+the small **✎ Edit** button that appears on it. That opens its property editor — colour,
+opacity, rotation, layer, duplicate, delete, and whatever else that kind offers — in a
+seventh sheet, laid out full-width for a thumb the same way the Annotate sheet is, and
+subject to the same "only one panel open" rule as everything else in the list above
+(opening it closes Annotate/Search/Create/Chat/Menu, and opening any of those closes it).
+It has no bottom-nav slot of its own — it only opens contextually, from the annotation's
+own Edit button, since it always needs an annotation to edit.
 
 **Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
 the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,
@@ -971,7 +1082,7 @@ leaving you in it without the controls to get out.
 | **Enter** (chat) | Send message |
 | **Escape** | Cancel guide / close dialog |
 | **Esc × 2** | Clear the canvas (remove all nodes from view). On a **named** session this first asks for confirmation; on a **locked** visualization it does nothing (unlock it, or use the clear button). |
-| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag or Organize) |
+| **Ctrl+Z** / **Cmd+Z** | Undo the last node move (drag, Organize, or Align/Distribute) |
 | **Ctrl+Shift+Z** / **Cmd+Shift+Z** / **Ctrl+Y** | Redo the last undone move |
 | **Space + drag** | Pan the canvas |
 | **Scroll wheel** | Zoom in/out |
@@ -1002,7 +1113,8 @@ Screenshots for this guide are saved to `docs/images/` in PNG format.
 | `federation-depth.png` | pending | Canvas depth selector (requires federation-enabled instance) |
 | `mobile-canvas-controls.png` | pending | Phone viewport with the compact zoom/fit/focus pill in the bottom-right corner |
 | `mobile-focus-view.png` | pending | Phone viewport in focus view — one node ringed by its direct neighbours |
-| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the five-slot bottom navigation |
+| `mobile-bottom-nav.png` | pending | Phone viewport showing the compact top bar and the six-slot bottom navigation |
 | `mobile-create-sheet.png` | pending | Phone viewport with the Create bottom sheet open over the canvas |
+| `mobile-annotate-sheet.png` | pending | Phone viewport with the Annotate bottom sheet open, showing the expanded annotation toolbox grid |
 | `mobile-session-menu.png` | pending | Phone viewport with the session menu open as a full-width overlay and scrim |
 | `metamodel-explorer.png` | pending | Metamodel explorer network view with a node type selected and its detail panel open |

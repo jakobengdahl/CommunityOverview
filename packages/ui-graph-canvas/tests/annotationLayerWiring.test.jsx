@@ -139,7 +139,19 @@ describe('useAnnotationLayer refuses independently of the markup', () => {
     expect(hoisted.setNodes).not.toHaveBeenCalled();
   });
 
-  it('refuses and surfaces the attempt when another client holds the claim', () => {
+  it('refuses and surfaces the attempt when another client holds the edit lease', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt }}>
+        <Harness data={{ remoteLease: { color: '#f00', displayName: 'Ada' } }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.click(screen.getByText('go'));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('a mere remoteSelection (no edit lease) never refuses', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     render(
       <AnnotationContext.Provider value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt }}>
@@ -147,8 +159,8 @@ describe('useAnnotationLayer refuses independently of the markup', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.click(screen.getByText('go'));
-    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
-    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).toHaveBeenCalled();
   });
 
   it('acts when the annotation is neither locked nor claimed', () => {

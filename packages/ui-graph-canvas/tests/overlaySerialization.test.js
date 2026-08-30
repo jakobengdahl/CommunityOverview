@@ -45,6 +45,53 @@ describe('overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half)
+  // was previously freehand-only; every kind now round-trips it the same way.
+  it('round-trips opacity on a note, label and arrow', () => {
+    const note = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.5,
+      size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(note).data.opacity).toBe(0.5);
+    expect(flowNodeToOverlay(overlayToFlowNode(note))).toEqual(note);
+
+    const label = {
+      id: 'label-1',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      opacity: 0.75,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(label).data.opacity).toBe(0.75);
+    expect(flowNodeToOverlay(overlayToFlowNode(label))).toEqual(label);
+
+    const arrow = {
+      id: 'arrow-1',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      opacity: 0.3,
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    expect(overlayToFlowNode(arrow).data.opacity).toBe(0.3);
+    expect(flowNodeToOverlay(overlayToFlowNode(arrow))).toEqual(arrow);
+  });
+
   // z (layer order), locked (the canvas UI's own edit-lock convention, set
   // via the generic MCP annotation tools) and rotation are envelope fields on
   // every v1 annotation type. A translator that dropped them would, on the
@@ -69,6 +116,33 @@ describe('overlay serialization', () => {
     expect(node.draggable).toBe(false);
     expect(node.data.locked).toBe(true);
     expect(node.data.rotation).toBe(30);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
+  // `field_versions` (dec-annotation-field-patches-and-conflicts) are the
+  // same kind of envelope field as z/locked/rotation above — a translator
+  // that dropped them silently disabled the same-field-conflict protection
+  // for a real browser, since sessionSyncClient.js's `computeOps` reads
+  // `version` off exactly this shape to compute `base_version`.
+  it('round-trips a server-assigned version and field_versions through the flow node', () => {
+    const overlay = {
+      id: 'note-1',
+      kind: 'note',
+      position: { x: 1, y: 2 },
+      text: 'hi',
+      color: '#FEF08A',
+      fontSize: 18,
+      size: { w: 200, h: 140 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 7,
+      field_versions: { text: 7, geometry: 3 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(7);
+    expect(node.data.field_versions).toEqual({ text: 7, geometry: 3 });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -262,14 +336,43 @@ describe('overlay serialization', () => {
 });
 
 // The v1 annotation model (docs/ANNOTATION_CONTRACT.md) also defines text,
-// frame, shape, icon, vote_dot and image. These were previously store/MCP-only:
+// shape, icon, vote_dot and image. These were previously store/MCP-only:
 // the canvas normalized them (annotationModel.js) but silently dropped them
 // here, so an MCP-created shape or image never appeared on screen. These
 // round-trips lock in a simple, generic visual representation for each.
 describe('generic annotation overlay serialization', () => {
-  it('registers text/frame/shape/icon/vote_dot/image as overlay types', () => {
-    for (const kind of ['text', 'frame', 'shape', 'icon', 'vote_dot', 'image']) {
+  it('registers text/shape/icon/vote_dot/image as overlay types', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
       expect(OVERLAY_TYPES.has(kind)).toBe(true);
+    }
+  });
+
+  // `frame` used to be a registered overlay type — a plain box with no fill.
+  // task-annotation-merge-frame-into-shape-rectangle folded it into `shape`;
+  // it is no longer recognised at all, so a stored `frame` annotation is
+  // dropped upstream, while normalising the document (annotationModel.js),
+  // never reaching this translator — see AnnotationBadData.test.jsx for the
+  // end-to-end "does not crash" coverage of exactly that stored shape.
+  it('no longer registers frame as an overlay type', () => {
+    expect(OVERLAY_TYPES.has('frame')).toBe(false);
+  });
+
+  it('round-trips opacity on every generic kind (text/shape/icon/vote_dot/image)', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
+      const overlay = {
+        id: `${kind}-1`,
+        kind,
+        position: { x: 0, y: 0 },
+        color: '#fff',
+        opacity: 0.5,
+        z: 0,
+        locked: false,
+        rotation: 0,
+        size: { w: 0, h: 0 },
+      };
+      const node = overlayToFlowNode(overlay);
+      expect(node.data.opacity).toBe(0.5);
+      expect(flowNodeToOverlay(node).opacity).toBe(0.5);
     }
   });
 
@@ -295,47 +398,97 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips a frame overlay with an explicit size', () => {
-    const overlay = {
-      id: 'frame-1',
-      kind: 'frame',
-      position: { x: 0, y: 0 },
-      color: '#4ADE80',
-      size: { w: 300, h: 200 },
-      z: 0,
-      locked: false,
-      rotation: 0,
-    };
-    const node = overlayToFlowNode(overlay);
-    expect(node).toMatchObject({
-      id: 'frame-1',
-      type: 'frame',
-      style: { width: 300, height: 200 },
-      data: { color: '#4ADE80' },
-    });
-    expect(flowNodeToOverlay(node)).toEqual(overlay);
-  });
-
-  it('defaults a frame to 160x96 when size is missing', () => {
-    const node = overlayToFlowNode({ id: 'f', kind: 'frame', position: { x: 0, y: 0 } });
-    expect(node.style).toEqual({ width: 160, height: 96 });
-  });
-
-  it('round-trips a shape overlay (shape name, colour, size)', () => {
+  it('round-trips a shape overlay (shape name, fill, border, size)', () => {
     const overlay = {
       id: 'shape-1',
       kind: 'shape',
       position: { x: 5, y: 5 },
       shape: 'circle',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 120, h: 120 },
       z: 2,
       locked: false,
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ shape: 'circle', color: '#60A5FA', locked: false, rotation: 0 });
+    expect(node.data).toEqual({
+      shape: 'circle',
+      fill: '#60A5FA',
+      border: 'transparent',
+      locked: false,
+      rotation: 0,
+    });
     expect(node.zIndex).toBe(2);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: pins the same
+  // fix for a generic overlay and for an arrow/line, not just note/label —
+  // GENERIC_OVERLAY_FIELDS (the per-kind content whitelist) never carries
+  // version/field_versions on purpose; they must instead survive through the
+  // unconditional envelope handling next to z/locked/rotation.
+  it('round-trips version/field_versions on a generic (shape) overlay', () => {
+    const overlay = {
+      id: 'shape-versioned',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'rectangle',
+      fill: '#60A5FA',
+      border: 'transparent',
+      size: { w: 160, h: 96 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 4,
+      field_versions: { fill: 4 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(4);
+    expect(node.data.field_versions).toEqual({ fill: 4 });
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips version/field_versions on an arrow overlay', () => {
+    const overlay = {
+      id: 'arrow-versioned',
+      kind: 'arrow',
+      position: { x: 5, y: 6 },
+      dx: 10,
+      dy: 20,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      rotation: 0,
+      version: 2,
+      field_versions: { dx: 2 },
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.version).toBe(2);
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: fill and border are
+  // independent settings — a shape can have a transparent fill with a
+  // coloured border, the setting that subsumes what the retired `frame` kind
+  // used to draw.
+  it('round-trips a shape overlay with a transparent fill and a coloured border', () => {
+    const overlay = {
+      id: 'shape-frame-like',
+      kind: 'shape',
+      position: { x: 0, y: 0 },
+      shape: 'rectangle',
+      fill: 'transparent',
+      border: '#94a3b8',
+      size: { w: 220, h: 160 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toMatchObject({ fill: 'transparent', border: '#94a3b8' });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
@@ -349,7 +502,8 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 0, y: 0 },
       shape: 'rectangle',
       text: 'Step 1',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 160, h: 96 },
       z: 0,
       locked: false,
@@ -391,7 +545,8 @@ describe('generic annotation overlay serialization', () => {
       position: { x: 0, y: 0 },
       shape: 'hexagon',
       text: 'Step 2',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       fontSize: 18,
       textAlign: 'top-left',
       font: 'monospace',
@@ -411,7 +566,8 @@ describe('generic annotation overlay serialization', () => {
       kind: 'shape',
       position: { x: 0, y: 0 },
       shape: 'process_arrow',
-      color: '#60A5FA',
+      fill: '#60A5FA',
+      border: 'transparent',
       size: { w: 160, h: 96 },
       z: 0,
       locked: false,
@@ -439,20 +595,48 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips a vote_dot overlay, preserving a value of 0', () => {
+  // task-annotation-vote-dot-simplify: a vote dot is a plain coloured dot —
+  // `color` is the only field either translator direction still carries for
+  // it. Confirms the field that DOES remain still round-trips correctly,
+  // now that `value` no longer does (see the two regression tests below).
+  it('round-trips a vote_dot overlay, carrying only colour', () => {
     const overlay = {
       id: 'vote-1',
       kind: 'vote_dot',
       position: { x: 9, y: 9 },
-      value: 0,
       color: '#FB923C',
       z: 0,
       locked: false,
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(node.data).toEqual({ value: 0, color: '#FB923C', locked: false, rotation: 0 });
+    expect(node.data).toEqual({ color: '#FB923C', locked: false, rotation: 0 });
     expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  // Explicit regression for task-annotation-vote-dot-simplify: a stored
+  // vote_dot from before this change may still carry `value` and/or
+  // `attachment`. Neither is a member of GENERIC_OVERLAY_FIELDS.vote_dot any
+  // more, so overlayToFlowNode must not project either onto the live node —
+  // pinned here rather than left to the general "unknown field" tolerance to
+  // imply it holds, since this translator leg is exactly the kind of place a
+  // sibling leg's fix has failed to reach before in this codebase.
+  it('drops a stale value and attachment when hydrating a vote_dot overlay', () => {
+    const overlay = {
+      id: 'vote-legacy',
+      kind: 'vote_dot',
+      position: { x: 9, y: 9 },
+      value: 3,
+      attachment: { target_id: 'node-9', target_type: 'node', offset: { x: 1, y: 1 } },
+      color: '#FB923C',
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data).toEqual({ color: '#FB923C', locked: false, rotation: 0 });
+    expect(node.data.value).toBeUndefined();
+    expect(node.data.attachment).toBeUndefined();
   });
 
   it('round-trips an image overlay (URL content, alt, and colour)', () => {
@@ -547,12 +731,11 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
-  it('round-trips an attachment on a vote_dot overlay', () => {
+  it('does not round-trip an attachment on a vote_dot overlay (not attachable any more)', () => {
     const overlay = {
       id: 'vote-2',
       kind: 'vote_dot',
       position: { x: 1, y: 1 },
-      value: 5,
       color: '#fff',
       attachment: { target_id: 'node-3', target_type: 'node', offset: { x: -8, y: -8 } },
       z: 0,
@@ -560,7 +743,10 @@ describe('generic annotation overlay serialization', () => {
       rotation: 0,
     };
     const node = overlayToFlowNode(overlay);
-    expect(flowNodeToOverlay(node)).toEqual(overlay);
+    expect(node.data.attachment).toBeUndefined();
+    const roundTripped = flowNodeToOverlay(node);
+    expect(roundTripped.attachment).toBeUndefined();
+    expect(roundTripped).toEqual({ ...overlay, attachment: undefined });
   });
 
   // 61d5cc7b / smallfix-annotation-unsized-generic-geometry-clobber: icon,
@@ -580,7 +766,6 @@ describe('generic annotation overlay serialization', () => {
         position: { x: 1, y: 1 },
         text: kind === 'text' ? 'hi' : undefined,
         icon: kind === 'icon' ? 'flag' : undefined,
-        value: kind === 'vote_dot' ? 3 : undefined,
         color: '#fff',
         size: { w: 32, h: 32 },
         z: 0,
@@ -757,7 +942,10 @@ describe('isArrowHeld', () => {
 
 describe('ATTACHABLE_OVERLAY_KINDS', () => {
   it('names exactly the node-attachable generic kinds', () => {
-    expect(ATTACHABLE_OVERLAY_KINDS).toEqual(new Set(['text', 'label', 'icon', 'vote_dot']));
+    // vote_dot used to be a member of this set; task-annotation-vote-dot-
+    // simplify removed it — a vote dot is now a plain coloured dot that
+    // never snaps to or follows a target.
+    expect(ATTACHABLE_OVERLAY_KINDS).toEqual(new Set(['text', 'label', 'icon']));
   });
 });
 
@@ -787,27 +975,51 @@ describe('computeDroppedAttachment', () => {
     });
   });
 
-  // Contract: "frame and group are containment/visual constructs, not
-  // attachment targets" — dropping near one must not attach to it, even when
-  // it is the nearest candidate.
-  it('never attaches to a frame or a group, even when nothing else is nearby', () => {
-    const withFrameAndGroup = [
-      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+  // Contract: "group is a containment/visual construct, not an attachment
+  // target" — dropping near one must not attach to it, even when it is the
+  // nearest candidate.
+  it('never attaches to a group, even when nothing else is nearby', () => {
+    const withGroup = [
       { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
       { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
     ];
-    expect(computeDroppedAttachment({ x: 100, y: 100 }, withFrameAndGroup, 'self')).toBeNull();
+    expect(computeDroppedAttachment({ x: 100, y: 100 }, withGroup, 'self')).toBeNull();
   });
 
-  it('skips a nearby frame to attach to a real node within the same radius', () => {
+  it('skips a nearby group to attach to a real node within the same radius', () => {
     const mixed = [
-      { id: 'frame-1', type: 'frame', position: { x: 100, y: 100 }, width: 0, height: 0 },
+      { id: 'group-1', type: 'group', position: { x: 100, y: 100 }, width: 0, height: 0 },
       { id: 'node-1', type: 'custom', position: { x: 105, y: 105 }, width: 0, height: 0 },
       { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
     ];
     expect(computeDroppedAttachment({ x: 100, y: 100 }, mixed, 'self')).toMatchObject({
       target_id: 'node-1',
     });
+  });
+
+  // Deliberate decision (task-annotation-merge-frame-into-shape-rectangle):
+  // `frame` used to be excluded from attach candidacy the same way `group`
+  // still is. Now that it is folded into `shape`, a shape stays a valid
+  // attach target regardless of its fill/border — including a
+  // transparent-fill one that looks exactly like the retired `frame` — since
+  // eligibility here is keyed on `node.type`, not on a shape's own style
+  // fields (see computeDroppedAttachment's doc comment in annotations.js for
+  // the full reasoning).
+  it('still attaches to a shape annotation, even one styled to look like the retired frame', () => {
+    const withTransparentShape = [
+      {
+        id: 'shape-1',
+        type: 'shape',
+        position: { x: 100, y: 100 },
+        width: 0,
+        height: 0,
+        data: { shape: 'rectangle', fill: 'transparent', border: '#94a3b8' },
+      },
+      { id: 'self', type: 'label', position: { x: 100, y: 100 }, width: 0, height: 0 },
+    ];
+    expect(
+      computeDroppedAttachment({ x: 100, y: 100 }, withTransparentShape, 'self')
+    ).toMatchObject({ target_id: 'shape-1' });
   });
 
   it('returns null outside the snap radius (detach)', () => {
@@ -855,36 +1067,49 @@ describe('resolveAttachedPosition', () => {
   });
 });
 
-// task-annotation-shared-session-realtime: another live client's selection
-// claim makes an annotation's edit lease exclusive rather than merely
-// advisory. isRemoteLocked/isAnnotationDraggable are the single source of
-// truth every annotation component and GraphCanvas's remote-claim effect
-// reads to enforce it.
+// task-annotation-exclusive-edit-leases: another live client's *edit lease*
+// (never a mere selection claim) makes an annotation's edit lock exclusive.
+// isRemoteLocked/isAnnotationDraggable are the single source of truth every
+// annotation component and GraphCanvas's remote-lease effect reads to
+// enforce it.
 describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)', () => {
-  const CLAIM = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
+  const LEASE = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
 
-  it('isRemoteLocked is false with no remoteSelection and true once one is set', () => {
+  it('isRemoteLocked is false with no remoteLease and true once one is set', () => {
     expect(isRemoteLocked(undefined)).toBe(false);
     expect(isRemoteLocked({})).toBe(false);
-    expect(isRemoteLocked({ remoteSelection: null })).toBe(false);
-    expect(isRemoteLocked({ remoteSelection: CLAIM })).toBe(true);
+    expect(isRemoteLocked({ remoteLease: null })).toBe(false);
+    expect(isRemoteLocked({ remoteLease: LEASE })).toBe(true);
+  });
+
+  it('a mere remoteSelection (cosmetic presence, no edit lease) never locks', () => {
+    // The exact bug task-annotation-exclusive-edit-leases closes: selection
+    // alone must never acquire or steal an edit lease.
+    expect(isRemoteLocked({ remoteSelection: LEASE })).toBe(false);
+    expect(isRemoteLocked({ remoteSelection: LEASE, remoteLease: null })).toBe(false);
   });
 
   it('a plain unlocked, unclaimed annotation is draggable', () => {
     expect(isAnnotationDraggable({ type: 'note', data: {} })).toBe(true);
   });
 
-  it('a persisted `locked` flag blocks dragging, independent of any claim', () => {
+  it('a persisted `locked` flag blocks dragging, independent of any lease', () => {
     expect(isAnnotationDraggable({ type: 'note', data: { locked: true } })).toBe(false);
   });
 
-  it('a live remote claim blocks dragging even when unlocked', () => {
+  it('a live remote edit lease blocks dragging even when unlocked', () => {
     expect(
-      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteSelection: CLAIM } })
+      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteLease: LEASE } })
     ).toBe(false);
   });
 
-  it('an anchored arrow stays non-draggable regardless of claim state', () => {
+  it('a mere remoteSelection does not block dragging', () => {
+    expect(
+      isAnnotationDraggable({ type: 'note', data: { locked: false, remoteSelection: LEASE } })
+    ).toBe(true);
+  });
+
+  it('an anchored arrow stays non-draggable regardless of lease state', () => {
     expect(isAnnotationDraggable({ type: 'arrow', data: { startAnchor: 'node-a' } })).toBe(false);
   });
 
@@ -892,8 +1117,8 @@ describe('isRemoteLocked / isAnnotationDraggable (exclusive annotation leases)',
     expect(isAnnotationDraggable({ type: 'arrow', data: {} })).toBe(true);
   });
 
-  it('a group box is subject to the same claim-based exclusivity as any other annotation', () => {
+  it('a group box is subject to the same lease-based exclusivity as any other annotation', () => {
     expect(isAnnotationDraggable({ type: 'group', data: {} })).toBe(true);
-    expect(isAnnotationDraggable({ type: 'group', data: { remoteSelection: CLAIM } })).toBe(false);
+    expect(isAnnotationDraggable({ type: 'group', data: { remoteLease: LEASE } })).toBe(false);
   });
 });

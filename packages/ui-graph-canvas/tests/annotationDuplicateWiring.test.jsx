@@ -144,7 +144,20 @@ describe('useAnnotationDuplicate', () => {
     expect(notifyChange).toHaveBeenCalledWith('create');
   });
 
-  it('refuses and surfaces the attempt when another client holds the claim', () => {
+  it('refuses and surfaces the attempt when another client holds the edit lease', () => {
+    const notifyRemoteLockedAttempt = vi.fn();
+    hoisted.nodes = [{ id: 'x1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
+    render(
+      <AnnotationContext.Provider value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt }}>
+        <Harness data={{ remoteLease: { color: '#f00', displayName: 'Ada' } }} />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.click(screen.getByText('go'));
+    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
+    expect(hoisted.setNodes).not.toHaveBeenCalled();
+  });
+
+  it('a mere remoteSelection (no edit lease) never refuses', () => {
     const notifyRemoteLockedAttempt = vi.fn();
     hoisted.nodes = [{ id: 'x1', type: 'note', position: { x: 0, y: 0 }, data: {} }];
     render(
@@ -153,8 +166,8 @@ describe('useAnnotationDuplicate', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.click(screen.getByText('go'));
-    expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
-    expect(hoisted.setNodes).not.toHaveBeenCalled();
+    expect(notifyRemoteLockedAttempt).not.toHaveBeenCalled();
+    expect(hoisted.setNodes).toHaveBeenCalled();
   });
 
   it('is a no-op when the source id is not found among the live nodes', () => {
@@ -192,5 +205,20 @@ describe('useAnnotationDuplicate', () => {
     const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
     const copy = updated.find((n) => n.id !== 'x1');
     expect(copy.data.remoteSelection).toBeUndefined();
+  });
+
+  it('drops a stale remoteLease marker rather than copying it onto the new id', () => {
+    // Same one-tick-stale race as the remoteSelection case above, but for
+    // the edit-lease marker (task-annotation-exclusive-edit-leases) — a
+    // fresh duplicate must never render as remote-locked from its first
+    // frame just because its source happened to carry a lease at the moment
+    // getNodes() was read.
+    const sourceData = { text: 'x', remoteLease: { color: '#f00', displayName: 'Ada' } };
+    hoisted.nodes = [{ id: 'x1', type: 'label', position: { x: 0, y: 0 }, data: sourceData }];
+    render(<Harness data={{ text: 'x' }} />);
+    fireEvent.click(screen.getByText('go'));
+    const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
+    const copy = updated.find((n) => n.id !== 'x1');
+    expect(copy.data.remoteLease).toBeUndefined();
   });
 });

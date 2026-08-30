@@ -3,8 +3,13 @@ import {
   computeOps,
   normalizeMirror,
   applyOpToMirror,
+  predictAnnotationVersionsForSend,
+  foldAckedAnnotationOp,
+  foldRemoteAnnotationOp,
+  isAnnotationOpStale,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
+import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
 class FakeEventSource {
@@ -157,10 +162,76 @@ describe('computeOps', () => {
     };
     const ops = computeOps(prev, next);
     expect(ops.some((o) => o.op === 'group_membership_changed')).toBe(false);
+    // member_node_ids is deliberately absent: it did not change (unlike
+    // label), and group membership always goes through its own op — a
+    // field-diff patch never re-sends a field it did not touch, even one
+    // that happens to still be present on the full local object.
     expect(ops).toContainEqual({
       op: 'annotation_updated',
-      annotation: { id: 'g1', kind: 'group', label: 'New', member_node_ids: ['a'] },
+      annotation: { id: 'g1', kind: 'group', label: 'New' },
+      base_version: undefined,
     });
+  });
+
+  // --- Field patches (smallfix-whole-annotation-clobber-on-concurrent-
+  // different-field-edit, dec-annotation-field-patches-and-conflicts): the
+  // browser now diffs by field, not by whole-object equality, and carries
+  // base_version — see diffAnnotationFields below and
+  // docs/ANNOTATION_CONTRACT.md's "Two-client conflict matrix".
+  it('emits annotation_updated with only the fields that actually changed, plus base_version', () => {
+    const prev = {
+      annotations: [
+        {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          text: 'orig',
+          geometry: { x: 0, y: 0, w: 160, h: 96 },
+          style: { fill: '#94a3b8' },
+          version: 3,
+        },
+      ],
+    };
+    // The local canvas still carries every field (its own full copy) — only
+    // geometry actually moved; text/style are untouched, possibly even
+    // stale relative to a concurrent peer's edit this client has not
+    // received yet.
+    const next = {
+      annotations: [
+        {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          text: 'orig',
+          geometry: { x: 40, y: 40, w: 160, h: 96 },
+          style: { fill: '#94a3b8' },
+          version: 3,
+        },
+      ],
+    };
+    const ops = computeOps(prev, next);
+    expect(ops).toEqual([
+      {
+        op: 'annotation_updated',
+        annotation: {
+          id: 'shape-1',
+          type: 'shape',
+          kind: 'shape',
+          geometry: { x: 40, y: 40, w: 160, h: 96 },
+        },
+        base_version: 3,
+      },
+    ]);
+  });
+
+  it('omits base_version when the baseline annotation has no version yet', () => {
+    const prev = { annotations: [{ id: 'n1', kind: 'note', text: 'hi' }] };
+    const next = { annotations: [{ id: 'n1', kind: 'note', text: 'bye' }] };
+    const [op] = computeOps(prev, next);
+    // JSON.stringify drops an `undefined`-valued key entirely, so this
+    // never reaches the server as a literal null/0 that could be mistaken
+    // for a real version.
+    expect(JSON.parse(JSON.stringify(op))).not.toHaveProperty('base_version');
   });
 
   it('ignores updated_at churn on annotations', () => {
@@ -809,6 +880,41 @@ describe('SessionSyncClient', () => {
     expect(pendingDuringDrop).toEqual([]);
   });
 
+  // Regression for the review finding on PR #527 (task-annotation-exclusive-
+  // edit-leases): before the fix, 409/LeaseConflict fell into the generic
+  // "429 / 5xx / unknown" branch, so a queued op rejected by another client's
+  // live edit lease was requeued with its original, aging content and retried
+  // on the backoff timer forever — silently, since onDropped only ever fired
+  // for 400/413/404/410. Once the lease that was blocking it finally cleared,
+  // that stale content would then replay unconditionally against whatever the
+  // annotation's current state had become, silently overwriting real work.
+  it('drops a 409/LeaseConflict op instead of retrying it forever, and never replays it once the conflict clears', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
+    const onDropped = vi.fn();
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+    client.syncState({ node_refs: ['a'] });
+    await new Promise((r) => setTimeout(r, 30)); // let the first flush's fetch settle
+
+    // Terminal handling: onDropped fires with the 409 status so the UI can
+    // tell the user their edit didn't apply, and the op is gone from the
+    // queue rather than sitting there to be resent.
+    expect(onDropped).toHaveBeenCalledTimes(1);
+    expect(onDropped.mock.calls[0][1]).toBe(409);
+    expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
+    expect(client.getPendingOps()).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Wait well past the retry-backoff window (500ms floor). If the silent-
+    // infinite-retry bug were still present, the op would be resent here with
+    // its original, now-stale content — exactly the replay this fix rules out.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(onDropped).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
     // Regression for the shared-session "moves silently stop persisting over
     // time" data-loss bug: a single hung POST (a half-open request held by a
@@ -1405,5 +1511,1158 @@ describe('SessionSyncClient presence + claims', () => {
     // Advance beyond the 30 s TTL: the claim no longer renders.
     now += 31_000;
     expect(client.getRemoteSelections()).toEqual({});
+  });
+});
+
+// task-annotation-exclusive-edit-leases: beginEditing/endEditing are a
+// separate protocol from the selection claims above — first-actual-editor-
+// wins, refused rather than taken over, never acquired by a mere selection.
+describe('SessionSyncClient edit leases', () => {
+  const roster = [
+    { client_id: 'client-me', display_name: 'Me', color: '#111' },
+    { client_id: 'client-other', display_name: 'Ada', color: '#e6194b' },
+  ];
+
+  it('seeds remote leases from a snapshot, excluding its own', () => {
+    const onLeases = vi.fn();
+    const { client } = makeClient({ handlers: { onLeases } });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: { 'node-a': 'client-other', 'node-b': 'client-me' },
+    });
+    expect(client.getRemoteLeases()).toEqual({
+      'node-a': { clientId: 'client-other', color: '#e6194b', displayName: 'Ada' },
+    });
+    expect(onLeases).toHaveBeenLastCalledWith(client.getRemoteLeases());
+  });
+
+  it('beginEditing acquires via a direct POST (bypassing the debounced queue) and grants locally', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+    // Sent immediately, not through the debounced op queue setLocalSelection uses.
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'edit_lease_acquired', element_ids: ['node-a'] },
+    ]);
+  });
+
+  it("beginEditing reports a denial with the holder's display name", async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [
+            { op: 'edit_lease_acquired', element_ids: [], denied: { 'node-a': 'client-other' } },
+          ],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: [], denied: { 'node-a': 'Ada' } });
+  });
+
+  it('fails open (grants without a round trip) before the stream is ready', async () => {
+    const fetchImpl = makeFetch();
+    const { client } = makeClient({ fetchImpl });
+    // Never connected — no live session yet.
+    const result = await client.beginEditing(['node-a']);
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  it('endEditing sends edit_lease_released for ids actually held, ignoring the rest', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+    await client.beginEditing(['node-a']);
+    fetchImpl.calls.length = 0;
+
+    client.endEditing(['node-a', 'node-never-held']);
+    await flush();
+    expect(fetchImpl.calls).toHaveLength(1);
+    expect(fetchImpl.calls[0].body.ops).toEqual([
+      { op: 'edit_lease_released', element_ids: ['node-a'] },
+    ]);
+  });
+
+  it('an endEditing that lands while the matching beginEditing is still in flight releases the lease once it resolves, instead of leaking it', async () => {
+    // Regression for a real race found in review: a fast Escape right after
+    // double-click (or any edit-start/end pair shorter than the acquire
+    // round trip) used to have nothing in `_activeEditIds` yet for
+    // `endEditing` to find, so the release was silently dropped — and the
+    // later-resolving `beginEditing` then committed a lease nobody wanted,
+    // held until the 30 s TTL expired and wrongly refusing a genuine second
+    // editor in the meantime.
+    let resolveFetch;
+    const fetchImpl = vi.fn((url, opts) => {
+      fetchImpl.calls.push({ url, body: JSON.parse(opts.body) });
+      return new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+    });
+    fetchImpl.calls = [];
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    FakeEventSource.instances[0].emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: {},
+    });
+
+    const beginPromise = client.beginEditing(['node-a']);
+    // The caller changes its mind (Escape, a cancelled drag, a closed menu)
+    // before the acquire round trip has resolved.
+    client.endEditing(['node-a']);
+    // Nothing to release yet from the caller's point of view — the id was
+    // never actually held — so no op is enqueued for it here.
+    expect(fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released')).toHaveLength(
+      0
+    );
+
+    // The server now grants the acquisition the caller no longer wants.
+    resolveFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+      }),
+    });
+    const result = await beginPromise;
+    // The direct caller of beginEditing still sees it as granted — this is a
+    // race between two calls the caller itself made, not a server refusal.
+    expect(result).toEqual({ granted: ['node-a'], denied: {} });
+
+    // But the lease is released again immediately rather than held locally.
+    await flush();
+    const released = fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released');
+    expect(released).toHaveLength(1);
+    expect(released[0].body.ops).toEqual([{ op: 'edit_lease_released', element_ids: ['node-a'] }]);
+  });
+
+  it('tracks remote lease acquire/release ops but ignores its own echoes', () => {
+    const onLeases = vi.fn();
+    const { client } = makeClient({ handlers: { onLeases } });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_acquired', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_released', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()).toEqual({});
+
+    // Our own acquire echo must not render as a remote marker (beginEditing
+    // already updated local state from the direct response).
+    es.emit({
+      type: 'op',
+      client_id: 'client-me',
+      op: { op: 'edit_lease_acquired', client_id: 'client-me', element_ids: ['node-c'] },
+    });
+    expect(client.getRemoteLeases()['node-c']).toBeUndefined();
+  });
+
+  it("drops a departed client's leases on presence_left", () => {
+    const { client } = makeClient();
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({
+      type: 'snapshot',
+      seq: 0,
+      session: { state: {} },
+      roster,
+      claims: {},
+      leases: { 'node-a': 'client-other' },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+
+    es.emit({ type: 'presence_left', client_id: 'client-other' });
+    expect(client.getRemoteLeases()).toEqual({});
+  });
+
+  it('re-acquires actively-held edit leases on reconnect (server dropped them on disconnect)', async () => {
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+    await client.beginEditing(['node-a']);
+    fetchImpl.calls.length = 0;
+
+    es.emit({ type: 'catch_up', seq: 1, ops: [], roster, claims: {}, leases: {} });
+    await flush();
+    const reacquires = fetchImpl.calls
+      .flatMap((c) => c.body.ops)
+      .filter((o) => o.op === 'edit_lease_acquired' && o.element_ids.includes('node-a'));
+    expect(reacquires.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renews a held lease on a timer, but skips renewal while the stream is disconnected', async () => {
+    const fetchImpl = makeFetch(
+      Array.from({ length: 10 }, () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
+      }))
+    );
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+
+    // Fake timers engaged before beginEditing — `_startLeaseRenewTimer`'s
+    // `setInterval` is only created once its acquire resolves, and a
+    // `setInterval` created under real timers is invisible to a fake clock
+    // engaged afterward. `advanceTimersByTimeAsync` (unlike the sync
+    // variant) also flushes the microtask queue between ticks, which is
+    // what actually lets the mocked fetch's resolved Promise settle.
+    vi.useFakeTimers();
+    try {
+      const beginPromise = client.beginEditing(['node-a']);
+      await vi.advanceTimersByTimeAsync(0);
+      await beginPromise;
+      const afterAcquire = fetchImpl.calls.length;
+      expect(afterAcquire).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(15_000); // one LEASE_RENEW_MS interval
+      expect(fetchImpl.calls.length).toBeGreaterThan(afterAcquire);
+      const afterRenew = fetchImpl.calls.length;
+
+      es.error(); // stream drops → not ready
+      await vi.advanceTimersByTimeAsync(60_000); // several renewal intervals pass
+      expect(fetchImpl.calls.length).toBe(afterRenew);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a remote lease client-side once its TTL passes', () => {
+    let now = 1000;
+    const { client } = makeClient({ nowFn: () => now });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} }, roster, claims: {}, leases: {} });
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'edit_lease_acquired', client_id: 'client-other', element_ids: ['node-a'] },
+    });
+    expect(client.getRemoteLeases()['node-a']).toBeTruthy();
+    now += 31_000;
+    expect(client.getRemoteLeases()).toEqual({});
+  });
+});
+
+// smallfix-annotation-version-dropped-by-browser-pipeline: end-to-end
+// reproduction of the bug an independent review found and traced through
+// this exact pipeline. `computeOps`/`diffAnnotationFields` themselves were
+// never broken — they already correctly excluded `version`/`field_versions`
+// from the outgoing content diff and read `before.version` for
+// `base_version` (see the "Field patches" tests above, which pin that in
+// isolation). The break was upstream: `annotationsToOverlays` (frontend/web/
+// src/utils/sessionAnnotations.js) — the function `useSharedSession.js`'s
+// serverStateToMirror calls to build a browser's hydration baseline — used
+// to silently drop `version`/`field_versions` off every server annotation,
+// so `before.version` was always `undefined` for a real browser and
+// `base_version` never reached the server at all. These tests go through
+// `annotationsToOverlays` for real (not a hand-built mirror object, unlike
+// every test above it) and a fake server implementing the identical
+// field-version-conflict rule `session_store.py` enforces, so the assertions
+// below fail on the pre-fix code and pass on the fixed code — see this
+// task's PR/commit message for the before/after run this was verified with.
+describe('two-client same-field race through the real browser pipeline (smallfix-annotation-version-dropped-by-browser-pipeline)', () => {
+  // Mirrors SessionStore.apply_state_op's annotation_updated branch
+  // (backend/core/session_store.py): a field is "touched" only when its
+  // incoming value actually differs, `base_version` given but omitted from a
+  // field's history defaults to version 1, and any touched field newer than
+  // `base_version` refuses the whole op with a 409 shaped like the real
+  // `AnnotationFieldConflict` HTTP detail (rest_api.py).
+  function makeFieldVersionServer(initialAnnotations) {
+    const store = new Map(initialAnnotations.map((a) => [a.id, { ...a }]));
+    const fetchImpl = vi.fn(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      const applied = [];
+      for (const op of body.ops) {
+        if (op.op !== 'annotation_updated') continue;
+        const target = store.get(op.annotation.id);
+        const changedFields = Object.keys(op.annotation).filter(
+          (k) =>
+            !['id', 'type', 'kind'].includes(k) &&
+            JSON.stringify(op.annotation[k]) !== JSON.stringify(target[k])
+        );
+        if (op.base_version != null) {
+          const conflicts = {};
+          for (const field of changedFields) {
+            const fieldVersion = (target.field_versions || {})[field] ?? 1;
+            if (fieldVersion > op.base_version) conflicts[field] = fieldVersion;
+          }
+          if (Object.keys(conflicts).length) {
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({
+                detail: {
+                  error: 'field_conflict',
+                  annotation_id: target.id,
+                  conflicting_fields: conflicts,
+                  server_version: target.version,
+                },
+              }),
+            };
+          }
+        }
+        const newVersion = (target.version || 1) + 1;
+        Object.assign(target, op.annotation);
+        target.version = newVersion;
+        target.field_versions = { ...(target.field_versions || {}) };
+        for (const field of changedFields) target.field_versions[field] = newVersion;
+        applied.push({ op: 'annotation_updated', annotation: { ...target } });
+      }
+      return { ok: true, status: 200, json: async () => ({ applied, seq: 1 }) };
+    });
+    return { fetchImpl, store };
+  }
+
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return client;
+  }
+
+  it('a hydrated overlay carries the real server version into base_version, not undefined', async () => {
+    const serverAnnotation = {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      z: 0,
+      locked: false,
+      version: 7,
+      field_versions: { shape: 5 },
+    };
+    // The exact hydration call useSharedSession.js's serverStateToMirror makes.
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const { fetchImpl } = makeFieldVersionServer([serverAnnotation]);
+    const client = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [overlay] });
+
+    client.syncState({ annotations: [{ ...overlay, fill: '#60A5FA' }] });
+    await flush();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOp = JSON.parse(fetchImpl.mock.calls[0][1].body).ops[0];
+    expect(sentOp.op).toBe('annotation_updated');
+    expect(sentOp.base_version).toBe(7); // not undefined
+  });
+
+  it('two browsers racing the same field: the second genuinely gets 409 field_conflict, not a silent clobber', async () => {
+    const serverAnnotation = {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      text: 'orig',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      z: 0,
+      locked: false,
+      version: 1,
+      field_versions: {},
+    };
+    const { fetchImpl, store } = makeFieldVersionServer([serverAnnotation]);
+
+    // Both browsers hydrate independently from the same server state, through
+    // the real translator — the exact path the review traced.
+    const [overlayForA] = annotationsToOverlays([serverAnnotation]);
+    const [overlayForB] = annotationsToOverlays([serverAnnotation]);
+
+    const onDroppedB = vi.fn();
+    const clientA = makeReadyClient(fetchImpl);
+    const clientB = makeReadyClient(fetchImpl, { handlers: { onDropped: onDroppedB } });
+    clientA.setBaseline({ annotations: [overlayForA] });
+    clientB.setBaseline({ annotations: [overlayForB] });
+
+    // A publishes first and wins.
+    clientA.syncState({ annotations: [{ ...overlayForA, text: 'A wins' }] });
+    await flush();
+
+    // B never saw A's update (it is still working off the original
+    // version-1 hydration) and now publishes a conflicting edit to the same
+    // field.
+    clientB.syncState({ annotations: [{ ...overlayForB, text: 'B loses' }] });
+    await flush();
+
+    expect(onDroppedB).toHaveBeenCalledTimes(1);
+    const [, status, body] = onDroppedB.mock.calls[0];
+    expect(status).toBe(409);
+    expect(body.detail.error).toBe('field_conflict');
+    expect(body.detail.conflicting_fields).toHaveProperty('text');
+
+    // A's write genuinely stands — the server-side store still holds A's text.
+    expect(store.get('shape-1').text).toBe('A wins');
+  });
+});
+
+// dec-annotation-field-patches-and-conflicts / round 2 review: the two-client
+// tests above cover a stale `base_version` from a genuinely different
+// collaborator. This describe block covers the narrower, same-client race the
+// round-2 reviewer found: annotationChangeScheduler.js publishes
+// style/geometry/create/delete immediately (no debounce), so a single user
+// can fire two rapid edits to the *same* field of the *same* annotation
+// before the first op's round trip completes. Before the fix, both edits are
+// computed while `this._baseline` still carries the pre-first-edit version
+// (syncState assigned it straight from the canvas snapshot, whose own copy of
+// `version`/`field_versions` only catches up asynchronously through the ack),
+// so both carry the identical, now-stale `base_version` — the server refuses
+// the batch as a conflict against no one but this client's own prior write.
+describe('same-client self-conflict race (round 2 follow-up to smallfix-annotation-version-dropped-by-browser-pipeline)', () => {
+  // Unlike makeFieldVersionServer above (which short-circuits a batch on the
+  // first conflicting op, leaving any earlier op in that same request already
+  // committed to `store`), this fake stages every op in the request against a
+  // scratch copy and only commits it to `store` if every op in the batch
+  // succeeds — mirroring session_manager.py's apply_ops: a mid-batch
+  // AnnotationFieldConflict rolls back the *whole* request, including an
+  // earlier op in it that would otherwise have applied cleanly. Getting this
+  // right matters here specifically: the bug this test drives at reproduces
+  // as two same-client ops landing in one batch, and a fake that quietly lets
+  // the first one through regardless of the second would pass for the wrong
+  // reason.
+  function makeSequentialAnnotationServer(initialAnnotations = []) {
+    const store = new Map(initialAnnotations.map((a) => [a.id, { ...a }]));
+    const changedFieldsOf = (incoming, target) =>
+      Object.keys(incoming).filter(
+        (k) =>
+          !['id', 'type', 'kind'].includes(k) &&
+          JSON.stringify(incoming[k]) !== JSON.stringify(target[k])
+      );
+    const fetchImpl = vi.fn(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      // Scratch copy: only merged into `store` once every op below succeeds.
+      const staged = new Map([...store].map(([id, a]) => [id, { ...a }]));
+      const applied = [];
+      for (const op of body.ops) {
+        if (op.op === 'annotation_created') {
+          const incoming = op.annotation;
+          const existing = staged.get(incoming.id);
+          if (existing) {
+            const changed = changedFieldsOf(incoming, existing);
+            const newVersion = (existing.version || 1) + 1;
+            const target = { ...existing, ...incoming, version: newVersion };
+            target.field_versions = { ...(existing.field_versions || {}) };
+            for (const f of changed) target.field_versions[f] = newVersion;
+            staged.set(target.id, target);
+            applied.push({ op: 'annotation_created', annotation: { ...target } });
+          } else {
+            const target = { ...incoming, version: 1, field_versions: {} };
+            staged.set(target.id, target);
+            applied.push({ op: 'annotation_created', annotation: { ...target } });
+          }
+          continue;
+        }
+        if (op.op !== 'annotation_updated') continue;
+        const target = staged.get(op.annotation.id);
+        const changed = changedFieldsOf(op.annotation, target);
+        if (op.base_version != null) {
+          const conflicts = {};
+          for (const field of changed) {
+            const fieldVersion = (target.field_versions || {})[field] ?? 1;
+            if (fieldVersion > op.base_version) conflicts[field] = fieldVersion;
+          }
+          if (Object.keys(conflicts).length) {
+            // Whole batch refused — `staged` is discarded, nothing this
+            // request touched (including an earlier, otherwise-valid op in
+            // it) reaches `store`.
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({
+                detail: {
+                  error: 'field_conflict',
+                  annotation_id: target.id,
+                  conflicting_fields: conflicts,
+                  server_version: target.version,
+                  message: 'conflict',
+                },
+              }),
+            };
+          }
+        }
+        const newVersion = (target.version || 1) + 1;
+        const merged = { ...target, ...op.annotation, version: newVersion };
+        merged.field_versions = { ...(target.field_versions || {}) };
+        for (const f of changed) merged.field_versions[f] = newVersion;
+        staged.set(merged.id, merged);
+        applied.push({ op: 'annotation_updated', annotation: { ...merged } });
+      }
+      for (const [id, a] of staged) store.set(id, a);
+      return { ok: true, status: 200, json: async () => ({ applied, seq: 1 }) };
+    });
+    return { fetchImpl, store };
+  }
+
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return client;
+  }
+
+  // `text` and `position` are the two fields to drive these edits through:
+  // both survive `annotationsToOverlays`/the shape overlay translator with
+  // the *same* name and shape as the server-side annotation (see
+  // `genericAnnotationToOverlay` — `overlay.text = a.text`, `overlay.position
+  // = a.position`), unlike e.g. a shape's fill colour (server `style.fill`
+  // vs. overlay `fill`, a rename this fake server's plain field-name diff
+  // does not need to know about, matching the existing hydrated-overlay
+  // tests above which use `text` for the same reason).
+  function makeShapeAnnotation(overrides = {}) {
+    return {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      text: 'orig',
+      z: 0,
+      locked: false,
+      version: 1,
+      field_versions: {},
+      ...overrides,
+    };
+  }
+
+  it('two rapid same-field edits (a fast double edit, e.g. two quick color picks) both land instead of the second spuriously conflicting with the first', async () => {
+    const serverAnnotation = makeShapeAnnotation();
+    const { fetchImpl, store } = makeSequentialAnnotationServer([serverAnnotation]);
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const client = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [overlay] });
+
+    // Two edits to the SAME field, both computed before either op's ack
+    // lands — annotationChangeScheduler.js publishes most annotation field
+    // changes immediately (no debounce), so a fast double edit produces
+    // exactly this.
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 1' }] });
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 2' }] });
+    await flush();
+
+    // Both ops went out together in one batch...
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOps = JSON.parse(fetchImpl.mock.calls[0][1].body).ops;
+    expect(sentOps).toHaveLength(2);
+    expect(sentOps[0].base_version).toBe(1);
+    // ...and the second op's base_version reflects the optimistic bump from
+    // the first — NOT the stale pre-send value of 1 (the bug: both ops
+    // would otherwise carry an identical base_version and the server would
+    // refuse the whole batch as a same-annotation conflict).
+    expect(sentOps[1].base_version).toBe(2);
+
+    // Nothing was dropped, and the second (most recent) edit genuinely won.
+    expect(store.get('shape-1').text).toBe('edit 2');
+    expect(store.get('shape-1').version).toBe(3);
+  });
+
+  it('three rapid edits, interleaving a different field in between, all land (closes the general class, not just the two-edit case)', async () => {
+    const serverAnnotation = makeShapeAnnotation();
+    const { fetchImpl, store } = makeSequentialAnnotationServer([serverAnnotation]);
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const onDropped = vi.fn();
+    const client = makeReadyClient(fetchImpl, { handlers: { onDropped } });
+    client.setBaseline({ annotations: [overlay] });
+
+    // text -> position -> text again, all before any ack. The third op
+    // re-touches the field the first op already touched, with an unrelated
+    // field's edit interleaved in between — the case a fix that only
+    // special-cases two back-to-back edits to the same field would miss.
+    client.syncState({ annotations: [{ ...overlay, text: 'edit 1' }] });
+    client.syncState({
+      annotations: [{ ...overlay, text: 'edit 1', position: { x: 40, y: 0 } }],
+    });
+    client.syncState({
+      annotations: [{ ...overlay, text: 'edit 2', position: { x: 40, y: 0 } }],
+    });
+    await flush();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOps = JSON.parse(fetchImpl.mock.calls[0][1].body).ops;
+    expect(sentOps).toHaveLength(3);
+    expect(sentOps.map((op) => op.base_version)).toEqual([1, 2, 3]);
+
+    expect(onDropped).not.toHaveBeenCalled();
+    const finalAnnotation = store.get('shape-1');
+    expect(finalAnnotation.text).toBe('edit 2');
+    expect(finalAnnotation.position.x).toBe(40);
+    expect(finalAnnotation.version).toBe(4);
+  });
+});
+
+// Round 3 review, following the same-client race fix above: every test up
+// to here — including the two-client tests further up this file — is
+// single-client only from `_handleEvent`'s point of view; none of them
+// injects a genuinely remote SSE 'op' event. This block closes that gap by
+// driving a real remote broadcast through the real
+// SessionSyncClient/_handleEvent path, reproducing the round-3 reviewer's
+// scenario: the SSE stream and this client's own POST-ack channel have no
+// cross-ordering guarantee, so a genuinely different client's broadcast for
+// a chronologically EARLIER op can arrive after this client's own
+// already-acked LATER op on the same annotation.
+describe('remote broadcast reordering vs. an already-acked own write (round 3 follow-up)', () => {
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return { client, es };
+  }
+
+  function makeInitialAnnotation(overrides = {}) {
+    return {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      style: 'red',
+      geometry: { x: 0 },
+      version: 1,
+      field_versions: {},
+      ...overrides,
+    };
+  }
+
+  it("a stale/reordered remote broadcast for a chronologically earlier op never regresses a baseline already advanced by this client's own ack", async () => {
+    const initial = makeInitialAnnotation();
+    // 2. Server-side ordering being reproduced: B's op (geometry) lands
+    // first, bumping version 1 -> 2; A's own op (style) lands second,
+    // bumping version 2 -> 3. A's ack — carrying that real, already-
+    // cumulative version-3 state — is what the POST response below returns.
+    const fetchImpl = makeFetch([
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          applied: [
+            {
+              op: 'annotation_updated',
+              annotation: {
+                ...initial,
+                style: 'blue',
+                geometry: { x: 1 },
+                version: 3,
+                field_versions: { geometry: 2, style: 3 },
+              },
+            },
+          ],
+          seq: 3,
+        }),
+      },
+    ]);
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
+    client.setBaseline({ annotations: [initial] });
+
+    // 1. Client A edits style and sends its op.
+    client.syncState({ annotations: [{ ...initial, style: 'blue' }] });
+    await flush();
+    // 3. A's POST ack arrives and is correctly folded (foldAckedAnnotationOp,
+    // unmodified by this fix) — baseline reaches version 3 / style 'blue'.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // 4. B's SSE broadcast for its own earlier (lower-version, lower-seq)
+    // op arrives late, after A's own ack already landed. Its seq (2) is
+    // still above `_appliedSeq` (0 — only stream events advance it, never
+    // the POST-ack's optimistic `_seq`), so the R15 dedup guard does not
+    // itself drop it; this is a genuinely new, merely late delivery, not a
+    // duplicate.
+    es.emit({
+      type: 'op',
+      seq: 2,
+      client_id: 'client-B',
+      op: {
+        op: 'annotation_updated',
+        annotation: {
+          ...initial,
+          style: 'red', // stale — B's snapshot predates A's style edit
+          geometry: { x: 1 },
+          version: 2,
+          field_versions: { geometry: 2 },
+        },
+      },
+    });
+
+    // The baseline must still be at version 3 with A's edit intact. Proven
+    // behaviourally, the same way the same-client race tests above do: the
+    // *next* local edit's outgoing `base_version` reflects the un-regressed
+    // baseline, not the stale broadcast's version 2 — which the server
+    // would otherwise genuinely reject as a conflict against A's own prior,
+    // already-succeeded write (the consequence this fix closes).
+    client.syncState({ annotations: [{ ...initial, style: 'blue', text: 'caption' }] });
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const secondBatch = fetchImpl.calls[1].body.ops;
+    const updateOp = secondBatch.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(3); // not regressed to 2
+    expect(updateOp.annotation.text).toBe('caption');
+
+    // 5. Round 5 (smallfix-applyremoteop-canvas-no-version-guard): the stale
+    // broadcast must never reach onRemoteOps either — the exact handler
+    // App.jsx wires straight onto the live canvas with no version check of
+    // its own (see applyRemoteOp/applyAnnotationUpsertToCanvas). Before this
+    // fix, onRemoteOps fired for B's stale op regardless of the baseline
+    // guard above, so the canvas would flash to B's reverted style even
+    // though the sync baseline (asserted above) correctly never moved. The
+    // only 'op' event this test emitted was that stale broadcast, so the
+    // handler must not have been called at all.
+    expect(onRemoteOps).not.toHaveBeenCalled();
+  });
+
+  it('a genuinely newer remote broadcast still applies normally (not a license to ignore real remote updates)', async () => {
+    const initial = makeInitialAnnotation();
+    const fetchImpl = makeFetch();
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
+    client.setBaseline({ annotations: [initial] });
+
+    // A genuinely different, and genuinely newer, collaborator edit.
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: {
+        ...initial,
+        geometry: { x: 5 },
+        version: 2,
+        field_versions: { geometry: 2 },
+      },
+    };
+    es.emit({ type: 'op', seq: 1, client_id: 'client-B', op: newerOp });
+
+    // The next local edit's base_version must reflect the applied
+    // broadcast's version 2 — proving it was folded into the baseline,
+    // not dropped by the new guard.
+    client.syncState({ annotations: [{ ...initial, geometry: { x: 5 }, style: 'green' }] });
+    await flush();
+    const sentOps = fetchImpl.calls[0].body.ops;
+    const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(2);
+    expect(updateOp.annotation.style).toBe('green');
+
+    // A genuinely newer broadcast must still reach onRemoteOps — round 5's
+    // fix must not turn into a "collaboration doesn't work" regression by
+    // over-suppressing delivery of real updates.
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-B' });
+  });
+
+  it('a stale broadcast followed by a genuinely newer one: the stale one is dropped but the newer one still applies', async () => {
+    const initial = makeInitialAnnotation();
+    const fetchImpl = makeFetch();
+    const onRemoteOps = vi.fn();
+    const { client, es } = makeReadyClient(fetchImpl, { handlers: { onRemoteOps } });
+    // Baseline already at version 3 (as if this client's own ack, or an
+    // earlier remote op, already advanced it) — mirrors the point reached
+    // right after step 3 of the scenario above, isolated from the POST/ack
+    // machinery so this test can focus purely on two out-of-order
+    // broadcasts arriving back to back.
+    client.setBaseline({
+      annotations: [{ ...initial, style: 'blue', version: 3, field_versions: { style: 3 } }],
+    });
+
+    // A stale broadcast (version 2) arrives first...
+    const staleOp = {
+      op: 'annotation_updated',
+      annotation: { ...initial, style: 'red', version: 2, field_versions: { style: 2 } },
+    };
+    es.emit({ type: 'op', seq: 2, client_id: 'client-B', op: staleOp });
+    // ...then a genuinely newer one (version 4) arrives right after.
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: {
+        ...initial,
+        style: 'blue',
+        geometry: { x: 9 },
+        version: 4,
+        field_versions: { style: 3, geometry: 4 },
+      },
+    };
+    es.emit({ type: 'op', seq: 4, client_id: 'client-C', op: newerOp });
+
+    // The stale one must not have won, and the newer one must have: the
+    // next local edit's base_version reflects version 4, not 2 or 3.
+    client.syncState({
+      annotations: [{ ...initial, style: 'blue', geometry: { x: 9 }, text: 'z' }],
+    });
+    await flush();
+    const sentOps = fetchImpl.calls[0].body.ops;
+    const updateOp = sentOps.find((o) => o.op === 'annotation_updated');
+    expect(updateOp.base_version).toBe(4);
+
+    // onRemoteOps sees only the genuinely newer broadcast — the stale one
+    // never reaches it (and so never reaches a canvas wired to it either).
+    expect(onRemoteOps).toHaveBeenCalledTimes(1);
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-C' });
+  });
+});
+
+// Pure-function coverage for `foldRemoteAnnotationOp`, the guard the tests
+// above drive end-to-end — see its own docstring in sessionSyncClient.js for
+// why it rejects a stale remote op atomically rather than merging it in
+// field-by-field, unlike `foldAckedAnnotationOp` just below.
+describe('foldRemoteAnnotationOp', () => {
+  it('drops a stale remote op atomically — neither version/field_versions nor content regress', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: 'blue',
+          geometry: { x: 1 },
+          version: 3,
+          field_versions: { geometry: 2, style: 3 },
+        },
+      ],
+    };
+    const staleOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: 'red', // stale content
+        geometry: { x: 1 },
+        version: 2,
+        field_versions: { geometry: 2 },
+      },
+    };
+    const result = foldRemoteAnnotationOp(baseline, staleOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3);
+    expect(a.field_versions).toEqual({ geometry: 2, style: 3 });
+    expect(a.style).toBe('blue'); // not regressed to the stale op's 'red'
+  });
+
+  it('applies a version tie normally', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3, field_versions: {} },
+      ],
+    };
+    const tieOp = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', style: 'green', version: 3 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, tieOp);
+    expect(result.annotations.find((x) => x.id === 'a').style).toBe('green');
+  });
+
+  it('applies a genuinely newer remote op normally', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3, field_versions: {} },
+      ],
+    };
+    const newerOp = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', style: 'green', version: 4 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, newerOp);
+    expect(result.annotations.find((x) => x.id === 'a').style).toBe('green');
+  });
+
+  it('applies a create for an id the baseline does not know yet, unconditionally', () => {
+    const baseline = { annotations: [] };
+    const createOp = {
+      op: 'annotation_created',
+      annotation: { id: 'new', type: 'shape', kind: 'shape', style: 'blue', version: 1 },
+    };
+    const result = foldRemoteAnnotationOp(baseline, createOp);
+    expect(result.annotations.find((x) => x.id === 'new').style).toBe('blue');
+  });
+
+  it('leaves non-annotation ops untouched (passthrough to applyOpToMirror)', () => {
+    const baseline = { node_refs: ['a'] };
+    const result = foldRemoteAnnotationOp(baseline, { op: 'nodes_added', node_ids: ['b'] });
+    expect(result.node_refs).toEqual(['a', 'b']);
+  });
+});
+
+// Pure-function coverage for `isAnnotationOpStale` — the predicate
+// `foldRemoteAnnotationOp` (above) and `_handleEvent`'s `'op'` case (which
+// gates `onRemoteOps`, and so ultimately App.jsx's canvas write, on it) both
+// consult, so the two can never independently drift on the same question
+// (round 5, smallfix-applyremoteop-canvas-no-version-guard).
+describe('isAnnotationOpStale', () => {
+  const baseline = {
+    annotations: [{ id: 'a', type: 'shape', kind: 'shape', style: 'blue', version: 3 }],
+  };
+
+  it('is true for a lower incoming version', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 2 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(true);
+  });
+
+  it('is false for a version tie', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 3 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for a genuinely higher incoming version', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape', version: 4 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for an id the baseline has no entry for yet (a fresh annotation)', () => {
+    const op = {
+      op: 'annotation_created',
+      annotation: { id: 'new', type: 'shape', kind: 'shape', version: 1 },
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false when the incoming version cannot be compared', () => {
+    const op = {
+      op: 'annotation_updated',
+      annotation: { id: 'a', type: 'shape', kind: 'shape' }, // no version field
+    };
+    expect(isAnnotationOpStale(baseline, op)).toBe(false);
+  });
+
+  it('is false for a non-annotation op', () => {
+    expect(isAnnotationOpStale(baseline, { op: 'nodes_added', node_ids: ['b'] })).toBe(false);
+  });
+
+  it('is false for an annotation op with no id', () => {
+    expect(
+      isAnnotationOpStale(baseline, { op: 'annotation_updated', annotation: { version: 1 } })
+    ).toBe(false);
+  });
+});
+
+// Pure-function coverage for the two building blocks the tests above drive
+// end-to-end. These pin the invariants precisely (including a scenario that
+// is impractical to force deterministically through the full async
+// send/flush/ack pipeline) rather than only exercising them incidentally.
+describe('predictAnnotationVersionsForSend', () => {
+  it('advances a touched annotation by one version and bumps only the fields the outgoing patch touches', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'red' },
+          geometry: { x: 0 },
+          version: 2,
+          field_versions: { style: 2 },
+        },
+      ],
+    };
+    const next = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'blue' },
+          geometry: { x: 0 },
+          version: 2,
+          field_versions: { style: 2 },
+        },
+      ],
+    };
+    const ops = computeOps(baseline, next);
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3);
+    expect(a.field_versions).toEqual({ style: 3 }); // geometry untouched, not bumped
+  });
+
+  it('predicts version 1 and empty field_versions for a brand new annotation_created', () => {
+    const baseline = { annotations: [] };
+    const next = { annotations: [{ id: 'new', type: 'note', kind: 'note', text: 'hi' }] };
+    const ops = computeOps(baseline, next);
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'new');
+    expect(a.version).toBe(1);
+    expect(a.field_versions).toEqual({});
+  });
+
+  it('keeps the baseline version for an annotation not touched this round, even when the canvas snapshot still carries a stale one', () => {
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: {},
+          version: 5,
+          field_versions: { style: 5 },
+        },
+      ],
+    };
+    // `next` (the live canvas snapshot) has not yet learned about a prior
+    // edit's ack — its version/field_versions are still what they were on
+    // load.
+    const next = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: {}, version: 1, field_versions: {} },
+      ],
+    };
+    const ops = computeOps(baseline, next); // content unchanged -> no ops
+    const result = predictAnnotationVersionsForSend(baseline, next, ops);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(5);
+    expect(a.field_versions).toEqual({ style: 5 });
+  });
+});
+
+describe('foldAckedAnnotationOp', () => {
+  it('never regresses a version/field_versions the client has already optimistically predicted past this ack', () => {
+    // The baseline already predicts version 3 (a later, still-unacked local
+    // op already advanced it via predictAnnotationVersionsForSend) — the ack
+    // being folded here is only authoritative as of an EARLIER op (version
+    // 2, and it only ever touched 'style').
+    const baseline = {
+      annotations: [
+        {
+          id: 'a',
+          type: 'shape',
+          kind: 'shape',
+          style: { fill: 'red' },
+          geometry: { x: 10 },
+          version: 3,
+          field_versions: { style: 2, geometry: 3 },
+        },
+      ],
+    };
+    const ackOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: { fill: 'red' },
+        geometry: { x: 0 }, // stale — as of the acked op, before geometry moved
+        version: 2,
+        field_versions: { style: 2 },
+      },
+    };
+    const result = foldAckedAnnotationOp(baseline, ackOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(3); // not regressed to the ack's 2
+    // geometry:3 survives even though this ack's field_versions never
+    // mentions 'geometry' at all.
+    expect(a.field_versions).toEqual({ style: 2, geometry: 3 });
+  });
+
+  it('adopts the ack when it is newer than anything the client already knew', () => {
+    const baseline = {
+      annotations: [
+        { id: 'a', type: 'shape', kind: 'shape', style: {}, version: 1, field_versions: {} },
+      ],
+    };
+    const ackOp = {
+      op: 'annotation_updated',
+      annotation: {
+        id: 'a',
+        type: 'shape',
+        kind: 'shape',
+        style: { fill: 'red' },
+        version: 2,
+        field_versions: { style: 2 },
+      },
+    };
+    const result = foldAckedAnnotationOp(baseline, ackOp);
+    const a = result.annotations.find((x) => x.id === 'a');
+    expect(a.version).toBe(2);
+    expect(a.field_versions).toEqual({ style: 2 });
   });
 });

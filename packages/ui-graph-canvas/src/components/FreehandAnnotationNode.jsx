@@ -9,9 +9,12 @@ import {
   hasPressureData,
   segmentsFromCurvePoints,
 } from '../utils/freehandPath';
-import { isRemoteLocked, isAnnotationDraggable } from '../utils/annotations';
+import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './FreehandAnnotationNode.css';
 
 /**
@@ -85,20 +88,30 @@ function FreehandAnnotationNode({ id, data, selected }) {
   const smoothing = data?.smoothing ?? 0;
   const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+    useContext(AnnotationContext);
+  // Another client's live edit lease (task-annotation-exclusive-edit-leases):
+  // dragging is already refused centrally via `draggable` (GraphCanvas's
+  // remote-lease effect); the context-menu guards below refuse the
+  // per-component mutations this component does have (colour/width/
+  // smoothing/opacity/delete/unlock).
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
   const { setNodes } = useReactFlow();
-  // Another client's live selection claim (task-annotation-shared-session-
-  // realtime): dragging is already refused centrally via `draggable`
-  // (GraphCanvas's remote-selection effect); this only adds the visual cue,
-  // since freehand strokes have no per-component mutation UI of their own to
-  // guard.
-  const remoteSelection = data?.remoteSelection || null;
+  // Cosmetic "who's here" marker — prefers the active editor over a mere
+  // selection (see remoteEditBadge's doc comment).
+  const badge = remoteEditBadge(data);
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -224,18 +237,18 @@ function FreehandAnnotationNode({ id, data, selected }) {
       style={{
         marginLeft: -originX,
         marginTop: -originY,
-        outline: remoteSelection ? `2px solid ${remoteSelection.color}` : undefined,
-        outlineOffset: remoteSelection ? '2px' : undefined,
+        outline: badge ? `2px solid ${badge.color}` : undefined,
+        outlineOffset: badge ? '2px' : undefined,
       }}
       onContextMenu={openContextMenu}
     >
-      {remoteSelection && (
+      {badge && (
         <div
           className="graph-node-remote-badge"
-          style={{ backgroundColor: remoteSelection.color, left: originX - 2, top: originY - 11 }}
-          title={remoteSelection.displayName}
+          style={{ backgroundColor: badge.color, left: originX - 2, top: originY - 11 }}
+          title={badge.displayName}
         >
-          {remoteSelection.displayName}
+          {badge.displayName}
         </div>
       )}
       <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
@@ -277,12 +290,38 @@ function FreehandAnnotationNode({ id, data, selected }) {
           )}
         </g>
       </svg>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected. Positioned near the stroke's anchor point
+          (like the remote badge above), offset above it so the two never
+          overlap. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          style={{ left: originX - 12, top: originY - 34 }}
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:
@@ -354,6 +393,10 @@ function FreehandAnnotationNode({ id, data, selected }) {
                   locked={data.locked}
                   onChangeLayer={changeLayer}
                 />
+                <NearbyObjectMenuSection
+                  labels={labels}
+                  onAttach={(kind) => attachNearby(id, kind)}
+                />
                 <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
                 <button type="button" className="context-menu-delete" onClick={remove}>
                   🗑️ {labels.delete}
@@ -361,7 +404,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </div>
   );

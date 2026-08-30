@@ -6,16 +6,26 @@
  * logic, so they are tracked apart from these overlays.
  */
 
-// text/frame/shape/icon/vote_dot/image/freehand are the rest of the v1
+// text/shape/icon/vote_dot/image/freehand are the rest of the v1
 // annotation model (docs/ANNOTATION_CONTRACT.md) that isn't note/label/
-// arrow/group. text/frame/shape/icon/vote_dot/image render through
+// arrow/group. text/shape/icon/vote_dot/image render through
 // GenericAnnotationNode — a simple, non-interactive visual representation
 // rather than dedicated per-type UX like NoteNode. freehand renders through
 // its own FreehandAnnotationNode (an SVG path, like ArrowNode) but still
 // shares this generic envelope-field handling.
+//
+// `frame` used to be a member of this set: a plain box with no fill, drawn
+// by the exact same generic machinery as `shape`. task-annotation-merge-
+// frame-into-shape-rectangle folded it into `shape` as one merged kind with
+// independent fill/border settings (each transparent-or-coloured) — a
+// `shape` with `fill: 'transparent'` now covers what `frame` used to draw.
+// `frame` is no longer a recognised annotation kind at all; a stored `frame`
+// annotation from before this change is dropped while normalising
+// (annotationModel.js's `createAnnotation` throws for an unknown type, and
+// `normalizeAnnotationDocument` skips rather than propagates that — see its
+// doc comment) and never reaches this file.
 export const GENERIC_OVERLAY_TYPES = new Set([
   'text',
-  'frame',
   'shape',
   'icon',
   'vote_dot',
@@ -49,7 +59,19 @@ export const VOTE_DOT_INTRINSIC_SIZE = { w: 24, h: 24 };
 // (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
 // attaches per-endpoint (`start`/`end`) instead, via its own mechanism
 // (startAnchor/endAnchor below), not this field.
-export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_dot']);
+//
+// `vote_dot` used to be a member of this set. task-annotation-vote-dot-
+// simplify removed it: a vote dot is now a plain coloured dot with no
+// attachment behaviour of its own — it never snaps to or follows a target,
+// and lives entirely on its own once dropped. No migration was written for a
+// vote_dot already stored with an `attachment` field (nobody used the
+// annotation feature yet — the same 2026-08-25 owner direction
+// task-annotation-tolerate-unexpected-data's docstring cites); it is simply
+// never read as one, since every reader of this set (GraphCanvas.jsx's
+// drop-to-attach and attachment-follow effects, `computeDroppedAttachment`'s
+// callers) is keyed on membership here, not on whether the field happens to
+// be present.
+export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
 
 // Per-kind payload fields carried on a generic overlay's `data`, beyond the
 // shared id/type/position/style. Drives both overlayToFlowNode and its
@@ -63,17 +85,36 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon', 'vote_
 // annotation with none of them keeps rendering exactly as it did before this
 // task — the same "omitted field = default" contract `color`/`rotation`
 // already follow.
+//
+// `shape` carries `fill`/`border` instead of a single `color`
+// (task-annotation-merge-frame-into-shape-rectangle): each is independently
+// either a colour or the literal string `'transparent'`, so a shape can be a
+// solid fill with no border (the old plain-shape look), a transparent fill
+// with a coloured border (what `frame` used to draw), both, or neither.
+// `opacity` (0-1, task-annotation-responsive-bottom-toolbox's edit-surface
+// half) is appended to every one of these five kinds' field lists — it was
+// previously a `freehand`-only control (see that kind's own list below); an
+// omitted value keeps rendering fully opaque, the same "absent field = no
+// change from before this task" contract every other newly-added optional
+// field here already follows.
 const GENERIC_OVERLAY_FIELDS = {
-  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment'],
-  frame: ['color'],
+  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment', 'opacity'],
   // `text` here is a `shape`'s optional caption
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'color', 'text', 'fontSize', 'textAlign', 'font'],
-  icon: ['icon', 'color', 'attachment'],
-  vote_dot: ['value', 'color', 'attachment'],
-  image: ['image', 'alt', 'color'],
+  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font', 'opacity'],
+  icon: ['icon', 'color', 'attachment', 'opacity'],
+  // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
+  // no `value` (the number it used to render and the stepper that changed
+  // it are both gone) and no `attachment` (it is not in
+  // ATTACHABLE_OVERLAY_KINDS above any more, so it never snaps to or follows
+  // a target). A stored vote_dot carrying either field from before this
+  // change simply never has it projected onto the live node — see this
+  // object's own doc comment above for why that is enough, with no
+  // migration, to make old data render correctly.
+  vote_dot: ['color', 'opacity'],
+  image: ['image', 'alt', 'color', 'opacity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -92,17 +133,14 @@ const GENERIC_OVERLAY_FIELDS = {
   ],
 };
 
-// Generic overlay kinds that carry an explicit box size (frame/shape/image);
+// Generic overlay kinds that carry an explicit box size (shape/image);
 // icon/vote_dot/text render at a fixed intrinsic size instead.
-const SIZED_GENERIC_KINDS = new Set(['frame', 'shape', 'image']);
+const SIZED_GENERIC_KINDS = new Set(['shape', 'image']);
 
 // The kinds that draw geometry.rotation. The capability baseline names
 // text/headings, labels/callouts, sticky notes, images, icons/dots and basic
-// shapes (process arrow included, as a shape variant); `frame` is drawn too,
-// because the MCP tools accept a rotation for every generic type they take,
-// with no per-type validation, and a frame is one box like a shape — silently
-// discarding a rotation the server stored and reports back is worse than
-// honouring it.
+// shapes (process arrow included, as a shape variant, and — since the merge —
+// a shape with a transparent fill, which covers what `frame` used to be).
 //
 // `line` and `freehand` are the real exclusions: their geometry lives in
 // endpoints and sampled points rather than in a box, so rotation there is a
@@ -116,7 +154,6 @@ export const ROTATABLE_OVERLAY_KINDS = new Set([
   'icon',
   'vote_dot',
   'image',
-  'frame',
 ]);
 
 // Inline style that draws an annotation's geometry.rotation, or an empty
@@ -290,28 +327,48 @@ export function isArrowAnchored(data) {
   return Boolean(data?.startAnchor || data?.endAnchor);
 }
 
-// Whether another live client currently holds this annotation's selection
-// claim (task-annotation-shared-session-realtime: annotation leases are
-// exclusive, not merely advisory — see the task's slice_scope). GraphCanvas's
-// remote-selection effect stamps `data.remoteSelection` from the sync
-// client's live claim map; this is the single read-side check every
-// annotation component uses to refuse a local edit while someone else holds
-// the claim. Distinct from `data.locked` (a persisted, geometry-only edit
-// lock a user sets deliberately) — a remote claim clears itself (release or
-// 30s TTL expiry) the moment the other client lets go.
+// Whether another live client currently holds an *edit lease* on this
+// annotation (task-annotation-exclusive-edit-leases, deciding
+// dec-mcp-agent-ops-vs-annotation-claimmap: edit leases are genuinely
+// exclusive — first-actual-editor-wins, refused rather than taken over — as
+// opposed to the advisory, last-write-wins selection claim `data.
+// remoteSelection` carries; this now reads a *different* field on purpose).
+// GraphCanvas's remote-lease effect stamps `data.remoteLease` from the sync
+// client's live lease map (`sessionSyncClient.getRemoteLeases()`), populated
+// only when the other client actually started editing (opened a text field,
+// began a geometry gesture, opened a property editor, started a bulk
+// mutation/undo) — never on mere selection. This is the single read-side
+// check every annotation component uses to refuse a local edit while
+// someone else holds the lease. Distinct from `data.locked` (a persisted,
+// geometry-only edit lock a user sets deliberately) — a remote lease clears
+// itself (release, completion or 30s TTL expiry) the moment the other
+// client lets go, and is unrelated to `data.remoteSelection`, which stays a
+// purely cosmetic "who has this selected" marker with no bearing on
+// whether an edit is allowed.
 export function isRemoteLocked(data) {
-  return Boolean(data?.remoteSelection);
+  return Boolean(data?.remoteLease);
+}
+
+// The marker to render as the collaborator badge/outline: the id of whoever
+// is actively *editing* this annotation when there is one (more specific and
+// more urgent to show than a mere selection), else whoever merely has it
+// selected. Both are `{ clientId, color, displayName }` or null/undefined —
+// see `data.remoteLease` and `data.remoteSelection` above. Centralises what
+// every annotation component's own badge JSX would otherwise re-derive
+// identically six times.
+export function remoteEditBadge(data) {
+  return data?.remoteLease || data?.remoteSelection || null;
 }
 
 // Whether an annotation should currently accept a plain ReactFlow drag,
-// combining its persisted lock, a live remote claim, and — for arrows only —
-// whether either endpoint is anchored to a target (anchored arrows move only
-// via their endpoint handles, never as a whole). Drives GraphCanvas's
-// remote-selection effect, which takes the `false` verbatim but maps a `true`
-// for a group to `undefined`, so the group keeps deferring to the canvas-wide
-// `nodesDraggable` switch instead of overriding it. `overlayToFlowNode`
-// computes the locked/anchor-only half of this itself at hydration time, when
-// no remote claim can yet exist.
+// combining its persisted lock, a live remote edit lease, and — for arrows
+// only — whether either endpoint is anchored to a target (anchored arrows
+// move only via their endpoint handles, never as a whole). Drives
+// GraphCanvas's remote-lease effect, which takes the `false` verbatim but
+// maps a `true` for a group to `undefined`, so the group keeps deferring to
+// the canvas-wide `nodesDraggable` switch instead of overriding it.
+// `overlayToFlowNode` computes the locked/anchor-only half of this itself at
+// hydration time, when no remote lease can yet exist.
 export function isAnnotationDraggable(node) {
   const data = node?.data;
   if (Boolean(data?.locked) || isRemoteLocked(data)) return false;
@@ -342,6 +399,15 @@ export function overlayToFlowNode(overlay) {
   // that dropped it would diff back out on the next autosave as a rotation
   // reset, silently overwriting whatever an agent or collaborator had set.
   const rotation = overlay.rotation ?? 0;
+  // `version`/`field_versions` are server-owned same-field-conflict bookkeeping
+  // (dec-annotation-field-patches-and-conflicts), carried the same envelope way
+  // as z/locked/rotation rather than defaulted — an annotation that has never
+  // round-tripped through the server (a brand-new local creation) legitimately
+  // has neither yet, and inventing 0/{} here would make a later diff think the
+  // server had already assigned one. Read-only from this file's point of view:
+  // nothing here ever changes them, only carries whatever was last read.
+  const version = overlay.version;
+  const fieldVersions = overlay.field_versions;
   if (overlay.kind === 'note') {
     return {
       ...base,
@@ -349,8 +415,11 @@ export function overlayToFlowNode(overlay) {
         text: overlay.text || '',
         color: overlay.color,
         fontSize: overlay.fontSize,
+        opacity: overlay.opacity,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       style: overlay.size
         ? { width: overlay.size.w, height: overlay.size.h }
@@ -367,15 +436,18 @@ export function overlayToFlowNode(overlay) {
         color: overlay.color,
         fontSize: overlay.fontSize,
         attachment: overlay.attachment,
+        opacity: overlay.opacity,
         locked,
         rotation,
+        version,
+        field_versions: fieldVersions,
       },
       draggable: !locked,
       zIndex,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
-    const data = { locked, rotation };
+    const data = { locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[overlay.kind]) data[field] = overlay[field];
     const node = { ...base, data, draggable: !locked, zIndex };
     if (SIZED_GENERIC_KINDS.has(overlay.kind)) {
@@ -403,10 +475,13 @@ export function overlayToFlowNode(overlay) {
     dx: overlay.dx ?? 160,
     dy: overlay.dy ?? 0,
     color: overlay.color,
+    opacity: overlay.opacity,
     startArrow: overlay.startArrow ?? false,
     endArrow: overlay.endArrow ?? true,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (overlay.startAnchor) data.startAnchor = overlay.startAnchor;
   if (overlay.endAnchor) data.endAnchor = overlay.endAnchor;
@@ -435,16 +510,24 @@ export function flowNodeToOverlay(node) {
   const z = node.zIndex ?? 0;
   const locked = Boolean(node.data?.locked);
   const rotation = node.data?.rotation ?? 0;
+  // Mirrors overlayToFlowNode's version/field_versions handling above: read
+  // whatever the live node carries, default to nothing (never invent a
+  // version an annotation hasn't actually been assigned server-side yet).
+  const version = node.data?.version;
+  const fieldVersions = node.data?.field_versions;
   if (node.type === 'note') {
     return {
       ...base,
       text: node.data?.text || '',
       color: node.data?.color,
       fontSize: node.data?.fontSize,
+      opacity: node.data?.opacity,
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (node.type === 'label') {
@@ -454,13 +537,16 @@ export function flowNodeToOverlay(node) {
       color: node.data?.color,
       fontSize: node.data?.fontSize,
       attachment: node.data?.attachment,
+      opacity: node.data?.opacity,
       z,
       locked,
       rotation,
+      version,
+      field_versions: fieldVersions,
     };
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
-    const out = { ...base, z, locked, rotation };
+    const out = { ...base, z, locked, rotation, version, field_versions: fieldVersions };
     for (const field of GENERIC_OVERLAY_FIELDS[node.type]) out[field] = node.data?.[field];
     if (SIZED_GENERIC_KINDS.has(node.type) && node.style) {
       out.size = { w: node.style.width, h: node.style.height };
@@ -477,11 +563,14 @@ export function flowNodeToOverlay(node) {
     dx: node.data?.dx ?? 160,
     dy: node.data?.dy ?? 0,
     color: node.data?.color,
+    opacity: node.data?.opacity,
     startArrow: node.data?.startArrow ?? false,
     endArrow: node.data?.endArrow ?? true,
     z,
     locked,
     rotation,
+    version,
+    field_versions: fieldVersions,
   };
   if (node.data?.startAnchor) out.startAnchor = node.data.startAnchor;
   if (node.data?.endAnchor) out.endAnchor = node.data.endAnchor;
@@ -491,13 +580,26 @@ export function flowNodeToOverlay(node) {
   return out;
 }
 
+// On-canvas size (flow px) of a node: ReactFlow's own measured `width`/
+// `height` (set once the node has actually rendered) when available, falling
+// back to an explicit `style.width`/`style.height` for a node not yet
+// measured (or one — like an unmounted overlay snapshot — that never will
+// be). Shared by nodeCenter below and by the multi-select align/distribute
+// bounding-box math (task-annotation-render-direct-manipulation), so the two
+// agree on what a node's box is.
+export function nodeSize(node) {
+  return {
+    w: node.width || node.style?.width || 0,
+    h: node.height || node.style?.height || 0,
+  };
+}
+
 // Centre point (flow coords) of a node, using its measured size when available.
 // Returns null when the node has no usable position.
 export function nodeCenter(node) {
   const pos = node.positionAbsolute || node.position;
   if (!pos) return null;
-  const w = node.width || node.style?.width || 0;
-  const h = node.height || node.style?.height || 0;
+  const { w, h } = nodeSize(node);
   return { x: pos.x + w / 2, y: pos.y + h / 2 };
 }
 
@@ -551,35 +653,152 @@ export function resolveAnchoredArrow(arrow, centers) {
 }
 
 // Distance (px, unscaled) within which a dropped attachable overlay
-// (label/text/icon/vote_dot) snaps onto — and stays attached to — a node or
+// (label/text/icon) snaps onto — and stays attached to — a node or
 // another annotation's centre. Looser than SNAP_RADIUS (an arrow endpoint,
 // a precise point) because "attach this label to that node" is a coarser
 // gesture aimed at "near this object", not a pixel-precise line endpoint.
 export const ATTACH_SNAP_RADIUS = 90;
 
-// Compute the attachment a dropped attachable overlay (label/text/icon/
-// vote_dot) should carry after being released at `position`: attaches to the
+// Fixed offset (px, model space) from a target's centre that the "Nearby
+// object menu" creation entry point (docs/ANNOTATION_CONTRACT.md "Human
+// authoring surfaces") places a newly created, pre-wired label/icon/
+// text at. Diagonal (not simply "above" or "below") so the new
+// annotation doesn't sit exactly on top of the target's own centre, and its
+// magnitude (~51px) is deliberately well inside ATTACH_SNAP_RADIUS so the
+// annotation is attached from its very first rendered frame rather than
+// merely close enough to have qualified — the same margin
+// AnnotationDuplicateControl's DUPLICATE_OFFSET keeps for its own, unrelated
+// "don't land exactly on top of the source" nudge.
+export const NEARBY_ATTACH_OFFSET = { x: 36, y: -36 };
+
+// Compute the attachment a dropped attachable overlay (label/text/icon)
+// should carry after being released at `position`: attaches to the
 // nearest node/annotation centre within ATTACH_SNAP_RADIUS, storing the drop
 // point's offset from that centre so the overlay keeps exactly where it was
 // dropped (the contract's "free fine adjustment") instead of jumping onto the
 // centre. Returns null when nothing is close enough — the caller detaches
 // (contract: "snap to the node edge ... and detach outside the snap zone").
-// `frame` and `group` are excluded from candidacy: the contract's Attachment
-// section is explicit that they are "containment/visual constructs, not
-// attachment targets" — nothing attaches to a frame or a group, the same way
-// nothing attaches to another line/arrow (findSnapTarget's own exclusion).
-export function computeDroppedAttachment(position, nodes, excludeId) {
-  const candidates = nodes.filter((n) => n.type !== 'frame' && n.type !== 'group');
-  const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
-  if (!targetId) return null;
-  const target = candidates.find((n) => n.id === targetId);
+// `group` is excluded from candidacy: the contract's Attachment section is
+// explicit that a group is a "containment/visual construct, not an
+// attachment target" — nothing attaches to a group, the same way nothing
+// attaches to another line/arrow (findSnapTarget's own exclusion).
+//
+// `frame` used to be excluded here too, on the same reasoning. Now that it is
+// folded into `shape` (task-annotation-merge-frame-into-shape-rectangle),
+// this is a deliberate decision, not an oversight: a `shape` — whatever its
+// fill/border, including a transparent-fill one that looks exactly like the
+// old `frame` — stays a valid attach target, the same as any other shape.
+// Eligibility here is keyed on `node.type` everywhere else in this file
+// (arrow, group); making one configuration of `shape`'s own style fields
+// silently opt it out of attachment would be a new, content-dependent kind of
+// exclusion this codebase does not otherwise have, and a surprising one: two
+// visually-similar transparent-fill shapes would attach differently depending
+// on an internal field the user has no reason to remember they set. Keeping
+// `shape` uniformly attachable is the smaller, more predictable change, and
+// the more consistent one now that `frame` is no longer a distinct type.
+// Builds the `content.attachment` shape for a point attaching to `target`,
+// shared by computeDroppedAttachment (nearest-target-within-radius, for a
+// drag release) and computeAttachmentToTarget (an explicit, caller-chosen
+// target, for the non-drag "Attach to…" mode below) so the two attachment
+// entry points can never drift into two different field shapes.
+function buildAttachment(position, target) {
   const center = target && nodeCenter(target);
   if (!center) return null;
   return {
-    target_id: targetId,
+    target_id: target.id,
     target_type: ANNOTATION_TYPES.has(target.type) ? 'annotation' : 'node',
     offset: { x: position.x - center.x, y: position.y - center.y },
   };
+}
+
+export function computeDroppedAttachment(position, nodes, excludeId) {
+  const candidates = nodes.filter((n) => n.type !== 'group');
+  const targetId = findSnapTarget(position, candidates, { excludeId, radius: ATTACH_SNAP_RADIUS });
+  if (!targetId) return null;
+  const target = candidates.find((n) => n.id === targetId);
+  return buildAttachment(position, target);
+}
+
+// The non-drag "Attach to…" mode's own attachment computation
+// (task-annotation-accessible-shared-controls, closing the audit's
+// "attaching an EXISTING annotation to a target" gap): the caller has
+// already resolved an explicit target (via a target-tap/click, not a
+// proximity search), so this only has to build the attachment shape for it —
+// reusing buildAttachment rather than a second implementation. Keeps the
+// annotation's current on-screen offset from the target's centre (the
+// contract's "free fine adjustment"), the same behaviour a drop that snapped
+// onto this exact target would have produced, rather than jumping the
+// annotation onto the target's centre. `node` is the flow node being
+// attached (its own `.position`, not the target's); `group` targets are
+// rejected by the caller before this is reached (a group is a containment
+// construct, not an attachment target — see computeDroppedAttachment's own
+// comment), so this does not re-check it.
+export function computeAttachmentToTarget(node, target) {
+  const position = node?.position;
+  if (!position) return null;
+  return buildAttachment(position, target);
+}
+
+// Whether `node` is a valid target for the "Attach to…" mode: any node or
+// annotation except a group (a containment/visual construct, not an
+// attachment target — matches computeDroppedAttachment's own candidate
+// filter) or the annotation being attached itself.
+export function isEligibleAttachTarget(node, selfId) {
+  return Boolean(node) && node.id !== selfId && node.type !== 'group';
+}
+
+// Per-kind screen-reader accessible name (dec-annotation-v1-accessibility-
+// and-touch's bar: "role + accessible name per annotation, e.g. 'sticky
+// note, Budget Q3'" — a name that SAYS WHAT THE THING IS, not merely
+// whatever an accname algorithm happens to fall back to). One shared
+// function rather than ten per-kind fixes, per the accessibility audit's own
+// root-cause note (docs/ANNOTATION_CONTRACT.md's "Keyboard, touch and
+// screen-reader controls audit" section): every caller that builds or
+// hydrates a ReactFlow node writes this onto `node.ariaLabel`, the only field
+// ReactFlow itself ever reads for a node's `aria-label` (`@reactflow/core`'s
+// `NodeRenderer`).
+//
+// `labels` carries the kind words with English defaults, following this
+// package's own props-with-defaults i18n rule (see AnnotationContext.js) —
+// never a bare English literal, so a host with Swedish `labels` gets a
+// Swedish accessible name too. Shape subtype names (`rectangle`, `process_
+// arrow`, …) and icon names are left untranslated, matching the existing
+// precedent of GenericAnnotationNode.jsx's own shape/icon picker buttons
+// (`aria-label={name}`) — this file adds no new translation surface for
+// vocabulary that was already untranslated elsewhere in the same menu.
+export function computeAnnotationAriaLabel(kind, data, labels = {}) {
+  const d = data || {};
+  const withDetail = (kindWord, detail) => (detail ? `${kindWord}, ${detail}` : kindWord);
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
+  switch (kind) {
+    case 'note':
+      return withDetail(labels.ariaKindNote || 'Sticky note', text(d.text));
+    case 'label':
+      return withDetail(labels.ariaKindLabel || 'Label', text(d.text));
+    case 'text':
+      return withDetail(labels.ariaKindText || 'Text', text(d.text));
+    case 'shape': {
+      const shapeName = (d.shape || 'rectangle').replace(/_/g, ' ');
+      const kindWord = `${shapeName} ${labels.ariaKindShape || 'shape'}`;
+      return withDetail(kindWord, text(d.text));
+    }
+    case 'icon': {
+      const kindWord = labels.ariaKindIcon || 'icon';
+      return d.icon ? `${d.icon} ${kindWord}` : kindWord;
+    }
+    case 'vote_dot':
+      return labels.ariaKindVoteDot || 'Vote dot';
+    case 'image':
+      return withDetail(labels.ariaKindImage || 'Image', text(d.alt));
+    case 'arrow':
+      return labels.ariaKindArrow || 'Arrow';
+    case 'freehand':
+      return labels.ariaKindFreehand || 'Freehand stroke';
+    case 'group':
+      return withDetail(labels.ariaKindGroup || 'Group', text(d.label));
+    default:
+      return '';
+  }
 }
 
 // Recompute an attached overlay's position from its target's current centre
@@ -590,6 +809,46 @@ export function computeDroppedAttachment(position, nodes, excludeId) {
 // yet loaded, or deleted): the overlay keeps its last resolved position rather
 // than being recomputed or reset (contract: "detaches and keeps its last
 // resolved model-space geometry").
+// Fallback hit-box half-size (flow px) for a kind with no explicit
+// style.width/height (icon/vote_dot's fixed intrinsic size, and arrow/text/
+// freehand's boxless geometry) — see nodesAtPoint's own comment for why a
+// zero-size box would otherwise never register as "clicked".
+const POINTLESS_KIND_HIT_RADIUS = 16;
+
+// Every node whose box contains `point` (flow coordinates) — the overlap-
+// object picker's own hit test (task-annotation-accessible-shared-controls,
+// closing the audit's "Overlapping objects: a visible way to choose which
+// one you mean | MISSING" row). Deliberately independent of ReactFlow's own
+// pointer-event hit testing (which already resolved one specific node before
+// a click handler ever sees it, by DOM z-order): this recomputes candidacy
+// geometrically so a caller can tell "exactly one node here" (nothing to
+// disambiguate) apart from "several nodes here" (offer a picker) using the
+// same `nodes` array GraphCanvas already holds.
+//
+// Uses each node's *stored* box (nodeSize/position), not its rotated visual
+// outline — a rotated annotation's axis-aligned bounding box is a
+// conservative approximation of what it actually paints, not a pixel-exact
+// hit test. `group` is excluded: a group is a containment/visual backdrop
+// almost always larger than whatever sits on it, so including it would
+// nearly always "overlap" and defeat the picker's purpose of disambiguating
+// genuinely stacked objects.
+export function nodesAtPoint(nodes, point) {
+  if (!point) return [];
+  return nodes.filter((n) => {
+    if (n.type === 'group') return false;
+    const pos = n.positionAbsolute || n.position;
+    if (!pos) return false;
+    const { w, h } = nodeSize(n);
+    if (!w || !h) {
+      const r = POINTLESS_KIND_HIT_RADIUS;
+      return (
+        point.x >= pos.x - r && point.x <= pos.x + r && point.y >= pos.y - r && point.y <= pos.y + r
+      );
+    }
+    return point.x >= pos.x && point.x <= pos.x + w && point.y >= pos.y && point.y <= pos.y + h;
+  });
+}
+
 export function resolveAttachedPosition(node, centers) {
   const targetId = node.data?.attachment?.target_id;
   if (!targetId) return null;

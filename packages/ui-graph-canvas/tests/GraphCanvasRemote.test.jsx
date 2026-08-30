@@ -179,7 +179,31 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     });
   });
 
-  it('stamps a live remote claim onto an annotation node and refuses local dragging (task-annotation-shared-session-realtime)', () => {
+  it('stamps a live remote edit lease onto an annotation node and refuses local dragging (task-annotation-exclusive-edit-leases)', () => {
+    render(
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        remoteLeases={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+      />
+    );
+    const seed = [
+      { id: 'note-1', type: 'note', position: { x: 0, y: 0 }, data: {}, draggable: true },
+    ];
+    const result = findResult(
+      seed,
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteLease?.displayName === 'Ada'
+    );
+    const note = result.find((n) => n.id === 'note-1');
+    expect(note.data.remoteLease).toEqual({
+      clientId: 'c2',
+      color: '#e6194b',
+      displayName: 'Ada',
+    });
+    expect(note.draggable).toBe(false);
+  });
+
+  it('a mere remote selection claim (no edit lease) never blocks local dragging (task-annotation-exclusive-edit-leases)', () => {
     render(
       <GraphCanvas
         nodes={[]}
@@ -200,7 +224,7 @@ describe('GraphCanvas remote apply (design step 6)', () => {
       color: '#e6194b',
       displayName: 'Ada',
     });
-    expect(note.draggable).toBe(false);
+    expect(note.draggable).toBe(true);
   });
 
   it('leaves a graph ("custom") node untouched by the annotation remote-claim effect', () => {
@@ -234,44 +258,44 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     }
   });
 
-  it('restores dragging once a remote claim is released', () => {
+  it('restores dragging once a remote edit lease is released', () => {
     const { rerender } = render(
       <GraphCanvas
         nodes={[]}
         edges={[]}
-        remoteSelections={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        remoteLeases={{ 'note-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
       />
     );
     hoisted.setNodes.mockClear();
-    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
     const seed = [
       {
         id: 'note-1',
         type: 'note',
         position: { x: 0, y: 0 },
-        data: { remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
+        data: { remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
         draggable: false,
       },
     ];
     const result = findResult(
       seed,
-      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteSelection == null
+      (r) => r.find((n) => n.id === 'note-1')?.data?.remoteLease == null
     );
     const note = result.find((n) => n.id === 'note-1');
-    expect(note.data.remoteSelection).toBeNull();
+    expect(note.data.remoteLease).toBeNull();
     expect(note.draggable).toBe(true);
   });
 
-  it('keeps an anchored arrow non-draggable even once its remote claim clears (isArrowAnchored still applies)', () => {
+  it('keeps an anchored arrow non-draggable even once its remote edit lease clears (isArrowAnchored still applies)', () => {
     const { rerender } = render(
       <GraphCanvas
         nodes={[]}
         edges={[]}
-        remoteSelections={{ 'arrow-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
+        remoteLeases={{ 'arrow-1': { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } }}
       />
     );
     hoisted.setNodes.mockClear();
-    rerender(<GraphCanvas nodes={[]} edges={[]} remoteSelections={{}} />);
+    rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
     const seed = [
       {
         id: 'arrow-1',
@@ -279,14 +303,14 @@ describe('GraphCanvas remote apply (design step 6)', () => {
         position: { x: 0, y: 0 },
         data: {
           startAnchor: 'graph-node-a',
-          remoteSelection: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
         },
         draggable: false,
       },
     ];
     const result = findResult(
       seed,
-      (r) => r.find((n) => n.id === 'arrow-1')?.data?.remoteSelection == null
+      (r) => r.find((n) => n.id === 'arrow-1')?.data?.remoteLease == null
     );
     expect(result.find((n) => n.id === 'arrow-1').draggable).toBe(false);
   });
@@ -498,4 +522,156 @@ describe('GraphCanvas remote apply (design step 6)', () => {
     expect(left.parentId).toBeUndefined();
     expect(left.position).toEqual({ x: 450, y: 320 });
   });
+});
+
+// The six v1 annotation kinds beyond note/label/group — those three are
+// covered above. `frame` is excluded: no longer a separate kind (merged into
+// `shape`, PR #521). Per-kind reconnect/catch-up/duplicate-suppression/
+// lock-ownership audit (task-annotation-shared-session-realtime remaining_
+// scope item 2): a reconnect's full-session reload (App.jsx's
+// resyncFromServer) rebuilds the canvas through the same overlayToFlowNode
+// translator a live 'op' event's remote-apply effect below exercises, so a
+// live-delivered upsert-overlay/delete op here stands in for "the annotation-
+// side application logic a reconnect's rebuild and a live op both funnel
+// through" — see this suite's own module doc comment for the two-mock-
+// reactflow harness this relies on. No kind-specific gap was found: every
+// case below already passes against GraphCanvas's existing, kind-agnostic
+// remote-op effect and remote-claim effect (both keyed on
+// GENERIC_OVERLAY_TYPES/ANNOTATION_TYPES, never on a per-kind branch).
+const SIX_AUDITED_KINDS = ['text', 'shape', 'icon', 'vote_dot', 'image', 'freehand'];
+
+describe('GraphCanvas remote apply — per-kind audit (task-annotation-shared-session-realtime)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  for (const kind of SIX_AUDITED_KINDS) {
+    it(`upserts a remote overlay annotation of kind '${kind}'`, () => {
+      const onApplied = vi.fn();
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteAnnotationOps={[
+            {
+              action: 'upsert-overlay',
+              overlay: { id: `ann-${kind}`, kind, position: { x: 1, y: 2 } },
+            },
+          ]}
+          onRemoteAnnotationsApplied={onApplied}
+        />
+      );
+      const result = findResult([], (r) =>
+        r.some((n) => n.id === `ann-${kind}` && n.type === kind)
+      );
+      expect(result?.some((n) => n.id === `ann-${kind}` && n.type === kind)).toBe(true);
+      expect(onApplied).toHaveBeenCalled();
+    });
+
+    // Duplicate-delivery suppression: the same annotation id delivered a
+    // second time (e.g. the catch-up-boundary double-delivery
+    // sessionSyncClient.js's R15 guard documents, or a retried batch) applied
+    // on top of an already-hydrated node list must converge to exactly one
+    // node, not two — overlayToFlowNode's upsert is filter-then-append by id,
+    // so a second delivery replaces rather than duplicates. Uses rerender (as
+    // the mount-race and claim-release tests above do) to chain the second
+    // delivery's seed onto the first delivery's actual result, rather than
+    // relying on findResult's own per-call isolation to fold a burst — see
+    // that helper's doc comment on why it deliberately does not chain calls.
+    it(`re-applying the same upsert-overlay op for kind '${kind}' converges to exactly one node (no duplicate)`, () => {
+      const overlay = { id: `ann-${kind}`, kind, position: { x: 0, y: 0 } };
+      const { rerender } = render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteAnnotationOps={[{ action: 'upsert-overlay', overlay }]}
+        />
+      );
+      const firstResult = findResult([], (r) => r.some((n) => n.id === `ann-${kind}`));
+      expect(firstResult?.filter((n) => n.id === `ann-${kind}`)).toHaveLength(1);
+
+      hoisted.setNodes.mockClear();
+      rerender(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteAnnotationOps={[{ action: 'upsert-overlay', overlay }]}
+        />
+      );
+      const secondResult = findResult(firstResult, (r) => r.some((n) => n.id === `ann-${kind}`));
+      expect(secondResult?.filter((n) => n.id === `ann-${kind}`)).toHaveLength(1);
+    });
+
+    // Lock ownership: a live remote edit lease on this kind is stamped and
+    // blocks local dragging identically to how the note/arrow cases above
+    // already prove it — this is the same GraphCanvas remote-lease effect
+    // (ANNOTATION_TYPES.has(n.type)), keyed on type membership rather than a
+    // per-kind branch, so every ANNOTATION_TYPES member should behave alike.
+    it(`stamps a live remote edit lease onto a '${kind}' annotation and refuses local dragging`, () => {
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteLeases={{
+            [`ann-${kind}`]: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          }}
+        />
+      );
+      const seed = [
+        { id: `ann-${kind}`, type: kind, position: { x: 0, y: 0 }, data: {}, draggable: true },
+      ];
+      const result = findResult(
+        seed,
+        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteLease?.displayName === 'Ada'
+      );
+      const node = result.find((n) => n.id === `ann-${kind}`);
+      expect(node.data.remoteLease).toEqual({
+        clientId: 'c2',
+        color: '#e6194b',
+        displayName: 'Ada',
+      });
+      expect(node.draggable).toBe(false);
+    });
+
+    it(`restores dragging for a '${kind}' annotation once its remote edit lease clears`, () => {
+      const { rerender } = render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteLeases={{
+            [`ann-${kind}`]: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' },
+          }}
+        />
+      );
+      hoisted.setNodes.mockClear();
+      rerender(<GraphCanvas nodes={[]} edges={[]} remoteLeases={{}} />);
+      const seed = [
+        {
+          id: `ann-${kind}`,
+          type: kind,
+          position: { x: 0, y: 0 },
+          data: { remoteLease: { clientId: 'c2', color: '#e6194b', displayName: 'Ada' } },
+          draggable: false,
+        },
+      ];
+      const result = findResult(
+        seed,
+        (r) => r.find((n) => n.id === `ann-${kind}`)?.data?.remoteLease == null
+      );
+      const node = result.find((n) => n.id === `ann-${kind}`);
+      expect(node.data.remoteLease).toBeNull();
+      expect(node.draggable).toBe(true);
+    });
+
+    it(`deletes a remote '${kind}' annotation`, () => {
+      render(
+        <GraphCanvas
+          nodes={[]}
+          edges={[]}
+          remoteAnnotationOps={[{ action: 'delete', id: `ann-${kind}` }]}
+        />
+      );
+      const seed = [{ id: `ann-${kind}`, type: kind, position: { x: 0, y: 0 } }];
+      const result = findResult(seed, (r) => !r.some((n) => n.id === `ann-${kind}`));
+      expect(result?.some((n) => n.id === `ann-${kind}`)).toBe(false);
+    });
+  }
 });

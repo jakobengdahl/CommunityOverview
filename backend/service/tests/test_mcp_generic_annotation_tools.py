@@ -5,7 +5,7 @@ registered in ``backend/service/mcp_tools.py``.
 
 These extend the note-only MCP annotation access added in the sticky-note
 tool set (see ``test_mcp_sticky_note_tools.py``) to the rest of the v1 model
-(``text``/``label``/``line``/``frame``/``shape``/``icon``/``vote_dot``/
+(``text``/``label``/``line``/``shape``/``icon``/``vote_dot``/
 ``freehand``); ``note``, ``group`` and ``image`` stay out of scope for
 *creation* through these tools — each has its own dedicated tool set instead
 (see ``backend/core/session_annotations.py``'s module docstring,
@@ -111,7 +111,7 @@ class TestListAnnotations:
 class TestCreateAnnotation:
     @pytest.mark.parametrize(
         "ann_type",
-        ["text", "label", "line", "frame", "shape", "icon", "vote_dot"],
+        ["text", "label", "line", "shape", "icon", "vote_dot"],
     )
     def test_creates_each_generic_type(self, annotation_tools, ann_type):
         tools_map, manager = annotation_tools
@@ -365,7 +365,7 @@ class TestCreateAnnotation:
         assert result["success"] is False
         assert result["error"] == "invalid_content"
 
-    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon"])
     def test_attachment_round_trips_for_every_attachable_type(
         self, annotation_tools, ann_type
     ):
@@ -665,6 +665,28 @@ class TestCreateAnnotation:
         assert result["error"] == "revision_conflict"
         assert result["current_revision"] == session.seq
 
+    def test_lease_conflict_is_reported_and_does_not_replace(self, annotation_tools):
+        """task-mcp-annotation-human-edit-guard: a create-by-id targeting an
+        annotation another (browser) client holds a live edit lease on is
+        refused, mirroring the revision_conflict shape above."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, annotation_id="ann-1"
+        )
+        manager.leases.acquire(session.id, "browser-1", ["ann-1"])
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=9, y=9, annotation_id="ann-1"
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == "ann-1"
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert after["x"] == created["annotation"]["x"]
+
     def test_busy_when_lock_held(self, annotation_tools):
         tools_map, manager = annotation_tools
         session = manager.create_session()
@@ -697,6 +719,85 @@ class TestCreateAnnotation:
             session_id="1111-2222", type="label", x=0, y=0
         )
         assert result["success"] is False
+
+
+class TestCreateAnnotationSemanticDefaultLayer:
+    """task-annotation-render-direct-manipulation's remaining "semantic
+    default layers" scope: a per-kind default `z` at creation, applied
+    through `create_annotation` exactly like every other envelope default —
+    see `session_annotations.py`'s `default_annotation_z` for the mapping and
+    docs/ANNOTATION_CONTRACT.md's Layer order section for the reasoning.
+    Only `shape` moves off the shared 0; this pins that through the real MCP
+    tool, not just the pure `build_annotation` helper
+    (test_session_annotations_generic.py already covers that leg).
+    """
+
+    def test_shape_created_without_z_defaults_to_minus_one(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        assert result["success"] is True
+        assert result["annotation"]["z"] == -1
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["shape"])
+        assert listed["annotations"][0]["z"] == -1
+
+    @pytest.mark.parametrize("ann_type", ["text", "label", "line", "icon", "vote_dot"])
+    def test_every_other_generic_type_still_defaults_to_zero(
+        self, annotation_tools, ann_type
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type=ann_type, x=0, y=0
+        )
+        assert result["annotation"]["z"] == 0
+
+    def test_explicit_z_zero_on_a_shape_is_honoured_not_defaulted(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0, z=0
+        )
+        assert result["annotation"]["z"] == 0
+
+    def test_upsert_replace_without_resending_z_applies_the_same_default(
+        self, annotation_tools
+    ):
+        """An upsert-replace (matching `annotation_id`) that omits `z` is not
+        a *new* creation, but `build_annotation` does not distinguish the two
+        — the same pre-existing behaviour as the flat-0 default it replaces
+        (an omitted-z resend already reset to 0 before this change). Pinning
+        the now-per-kind value here so this stays a documented, unchanged
+        quirk rather than an accidental regression this task introduces.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            z=9,
+            annotation_id="shape-upsert-1",
+        )
+        replaced = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=5,
+            y=5,
+            annotation_id="shape-upsert-1",
+        )
+        assert replaced["success"] is True
+        assert replaced["annotation"]["z"] == -1
 
 
 class TestUpdateAnnotation:
@@ -849,6 +950,181 @@ class TestUpdateAnnotation:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_mutate(self, annotation_tools):
+        """task-mcp-annotation-human-edit-guard: a live human edit lease
+        blocks this MCP write, and the annotation is left untouched — not
+        just "an error came back"."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["update_annotation"](
+            session_id=session.id, annotation_id=ann_id, x=99
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["annotation_id"] == ann_id
+        assert result["held_by"] == "browser-1"
+        after = tools_map["list_annotations"](session_id=session.id)["annotations"][0]
+        assert after["x"] == 0
+
+    # --- base_version / field-level conflicts (task-smallfix-whole-
+    # annotation-clobber-on-concurrent-different-field-edit,
+    # dec-annotation-field-patches-and-conflicts): MCP-path parity with the
+    # browser op protocol tested in
+    # backend/core/tests/test_session_manager.py's TestConflictMatrixTwoClients.
+
+    def test_created_annotation_reports_its_starting_version(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, content={"text": "hello"}
+        )
+        assert created["annotation"]["version"] == 1
+
+    def test_matching_base_version_applies_and_bumps_version(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, content={"text": "hello"}
+        )
+        ann_id = created["annotation"]["id"]
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"text": "updated"},
+            base_version=created["annotation"]["version"],
+        )
+
+        assert result["success"] is True
+        assert result["annotation"]["content"]["text"] == "updated"
+        assert result["annotation"]["version"] == 2
+
+    def test_stale_base_version_on_a_genuinely_conflicting_field_is_refused(
+        self, annotation_tools
+    ):
+        """Two MCP writers racing the SAME field: the second, still holding
+        the version from before the first writer's change, gets an explicit
+        field_conflict rather than silently clobbering it — the MCP-path
+        counterpart of TestConflictMatrixTwoClients' same-field cases."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, content={"text": "hello"}
+        )
+        ann_id = created["annotation"]["id"]
+        starting_version = created["annotation"]["version"]
+
+        first = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"text": "writer A"},
+            base_version=starting_version,
+        )
+        assert first["success"] is True
+
+        result = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"text": "writer B"},
+            base_version=starting_version,  # stale: A already moved this field on
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "field_conflict"
+        assert "text" in result["conflicting_fields"]
+        assert result["server_version"] == first["annotation"]["version"]
+        # The rejected write never applied — A's content stands, and the
+        # conflict response hands back the current server value so the
+        # caller can re-derive a fresh patch instead of blindly retrying.
+        assert result["annotation"]["content"]["text"] == "writer A"
+        stored = session.state["annotations"][0]
+        assert stored["text"] == "writer A"
+
+        # Re-deriving from the value the conflict itself reported (rather
+        # than blindly resending the same stale patch) succeeds — an
+        # intentional override at the current version, not a stale clobber.
+        retried = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"text": "writer B, retried"},
+            base_version=result["server_version"],
+        )
+        assert retried["success"] is True
+        assert retried["annotation"]["content"]["text"] == "writer B, retried"
+
+    def test_independent_field_update_merges_despite_a_stale_base_version(
+        self, annotation_tools
+    ):
+        """A concurrent edit to a *different* field does not block this
+        write, even though this write's base_version now trails the
+        session's other changes — the merge half of the matrix."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            content={"text": "hello"},
+            style={"fill": "#94a3b8"},
+        )
+        ann_id = created["annotation"]["id"]
+        starting_version = created["annotation"]["version"]
+
+        style_write = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            style={"fill": "#fff"},
+            base_version=starting_version,
+        )
+        assert style_write["success"] is True
+
+        # This writer's base_version still predates the style change above,
+        # but it never touches style — only content.text — so it is not a
+        # real conflict and must merge rather than being refused.
+        text_write = tools_map["update_annotation"](
+            session_id=session.id,
+            annotation_id=ann_id,
+            content={"text": "hello, still independent"},
+            base_version=starting_version,
+        )
+
+        assert text_write["success"] is True
+        stored = session.state["annotations"][0]
+        assert stored["style"] == {"fill": "#fff"}
+        assert stored["text"] == "hello, still independent"
+
+    def test_omitted_base_version_keeps_the_pre_existing_unconditional_merge(
+        self, annotation_tools
+    ):
+        """Omitting base_version entirely (an MCP caller that has not opted
+        in) is the documented legacy fallback — the write still applies
+        unconditionally, exactly as it did before this task."""
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0, content={"text": "hello"}
+        )
+        ann_id = created["annotation"]["id"]
+
+        first = tools_map["update_annotation"](
+            session_id=session.id, annotation_id=ann_id, content={"text": "writer A"}
+        )
+        assert first["success"] is True
+
+        second = tools_map["update_annotation"](
+            session_id=session.id, annotation_id=ann_id, content={"text": "writer B"}
+        )
+        assert second["success"] is True
+        assert second["annotation"]["content"]["text"] == "writer B"
+
     def test_malformed_shape_update_is_rejected_without_mutating(
         self, annotation_tools
     ):
@@ -897,7 +1173,7 @@ class TestUpdateAnnotation:
         stored = session.state["annotations"][0]
         assert stored["attachment"]["target_id"] == "node-1"
 
-    @pytest.mark.parametrize("ann_type", ["label", "text", "icon", "vote_dot"])
+    @pytest.mark.parametrize("ann_type", ["label", "text", "icon"])
     def test_update_annotation_attaches_a_previously_unattached_annotation(
         self, annotation_tools, ann_type
     ):
@@ -1031,6 +1307,24 @@ class TestReorderAnnotation:
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
 
+    def test_lease_conflict_is_reported_and_does_not_reorder(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["reorder_annotation"](
+            session_id=session.id, annotation_id=ann_id, z=7
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
+        assert session.state["annotations"][0].get("z") != 7
+
 
 class TestSetAnnotationLock:
     def test_locks_and_unlocks(self, annotation_tools):
@@ -1153,6 +1447,26 @@ class TestSetAnnotationLock:
 
         assert unlocked["annotation"]["locked"] is False
         assert unlocked["annotation"]["content"].get("attachment") is None
+
+    def test_lease_conflict_is_reported_and_does_not_toggle_the_lock(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["set_annotation_lock"](
+            session_id=session.id, annotation_id=ann_id, locked=True
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
+        assert session.state["annotations"][0].get("locked") is not True
 
 
 class TestDuplicateAnnotation:
@@ -1385,7 +1699,7 @@ class TestFreehandOverGenericTools:
         self, annotation_tools
     ):
         """A `freehand` stroke's shape is entirely in its `points`; unlike
-        `frame`/`shape`/`image` it carries no box the renderer scales to. A
+        `shape`/`image` it carries no box the renderer scales to. A
         w/h patch is therefore accepted and echoed back by the server while
         changing nothing a viewer sees — documented under Canvas rendering in
         docs/ANNOTATION_CONTRACT.md.
@@ -1525,6 +1839,24 @@ class TestDeleteAnnotation:
 
         assert result["success"] is False
         assert result["error"] == "revision_conflict"
+        assert len(session.state["annotations"]) == 1
+
+    def test_lease_conflict_is_reported_and_does_not_delete(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+        created = tools_map["create_annotation"](
+            session_id=session.id, type="label", x=0, y=0
+        )
+        ann_id = created["annotation"]["id"]
+        manager.leases.acquire(session.id, "browser-1", [ann_id])
+
+        result = tools_map["delete_annotation"](
+            session_id=session.id, annotation_id=ann_id
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "lease_conflict"
+        assert result["held_by"] == "browser-1"
         assert len(session.state["annotations"]) == 1
 
 

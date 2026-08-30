@@ -67,15 +67,6 @@
       }
     },
     {
-      "id": "frame-1",
-      "type": "frame",
-      "x": 0,
-      "y": 0,
-      "w": 400,
-      "h": 300,
-      "fields": {}
-    },
-    {
       "id": "group-1",
       "type": "group",
       "x": 0,
@@ -118,10 +109,7 @@
       "type": "vote_dot",
       "x": 90,
       "y": 100,
-      "fields": {
-        "value": 3,
-        "attachment": { "target_id": "node-5", "target_type": "node" }
-      }
+      "fields": {}
     },
     {
       "id": "image-1",

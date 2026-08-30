@@ -1,9 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   ANNOTATION_SCHEMA_VERSION,
   ANNOTATION_SHAPES,
+  ANNOTATION_TYPES,
   applyAnnotationOperation,
   createAnnotation,
+  defaultAnnotationZ,
   normalizeAnnotationDocument,
   normalizeShapeName,
 } from '../src/utils/annotationModel';
@@ -144,7 +146,7 @@ describe('annotationModel contract v1', () => {
     expect(shorthand.start.attachment).toEqual(expected);
   });
 
-  it.each(['text', 'label', 'icon', 'vote_dot'])(
+  it.each(['text', 'label', 'icon'])(
     'normalizes a %s attachment to a node with target_id/target_type/anchor/offset',
     (type) => {
       const annotation = createAnnotation({
@@ -161,7 +163,7 @@ describe('annotationModel contract v1', () => {
     }
   );
 
-  it.each(['text', 'label', 'icon', 'vote_dot'])(
+  it.each(['text', 'label', 'icon'])(
     'drops a %s attachment with no target id rather than storing a dangling reference',
     (type) => {
       const annotation = createAnnotation({ id: `${type}-2`, type, attachment: { anchor: 'top' } });
@@ -169,7 +171,39 @@ describe('annotationModel contract v1', () => {
     }
   );
 
-  it('accepts targetId/nodeId/target_type as attachment aliases for label/icon/vote_dot', () => {
+  // task-annotation-vote-dot-simplify: unlike text/label/icon above,
+  // `vote_dot` no longer normalizes an `attachment` at all — its
+  // withTypePayload returns no payload fields beyond the shared envelope, so
+  // a well-formed attachment is dropped exactly the same as a malformed one
+  // (a stale field from before this change, since nobody used the
+  // annotation feature yet — no migration was written for it).
+  it('drops a vote_dot attachment even when well-formed, since it is no longer an attachable kind', () => {
+    const annotation = createAnnotation({
+      id: 'vote-dot-1',
+      type: 'vote_dot',
+      attachment: { target_id: 'node-9', anchor: 'bottom', offset: { x: 4, y: -2 } },
+    });
+    expect(annotation.attachment).toBeUndefined();
+  });
+
+  it('drops a vote_dot value, and still carries its colour, through a full normalize round trip', () => {
+    const doc = normalizeAnnotationDocument({
+      annotations: [
+        {
+          id: 'vote-dot-2',
+          type: 'vote_dot',
+          position: { x: 1, y: 2 },
+          value: 7,
+          style: { color: '#22c55e' },
+        },
+      ],
+    });
+    const [annotation] = doc.annotations;
+    expect(annotation.value).toBeUndefined();
+    expect(annotation.style.color).toBe('#22c55e');
+  });
+
+  it('accepts targetId/nodeId/target_type as attachment aliases for label/icon', () => {
     expect(
       createAnnotation({ id: 'label-alias', type: 'label', attachment: { nodeId: 42 } }).attachment
         .target_id
@@ -365,5 +399,88 @@ describe('annotationModel contract v1', () => {
       applyAnnotationOperation(doc, { type: 'update', id: 'missing', patch: { text: 'x' } })
     ).toThrow(/Annotation not found/);
     expect(doc.annotations[0].text).toBe('safe');
+  });
+
+  // task-annotation-merge-frame-into-shape-rectangle: `frame` was a real,
+  // recognised type until this task retired it in favour of `shape` with a
+  // transparent fill. A session written before this task can still hold a
+  // stored `frame`-kind annotation, and it must degrade quietly — skipped,
+  // not thrown — the same guarantee task-annotation-tolerate-unexpected-data
+  // built for any other kind this version does not recognise. Explicit
+  // rather than assumed: `createAnnotation` throwing for an unknown type is
+  // exactly what makes this work, so this pins that `frame` actually takes
+  // that path rather than having quietly been left in TYPE_SET.
+  it('skips a stored `frame` annotation (retired into `shape`) rather than throwing', () => {
+    expect(() => createAnnotation({ id: 'f-1', type: 'frame' })).toThrow(
+      /Unsupported annotation type: frame/
+    );
+    const onSkipped = vi.fn();
+    const doc = normalizeAnnotationDocument(
+      [
+        { id: 'f-1', type: 'frame', position: { x: 0, y: 0 } },
+        { id: 'note-1', type: 'note', text: 'survives' },
+      ],
+      { onSkipped }
+    );
+    expect(doc.annotations.map((a) => a.id)).toEqual(['note-1']);
+    expect(onSkipped).toHaveBeenCalledTimes(1);
+    expect(onSkipped.mock.calls[0][0]).toMatchObject({ id: 'f-1', type: 'frame' });
+  });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
+  // `field_versions` (dec-annotation-field-patches-and-conflicts) are
+  // server-owned same-field-conflict bookkeeping, carried the same envelope
+  // way as created_by/updated_by/created_at/updated_at — never per-kind
+  // content, so this must hold for every type this function builds, not just
+  // one. A regression here is exactly what made a real browser's
+  // `base_version` always come out `undefined` (dropped before
+  // sessionSyncClient.js's computeOps ever saw the annotation), silently
+  // disabling the field-conflict protection for every real browser write.
+  it.each(['note', 'label', 'shape', 'icon', 'text'])(
+    'carries version/field_versions through for a %s annotation when present on input',
+    (type) => {
+      const annotation = createAnnotation({
+        id: `${type}-1`,
+        type,
+        position: { x: 0, y: 0 },
+        version: 7,
+        field_versions: { text: 7, geometry: 5 },
+      });
+      expect(annotation.version).toBe(7);
+      expect(annotation.field_versions).toEqual({ text: 7, geometry: 5 });
+    }
+  );
+
+  it('does not invent a version when the input has none', () => {
+    const annotation = createAnnotation({ id: 'note-1', type: 'note' });
+    expect(annotation.version).toBeUndefined();
+    expect(annotation.field_versions).toBeUndefined();
+  });
+
+  // task-annotation-render-direct-manipulation's remaining "semantic default
+  // layers" scope: a per-kind default `z` at creation, narrow by design (see
+  // docs/ANNOTATION_CONTRACT.md's Layer order section and this file's own
+  // `defaultAnnotationZ` comment) — only `shape` moves off the shared 0.
+  describe('semantic default layer at creation', () => {
+    it('defaults a freshly created shape to z -1, one layer behind everything else', () => {
+      expect(createAnnotation({ type: 'shape' }).z).toBe(-1);
+      expect(defaultAnnotationZ('shape')).toBe(-1);
+    });
+
+    it.each(ANNOTATION_TYPES.filter((type) => type !== 'shape'))(
+      'still defaults %s to z 0, unchanged',
+      (type) => {
+        expect(createAnnotation({ type }).z).toBe(0);
+        expect(defaultAnnotationZ(type)).toBe(0);
+      }
+    );
+
+    it('an explicit z 0 on a shape is honoured, not treated as absent', () => {
+      expect(createAnnotation({ type: 'shape', z: 0 }).z).toBe(0);
+    });
+
+    it('an explicit z on a shape overrides the -1 default', () => {
+      expect(createAnnotation({ type: 'shape', z: 42 }).z).toBe(42);
+    });
   });
 });

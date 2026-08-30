@@ -63,9 +63,17 @@ DEFAULT_GROUP_SIZE = {"w": 320, "h": 200}
 EMBEDDED_IMAGE_URL_PREFIXES = ("data:image/webp;base64,",)
 
 # Every v1 type except `note` and `group` — see module docstring for why
-# those two are excluded from the generic tool set.
+# those two are excluded from the generic tool set. `frame` (a plain box with
+# no fill) was a member of this set until task-annotation-merge-frame-into-
+# shape-rectangle folded it into `shape`: a `shape` with a transparent fill
+# and a coloured border now covers what a standalone `frame` used to be, and
+# `frame` is no longer a recognised annotation type at all. No migration was
+# written for annotations already stored with type `frame` (nobody used the
+# annotation features yet — see task-annotation-tolerate-unexpected-data);
+# they are simply no longer resolved by `normalize_generic_type` below, the
+# same as any other unrecognised type.
 GENERIC_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "line", "frame", "shape", "icon", "vote_dot", "image", "freehand"}
+    {"text", "label", "line", "shape", "icon", "vote_dot", "image", "freehand"}
 )
 ALL_ANNOTATION_TYPES: FrozenSet[str] = GENERIC_ANNOTATION_TYPES | {
     NOTE_TYPE,
@@ -93,6 +101,13 @@ _RESERVED_ANNOTATION_KEYS = {
     "updated_at",
     "created_by",
     "updated_by",
+    # Server-owned versioning bookkeeping (dec-annotation-field-patches-and-
+    # conflicts) — see session_store.py's _ANNOTATION_META_FIELDS. Never
+    # caller-settable; "version" is surfaced read-only by project_note/
+    # project_annotation so a caller can supply it back as base_version, but
+    # neither belongs inside a content/patch payload.
+    "version",
+    "field_versions",
 }
 
 # The `content.shape` variants a `shape` annotation accepts
@@ -111,9 +126,32 @@ ANNOTATION_SHAPES: FrozenSet[str] = frozenset(
 # The generic types whose `content.attachment` may bind them to a node
 # (docs/ANNOTATION_CONTRACT.md's "Attachment and detach behavior"). `line`
 # attaches per-endpoint (`start`/`end`) instead, validated separately.
-ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset(
-    {"text", "label", "icon", "vote_dot"}
-)
+#
+# `vote_dot` was a member of this set until task-annotation-vote-dot-simplify
+# retired its attachment behaviour: a vote dot is now a plain coloured dot
+# that always lives on its own. An `attachment` a caller still sends in a
+# vote_dot's `content` is no longer structurally validated as one (it is
+# simply free-form, unvalidated content, like any field this module does not
+# specifically type-constrain) — the canvas never reads it as an attachment
+# either way (see ATTACHABLE_OVERLAY_KINDS in
+# packages/ui-graph-canvas/src/utils/annotations.js). No migration was
+# written for a vote_dot already stored with one.
+ATTACHABLE_ANNOTATION_TYPES: FrozenSet[str] = frozenset({"text", "label", "icon"})
+
+# Semantic default layer at creation (task-annotation-render-direct-
+# manipulation's remaining scope: "semantic default layers - a per-kind
+# default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
+# Mirrors `DEFAULT_ANNOTATION_Z_BY_TYPE`/`defaultAnnotationZ` in
+# packages/ui-graph-canvas/src/utils/annotationModel.js exactly — see that
+# file's comment for the full reasoning (only `shape` moves, everything else
+# including `note`/`group`/`image` stays at 0) — so an MCP/REST-created
+# annotation and a GUI-created one of the same kind start on the same layer.
+SHAPE_DEFAULT_Z = -1
+DEFAULT_ANNOTATION_Z_BY_TYPE: Dict[str, float] = {"shape": SHAPE_DEFAULT_Z}
+
+
+def default_annotation_z(annotation_type: Optional[str]) -> float:
+    return DEFAULT_ANNOTATION_Z_BY_TYPE.get(annotation_type, 0)
 
 
 def _attachment_error(value: Any, *, field: str) -> Optional[str]:
@@ -379,6 +417,13 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "rotation": geometry.get("rotation", 0),
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
+        # Read-only bookkeeping (dec-annotation-field-patches-and-conflicts):
+        # bumped on every applied write. Pass straight back as
+        # `update_sticky_note`'s `base_version` to opt into field-level
+        # conflict checking on a later write, same as `project_annotation`'s
+        # equivalent field. Defaults to 1 for an annotation stored before
+        # this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),
@@ -713,7 +758,7 @@ def build_annotation(
     Builds the common envelope (``geometry``/``position``/``style``/``z``/
     ``locked``) shared by every v1 type, mirroring ``createAnnotation()``.
     Unlike ``build_note_annotation`` this does not model each type's payload
-    shape — that differs too much across line/label/shape/frame/icon/
+    shape — that differs too much across line/label/shape/icon/
     vote_dot/image/freehand for one generic builder to hand-build — so *content*
     carries it verbatim and is merged onto the annotation as-is. The
     frontend's ``createAnnotation()`` re-normalizes defensively on load
@@ -737,7 +782,7 @@ def build_annotation(
         "kind": type,
         "position": {"x": x, "y": y},
         "geometry": geometry,
-        "z": z if z is not None else 0,
+        "z": z if z is not None else default_annotation_z(type),
         "locked": bool(locked),
     }
     if w is not None or h is not None:
@@ -905,6 +950,11 @@ def project_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
         "content": content,
+        # Read-only: pass straight back as update_annotation's base_version
+        # to opt into field-level conflict checking on a later write
+        # (dec-annotation-field-patches-and-conflicts). Defaults to 1 for an
+        # annotation stored before this field existed.
+        "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
         "created_by": annotation.get("created_by"),

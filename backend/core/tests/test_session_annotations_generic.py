@@ -30,7 +30,6 @@ class TestTypeResolution:
             "text",
             "label",
             "line",
-            "frame",
             "shape",
             "icon",
             "vote_dot",
@@ -91,7 +90,7 @@ class TestBuildAnnotation:
         assert "id" not in annotation
 
     def test_w_h_populate_geometry_and_size(self):
-        annotation = build_annotation(type="frame", x=0, y=0, w=200, h=100)
+        annotation = build_annotation(type="shape", x=0, y=0, w=200, h=100)
         assert annotation["geometry"]["w"] == 200
         assert annotation["geometry"]["h"] == 100
         assert annotation["size"] == {"w": 200, "h": 100}
@@ -116,6 +115,25 @@ class TestBuildAnnotation:
         assert annotation["style"] == {"fill": "#fff"}
         assert annotation["z"] == 5
         assert annotation["locked"] is True
+
+    def test_shape_defaults_to_z_minus_one(self):
+        # task-annotation-render-direct-manipulation's "semantic default
+        # layers": a shape starts one layer behind the 0 everything else
+        # (including graph nodes) is created at, so it opens already behind
+        # content instead of needing a manual send-to-back.
+        annotation = build_annotation(type="shape", x=0, y=0)
+        assert annotation["z"] == -1
+
+    @pytest.mark.parametrize("kind", sorted(GENERIC_ANNOTATION_TYPES - {"shape"}))
+    def test_every_other_generic_type_still_defaults_to_zero(self, kind):
+        annotation = build_annotation(type=kind, x=0, y=0)
+        assert annotation["z"] == 0
+
+    def test_explicit_z_overrides_the_shape_default(self):
+        # An explicit z=0 for a shape must stick, not be treated as "absent"
+        # and fall through to the -1 default.
+        annotation = build_annotation(type="shape", x=0, y=0, z=0)
+        assert annotation["z"] == 0
 
     def test_content_is_merged_verbatim(self):
         annotation = build_annotation(
@@ -225,13 +243,27 @@ class TestBuildAnnotationContentValidation:
             )
 
     def test_attachment_on_a_non_attachable_type_is_not_validated(self):
-        """`frame`/`shape`/`group` never attach (docs/ANNOTATION_CONTRACT.md);
-        an `attachment`-named field on one of them is just an ordinary
+        """`shape`/`group` never attach (docs/ANNOTATION_CONTRACT.md); an
+        `attachment`-named field on one of them is just an ordinary
         free-form content field, not a payload this layer interprets."""
         annotation = build_annotation(
-            type="frame", x=0, y=0, content={"attachment": "not-even-an-object"}
+            type="shape", x=0, y=0, content={"attachment": "not-even-an-object"}
         )
         assert annotation["attachment"] == "not-even-an-object"
+
+    def test_vote_dot_attachment_is_no_longer_validated(self):
+        """`vote_dot` used to be in ATTACHABLE_ANNOTATION_TYPES; task-
+        annotation-vote-dot-simplify removed it (a vote dot is now a plain
+        coloured dot that always lives on its own — see
+        docs/ANNOTATION_CONTRACT.md's vote_dot paragraphs). A malformed
+        `attachment` — the exact shape `test_malformed_attachment_is_rejected`
+        above still rejects for `icon` — is no longer rejected for `vote_dot`;
+        it is stored verbatim as ordinary free-form content, the same as any
+        field this layer does not specifically type-constrain."""
+        annotation = build_annotation(
+            type="vote_dot", x=0, y=0, content={"attachment": {"target_id": ""}}
+        )
+        assert annotation["attachment"] == {"target_id": ""}
 
     def test_line_endpoints_with_attachment_round_trip(self):
         content = {

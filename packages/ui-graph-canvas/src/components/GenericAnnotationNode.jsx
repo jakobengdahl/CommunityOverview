@@ -7,6 +7,7 @@ import {
   rotationStyle,
   ROTATABLE_OVERLAY_KINDS,
   isRemoteLocked,
+  remoteEditBadge,
   resolveRotatedResizeGeometry,
   DEFAULT_GENERIC_TEXT_FONT_SIZE,
   DEFAULT_SHAPE_CAPTION_FONT_SIZE,
@@ -16,28 +17,39 @@ import {
   TEXT_ALIGN_DEFAULT_BY_KIND,
   TEXT_ALIGN_STYLES,
   isAnnotationDraggable,
+  ATTACHABLE_OVERLAY_KINDS,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
+import AnnotationSizeControl from './AnnotationSizeControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './GenericAnnotationNode.css';
 
 const DEFAULT_COLOR = '#94a3b8';
 
 // A right-click property editor exists for every rotatable generic kind:
 // each has at least its rotation and its layer to edit, plus — per kind —
-// `shape`'s subtype, `icon`'s configured name, `vote_dot`'s value and, for
-// the kinds that paint one, a colour. (`shape`, `icon` and `vote_dot` are
-// all already members of ROTATABLE_OVERLAY_KINDS, so this is exactly that
-// set.)
+// `shape`'s subtype, `icon`'s configured name and, for the kinds that paint
+// one, a colour. `vote_dot` is a plain coloured dot (task-annotation-vote-
+// dot-simplify): it no longer has a value to edit, only its colour. (`shape`,
+// `icon` and `vote_dot` are all already members of ROTATABLE_OVERLAY_KINDS,
+// so this is exactly that set.)
 const EDITABLE_KINDS = ROTATABLE_OVERLAY_KINDS;
 
 // The generic kinds whose `color` field is actually painted by a branch
-// below — text's text colour, frame's and icon's border, shape's and
-// vote_dot's fill. `image` carries a `color` in the model
-// (GENERIC_OVERLAY_FIELDS in utils/annotations.js) but nothing renders it,
-// so offering a recolour there would be a control with no visible effect.
-const COLORABLE_KINDS = new Set(['text', 'frame', 'shape', 'icon', 'vote_dot']);
+// below — text's text colour, icon's border, vote_dot's fill. `image`
+// carries a `color` in the model (GENERIC_OVERLAY_FIELDS in
+// utils/annotations.js) but nothing renders it, so offering a recolour there
+// would be a control with no visible effect. `shape` used to be here too
+// (its `color` painted its fill) — task-annotation-merge-frame-into-shape-
+// rectangle replaced that single swatch with the independent `fill`/`border`
+// sections below (see FILL_BORDER_SWATCHES), so `shape` no longer uses this
+// generic single-colour editor at all.
+const COLORABLE_KINDS = new Set(['text', 'icon', 'vote_dot']);
 
 // Palette for the generic kinds' colour picker. Saturated rather than the
 // pastels NoteNode/LabelNode use, because these paint borders, glyphs and
@@ -55,22 +67,32 @@ const GENERIC_COLORS = [
   '#0f172a',
 ];
 
-// A vote dot counts votes, so its value is a non-negative integer and the
-// stepper never takes it below zero.
-const VOTE_VALUE_MIN = 0;
+// The swatch options for `shape`'s fill/border editors: every GENERIC_COLORS
+// choice, plus `'transparent'` — the setting that subsumes what the retired
+// `frame` kind was (a box with no fill). Independent for fill and border, so
+// a shape can be a solid fill with no border (a plain shape, as before), a
+// transparent fill with a coloured border (what `frame` used to draw), both,
+// or neither.
+const FILL_BORDER_SWATCHES = ['transparent', ...GENERIC_COLORS];
+
+// `shape`'s own defaults when `fill`/`border` are unset — chosen to match
+// exactly how a `shape` rendered before this task added the two fields, so an
+// existing annotation with neither stored is unaffected: a solid grey fill
+// and no border, the same look a plain `color`-only shape had.
+const DEFAULT_SHAPE_FILL = DEFAULT_COLOR;
+const DEFAULT_SHAPE_BORDER = 'transparent';
 
 // The generic kinds that get inline double-click-to-edit text, following the
 // exact pattern NoteNode/LabelNode already established (double-click to
 // enter, blur/Escape to commit, live sync at the shared 300ms text debounce —
 // see AnnotationContext's notifyChange('text') doc comment). `text`'s whole
 // purpose is holding text; `shape` covers every content.shape variant
-// (rectangle through process_arrow) so a shape can carry a caption. `frame`
-// is deliberately excluded — the contract describes it as a "visual-only
-// framing box", and the reported gap (task-annotation-doubleclick-to-edit-text)
-// names only note/label/text/the six shape variants, not frame. `icon`,
-// `vote_dot` and `image` have no free-text field to edit this way either
-// (a vote's value is a number with its own stepper, and an icon/image carry
-// no caption in the v1 content model).
+// (rectangle through process_arrow) so a shape can carry a caption — including
+// a transparent-fill one that visually stands in for the retired `frame`
+// kind, which never had a caption of its own either. `icon`, `vote_dot` and
+// `image` have no free-text field to edit this way either — none carries a
+// caption in the v1 content model, and `vote_dot` is a plain coloured dot
+// with no content field of its own at all (task-annotation-vote-dot-simplify).
 const EDITABLE_TEXT_KINDS = new Set(['text', 'shape']);
 
 // Maps each half of a `textAlign` value ('top-left' -> ['top','left']) to the
@@ -169,11 +191,11 @@ function normalizeAngle(deg) {
   return ((deg % 360) + 360) % 360;
 }
 
-// frame/shape/image are the generic kinds that carry an explicit box size
+// shape/image are the generic kinds that carry an explicit box size
 // (SIZED_GENERIC_KINDS in utils/annotations.js) and are the only ones
 // resizable in this slice; text/icon/vote_dot render at a fixed intrinsic
 // size, so resizing them has no model-space geometry to change.
-const RESIZABLE_KINDS = new Set(['frame', 'shape', 'image']);
+const RESIZABLE_KINDS = new Set(['shape', 'image']);
 const MIN_SIZE = 40;
 
 // Every `content.shape` variant the contract accepts, as the CSS that draws
@@ -286,15 +308,15 @@ const SELECTED_SHAPE_HALO = Object.freeze({
 
 /**
  * GenericAnnotationNode - a simple visual representation for the v1
- * annotation types that have no dedicated per-type editor yet (text, frame,
- * shape, icon, vote_dot, image; see docs/ANNOTATION_CONTRACT.md). These were
+ * annotation types that have no dedicated per-type editor yet (text, shape,
+ * icon, vote_dot, image; see docs/ANNOTATION_CONTRACT.md). These were
  * previously normalized by annotationModel.js but dropped by the overlay
  * translation layer, so an MCP-created annotation of one of these types never
  * rendered. Selection and move (drag) are handled generically by GraphCanvas
  * for every annotation type; this component adds the visual selection
  * outline, for the sized kinds, model-space resize via ReactFlow's
  * NodeResizer, and — for the kinds EDITABLE_KINDS names — a right-click
- * property editor (colour, shape subtype, icon name, vote value, rotation
+ * property editor (colour, shape subtype, icon name, rotation
  * and layer order), and — for EDITABLE_TEXT_KINDS (`text`, `shape`) —
  * double-click-to-edit inline text, following NoteNode/LabelNode's own
  * pattern exactly, plus nine-position text alignment, font size and a
@@ -305,11 +327,32 @@ const SELECTED_SHAPE_HALO = Object.freeze({
 // fallback; this closes the two that dereferenced `data` directly.
 function GenericAnnotationNode({ id, type, data = {}, selected }) {
   const kind = type;
-  const color = data?.color || DEFAULT_COLOR;
+  // `shape` no longer has a single `color` — its resizer accent instead
+  // prefers whichever of fill/border is a real colour (fill first, since it
+  // usually covers more area), falling back to DEFAULT_COLOR when both are
+  // transparent or unset, so the resize handles are never left uncoloured.
+  const shapeFill = data?.fill ?? DEFAULT_SHAPE_FILL;
+  const shapeBorder = data?.border ?? DEFAULT_SHAPE_BORDER;
+  const color =
+    kind === 'shape'
+      ? shapeFill !== 'transparent'
+        ? shapeFill
+        : shapeBorder !== 'transparent'
+          ? shapeBorder
+          : DEFAULT_COLOR
+      : data?.color || DEFAULT_COLOR;
   const locked = Boolean(data?.locked);
-  const { notifyChange, notifyRemoteLockedAttempt, labels } = useContext(AnnotationContext);
-  // See NoteNode's equivalent comment: another client's live claim makes
-  // this annotation's lease exclusive (task-annotation-shared-session-realtime).
+  const {
+    notifyChange,
+    notifyRemoteLockedAttempt,
+    labels,
+    attachNearby,
+    enterAttachMode,
+    beginEditing,
+    endEditing,
+  } = useContext(AnnotationContext);
+  // See NoteNode's equivalent comment: another client's live edit lease
+  // (task-annotation-exclusive-edit-leases) refuses every mutation below.
   const remoteLocked = isRemoteLocked(data);
   const { setNodes } = useReactFlow();
   const selectedClass = selected ? ' selected' : '';
@@ -337,6 +380,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 
   const [contextMenu, setContextMenu] = useState(null);
   const contextMenuRef = useRef(null);
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
   // Snapshot of {x, y, width, height} at the start of the current resize
   // gesture, read by handleResizeEnd to map the gesture's net delta back
   // through this annotation's rotation (resolveRotatedResizeGeometry).
@@ -453,6 +502,32 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
+  // `shape`'s independent fill/border settings
+  // (task-annotation-merge-frame-into-shape-rectangle) — each is either a
+  // colour or the literal string `'transparent'`, following exactly the same
+  // wiring `changeColor` above uses for every other colourable kind.
+  const changeFill = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, fill: next } } : n))
+    );
+    notifyChange('style');
+  };
+
+  const changeBorder = (next) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, border: next } } : n))
+    );
+    notifyChange('style');
+  };
+
   // Typography changes for EDITABLE_TEXT_KINDS (`text`, `shape`) — same
   // 'style' notification NoteNode/LabelNode's own changeFontSize uses (a
   // presentation change, not geometry or text content).
@@ -492,20 +567,9 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
-  const changeValue = (next) => {
-    if (remoteLocked) {
-      notifyRemoteLockedAttempt();
-      return;
-    }
-    const clamped = Math.max(VOTE_VALUE_MIN, Math.round(next));
-    setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, value: clamped } } : n))
-    );
-    notifyChange('style');
-  };
-
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
 
   const changeRotation = (deg) => {
     if (remoteLocked) {
@@ -530,6 +594,21 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('delete');
   };
 
+  // Non-drag detach (task-annotation-accessible-shared-controls) — see
+  // LabelNode's identical helper for why this stays local rather than a
+  // shared AnnotationContext function.
+  const detach = () => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, attachment: undefined } } : n))
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
   // Locking withholds everything except the two actions the capability
   // baseline names for a locked object: unlock, and duplicate —
   // colour/rotation/shape/font-size/delete stay out of reach while `locked`
@@ -551,8 +630,12 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     notifyChange('style');
   };
 
+  // Geometry gesture (task-annotation-exclusive-edit-leases): acquired
+  // fire-and-forget at resize start (NodeResizer already begins the visual
+  // drag by the time this fires) and released at resize end.
   const handleResizeStart = (event, params) => {
     resizeStartRef.current = params;
+    beginEditing?.([id]);
   };
 
   // NodeResizer computes `params` as if this annotation's box were
@@ -582,13 +665,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     }
     resizeStartRef.current = null;
     notifyChange('geometry');
+    endEditing?.([id]);
   };
 
   // Locked annotations already refuse to drag (draggable: !locked in
   // overlayToFlowNode); hide the resize handles too so "locked" reads as one
   // consistent geometry lock rather than only blocking one of two ways to
-  // move/resize the object. A remote claim (another client's exclusive lease)
-  // hides them the same way.
+  // move/resize the object. A remote edit lease (another client actively
+  // editing) hides them the same way.
   // Locking the ratio is what keeps a regular figure regular through a resize.
   // Without it the box is free and the percentage clip-path distorts again the
   // moment the user drags a handle, which is how the squashed shapes were
@@ -616,14 +700,47 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     />
   );
 
-  const remoteBadge = remoteLocked && (
+  const badge = remoteEditBadge(data);
+  const remoteBadge = badge && (
     <div
       className="graph-node-remote-badge"
-      style={{ backgroundColor: data.remoteSelection.color }}
-      title={data.remoteSelection.displayName}
+      style={{ backgroundColor: badge.color }}
+      title={badge.displayName}
     >
-      {data.remoteSelection.displayName}
+      {badge.displayName}
     </div>
+  );
+
+  // Opacity (task-annotation-responsive-bottom-toolbox) applies to every
+  // generic kind alike, unlike colour (COLORABLE_KINDS) or the shape/icon
+  // pickers — see `opacityStyle` below for where it lands per kind.
+  const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
+  const opacityStyle = { opacity };
+
+  // The contextual "Edit" surface's visible entry point
+  // (task-annotation-responsive-bottom-toolbox) — see NoteNode's equivalent
+  // comment. Gated on EDITABLE_KINDS like `openContextMenu` itself, so a kind
+  // with no property editor at all (there is none today, but this mirrors
+  // that guard rather than assuming every future kind has one) never shows a
+  // button that would open nothing.
+  const editTrigger = selected && EDITABLE_KINDS.has(kind) && (
+    <button
+      ref={editButtonRef}
+      type="button"
+      className="annotation-edit-trigger nodrag nopan"
+      aria-label={labels.editAnnotation}
+      aria-haspopup="true"
+      aria-expanded={Boolean(contextMenu)}
+      onClick={(e) => {
+        if (remoteLocked) {
+          notifyRemoteLockedAttempt();
+          return;
+        }
+        openEditMenu(e);
+      }}
+    >
+      ✏️
+    </button>
   );
 
   const currentRotation = data?.rotation ?? 0;
@@ -631,29 +748,52 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
     <ContextMenuPortal
       menuRef={contextMenuRef}
       position={contextMenu}
+      sheet={Boolean(contextMenu.sheet)}
+      sheetContainer={sheetContainer}
+      id={id}
+      data={data}
       kind={kind}
       shape={data.shape || 'rectangle'}
       icon={data.icon}
       color={color}
-      value={data.value}
+      fill={shapeFill}
+      border={shapeBorder}
       rotation={currentRotation}
       locked={locked}
       labels={labels}
       textAlign={textAlign}
       fontSize={textFontSize}
       font={data?.font}
+      opacity={opacity}
       onChangeShape={changeShape}
       onChangeIcon={changeIcon}
       onChangeColor={changeColor}
-      onChangeValue={changeValue}
+      onChangeFill={changeFill}
+      onChangeBorder={changeBorder}
       onChangeLayer={changeLayer}
       onChangeRotation={changeRotation}
       onChangeTextAlign={changeTextAlign}
       onChangeFontSize={changeFontSize}
       onChangeFont={changeFont}
+      onChangeOpacity={changeOpacity}
       onDelete={remove}
       onUnlock={unlock}
       onDuplicate={duplicate}
+      // Every generic kind here — `shape` included, whatever its fill/border —
+      // is a valid nearby-attach target, the same decision
+      // computeDroppedAttachment's own candidacy filter makes (see its doc
+      // comment in utils/annotations.js) now that the former `frame` kind is
+      // folded into `shape` rather than excluded as its own special case.
+      onAttachNearby={(nearbyKind) => attachNearby(id, nearbyKind)}
+      onEnterAttachMode={
+        enterAttachMode
+          ? () => {
+              enterAttachMode(id);
+              setContextMenu(null);
+            }
+          : undefined
+      }
+      onDetach={detach}
     />
   );
 
@@ -703,6 +843,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             justifyContent: textAlignStyle.justifyContent,
             alignItems: textAlignStyle.alignItems,
             ...rotation,
+            ...opacityStyle,
           }}
           onDoubleClick={startEditingText}
           onContextMenu={openContextMenu}
@@ -713,31 +854,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             <span style={{ textAlign: textAlignStyle.textAlign }}>{data.text || ''}</span>
           )}
         </div>
-        {menu}
-        {remoteBadge}
-      </>
-    );
-  }
-
-  if (kind === 'frame') {
-    return (
-      <>
-        {/* Carries the rotation for both the resizer and the visible frame,
-            so the handles rotate with the box instead of staying
-            axis-aligned around its unrotated bounds (the ReactFlow node
-            wrapper itself deliberately stays unrotated — see the module doc
-            comment on `rotation`). */}
-        <div
-          className="graph-generic-annotation-rotate-wrap"
-          style={{ width: '100%', height: '100%', position: 'relative', ...rotation }}
-        >
-          {resizer}
-          <div
-            className={`graph-generic-annotation-node kind-frame${selectedClass}`}
-            style={{ borderColor: color, width: '100%', height: '100%' }}
-            onContextMenu={openContextMenu}
-          />
-        </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -746,6 +863,27 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 
   if (kind === 'shape') {
     const shape = data.shape || 'rectangle';
+    // Fill and border are independent and each is either a colour or
+    // `'transparent'` (task-annotation-merge-frame-into-shape-rectangle).
+    // `borderWidth`/`borderStyle` are always set, even at `'transparent'`, so
+    // toggling a border on/off never shifts the box's rendered size — the
+    // same reason a transparent border, not `border: none`, is what a
+    // former `frame` (fill: 'transparent', border: <colour>) renders with.
+    //
+    // Known limitation, stated plainly rather than silently shipped: a CSS
+    // `border` is drawn as an axis-aligned ring around the box and *then*
+    // clipped by `clip-path` along with everything else — for `rectangle`
+    // and `circle` (border-radius, not clip-path) that draws a correct
+    // outline, but for the four clip-path variants (triangle/rhombus/
+    // hexagon/process_arrow) only the parts of that ring that survive the
+    // clip are visible, which is not the same as a border tracing the
+    // polygon's own slanted edges. Tracing the true outline would need an
+    // SVG stroke or a second, larger clip-path per variant — out of scope for
+    // this merge; a border is still offered uniformly across variants rather
+    // than withheld from four of six, since a plain, imperfect border is
+    // strictly more useful than none.
+    const fill = data.fill ?? DEFAULT_SHAPE_FILL;
+    const border = data.border ?? DEFAULT_SHAPE_BORDER;
     return (
       <>
         <div
@@ -762,8 +900,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
           onContextMenu={openContextMenu}
         >
           {/* Inside the halo (rather than a sibling of it) so the resize
-              handles rotate along with it — see the `frame` branch's
-              comment. */}
+              handles rotate along with it. */}
           {resizer}
           <div
             // No `selected` class: the shared dashed outline it carries is
@@ -772,10 +909,14 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             // the halo above instead — for every variant alike.
             className={`graph-generic-annotation-node kind-shape shape-${shape}`}
             style={{
-              backgroundColor: color,
+              backgroundColor: fill === 'transparent' ? 'transparent' : fill,
+              borderColor: border === 'transparent' ? 'transparent' : border,
+              borderWidth: 2,
+              borderStyle: 'solid',
               width: '100%',
               height: '100%',
               ...(SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle),
+              ...opacityStyle,
             }}
           />
           {/* Sits on the halo (unclipped) rather than inside the shape div
@@ -792,6 +933,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
                 ...shapeTextInsetStyle(shape),
                 justifyContent: textAlignStyle.justifyContent,
                 alignItems: textAlignStyle.alignItems,
+                ...opacityStyle,
               }}
             >
               {isEditingText ? (
@@ -811,6 +953,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             </div>
           )}
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -826,12 +969,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       <>
         <div
           className={`graph-generic-annotation-node kind-icon${iconClass}${selectedClass}`}
-          style={{ borderColor: color, ...rotation }}
+          style={{ borderColor: color, ...rotation, ...opacityStyle }}
           title={data.icon}
           onContextMenu={openContextMenu}
         >
           {icon.text}
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -839,18 +983,17 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
   }
 
   if (kind === 'vote_dot') {
+    // A plain coloured dot (task-annotation-vote-dot-simplify): no rendered
+    // value, whatever a stored annotation's `value` field happens to hold —
+    // there is no content field here for it to read.
     return (
       <>
         <div
           className={`graph-generic-annotation-node kind-vote_dot${selectedClass}`}
-          style={{ backgroundColor: color, ...rotation }}
+          style={{ backgroundColor: color, ...rotation, ...opacityStyle }}
           onContextMenu={openContextMenu}
-        >
-          {/* Coerced: a stored value that is not a primitive (an object from
-              some earlier shape of this field) is not a valid React child and
-              would throw where a wrong-looking dot would do. */}
-          {typeof data.value === 'number' || typeof data.value === 'string' ? data.value : ''}
-        </div>
+        />
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -869,11 +1012,13 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             {resizer}
             <div
               className={`graph-generic-annotation-node kind-image kind-image-empty${selectedClass}`}
+              style={opacityStyle}
               onContextMenu={openContextMenu}
             >
               {data.alt || ''}
             </div>
           </div>
+          {editTrigger}
           {menu}
           {remoteBadge}
         </>
@@ -890,10 +1035,11 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
             className={`graph-generic-annotation-node kind-image${selectedClass}`}
             src={url}
             alt={data.alt || ''}
-            style={{ width: '100%', height: '100%' }}
+            style={{ width: '100%', height: '100%', ...opacityStyle }}
             onContextMenu={openContextMenu}
           />
         </div>
+        {editTrigger}
         {menu}
         {remoteBadge}
       </>
@@ -904,67 +1050,85 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
 }
 
 // The right-click property editor's portal content, split out only so the
-// six kind branches above can each attach it without repeating its JSX.
+// five kind branches above can each attach it without repeating its JSX.
 // Rotation and layer controls show for every EDITABLE_KINDS member, the
-// layer row then duplicate then Delete, matching the note/label/line/
-// freehand menus. The
-// colour swatches show for COLORABLE_KINDS, the nine-position alignment grid,
-// font-size picker and curated font-family picker
-// (task-annotation-text-alignment-and-font) for EDITABLE_TEXT_KINDS (`text`,
-// `shape`), the shape-subtype grid only for `kind === 'shape'`, the icon-name
-// grid only for `kind === 'icon'`, and the value stepper only for
-// `kind === 'vote_dot'`. A locked annotation gets none of them — the
+// layer row then the "Nearby object menu" section then duplicate then
+// Delete, matching the note/label/line/freehand menus. The colour swatches
+// show for COLORABLE_KINDS; `shape` instead gets its own independent Fill and
+// Border sections (task-annotation-merge-frame-into-shape-rectangle) — each
+// a FILL_BORDER_SWATCHES grid including `'transparent'`, the setting that
+// subsumes what the retired `frame` kind was. The nine-position alignment
+// grid, font-size picker and curated font-family picker
+// (task-annotation-text-alignment-and-font) show for EDITABLE_TEXT_KINDS
+// (`text`, `shape`), the shape-subtype grid only for `kind === 'shape'`, the
+// icon-name grid only for `kind === 'icon'`. `vote_dot` is a plain coloured
+// dot (task-annotation-vote-dot-simplify) — it gets only the shared colour
+// swatches, rotation and layer sections, no kind-specific section of its
+// own. A locked annotation gets none of them — the
 // capability baseline is "a locked object remains selectable but offers only
 // unlock or copy" — so this shows only the unlock and duplicate actions
 // instead.
 function ContextMenuPortal({
   menuRef,
   position,
+  sheet = false,
+  sheetContainer = null,
+  id,
+  data,
   kind,
   shape,
   icon,
   color,
-  value,
+  fill,
+  border,
   rotation,
   locked,
   labels,
   textAlign,
   fontSize,
   font,
+  opacity,
   onChangeShape,
   onChangeIcon,
   onChangeColor,
-  onChangeValue,
+  onChangeFill,
+  onChangeBorder,
   onChangeLayer,
   onChangeRotation,
   onChangeTextAlign,
   onChangeFontSize,
   onChangeFont,
+  onChangeOpacity,
   onDelete,
   onUnlock,
   onDuplicate,
+  onAttachNearby,
+  onEnterAttachMode,
+  onDetach,
 }) {
+  // The contextual "Edit" surface's mobile-sheet path
+  // (task-annotation-responsive-bottom-toolbox): the container may not have
+  // mounted yet even though `sheet` is true (the host's next render supplies
+  // it — see useAnnotationEditTrigger's own doc comment), so there is
+  // nothing to portal into until then.
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(menuRef);
+  const portalTarget = sheet ? sheetContainer : document.body;
+  if (!portalTarget) return null;
+  const menuClassName = `graph-annotation-context-menu${sheet ? ' sheet' : ''}`;
+  const menuStyle = sheet ? undefined : { left: position.x, top: position.y };
   if (locked) {
     return createPortal(
-      <div
-        ref={menuRef}
-        className="graph-annotation-context-menu"
-        style={{ left: position.x, top: position.y }}
-      >
+      <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
         <button type="button" className="context-menu-unlock" onClick={onUnlock}>
           🔓 {labels.unlock}
         </button>
         <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       </div>,
-      document.body
+      portalTarget
     );
   }
   return createPortal(
-    <div
-      ref={menuRef}
-      className="graph-annotation-context-menu"
-      style={{ left: position.x, top: position.y }}
-    >
+    <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
       {COLORABLE_KINDS.has(kind) && (
         <>
           <div className="context-menu-title">{labels.color}</div>
@@ -977,6 +1141,40 @@ function ContextMenuPortal({
                 style={{ backgroundColor: c }}
                 aria-label={c}
                 onClick={() => onChangeColor(c)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+      {kind === 'shape' && (
+        <>
+          <div className="context-menu-title">{labels.fill}</div>
+          <div className="context-menu-colors">
+            {FILL_BORDER_SWATCHES.map((c) => (
+              <button
+                key={`fill-${c}`}
+                type="button"
+                className={`color-button${
+                  c === 'transparent' ? ' color-button-transparent' : ''
+                }${fill === c ? ' active' : ''}`}
+                style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                aria-label={`${labels.fill} ${c === 'transparent' ? labels.transparent : c}`}
+                onClick={() => onChangeFill(c)}
+              />
+            ))}
+          </div>
+          <div className="context-menu-title">{labels.border}</div>
+          <div className="context-menu-colors">
+            {FILL_BORDER_SWATCHES.map((c) => (
+              <button
+                key={`border-${c}`}
+                type="button"
+                className={`color-button${
+                  c === 'transparent' ? ' color-button-transparent' : ''
+                }${border === c ? ' active' : ''}`}
+                style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                aria-label={`${labels.border} ${c === 'transparent' ? labels.transparent : c}`}
+                onClick={() => onChangeBorder(c)}
               />
             ))}
           </div>
@@ -1089,30 +1287,6 @@ function ContextMenuPortal({
           </div>
         </>
       )}
-      {kind === 'vote_dot' && (
-        <>
-          <div className="context-menu-title">{labels.voteValue}</div>
-          <div className="context-menu-vote-value">
-            <button
-              type="button"
-              className="vote-value-button"
-              aria-label={labels.voteValueDecrease}
-              onClick={() => onChangeValue((value ?? 0) - 1)}
-            >
-              −
-            </button>
-            <span className="vote-value-current">{value ?? 0}</span>
-            <button
-              type="button"
-              className="vote-value-button"
-              aria-label={labels.voteValueIncrease}
-              onClick={() => onChangeValue((value ?? 0) + 1)}
-            >
-              +
-            </button>
-          </div>
-        </>
-      )}
       <div className="context-menu-title">{labels.rotation}</div>
       <div className="context-menu-rotate">
         <button
@@ -1140,13 +1314,42 @@ function ContextMenuPortal({
           ⟳
         </button>
       </div>
+      <AnnotationOpacityControl
+        labels={labels}
+        opacity={opacity}
+        onChangeOpacity={onChangeOpacity}
+      />
+      {/* Non-drag alternative to the NodeResizer handles `shape`/`image`
+          render above — task-annotation-accessible-shared-controls.
+          `text`/`icon`/`vote_dot` have no explicit box (RESIZABLE_KINDS
+          excludes them; see this component's own doc comment), so nothing
+          renders for those kinds — matching what the drag handles already
+          do (or rather, do not) offer them. */}
+      {RESIZABLE_KINDS.has(kind) && <AnnotationSizeControl id={id} data={data} labels={labels} />}
       <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
+      <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
+      {/* Non-drag "Attach to…" target-tap mode
+          (task-annotation-accessible-shared-controls) — offered only for the
+          kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
+          `label` gets the identical pair in its own component). Unlike the
+          "Add nearby" section above (creates a NEW pre-attached annotation),
+          this attaches THIS existing one. */}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
+        <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
+          🧷 {labels.attachTo}
+        </button>
+      )}
+      {ATTACHABLE_OVERLAY_KINDS.has(kind) && data?.attachment && (
+        <button type="button" className="context-menu-attach" onClick={onDetach}>
+          {labels.detach}
+        </button>
+      )}
       <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
       <button type="button" className="context-menu-delete" onClick={onDelete}>
         🗑️ {labels.delete}
       </button>
     </div>,
-    document.body
+    portalTarget
   );
 }
 
