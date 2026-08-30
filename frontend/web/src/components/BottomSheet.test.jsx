@@ -48,6 +48,24 @@ function drag(handle, { from, to }) {
   firePointerEvent(handle, 'pointerup', to);
 }
 
+// Mirrors the fake in useVisualViewportInset.test.jsx: a minimal
+// VisualViewport whose height a test can shrink to simulate an on-screen
+// keyboard opening, and whose listeners are observable.
+function makeVisualViewport({ height, offsetTop = 0 }) {
+  const listeners = { resize: new Set(), scroll: new Set() };
+  return {
+    height,
+    offsetTop,
+    addEventListener: (event, handler) => listeners[event]?.add(handler),
+    removeEventListener: (event, handler) => listeners[event]?.delete(handler),
+    emit(event, { height: newHeight, offsetTop: newOffsetTop = 0 } = {}) {
+      if (newHeight !== undefined) this.height = newHeight;
+      this.offsetTop = newOffsetTop;
+      listeners[event]?.forEach((handler) => handler());
+    },
+  };
+}
+
 describe('BottomSheet', () => {
   let originalOverflow;
 
@@ -278,6 +296,120 @@ describe('BottomSheet', () => {
       expect(document.body.style.overflow).toBe('hidden');
       unmount();
       expect(document.body.style.overflow).toBe('auto');
+    });
+  });
+
+  describe('on-screen keyboard avoidance', () => {
+    let originalVisualViewport;
+    let originalInnerHeight;
+
+    beforeEach(() => {
+      originalVisualViewport = window.visualViewport;
+      originalInnerHeight = window.innerHeight;
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(window, 'visualViewport', {
+        configurable: true,
+        value: originalVisualViewport,
+      });
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: originalInnerHeight,
+      });
+    });
+
+    it('does not set a keyboard inset while no keyboard is open', () => {
+      const vv = makeVisualViewport({ height: 800 });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+      renderSheet();
+
+      expect(
+        screen.getByTestId('bottom-sheet-scrim').style.getPropertyValue('--keyboard-inset')
+      ).toBe('');
+    });
+
+    it('shrinks the scrim above the keyboard once the visual viewport reports it open', () => {
+      const vv = makeVisualViewport({ height: 800 });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+      renderSheet();
+      act(() => {
+        vv.emit('resize', { height: 480 });
+      });
+
+      expect(
+        screen.getByTestId('bottom-sheet-scrim').style.getPropertyValue('--keyboard-inset')
+      ).toBe('320px');
+    });
+
+    it('scrolls the focused field into view once the keyboard opens', () => {
+      const vv = makeVisualViewport({ height: 800 });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+      renderSheet();
+      // Move focus to a field other than whichever one the sheet's own
+      // open-focus effect landed on, so this test's outcome depends on the
+      // resize-driven effect below, not on that unrelated auto-focus.
+      const last = screen.getByText('last');
+      last.focus();
+      const scrollIntoView = vi.fn();
+      last.scrollIntoView = scrollIntoView;
+
+      act(() => {
+        vv.emit('resize', { height: 480 });
+      });
+
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' });
+    });
+
+    it('scrolls a newly focused field into view even while the keyboard is already open', () => {
+      const vv = makeVisualViewport({ height: 480 });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+      renderSheet();
+      const last = screen.getByText('last');
+      const scrollIntoView = vi.fn();
+      last.scrollIntoView = scrollIntoView;
+
+      // A real focus transition (not the sheet's own initial auto-focus,
+      // which already landed elsewhere) - this is what a user tapping a
+      // second field while the keyboard is already up looks like, and it
+      // must be caught by the onFocus handler since keyboardInset itself
+      // does not change here.
+      last.focus();
+
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' });
+    });
+
+    it('never scrolls an element outside the sheet, even if it somehow ends up focused', () => {
+      const vv = makeVisualViewport({ height: 800 });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+
+      renderSheet();
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      const scrollIntoView = vi.fn();
+      outside.scrollIntoView = scrollIntoView;
+      outside.focus();
+
+      act(() => {
+        vv.emit('resize', { height: 480 });
+      });
+
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      outside.remove();
+    });
+
+    it('is a graceful no-op when visualViewport is unavailable', () => {
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: undefined });
+
+      expect(() => renderSheet()).not.toThrow();
+      expect(
+        screen.getByTestId('bottom-sheet-scrim').style.getPropertyValue('--keyboard-inset')
+      ).toBe('');
     });
   });
 

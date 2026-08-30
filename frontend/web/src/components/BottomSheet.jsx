@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
+import { useVisualViewportInset } from '../hooks/useVisualViewportInset';
 import './BottomSheet.css';
 
 // Ordered low-to-high; index arithmetic in the drag handler and tests relies
@@ -77,6 +78,37 @@ function BottomSheet({
   const lastFocusedRef = useRef(null);
   const dragStateRef = useRef(null);
   const [dragOffset, setDragOffset] = useState(0);
+  // Keeps the whole sheet above an on-screen keyboard rather than letting it
+  // render (correctly, per the layout viewport) behind one - the scrim is
+  // `position: fixed`, which mobile browsers size against the LAYOUT
+  // viewport, not the smaller VISUAL viewport a keyboard leaves behind. See
+  // useVisualViewportInset's own docstring for why this degrades to 0 (a
+  // no-op) rather than throwing anywhere the API is unavailable.
+  const keyboardInset = useVisualViewportInset(isOpen);
+
+  const focusActiveIntoView = useCallback(() => {
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (
+      active &&
+      sheetRef.current?.contains(active) &&
+      typeof active.scrollIntoView === 'function'
+    ) {
+      active.scrollIntoView({
+        block: 'nearest',
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      });
+    }
+  }, [prefersReducedMotion]);
+
+  // Re-run whenever the keyboard opens/resizes while focus is already inside
+  // the sheet (the visualViewport `resize` event is the actual signal that
+  // the previously-focused field's position just changed), on top of the
+  // `onFocus` handler below for a tap that switches fields while the
+  // keyboard is already open and the inset itself does not change.
+  useEffect(() => {
+    if (!isOpen) return;
+    focusActiveIntoView();
+  }, [isOpen, keyboardInset, focusActiveIntoView]);
 
   // Body scroll lock while open - restores whatever value was there before,
   // so a sheet opened while some other overlay already locked scroll doesn't
@@ -208,7 +240,12 @@ function BottomSheet({
     .join(' ');
 
   return (
-    <div className="bottom-sheet-scrim" onClick={onClose} data-testid="bottom-sheet-scrim">
+    <div
+      className="bottom-sheet-scrim"
+      onClick={onClose}
+      data-testid="bottom-sheet-scrim"
+      style={keyboardInset ? { '--keyboard-inset': `${keyboardInset}px` } : undefined}
+    >
       <div
         ref={sheetRef}
         className={sheetClassName}
@@ -257,7 +294,9 @@ function BottomSheet({
           </div>
         ) : null}
 
-        <div className="bottom-sheet-content">{children}</div>
+        <div className="bottom-sheet-content" onFocus={focusActiveIntoView}>
+          {children}
+        </div>
       </div>
     </div>
   );

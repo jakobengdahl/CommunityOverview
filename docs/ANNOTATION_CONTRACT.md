@@ -167,6 +167,27 @@ MCP. The required entry points are:
   surface: an **Opacity** row (four levels — 30/50/75/100%) on every one of
   those same kinds' menus, previously offered only by `freehand`.
 
+  **Update, 2026-08-30 — on-screen keyboard avoidance.** The mobile Edit
+  sheet reuses the shared `BottomSheet` primitive
+  (`frontend/web/src/components/BottomSheet.jsx`), which is
+  `position: fixed` and therefore sized against the *layout* viewport by
+  mobile browsers, not the smaller *visual* viewport a keyboard leaves
+  behind — until this fix, focusing a text/number field inside the sheet
+  (a note's rename input, `AnnotationSizeControl`'s width/height inputs,
+  etc.) could leave it rendered behind the keyboard rather than above it.
+  `BottomSheet` now tracks the gap via the existing
+  `useVisualViewportInset` hook (already used by `ChatPanel`'s sheet
+  variant for the same class of problem) and applies it as a
+  `--keyboard-inset` CSS custom property that shrinks the sheet's scrim to
+  the actually-visible area, plus a focus-triggered `scrollIntoView` so a
+  field switched to while the keyboard is already open, or the field that
+  triggered the keyboard opening in the first place, is brought into view
+  within the sheet's own scrollable content. Degrades to a no-op wherever
+  `visualViewport` is unavailable, same as `useVisualViewportInset` itself.
+  Covers every `BottomSheet` consumer (Search/Create/Annotate/Edit), not
+  only the Edit surface. Test: `BottomSheet.test.jsx`'s "on-screen keyboard
+  avoidance" cases.
+
 ### Desktop wireframe
 
 ```
