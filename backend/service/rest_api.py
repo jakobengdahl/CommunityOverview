@@ -948,9 +948,9 @@ def _register_session_endpoints(
     """
     from backend.core.session_manager import (
         AnnotationRecentlyDeleted,
-        ClaimConflict,
         ImageBudgetExceeded,
         LayoutBusy,
+        LeaseConflict,
         NoUndoableAction,
         OpBatchTooLarge,
         RateLimited,
@@ -1079,7 +1079,7 @@ def _register_session_endpoints(
             raise HTTPException(status_code=429, detail="rate limit exceeded")
         except OpBatchTooLarge:
             raise HTTPException(status_code=413, detail="op batch too large")
-        except ClaimConflict as exc:
+        except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except OpError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -1154,21 +1154,21 @@ def _register_session_endpoints(
                         ),
                     )
                 # This replaces an existing annotation directly (not through
-                # apply_ops, so ClaimMap enforcement there never sees it) — the
+                # apply_ops, so LeaseMap enforcement there never sees it) — the
                 # pasting browser's own client_id is known here (unlike the op
                 # sent to upsert_image_annotation below, which is always
                 # attributed to the shared _HUMAN_IMAGE_INGEST_CLIENT_ID for SSE
                 # echo purposes — see that constant's docstring), so check it
-                # against the same live-claim snapshot apply_ops uses, before
+                # against the same live-lease snapshot apply_ops uses, before
                 # paying for the fetch/optimize below.
                 if existing is not None:
-                    holder = session_manager.claims.snapshot(session_id).get(
+                    holder = session_manager.leases.snapshot(session_id).get(
                         request.annotation_id
                     )
                     if holder is not None and holder != request.client_id:
                         raise HTTPException(
                             status_code=409,
-                            detail=str(ClaimConflict(request.annotation_id, holder)),
+                            detail=str(LeaseConflict(request.annotation_id, holder)),
                         )
 
         try:
@@ -1309,7 +1309,7 @@ def _register_session_endpoints(
             raise HTTPException(status_code=404, detail="no undoable action")
         except UndoConflict as exc:
             raise HTTPException(status_code=409, detail=exc.reason)
-        except ClaimConflict as exc:
+        except LeaseConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except RevisionConflict as exc:
             raise HTTPException(
