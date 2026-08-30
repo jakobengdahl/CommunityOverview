@@ -18,7 +18,17 @@ vi.mock('reactflow', () => {
       <div data-testid="react-flow">
         <div data-testid="pane-background" style={{ width: 500, height: 500 }} />
         {props.nodes?.map((node) => (
-          <div key={node.id} className="react-flow__node" data-id={node.id}>
+          // `role="button"` and `tabIndex` mirror what ReactFlow actually
+          // renders on a focusable node (@reactflow/core's NodeWrapper).
+          // Without them a guard that excludes `[role="button"]` looks
+          // harmless here while disabling long-press on every real node.
+          <div
+            key={node.id}
+            className="react-flow__node"
+            data-id={node.id}
+            role="button"
+            tabIndex={0}
+          >
             {node.data?.label}
           </div>
         ))}

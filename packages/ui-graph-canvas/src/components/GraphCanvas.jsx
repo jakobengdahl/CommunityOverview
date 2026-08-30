@@ -3110,11 +3110,15 @@ function GraphCanvasInner({
       // context menu at the press point and the button's own activation
       // arrived afterwards to close it again, which read as "the Edit button
       // does nothing with a pen".
-      if (
-        event.target?.closest?.(
-          'button, input, textarea, select, [role="button"], .react-flow__resize-control'
-        )
-      ) {
+      // Real controls only — deliberately NOT `[role="button"]`. ReactFlow puts
+      // `role="button"` on every focusable NODE wrapper
+      // (@reactflow/core's NodeWrapper: `role: isFocusable ? 'button' :
+      // undefined`), so matching that selector made this bail on every node
+      // and long-press stopped opening any node's context menu at all — the
+      // interaction this whole guard was added next to. A `<button>` element
+      // still matches, which is what the ✎ Edit trigger and the node's own
+      // expand/edit buttons are.
+      if (event.target?.closest?.('button, input, textarea, select, .react-flow__resize-control')) {
         return;
       }
       const info = resolveTouchTarget(event.target);
