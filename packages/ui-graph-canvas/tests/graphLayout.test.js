@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { arrangeNodes, positionNewNodes } from '../src/utils/graphLayout';
+import {
+  arrangeNodes,
+  positionNewNodes,
+  alignNodes,
+  distributeNodes,
+} from '../src/utils/graphLayout';
 
 describe('positionNewNodes — incremental placement', () => {
   it('places a new connected node near its existing neighbour, not at the origin', () => {
@@ -111,5 +116,138 @@ describe('arrangeNodes', () => {
       expect(center.x).toBeCloseTo(centroid.x, 5);
       expect(center.y).toBeCloseTo(centroid.y, 5);
     });
+  });
+});
+
+describe('alignNodes', () => {
+  const boxes = [
+    { id: 'a', position: { x: 0, y: 0 }, width: 100, height: 50 },
+    { id: 'b', position: { x: 200, y: 100 }, width: 50, height: 20 },
+    { id: 'c', position: { x: 50, y: 300 }, width: 200, height: 10 },
+  ];
+
+  it('returns an empty map below 2 nodes', () => {
+    expect(alignNodes([boxes[0]], 'left').size).toBe(0);
+    expect(alignNodes([], 'left').size).toBe(0);
+  });
+
+  it('aligns left edges to the minimum left edge', () => {
+    const result = alignNodes(boxes, 'left');
+    expect(result.get('a')).toEqual({ x: 0, y: 0 });
+    expect(result.get('b')).toEqual({ x: 0, y: 100 });
+    expect(result.get('c')).toEqual({ x: 0, y: 300 });
+  });
+
+  it('aligns right edges to the maximum right edge', () => {
+    // Right edges: a=100, b=250, c=250 -> target 250.
+    const result = alignNodes(boxes, 'right');
+    expect(result.get('a')).toEqual({ x: 150, y: 0 });
+    expect(result.get('b')).toEqual({ x: 200, y: 100 });
+    expect(result.get('c')).toEqual({ x: 50, y: 300 });
+  });
+
+  it('aligns horizontal centers to the midpoint of the overall extent', () => {
+    // Overall extent: minLeft=0, maxRight=250 -> centre 125.
+    const result = alignNodes(boxes, 'centerX');
+    expect(result.get('a')).toEqual({ x: 75, y: 0 });
+    expect(result.get('b')).toEqual({ x: 100, y: 100 });
+    expect(result.get('c')).toEqual({ x: 25, y: 300 });
+  });
+
+  it('aligns top edges to the minimum top edge', () => {
+    const result = alignNodes(boxes, 'top');
+    expect(result.get('a')).toEqual({ x: 0, y: 0 });
+    expect(result.get('b')).toEqual({ x: 200, y: 0 });
+    expect(result.get('c')).toEqual({ x: 50, y: 0 });
+  });
+
+  it('aligns bottom edges to the maximum bottom edge', () => {
+    // Bottom edges: a=50, b=120, c=310 -> target 310.
+    const result = alignNodes(boxes, 'bottom');
+    expect(result.get('a')).toEqual({ x: 0, y: 260 });
+    expect(result.get('b')).toEqual({ x: 200, y: 290 });
+    expect(result.get('c')).toEqual({ x: 50, y: 300 });
+  });
+
+  it('aligns vertical middles to the midpoint of the overall extent', () => {
+    // Overall extent: minTop=0, maxBottom=310 -> centre 155.
+    const result = alignNodes(boxes, 'centerY');
+    expect(result.get('a')).toEqual({ x: 0, y: 130 });
+    expect(result.get('b')).toEqual({ x: 200, y: 145 });
+    expect(result.get('c')).toEqual({ x: 50, y: 150 });
+  });
+
+  it('treats a node with no measured size as a zero-width/height point', () => {
+    const points = [
+      { id: 'p1', position: { x: 10, y: 10 } },
+      { id: 'p2', position: { x: 90, y: 40 } },
+    ];
+    const result = alignNodes(points, 'left');
+    expect(result.get('p1')).toEqual({ x: 10, y: 10 });
+    expect(result.get('p2')).toEqual({ x: 10, y: 40 });
+  });
+});
+
+describe('distributeNodes', () => {
+  it('returns an empty map below 3 nodes', () => {
+    const two = [
+      { id: 'a', position: { x: 0, y: 0 }, width: 100, height: 100 },
+      { id: 'b', position: { x: 500, y: 0 }, width: 100, height: 100 },
+    ];
+    expect(distributeNodes(two, 'horizontal').size).toBe(0);
+    expect(distributeNodes([], 'horizontal').size).toBe(0);
+  });
+
+  it('spreads three boxes with equal horizontal gaps, keeping the outer two fixed', () => {
+    const boxes = [
+      { id: 'a', position: { x: 0, y: 5 }, width: 100, height: 10 },
+      { id: 'b', position: { x: 1000, y: 5 }, width: 100, height: 10 },
+      { id: 'c', position: { x: 400, y: 5 }, width: 100, height: 10 },
+    ];
+    const result = distributeNodes(boxes, 'horizontal');
+    // Outer two (by centre) keep their x; the middle one moves to close the
+    // gap to exactly what the outer two's span allows.
+    expect(result.get('a').x).toBe(0);
+    expect(result.get('b').x).toBe(1000);
+    expect(result.get('c').x).toBe(500);
+    // y is untouched by a horizontal distribute.
+    expect(result.get('a').y).toBe(5);
+    expect(result.get('c').y).toBe(5);
+    // Equal-gap invariant: gap(a→c) === gap(c→b).
+    const gapAC = result.get('c').x - (result.get('a').x + 100);
+    const gapCB = result.get('b').x - (result.get('c').x + 100);
+    expect(gapAC).toBeCloseTo(gapCB, 9);
+  });
+
+  it('spreads boxes with equal vertical gaps, keeping the outer two fixed', () => {
+    const boxes = [
+      { id: 'a', position: { x: 5, y: 0 }, width: 10, height: 100 },
+      { id: 'b', position: { x: 5, y: 900 }, width: 10, height: 50 },
+      { id: 'c', position: { x: 5, y: 300 }, width: 10, height: 20 },
+    ];
+    const result = distributeNodes(boxes, 'vertical');
+    expect(result.get('a').y).toBe(0);
+    expect(result.get('b').y).toBe(900);
+    // x is untouched by a vertical distribute.
+    expect(result.get('a').x).toBe(5);
+    const gapAC = result.get('c').y - (result.get('a').y + 100);
+    const gapCB = result.get('b').y - (result.get('c').y + 20);
+    expect(gapAC).toBeCloseTo(gapCB, 9);
+  });
+
+  it('orders by bounding-box centre, not by input array order or raw position', () => {
+    // 'far' sits at a smaller x than 'near', but its centre (accounting for
+    // its own width) is further right — distribution must follow centres.
+    const boxes = [
+      { id: 'near', position: { x: 100, y: 0 }, width: 20, height: 10 },
+      { id: 'mid', position: { x: 500, y: 0 }, width: 20, height: 10 },
+      { id: 'far', position: { x: 0, y: 0 }, width: 300, height: 10 }, // centre 150
+    ];
+    const result = distributeNodes(boxes, 'horizontal');
+    // 'far' (centre 150) sorts after 'near' (centre 110), so 'near' — not
+    // 'far' — is the fixed left endpoint despite 'far' having the smaller x.
+    expect(result.get('near').x).toBe(100);
+    expect(result.get('mid').x).toBe(500);
+    expect(result.get('far').x).toBe(160);
   });
 });
