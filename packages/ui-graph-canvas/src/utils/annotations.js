@@ -103,7 +103,25 @@ const GENERIC_OVERLAY_FIELDS = {
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font', 'opacity'],
+  // `flipX`/`flipY` mirror a shape about its own centre. They exist because a
+  // shape is now drawn by dragging (task-annotation-drag-to-draw): dragging
+  // left from the press point produces a shape pointing left, and up produces
+  // an upside-down one, which is the only way a directional variant (triangle,
+  // process arrow) can be aimed without rotating it by hand afterwards. Both
+  // are plain booleans and absent when false, so an existing shape is
+  // unaffected.
+  shape: [
+    'shape',
+    'fill',
+    'border',
+    'text',
+    'fontSize',
+    'textAlign',
+    'font',
+    'opacity',
+    'flipX',
+    'flipY',
+  ],
   icon: ['icon', 'color', 'attachment', 'opacity'],
   // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
   // no `value` (the number it used to render and the stepper that changed
@@ -217,6 +235,28 @@ export function resolveRotatedResizeGeometry({ start, end, rotation }) {
     height: end.height,
   };
 }
+
+// Palette for the generic kinds' colour pickers. Saturated rather than the
+// pastels NoteNode/LabelNode use, because these paint borders, glyphs and
+// small filled dots rather than a large sticky-note ground — a pastel
+// vote_dot on a light canvas is nearly invisible. The default leads so a
+// picker can always return an annotation to the colour it was created with.
+//
+// Lives here rather than in GenericAnnotationNode.jsx (where it started)
+// because the toolbox's vote-dot slot offers the same choices at creation
+// time that the property editor offers afterwards — two lists that must not
+// be allowed to drift apart.
+export const DEFAULT_GENERIC_COLOR = '#94a3b8';
+export const GENERIC_ANNOTATION_COLORS = Object.freeze([
+  DEFAULT_GENERIC_COLOR,
+  '#ef4444',
+  '#f97316',
+  '#eab308',
+  '#22c55e',
+  '#3b82f6',
+  '#a855f7',
+  '#0f172a',
+]);
 
 // Default text sizes (px) for note body and label text; overridable per node.
 export const DEFAULT_NOTE_FONT_SIZE = 14;

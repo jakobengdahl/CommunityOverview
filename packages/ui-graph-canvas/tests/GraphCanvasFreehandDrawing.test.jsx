@@ -178,18 +178,45 @@ describe('GraphCanvas freehand drawing mode', () => {
     expect(onAnnotationChange).toHaveBeenCalledWith('create');
   });
 
-  it('auto-disarms drawing mode after one stroke (single-shot tool)', () => {
+  it('stays armed after a stroke, so the next press draws another line', () => {
+    // Inverted from the original single-shot contract. Disarming after one
+    // stroke meant lifting the pen and putting it down again panned the canvas
+    // instead of drawing — the tool was gone with nothing on screen saying so,
+    // and a drawing is rarely one stroke. Escape, the toolbox button and the
+    // mobile sheet closing are the ways out.
     const { container } = render(<GraphCanvas nodes={[]} edges={[]} />);
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^freehand$/i }));
     const rf = container.querySelector('[data-testid="react-flow"]');
+    const stroke = (offset) => {
+      act(() => {
+        rf.dispatchEvent(pointerEvent('pointerdown', { clientX: offset, clientY: offset }));
+        rf.dispatchEvent(pointerEvent('pointermove', { clientX: offset + 5, clientY: offset + 5 }));
+        rf.dispatchEvent(pointerEvent('pointerup', { clientX: offset + 5, clientY: offset + 5 }));
+      });
+    };
+
+    stroke(0);
+    expect(store.handlers.nodesDraggable).toBe(false);
+    expect(screen.getByRole('button', { name: /^freehand$/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    stroke(50);
+    expect((store.nodes || []).filter((n) => n.type === 'freehand')).toHaveLength(2);
+  });
+
+  it('disarms on Escape, which is the way out of a sticky drawing mode', () => {
+    render(<GraphCanvas nodes={[]} edges={[]} />);
+    fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^freehand$/i }));
+
     act(() => {
-      rf.dispatchEvent(pointerEvent('pointerdown', { clientX: 0, clientY: 0 }));
-      rf.dispatchEvent(pointerEvent('pointermove', { clientX: 5, clientY: 5 }));
-      rf.dispatchEvent(pointerEvent('pointerup', { clientX: 5, clientY: 5 }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
 
-    expect(store.handlers.nodesDraggable).toBe(true);
     expect(screen.getByRole('button', { name: /^freehand$/i })).toHaveAttribute(
       'aria-pressed',
       'false'

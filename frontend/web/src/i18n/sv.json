@@ -542,7 +542,9 @@
     "annotation_attach_to_hint": "Välj ett mål att fästa vid — Escape för att avbryta",
     "annotation_attach_to_cancel": "Avbryt fästning",
     "annotation_multi_select_mode": "Markera flera",
-    "annotation_overlap_picker_title": "Flera objekt här — välj ett"
+    "annotation_overlap_picker_title": "Flera objekt här — välj ett",
+    "annotation_size": "Storlek",
+    "annotation_more_actions": "Fler åtgärder"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",
@@ -576,7 +578,13 @@
     "icon_hint": "Lägg till en ikon",
     "vote_dot_hint": "Lägg till en röstprick",
     "image_hint": "Lägg till en bild från en fil",
-    "freehand_hint": "Rita ett frihandsstreck"
+    "freehand_hint": "Rita ett frihandsstreck",
+    "select": "Markera",
+    "eraser": "Suddgummi",
+    "select_hint": "Markera och flytta objekt",
+    "eraser_hint": "Dra över objekt för att sudda dem",
+    "vote_dot_picker_open": "Välj färg på röstpricken",
+    "vote_dot_picker": "Röstprickens färger"
   },
   "common": {
     "saving": "Sparar...",

@@ -8,13 +8,33 @@ import { GraphCanvas } from '../src/index';
 // its creation-logic coverage.
 const hoisted = vi.hoisted(() => ({ setNodes: vi.fn() }));
 
+function pointerEvent(
+  type,
+  { pointerId = 1, pointerType = 'mouse', clientX = 0, clientY = 0 } = {}
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  return event;
+}
+
+// Placement is a pointer gesture on the canvas wrapper, not `onPaneClick` —
+// that callback never fires while the pane is in selection mode.
+function placeOnPane(x = 120, y = 90) {
+  const pane = screen.getByTestId('pane');
+  fireEvent(pane, pointerEvent('pointerdown', { clientX: x, clientY: y }));
+  fireEvent(pane, pointerEvent('pointerup', { clientX: x, clientY: y }));
+}
+
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown }) => (
+  const MockReactFlow = ({ children, onPaneContextMenu, onPaneMouseDown, onPaneClick }) => (
     <div data-testid="react-flow" className="react-flow">
       <div
         data-testid="pane"
+        className="react-flow__pane"
         onMouseDown={(event) => onPaneMouseDown?.(event)}
         onContextMenu={(event) => onPaneContextMenu?.(event)}
+        onClick={(event) => onPaneClick?.(event)}
       />
       {children}
     </div>
@@ -105,6 +125,12 @@ describe('GraphCanvas annotation toolbox - mobile shared-surface integration', (
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
       fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
 
+      // Two-step creation (task-annotation-tool-modes): the toolbox arms the
+      // tool, the press on empty canvas places the object. Identical on mobile
+      // and desktop — the sheet is a different layout of the same toolbox,
+      // not a different creation contract.
+      placeOnPane();
+
       expect(onAnnotationChange).toHaveBeenCalled();
       expect(findCreatedNode('note')).toBeTruthy();
     });
@@ -143,6 +169,12 @@ describe('GraphCanvas annotation toolbox - mobile shared-surface integration', (
       );
 
       fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+      // Two-step creation (task-annotation-tool-modes): the toolbox arms the
+      // tool, the press on empty canvas places the object. Identical on mobile
+      // and desktop — the sheet is a different layout of the same toolbox,
+      // not a different creation contract.
+      placeOnPane();
 
       expect(onAnnotationChange).toHaveBeenCalled();
       expect(findCreatedNode('note')).toBeTruthy();
@@ -225,6 +257,12 @@ describe('GraphCanvas annotation toolbox - mobile shared-surface integration', (
 
       fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
       fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+
+      // Two-step creation (task-annotation-tool-modes): the toolbox arms the
+      // tool, the press on empty canvas places the object. Identical on mobile
+      // and desktop — the sheet is a different layout of the same toolbox,
+      // not a different creation contract.
+      placeOnPane();
 
       expect(onAnnotationChange).toHaveBeenCalled();
       expect(findCreatedNode('note')).toBeTruthy();

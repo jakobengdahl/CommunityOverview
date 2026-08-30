@@ -27,15 +27,35 @@ describe('applyIngestedImageOptimistically', () => {
     expect(foldLocalOp).not.toHaveBeenCalled();
   });
 
-  it('does nothing when the annotation has no id', async () => {
+  it('reports a response that carried no usable annotation, rather than failing silently', async () => {
     const applyRemoteOp = vi.fn();
     const foldLocalOp = vi.fn();
 
-    await applyIngestedImageOptimistically({ annotation: null, applyRemoteOp, foldLocalOp });
-    await applyIngestedImageOptimistically({ annotation: {}, applyRemoteOp, foldLocalOp });
+    // A 200 with a missing or malformed `annotation`. Nothing can be rendered
+    // from it, and the caller must not go on to mark the ingest delivered:
+    // that is how "I picked a file and got neither an image nor an error"
+    // happened — the canvas simply never changed and nothing said why.
+    await expect(
+      applyIngestedImageOptimistically({ annotation: null, applyRemoteOp, foldLocalOp })
+    ).resolves.toBe(false);
+    await expect(
+      applyIngestedImageOptimistically({ annotation: {}, applyRemoteOp, foldLocalOp })
+    ).resolves.toBe(false);
 
     expect(applyRemoteOp).not.toHaveBeenCalled();
     expect(foldLocalOp).not.toHaveBeenCalled();
+  });
+
+  it('reports success even when the echo won the race — a lost race is not a failure', async () => {
+    // `applied === false` means the confirming SSE echo applied the same op
+    // first. The image IS on the canvas, so this must not be reported as a
+    // failed upload.
+    const annotation = { id: 'ann-3', type: 'image' };
+    const applyRemoteOp = vi.fn().mockResolvedValue(false);
+
+    await expect(
+      applyIngestedImageOptimistically({ annotation, applyRemoteOp, foldLocalOp: vi.fn() })
+    ).resolves.toBe(true);
   });
 
   it('works without a sync client connected (foldLocalOp omitted)', async () => {
@@ -44,7 +64,7 @@ describe('applyIngestedImageOptimistically', () => {
 
     await expect(
       applyIngestedImageOptimistically({ annotation, applyRemoteOp, foldLocalOp: undefined })
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(true);
     expect(applyRemoteOp).toHaveBeenCalledWith({ op: 'annotation_created', annotation });
   });
 });

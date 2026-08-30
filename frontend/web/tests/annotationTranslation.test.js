@@ -412,6 +412,56 @@ describe('generic annotation overlay translation', () => {
     expect(annotationsToOverlays(server)).toEqual(overlays);
   });
 
+  // task-annotation-drag-to-draw: mirroring is set by the direction the shape
+  // was drawn in and is the ONLY way to aim a directional variant — there is
+  // no flip control anywhere in the UI. Dropping it on the write path meant a
+  // triangle came back from a reload pointing the other way, and a
+  // collaborator never saw the aiming at all. Both directions are pinned here
+  // because the host keeps its own field whitelist, independent of the canvas
+  // package's GENERIC_OVERLAY_FIELDS.
+  it("round-trips a shape's mirror flags", () => {
+    const overlays = [
+      {
+        id: 'shape-1',
+        kind: 'shape',
+        position: { x: 5, y: 6 },
+        shape: 'triangle',
+        text: '',
+        flipX: true,
+        flipY: true,
+        size: { w: 120, h: 104 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style.flipX).toBe(true);
+    expect(server[0].style.flipY).toBe(true);
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
+  it('leaves an unmirrored shape with no flip fields at all', () => {
+    // Absent-when-false: an existing shape must not gain new fields, and the
+    // round trip must not turn `undefined` into `false`.
+    const overlays = [
+      {
+        id: 'shape-2',
+        kind: 'shape',
+        position: { x: 0, y: 0 },
+        shape: 'rectangle',
+        text: '',
+        size: { w: 160, h: 96 },
+        z: 0,
+        locked: false,
+        rotation: 0,
+      },
+    ];
+    const server = overlaysToAnnotations(overlays);
+    expect(server[0].style.flipX).toBeUndefined();
+    expect(annotationsToOverlays(server)).toEqual(overlays);
+  });
+
   // task-annotation-text-alignment-and-font: alignment and font family are
   // new fields, carried under `style` alongside `fontSize` — same
   // "unsized-geometry clobber" risk as any other new content field, so this

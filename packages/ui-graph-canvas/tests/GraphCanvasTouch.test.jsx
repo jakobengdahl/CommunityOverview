@@ -18,7 +18,17 @@ vi.mock('reactflow', () => {
       <div data-testid="react-flow">
         <div data-testid="pane-background" style={{ width: 500, height: 500 }} />
         {props.nodes?.map((node) => (
-          <div key={node.id} className="react-flow__node" data-id={node.id}>
+          // `role="button"` and `tabIndex` mirror what ReactFlow actually
+          // renders on a focusable node (@reactflow/core's NodeWrapper).
+          // Without them a guard that excludes `[role="button"]` looks
+          // harmless here while disabling long-press on every real node.
+          <div
+            key={node.id}
+            className="react-flow__node"
+            data-id={node.id}
+            role="button"
+            tabIndex={0}
+          >
             {node.data?.label}
           </div>
         ))}
@@ -336,6 +346,52 @@ describe('GraphCanvas touch interaction', () => {
       });
 
       expect(noMenusOpen()).toBe(true);
+    });
+
+    // A stylus reports `pointerType: 'pen'`, not 'touch'. Restricting the
+    // long-press detector to 'touch' meant a pen press armed nothing at all,
+    // so on a pen-first device — which has no right-click of its own — no
+    // annotation's context menu was reachable. The target resolution was
+    // already there; only the pointer type was turned away.
+    it("long-press with a PEN on a node opens that node's context menu", () => {
+      store.nodes = [nodeA];
+      const { container } = render(<GraphCanvas nodes={[nodeA]} edges={[]} touchMode="on" />);
+      const nodeEl = container.querySelector('.react-flow__node[data-id="node-a"]');
+
+      act(() => {
+        nodeEl.dispatchEvent(
+          pointerEvent('pointerdown', { pointerType: 'pen', clientX: 40, clientY: 60 })
+        );
+      });
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+      });
+
+      const menu = document.querySelector('.node-context-menu');
+      expect(menu).toBeTruthy();
+      expect(menu.style.left).toBe('40px');
+      expect(menu.style.top).toBe('60px');
+    });
+
+    it('a pen long-press works even with touch mode off — a pen is not a finger', () => {
+      // `touchMode` is the host's coarse-pointer signal, and a hybrid device
+      // driven by pen can legitimately report a fine pointer. Gating the pen
+      // on that signal would put the menu back out of reach exactly where the
+      // pen is the primary input.
+      store.nodes = [nodeA];
+      const { container } = render(<GraphCanvas nodes={[nodeA]} edges={[]} touchMode="off" />);
+      const nodeEl = container.querySelector('.react-flow__node[data-id="node-a"]');
+
+      act(() => {
+        nodeEl.dispatchEvent(
+          pointerEvent('pointerdown', { pointerType: 'pen', clientX: 40, clientY: 60 })
+        );
+      });
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+      });
+
+      expect(document.querySelector('.node-context-menu')).toBeTruthy();
     });
 
     it('a mouse pointerdown (pointerType "mouse") never starts a long-press, even in touchMode="on"', () => {

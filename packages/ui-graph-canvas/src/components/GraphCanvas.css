@@ -870,3 +870,82 @@ body.graph-suppress-selection * {
     background: #374151;
   }
 }
+
+/* Resize handles must own the whole gesture on a touch/stylus device
+   (task-annotation-resize-releases-mid-drag).
+
+   ReactFlow ships no `touch-action` rule of its own — not on
+   `.react-flow__resize-control`, not anywhere in its stylesheet — so a handle
+   inherits the default `auto`. With `auto`, the browser is free to reinterpret
+   a press-and-drag as a page pan once it passes its own scroll-slop threshold
+   (a handful of pixels), and when it does it fires `pointercancel` at the
+   handle. d3-drag, which is what NodeResizer builds on, correctly abandons the
+   gesture at that point. The visible result is a resize that tracks for a few
+   pixels and then lets go, leaving the box at whatever size it had reached —
+   which is why it is impossible to size a rectangle properly with a pen, and
+   why a mouse (no touch-action interpretation at all) never shows the problem.
+
+   The pane itself already escapes this because d3-zoom preventDefaults its own
+   handlers; the handles had nothing equivalent. */
+.react-flow__resize-control {
+  touch-action: none;
+}
+
+/* A 10px handle (the size GenericAnnotationNode/NoteNode/GroupNode pass as
+   handleStyle) is a reasonable mouse target and a poor finger/stylus one, so
+   on a coarse pointer the *hit* area is grown without changing the drawn
+   handle: the pseudo-element is invisible and centred, so the handle still
+   looks the same while becoming realistically grabbable. */
+@media (pointer: coarse) {
+  .react-flow__resize-control.handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 24px;
+    height: 24px;
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* Let the canvas own touch gestures, so two-finger pinch zooms the graph
+   (task-annotation-pinch-to-zoom).
+
+   ReactFlow sets no `touch-action` anywhere in its stylesheet, so the pane and
+   the nodes inherit `auto`. Under `auto` the browser is entitled to claim a
+   two-finger gesture as a PAGE pinch-zoom before d3-zoom — which is what
+   actually implements `zoomOnPinch` — ever sees it, and the page here is a
+   fixed full-viewport app with nothing to zoom, so the gesture visibly does
+   nothing. `none` hands the gesture to d3-zoom, which is all `zoomOnPinch`
+   needs to work.
+
+   Text fields inside a node are the deliberate exception: caret placement,
+   selection and scrolling inside a note's textarea are ordinary browser touch
+   behaviours, and taking those over would break editing to fix panning. */
+.react-flow__pane,
+.react-flow__node {
+  touch-action: none;
+}
+
+.react-flow__node textarea,
+.react-flow__node input,
+/* A note's committed text is a scrollable region too, not just its editor.
+   Exempting only the form controls meant a long note could no longer be
+   scrolled by finger or stylus — the text was there and unreachable. */
+.react-flow__node .graph-note-text {
+  touch-action: auto;
+}
+
+/* The box a drag-to-draw placement will produce (task-annotation-drag-to-draw).
+   Drawn over the canvas in screen space while the pointer is down, so the user
+   sees the size they are about to get instead of finding out on release. Never
+   a hit target: the gesture it illustrates is being tracked by the wrapper
+   underneath it. */
+.graph-placement-preview {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  border: 1px dashed rgba(56, 189, 248, 0.95);
+  background: rgba(56, 189, 248, 0.12);
+  border-radius: 2px;
+}

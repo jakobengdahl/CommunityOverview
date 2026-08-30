@@ -83,9 +83,11 @@
   margin-bottom: 8px;
 }
 
+/* The swatch is the control's entire content — there is no label — so it has
+   to be big enough to judge a colour from, especially the darker entries. */
 .graph-annotation-context-menu .color-button {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   /* A resting border, not just transparent, so a dark swatch (e.g. arrow's
      '#111827' or the generic annotation's '#0f172a') stays distinguishable
@@ -261,8 +263,169 @@
   border-color: #60a5fa;
 }
 
+/* The compact property bar (task-annotation-compact-property-bar). The menu
+   used to be a single tall column — a heading plus a control row per property
+   — which on a shape ran well past a phone's screen height, covered the object
+   being edited, and needed scrolling to reach the controls at the bottom. Each
+   property is now one small trigger in a horizontal row (see
+   AnnotationMenuGroup.jsx), and its controls appear in a panel only when asked
+   for. Same controls, a fraction of the resting footprint. */
+.graph-annotation-context-menu--bar {
+  display: flex;
+  flex-direction: row;
+  /* Wraps, and is NOT a scroll container. `overflow-x: auto` here was a
+     mistake with a large blast radius: per CSS Overflow 3 a non-visible value
+     on one axis computes the other to `auto` too, so the bar became a ~52px
+     scrollport that clipped every group panel — the panels open outside the
+     bar's own box by design, so activating one showed nothing at all. Wrapping
+     also keeps all thirteen groups reachable on a narrow screen, which a
+     silent horizontal scroll did not. */
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  min-width: 0;
+  /* The panels are positioned against this, so it must be the containing
+     block for their absolute positioning. */
+  position: fixed;
+}
+
+/* The sheet variant is laid out in normal flow inside the host's BottomSheet
+   (see the .sheet rules above), which `position: fixed` would take it out of.
+   It keeps the row, and its panels anchor against the group instead. */
+.graph-annotation-context-menu--bar.sheet {
+  position: static;
+  justify-content: flex-start;
+  padding: 8px 0;
+}
+
+.annotation-menu-group {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Sized up ~50% from the first cut (30px cell / 14px glyph / 8px swatch).
+   The bar has no captions, so the glyph and its current-value swatch are the
+   only things carrying meaning — at the original size the swatch in
+   particular was too small to read a colour off, which is most of what it is
+   there for. */
+.annotation-menu-group-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #e6edf3;
+  font-size: 21px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-menu-group-trigger:hover,
+.annotation-menu-group-trigger:focus-visible {
+  border-color: #666;
+  background: #333;
+}
+
+.annotation-menu-group-trigger.open {
+  border-color: #60a5fa;
+  background: #1e293b;
+}
+
+.annotation-menu-group-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+
+/* The trigger's current-value preview: what the group is set to, without
+   opening it. A colour group shows its colour; 'transparent' shows the same
+   checkerboard the swatch list uses for it, so "no fill" is not mistaken for
+   a dark fill. */
+.annotation-menu-group-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 3px;
+}
+
+.annotation-menu-group-swatch--transparent {
+  background-image:
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%),
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%);
+  background-size: 8px 8px;
+  background-position:
+    0 0,
+    4px 4px;
+}
+
+/* Opens upward by default: the menu is positioned at the pointer, which is on
+   the object being edited, so a panel below would cover what the user is
+   looking at more often than one above. */
+.annotation-menu-group-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 1;
+  min-width: 150px;
+  max-width: min(280px, 92vw);
+  /* Capping the height and letting the panel itself scroll keeps every
+     control reachable wherever the menu lands. The panel is its own scroll
+     container; the bar above it deliberately is not. */
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #2a2a2a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* In the mobile sheet the bar is the first content of a scrolling container,
+   so "above the trigger" is off the top of that container — the panel would
+   open into space the user cannot scroll to. It drops below instead, where
+   the sheet's own scrolling can reach it. */
+.graph-annotation-context-menu--bar.sheet .annotation-menu-group-panel {
+  bottom: auto;
+  top: calc(100% + 6px);
+  max-height: none;
+}
+
+/* Panels are kept on screen by clamping the MENU itself into the viewport
+   (ContextMenuPortal measures and adjusts), not by guessing which groups sit
+   near an edge. The previous `nth-last-child` rule keyed off DOM order, which
+   stops tracking visual order the moment the bar wraps — it would right-anchor
+   panels in the middle of a wrapped bar and leave the actual rightmost ones
+   hanging off the edge. */
+
+/* A panel's own controls keep the spacing they had as sections, minus the
+   bottom margin that separated one section from the next — inside a panel
+   there is no next section. */
+.annotation-menu-group-panel > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Column direction is load-bearing, not cosmetic. TEXT_ALIGN_STYLES (see its
+   doc comment in utils/annotations.js) defines `justifyContent` as the
+   VERTICAL position and `alignItems` as the horizontal one — which is only
+   true for a column-direction container, the direction the annotation's own
+   text box uses. Rendering the preview in the default `row` direction swapped
+   the two axes, so every off-diagonal cell previewed its own transpose: the
+   top-centre button showed its dot at middle-left, and picking it looked like
+   it had set the wrong alignment. Row-major TEXT_ALIGN_VALUES already puts
+   the buttons in the right grid cells; this is what makes each button's dot
+   match the position that button actually applies. */
 .graph-annotation-context-menu .align-picker-dot {
   display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
 }

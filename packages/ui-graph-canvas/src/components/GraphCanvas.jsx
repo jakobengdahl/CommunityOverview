@@ -19,7 +19,11 @@ import GroupNode from './GroupNode';
 import NoteNode from './NoteNode';
 import LabelNode from './LabelNode';
 import ArrowNode from './ArrowNode';
-import GenericAnnotationNode, { newShapeSize } from './GenericAnnotationNode';
+import GenericAnnotationNode, {
+  newShapeSize,
+  regularShapeSize,
+  regularShapeAspect,
+} from './GenericAnnotationNode';
 import AnnotationErrorBoundary from './AnnotationErrorBoundary';
 import AnnotationToolbox from './AnnotationToolbox';
 import FreehandAnnotationNode, { DEFAULT_FREEHAND_COLOR } from './FreehandAnnotationNode';
@@ -81,7 +85,7 @@ import {
 } from '../utils/dragConnected';
 import { createLongPressDetector } from '../utils/longPress';
 import { createFreehandStrokeCapture } from '../utils/freehandStroke';
-import { pointsToPathData } from '../utils/freehandPath';
+import { pointsToPathData, buildPressureSegments, hasPressureData } from '../utils/freehandPath';
 
 // Phone-sized viewport, matching the host app's mobile breakpoint.
 const COMPACT_MEDIA_QUERY = '(max-width: 768px)';
@@ -100,6 +104,30 @@ const FOCUS_RADIUS_PER_NEIGHBOUR = 55;
 // copy — not the node's fallback — was the value every drawn stroke actually
 // got. Two constants for one default is what let the invisible near-white
 // survive a fix aimed at the fallback.
+// A stylus's inverted tip. Chromium reports it as its own pointer type; other
+// stacks report a normal `pen` and flag the eraser in the button bits (button
+// 5 / buttons bit 0x20, per the Pointer Events spec). Shared by the erase
+// gesture and the placement gesture — placement has to exclude EXACTLY what
+// erase accepts, or on the button-bits stacks (the Surface pen case this
+// exists for) flipping the pen over would erase along the stroke and commit a
+// new object on release.
+function isEraserTipEvent(event) {
+  if (event.pointerType === 'eraser') return true;
+  return event.pointerType === 'pen' && (event.button === 5 || (event.buttons & 32) !== 0);
+}
+
+// How far the pointer must travel before the eraser will act again. See
+// eraseAt: without it a sweep cascades down a stack of objects at one spot.
+const ERASE_RESTEP_PX = 8;
+
+// GenericAnnotationNode's own MIN_SIZE. A drawn box may never come out under
+// it, before or after a subtype's proportion is applied.
+const MIN_ANNOTATION_SIZE = 40;
+
+// How far the erased-footprint gate may extend from the pointer. Bounds the
+// measured rect so a large shape cannot black out the rest of the stroke.
+const ERASE_BLOCK_MAX_PX = 96;
+
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 const DEFAULT_FREEHAND_SMOOTHING = 0.3;
 const DEFAULT_FREEHAND_OPACITY = 1;
@@ -487,6 +515,8 @@ function GraphCanvasInner({
     ariaKindGroup: 'Group',
     annotationWidth: 'Width',
     annotationHeight: 'Height',
+    annotationSize: 'Size',
+    annotationMoreActions: 'More actions',
     annotationApplySize: 'Apply size',
     annotationAttachTo: 'Attach to…',
     annotationDetach: 'Detach',
@@ -524,6 +554,10 @@ function GraphCanvasInner({
     voteDot: 'Vote dot',
     image: 'Image',
     freehand: 'Freehand',
+    select: 'Select',
+    eraser: 'Eraser',
+    voteDotPickerOpen: 'Choose a vote dot colour',
+    voteDotPicker: 'Vote dot colours',
     ...annotationToolboxLabels,
   };
 
@@ -664,6 +698,51 @@ function GraphCanvasInner({
   // effect below; the rest are refs since they only matter inside that
   // effect's own event handlers, not to rendering.
   const [freehandActive, setFreehandActive] = useState(false);
+  // The armed annotation tool (task-annotation-tool-modes). `kind: 'select'`
+  // is the resting state and means "behave exactly as the canvas always has":
+  // click selects, drag marquees or moves. Any other kind is a STICKY
+  // placement tool — every tap on empty canvas creates one more of that kind
+  // at the tapped point, until the user arms a different tool. That
+  // stickiness is the whole point: placing eight vote dots used to be eight
+  // trips to the toolbox, each one dropping its dot at the viewport centre on
+  // top of the last.
+  //
+  // 'eraser' is a mode rather than a placement kind: dragging over an
+  // annotation deletes it, over a graph node or edge hides it. 'freehand'
+  // keeps its own separate `freehandActive` flag rather than being folded in
+  // here, because it is genuinely one-shot (auto-disarms after a stroke)
+  // while these are sticky; the two are kept in sync at every entry point
+  // below rather than by making one derive from the other.
+  const [activeTool, setActiveTool] = useState({ kind: 'select', options: undefined });
+  // Read by pointer handlers that must not re-subscribe every time the tool
+  // changes (the eraser effect below), the same refs-for-handlers convention
+  // the freehand capture already uses.
+  const activeToolRef = useRef(activeTool);
+  activeToolRef.current = activeTool;
+  const eraserActive = activeTool.kind === 'eraser';
+  // Any tool that places an object on the canvas: everything except the three
+  // modes and `image` (which opens a file picker instead of placing).
+  const placementArmed = !['select', 'eraser', 'freehand', 'image'].includes(activeTool.kind);
+  // The erase gesture's own state, deliberately in refs rather than inside the
+  // effect below. The effect must not re-subscribe mid-gesture: erasing
+  // changes `nodes`, and a `nodes` dependency would tear the listeners down
+  // and rebuild them after the FIRST object, losing `erasingPointerId` and
+  // stranding the rest of the sweep — the user had to lift and press again
+  // per object. These survive that, and `latestNodesRef` gives the handler a
+  // current node list without the effect having to depend on one.
+  // The in-flight drag-to-draw gesture, and the DOM node its live size preview
+  // is drawn on. Refs for the same reason the erase gesture uses them: the
+  // handlers must survive re-renders mid-gesture, and the preview must not
+  // re-render the canvas on every pointermove.
+  const placementRef = useRef(null);
+  const placementPreviewRef = useRef(null);
+  const placementSuspendedRef = useRef(false);
+  const pendingPlacementClickRef = useRef(false);
+  const createAnnotationRef = useRef(null);
+  const erasingPointerIdRef = useRef(null);
+  const eraseBlockRectRef = useRef(null);
+  const erasedThisStrokeRef = useRef(new Set());
+  const latestNodesRef = useRef([]);
   // The mobile annotate sheet unmounts the toolbox on close (its portal
   // container goes from a real node back to null - see
   // annotationToolboxPortalContainer above), which would otherwise strand
@@ -679,6 +758,13 @@ function GraphCanvasInner({
     prevAnnotationPortalContainerRef.current = annotationToolboxPortalContainer;
     if (isCompact && wasOpen && !annotationToolboxPortalContainer) {
       setFreehandActive(false);
+      // The armed tool has to fall back with it (task-annotation-tool-modes).
+      // `freehandActive` and `activeTool` are two records of the same fact —
+      // resetting only the first left the toolbox reporting freehand as still
+      // pressed, and would leave a placement tool armed with no visible
+      // toolbox left to disarm it, the exact stranding this effect exists to
+      // prevent.
+      setActiveTool({ kind: 'select' });
     }
   }, [annotationToolboxPortalContainer, isCompact]);
   const freehandCaptureRef = useRef(null);
@@ -812,6 +898,12 @@ function GraphCanvasInner({
     },
     [onEndEditing]
   );
+  // Reached from the erase gesture's pointer handlers, which must not
+  // re-subscribe when these callbacks' identities change.
+  const beginEditingRef = useRef(beginEditing);
+  beginEditingRef.current = beginEditing;
+  const endEditingRef = useRef(endEditing);
+  endEditingRef.current = endEditing;
 
   // An annotation that could not be drawn is reported once per session rather
   // than once per annotation: a graph carrying several of the same broken
@@ -910,6 +1002,8 @@ function GraphCanvasInner({
         ariaKindGroup: cml.ariaKindGroup,
         width: cml.annotationWidth,
         height: cml.annotationHeight,
+        size: cml.annotationSize,
+        moreActions: cml.annotationMoreActions,
         applySize: cml.annotationApplySize,
         attachTo: cml.annotationAttachTo,
         detach: cml.annotationDetach,
@@ -927,6 +1021,8 @@ function GraphCanvasInner({
       annotationEditSheetPortalContainer,
       onCloseAnnotationEditSheet,
       cml.annotationOpacity,
+      cml.annotationSize,
+      cml.annotationMoreActions,
       cml.editAnnotation,
       cml.annotationColor,
       cml.annotationFill,
@@ -1203,6 +1299,10 @@ function GraphCanvasInner({
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowNodes);
+  // Kept current here, next to the state it mirrors — the ref is declared far
+  // above because the erase gesture's other refs live together, but it cannot
+  // be initialised there: `nodes` does not exist yet at that point.
+  latestNodesRef.current = nodes;
   const [edges, setEdges, onEdgesChange] = useEdgesState(reactFlowEdges);
 
   const edgeContextRelationshipTypes = useMemo(() => {
@@ -1821,7 +1921,7 @@ function GraphCanvasInner({
           type: 'note',
           position,
           data: { text: '', color: undefined },
-          style: { width: 200, height: 140 },
+          style: options.box || { width: 200, height: 140 },
         };
       } else if (kind === 'label') {
         newNode = {
@@ -1844,6 +1944,44 @@ function GraphCanvasInner({
         // the ratio (GenericAnnotationNode's keepAspectRatio), so it stays
         // that way.
         const shape = options.shape || 'rectangle';
+        // An explicit box from a drag-to-draw gesture wins over the subtype's
+        // default size, and the mirror flags come with it — but a subtype with
+        // a regular ratio is re-proportioned to it first.
+        //
+        // This is load-bearing, not tidiness. The resizer locks
+        // `keepAspectRatio` to whatever ratio the node MEASURES at drag start
+        // (GenericAnnotationNode's own comment says so), which is only safe
+        // because every creation path used to size from `regularShapeSize`.
+        // Drag-to-draw is a new creation path: writing the swept box verbatim
+        // would start a circle/triangle/hexagon at an arbitrary ratio and the
+        // aspect lock would then cement the distortion — reintroducing exactly
+        // the squashed-shape bug that code exists to prevent. The drag still
+        // decides the SIZE; the subtype decides the proportion.
+        // Re-proportion FIRST, then re-floor: `regularShapeSize` recomputes
+        // height from width, so a height clamped before it is simply
+        // discarded — at the minimum a triangle came out 40x35, under the
+        // resizer's own MIN_SIZE that the clamp exists to respect.
+        const proportioned = options.box
+          ? (regularShapeSize(shape, options.box.width) ?? options.box)
+          : null;
+        // Floor the WIDTH so the derived height clears the minimum too —
+        // flooring both independently breaks the very ratio the
+        // re-proportioning exists to keep. `regularShapeSize(40)` gives a
+        // triangle 40x35; raising that 35 to 40 produced a 1:1 "equal-sided"
+        // triangle, and NodeResizer's keepAspectRatio then locked the
+        // distortion in.
+        const aspect = regularShapeAspect(shape);
+        const drawnBox = proportioned
+          ? aspect
+            ? (regularShapeSize(
+                shape,
+                Math.max(proportioned.width, Math.ceil(MIN_ANNOTATION_SIZE * aspect))
+              ) ?? proportioned)
+            : {
+                width: Math.max(MIN_ANNOTATION_SIZE, proportioned.width),
+                height: Math.max(MIN_ANNOTATION_SIZE, proportioned.height),
+              }
+          : null;
         newNode = {
           id,
           type: 'shape',
@@ -1873,8 +2011,15 @@ function GraphCanvasInner({
           // through the existing `zIndex ?? 0` fallbacks
           // (annotationLayers.js's `layerOf`, annotations.js's
           // `flowNodeToOverlay`) — nothing here regresses their behavior.
-          data: { shape, text: '', fill: undefined, border: undefined },
-          style: newShapeSize(shape),
+          data: {
+            shape,
+            text: '',
+            fill: undefined,
+            border: undefined,
+            flipX: options.flipX || undefined,
+            flipY: options.flipY || undefined,
+          },
+          style: drawnBox || newShapeSize(shape),
           zIndex: defaultAnnotationZ(kind),
         };
       } else if (kind === 'icon') {
@@ -1909,7 +2054,13 @@ function GraphCanvasInner({
           type: 'vote_dot',
           position,
           data: {
-            color: undefined,
+            // The colour chosen in the toolbox's vote-dot slot, when there is
+            // one. `undefined` still means "the default", so a dot created
+            // any other way (drag from a host that passes no colour, MCP) is
+            // unchanged. Placing a run of dots in one colour is the whole
+            // reason the slot exists — recolouring each one afterwards
+            // through the property editor was the laborious path.
+            color: options.color,
             size: { ...VOTE_DOT_INTRINSIC_SIZE },
           },
         };
@@ -2063,10 +2214,61 @@ function GraphCanvasInner({
     [viewportCenterPosition, createAnnotation]
   );
 
+  // Arm a toolbox tool (task-annotation-tool-modes). Three of the entries are
+  // not placement tools at all and are handled here rather than by pretending
+  // they are:
+  //   - 'image' has nothing to place until a file exists, so it opens the
+  //     picker immediately and leaves the armed tool alone; the ingest lands
+  //     the annotation at the viewport centre as it always has.
+  //   - 'freehand' owns the separate one-shot `freehandActive` flag; arming it
+  //     from here keeps the toolbox's pressed state and that flag in step, and
+  //     re-tapping it disarms as before.
+  //   - 'select' and 'eraser' are modes with no `options`.
+  // Everything else becomes the sticky placement tool `handlePaneClick` reads.
+  const handleSelectTool = useCallback(
+    (kind, options) => {
+      if (kind === 'image') {
+        pendingImagePositionRef.current = viewportCenterPosition();
+        imageFileInputRef.current?.click();
+        // Return to plain selection rather than leaving whatever was armed
+        // before still armed: after picking a file the user's next tap on the
+        // canvas would otherwise place a shape they had forgotten was live.
+        setFreehandActive(false);
+        setActiveTool({ kind: 'select' });
+        return;
+      }
+      if (kind === 'freehand') {
+        // Sequenced, not nested: a state updater must be pure, and StrictMode
+        // double-invokes them. `activeTool` is the authority on what is armed,
+        // so freehand's own flag is derived from it here.
+        const next = activeToolRef.current?.kind !== 'freehand';
+        setFreehandActive(next);
+        setActiveTool(next ? { kind: 'freehand', options: undefined } : { kind: 'select' });
+        return;
+      }
+      // Arming anything else always leaves freehand: two drawing modes armed
+      // at once would both claim the same pointer gesture.
+      setFreehandActive(false);
+      // Re-arming the tool that is already armed is deliberately a no-op
+      // rather than a toggle back to select. A toggle reads well for a single
+      // button but breaks the two-step gesture the shape and icon slots need:
+      // picking "circle" from the fold-out arms the shape tool, and the click
+      // that lands on the slot button right after would then disarm it, so
+      // choosing a variant would leave no tool armed at all. `select` is the
+      // way back, which is the whole reason it is in the row.
+      setActiveTool({ kind, options });
+    },
+    [viewportCenterPosition]
+  );
+
   // The toolbox's coarse-pointer (touch/stylus) drag-to-create path — see
   // AnnotationToolbox's component doc comment. `clientPosition` is the
   // release point in screen space; `image`/`freehand` never reach here since
   // AnnotationToolbox never starts a pointer-drag for either.
+  // The placement effect below listens once and must not re-subscribe when
+  // this callback's identity changes, so it reaches it through a ref.
+  createAnnotationRef.current = createAnnotation;
+
   const handleAnnotationDragCreate = useCallback(
     (kind, options, clientPosition) => {
       const position = screenToFlowPosition(clientPosition);
@@ -2136,7 +2338,26 @@ function GraphCanvasInner({
   // rather than a node that silently never appears.
   const ingestImageFile = useCallback(
     (file, position) => {
-      if (!onImageIngest || !file || !file.type || !file.type.startsWith('image/')) return;
+      if (!file) return;
+      // Every rejection below used to be a silent `return`, which is the worst
+      // possible answer to "I picked a file and nothing happened": the canvas
+      // did not change and nothing said why. Each one now reports.
+      if (!onImageIngest) {
+        showNotification('error', cml.imageIngestFailed);
+        return;
+      }
+      // A MISSING type is not a rejection. Browsers report an empty
+      // `file.type` for plenty of ordinary files depending on the platform and
+      // how the file was picked, and dropping those silently made image upload
+      // look broken for exactly the users it happened to. The server validates
+      // and optimises the bytes anyway (backend/core/image_ingest.py), and the
+      // file picker's own `accept` list already does the coarse filtering — so
+      // an unknown type is passed along and judged on its content. A type that
+      // IS present and is not an image is still refused, but out loud.
+      if (file.type && !file.type.startsWith('image/')) {
+        showNotification('error', cml.imageIngestFailed);
+        return;
+      }
       readImageFileAsDataUrl(file)
         .then((dataUrl) => onImageIngest(dataUrl, position))
         .catch(() => showNotification('error', cml.imageIngestFailed));
@@ -2243,6 +2464,11 @@ function GraphCanvasInner({
     // same "click away to back out" convention every menu here already uses.
     setAttachModeId(null);
     setOverlapPicker(null);
+    // Placement itself is NOT done here. It lives in the wrapper's own
+    // pointer gesture (see the drag-to-draw effect below), because
+    // `onPaneClick` never fires while the pane is in selection mode — which
+    // is the desktop default — and because a click carries no drag to size
+    // the object with.
   }, [closeAllMenus, clearSelection]);
 
   // Shared by the "Attach to…" target-tap mode and the overlap-object picker
@@ -2837,10 +3063,26 @@ function GraphCanvasInner({
   // start can otherwise exceed the long-press delay and pop the pane context
   // menu mid-gesture.
   useEffect(() => {
-    if (!isTouchMode || freehandActive) return undefined;
+    if (freehandActive) return undefined;
     const wrapper = reactFlowWrapper.current;
     if (!wrapper) return undefined;
     const detector = longPressDetectorRef.current;
+
+    // Which pointers can hold to open a context menu. A stylus reports
+    // `pointerType: 'pen'`, not 'touch', so restricting this to 'touch' meant
+    // a pen long-press armed nothing at all and never reached a menu — on a
+    // device where the pen is the primary input and has no right-click of its
+    // own. `resolveTouchTarget` below already resolves the object under the
+    // press, so admitting the pen is all it takes for a hold ON an annotation
+    // to open THAT annotation's menu rather than the pane's.
+    //
+    // Touch stays gated on `isTouchMode` (the host's coarse-pointer signal)
+    // exactly as before; the pen is admitted regardless, because a hybrid
+    // device driven by pen can legitimately report a fine pointer. Desktop
+    // mouse is unaffected either way — it never matches here and keeps
+    // right-click.
+    const isLongPressPointer = (event) =>
+      event.pointerType === 'pen' || (isTouchMode && event.pointerType === 'touch');
 
     const resolveTouchTarget = (target) => {
       const nodeEl = target?.closest?.('.react-flow__node');
@@ -2857,7 +3099,28 @@ function GraphCanvasInner({
     };
 
     const handlePointerDown = (event) => {
-      if (event.pointerType !== 'touch') return;
+      if (!isLongPressPointer(event)) return;
+      // A hold that is about to erase is not a hold that wants a menu.
+      if (event.pointerType === 'eraser' || activeToolRef.current?.kind === 'eraser') return;
+      // A press that lands on a real control — the ✎ Edit trigger, a resize
+      // handle, any button or field inside a node — belongs to that control,
+      // not to the canvas. A stylus rests on a target noticeably longer than
+      // a mouse click does, so without this the 500ms timer routinely won the
+      // race against the tap: pressing ✎ with a pen opened the pane/node
+      // context menu at the press point and the button's own activation
+      // arrived afterwards to close it again, which read as "the Edit button
+      // does nothing with a pen".
+      // Real controls only — deliberately NOT `[role="button"]`. ReactFlow puts
+      // `role="button"` on every focusable NODE wrapper
+      // (@reactflow/core's NodeWrapper: `role: isFocusable ? 'button' :
+      // undefined`), so matching that selector made this bail on every node
+      // and long-press stopped opening any node's context menu at all — the
+      // interaction this whole guard was added next to. A `<button>` element
+      // still matches, which is what the ✎ Edit trigger and the node's own
+      // expand/edit buttons are.
+      if (event.target?.closest?.('button, input, textarea, select, .react-flow__resize-control')) {
+        return;
+      }
       const info = resolveTouchTarget(event.target);
       detector.onPointerDown(event.pointerId, event.clientX, event.clientY, {
         ...info,
@@ -2866,15 +3129,15 @@ function GraphCanvasInner({
       });
     };
     const handlePointerMove = (event) => {
-      if (event.pointerType !== 'touch') return;
+      if (!isLongPressPointer(event)) return;
       detector.onPointerMove(event.pointerId, event.clientX, event.clientY);
     };
     const handlePointerUp = (event) => {
-      if (event.pointerType !== 'touch') return;
+      if (!isLongPressPointer(event)) return;
       detector.onPointerUp(event.pointerId);
     };
     const handlePointerCancel = (event) => {
-      if (event.pointerType !== 'touch') return;
+      if (!isLongPressPointer(event)) return;
       detector.onPointerCancel(event.pointerId);
     };
 
@@ -2924,19 +3187,81 @@ function GraphCanvasInner({
     const toModelPoint = (event) =>
       screenToFlowPositionRef.current({ x: event.clientX, y: event.clientY });
 
-    const clearPreview = () => {
-      freehandPreviewPathRef.current?.setAttribute('d', '');
+    // The preview's own sample: the model point PLUS the pressure, using the
+    // exact rule `samplePoint` (freehandStroke.js) applies to the samples that
+    // get committed — so what the preview draws and what lands on the canvas
+    // are derived from the same data. `toModelPoint` drops pressure because
+    // the capture reads it from the event itself; the preview array has no
+    // such second source and has to carry it.
+    const toPreviewPoint = (event) => {
+      const point = toModelPoint(event);
+      if (Number.isFinite(event.pressure) && event.pressure > 0) point.pressure = event.pressure;
+      return point;
     };
 
+    const clearPreview = () => {
+      const groupEl = freehandPreviewPathRef.current;
+      if (groupEl) groupEl.replaceChildren();
+    };
+
+    // The preview draws the SAME variable-width stroke the committed
+    // annotation will (FreehandAnnotationNode's own pressure rendering), not a
+    // uniform line. It used to be a single <path> at a constant width, so a
+    // pressure-sensitive stroke only revealed its thick and thin parts after
+    // the pointer came up — the one moment the feedback is useless, since the
+    // stroke is already finished. One <path> per pressure segment is what
+    // makes the width visible while the hand is still drawing it.
+    //
+    // Still imperative (no React state) for the same reason as before: a fast
+    // pointermove burst must not re-render the canvas. A pressure-less stroke
+    // keeps the single-path fast route unchanged.
     const updatePreview = () => {
-      const pathEl = freehandPreviewPathRef.current;
-      if (!pathEl) return;
+      const groupEl = freehandPreviewPathRef.current;
+      if (!groupEl) return;
       const viewport = getViewportRef.current();
-      const screenPoints = freehandModelPointsRef.current.map((p) => ({
-        x: p.x * viewport.zoom + viewport.x,
-        y: p.y * viewport.zoom + viewport.y,
-      }));
-      pathEl.setAttribute('d', pointsToPathData(screenPoints));
+      const points = freehandModelPointsRef.current;
+      const screenPoints = points.map((p) => {
+        const point = { x: p.x * viewport.zoom + viewport.x, y: p.y * viewport.zoom + viewport.y };
+        if (Number.isFinite(p.pressure)) point.pressure = p.pressure;
+        return point;
+      });
+
+      const ns = 'http://www.w3.org/2000/svg';
+      const paint = (el, d, width) => {
+        el.setAttribute('d', d);
+        el.setAttribute('stroke', DEFAULT_FREEHAND_COLOR);
+        el.setAttribute('stroke-width', String(width));
+        el.setAttribute('fill', 'none');
+        el.setAttribute('stroke-linecap', 'round');
+        el.setAttribute('stroke-linejoin', 'round');
+      };
+
+      if (!hasPressureData(screenPoints)) {
+        // Zoom scales the on-screen width the same way the committed stroke's
+        // own transform does, so the preview matches what lands.
+        const width = DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom;
+        let pathEl = groupEl.firstElementChild;
+        if (!pathEl || groupEl.childElementCount !== 1) {
+          groupEl.replaceChildren();
+          pathEl = document.createElementNS(ns, 'path');
+          groupEl.appendChild(pathEl);
+        }
+        paint(pathEl, pointsToPathData(screenPoints), width);
+        return;
+      }
+
+      const segments = buildPressureSegments(
+        screenPoints,
+        DEFAULT_FREEHAND_SMOOTHING,
+        DEFAULT_FREEHAND_STROKE_WIDTH * viewport.zoom
+      );
+      // Reuse the existing path elements and only add/remove the difference,
+      // rather than replacing the whole subtree on every pointermove.
+      while (groupEl.childElementCount > segments.length) groupEl.lastElementChild.remove();
+      while (groupEl.childElementCount < segments.length) {
+        groupEl.appendChild(document.createElementNS(ns, 'path'));
+      }
+      segments.forEach((segment, i) => paint(groupEl.children[i], segment.d, segment.width));
     };
 
     const abandonStroke = () => {
@@ -2945,12 +3270,13 @@ function GraphCanvasInner({
       clearPreview();
     };
 
-    // Single-shot: one completed (or cancelled) stroke disarms the tool, the
-    // same way clicking any other toolbox item creates exactly one
-    // annotation. Drawing a second stroke means clicking "Freehand" again.
+    // Sticky, like every other tool. It used to disarm itself after one
+    // stroke, so lifting the pen and putting it down again panned the canvas
+    // instead of drawing the next line — the tool was gone without anything
+    // saying so, and a drawing is rarely one stroke. Escape, the toolbox's own
+    // button and the mobile sheet closing all still disarm it.
     const finishStroke = () => {
       abandonStroke();
-      setFreehandActive(false);
     };
 
     const handlePointerDown = (event) => {
@@ -2965,7 +3291,7 @@ function GraphCanvasInner({
         return;
       }
       freehandPrimaryPointerIdRef.current = event.pointerId;
-      freehandModelPointsRef.current = [toModelPoint(event)];
+      freehandModelPointsRef.current = [toPreviewPoint(event)];
       capture.onPointerDown(event, toModelPoint);
       updatePreview();
     };
@@ -2977,7 +3303,7 @@ function GraphCanvasInner({
       const samples = coalesced && coalesced.length > 0 ? coalesced : [event];
       for (const sample of samples) {
         capture.onPointerMove(sample, toModelPoint);
-        freehandModelPointsRef.current.push(toModelPoint(sample));
+        freehandModelPointsRef.current.push(toPreviewPoint(sample));
       }
       updatePreview();
     };
@@ -3010,6 +3336,517 @@ function GraphCanvasInner({
       abandonStroke();
     };
   }, [freehandActive]);
+
+  // Erase-by-drag (task-annotation-tool-modes). Two independent ways in, which
+  // is why this listens unconditionally rather than only while the tool is
+  // armed:
+  //   - the toolbox's eraser tool, for any pointer;
+  //   - `pointerType === 'eraser'`, the inverted (back) tip of a stylus such
+  //     as the Surface pen, which browsers report as its own pointer type.
+  //     That one deliberately ignores whichever tool is armed: flipping the
+  //     pen over IS the gesture, and having to arm a tool first would defeat
+  //     the point. Nothing else in the app claims that pointer type, so this
+  //     cannot shadow another gesture.
+  //
+  // Erasing is per-gesture idempotent (`erasedThisStroke`): dragging back and
+  // forth over the same object must not delete it, then delete whatever
+  // ReactFlow re-renders under that point next. Annotations are deleted
+  // (they are the user's own scratch marks); graph nodes and edges are only
+  // HIDDEN, never deleted — the eraser is a canvas-tidying tool, and a
+  // dragged-over node is far too easy to hit to let it destroy graph data.
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return undefined;
+
+    // A stylus's inverted tip. Chromium reports it as its own pointer type;
+    // some stacks instead report a normal `pen` while flagging the eraser in
+    // the button bits (button 5 / buttons bit 0x20, per the Pointer Events
+    // spec). Accepting both is what makes the Surface pen's back end work
+    // rather than only the one platform that takes the first route.
+    const wantsErase = (event) =>
+      isEraserTipEvent(event) || activeToolRef.current?.kind === 'eraser';
+
+    // Resolve what sits under the pointer through the DOM rather than through
+    // ReactFlow's own hit-testing: the eraser has to work against whatever is
+    // actually painted at that pixel, including a node under a translucent
+    // annotation, and elementFromPoint already answers exactly that. Edge ids
+    // come from ReactFlow's own `rf__edge-<id>` test id, the only stable id
+    // carrier on an edge group.
+    const resolveTarget = (clientX, clientY) => {
+      const el = document.elementFromPoint(clientX, clientY);
+      if (!el) return null;
+      const nodeEl = el.closest('.react-flow__node');
+      if (nodeEl?.dataset?.id) return { kind: 'node', id: nodeEl.dataset.id };
+      const edgeEl = el.closest('.react-flow__edge');
+      const testId = edgeEl?.getAttribute('data-testid');
+      if (testId?.startsWith('rf__edge-')) {
+        return { kind: 'edge', id: testId.slice('rf__edge-'.length) };
+      }
+      return null;
+    };
+
+    // The footprint of the element being erased, measured before it is
+    // removed. Falls back to a small box around the pointer when the element
+    // cannot be measured (jsdom, or an element already detached).
+    const rectOfErased = (clientX, clientY) => {
+      const el = document.elementFromPoint(clientX, clientY)?.closest?.('.react-flow__node');
+      const rect = el?.getBoundingClientRect?.();
+      if (rect && (rect.width || rect.height)) {
+        // Clamped around the pointer. An unbounded rect can exceed the
+        // viewport for a large shape at high zoom, so the pointer could never
+        // leave it and nothing was erasable for the rest of the stroke; it
+        // also blocked a rotated annotation's whole bounding box rather than
+        // its figure.
+        const cx = clientX;
+        const cy = clientY;
+        const box = {
+          left: Math.max(rect.left, cx - ERASE_BLOCK_MAX_PX),
+          right: Math.min(rect.right, cx + ERASE_BLOCK_MAX_PX),
+          top: Math.max(rect.top, cy - ERASE_BLOCK_MAX_PX),
+          bottom: Math.min(rect.bottom, cy + ERASE_BLOCK_MAX_PX),
+        };
+        // `closest` can return an ancestor whose box does not contain the
+        // pointer (a child overflowing it — rotated content, handles), which
+        // would invert the clamp and leave a box that blocks nothing.
+        if (box.left > box.right || box.top > box.bottom) return null;
+        return box;
+      }
+      return {
+        left: clientX - ERASE_RESTEP_PX,
+        right: clientX + ERASE_RESTEP_PX,
+        top: clientY - ERASE_RESTEP_PX,
+        bottom: clientY + ERASE_RESTEP_PX,
+      };
+    };
+
+    const eraseAt = (clientX, clientY) => {
+      // Never act on what this stroke's own deletion just revealed. Erasing a
+      // small annotation sitting on a graph node would otherwise hide that
+      // node the moment the pointer moved — the per-object key cannot prevent
+      // it, because whatever is underneath is simply a different key.
+      //
+      // The gate is the erased element's own rectangle rather than a fixed
+      // radius: a radius only delays the cascade until the pointer has moved
+      // past it, and picks a distance that is wrong for both a vote dot and a
+      // full-width note. Leaving the erased object's footprint is the honest
+      // signal that the user has moved on to something else.
+      const blocked = eraseBlockRectRef.current;
+      if (blocked) {
+        if (
+          clientX >= blocked.left &&
+          clientX <= blocked.right &&
+          clientY >= blocked.top &&
+          clientY <= blocked.bottom
+        ) {
+          return;
+        }
+        eraseBlockRectRef.current = null;
+      }
+
+      const target = resolveTarget(clientX, clientY);
+      if (!target) return;
+      const key = `${target.kind}:${target.id}`;
+      if (erasedThisStrokeRef.current.has(key)) return;
+
+      if (target.kind === 'edge') {
+        erasedThisStrokeRef.current.add(key);
+        eraseBlockRectRef.current = rectOfErased(clientX, clientY);
+        onHideEdge?.(target.id);
+        return;
+      }
+
+      const node = latestNodesRef.current.find((n) => n.id === target.id);
+      if (!node) return;
+      // A group is deliberately NOT erasable. Removing one is not a filter:
+      // its children have to be un-parented and their parent-relative
+      // positions converted back to absolute (GroupNode's
+      // removeGroupKeepChildren). Deleting it here would leave children
+      // pointing at a parent that no longer exists. `deleteSelectedNodes`
+      // excludes groups for the same reason (it gates on OVERLAY_TYPES, not
+      // ANNOTATION_TYPES) — and a group's large empty interior is exactly the
+      // kind of thing a sweeping eraser lands on by accident.
+      if (node.type === 'group') return;
+
+      if (OVERLAY_TYPES.has(node.type)) {
+        // Same guards the bulk delete applies: an annotation another client
+        // is editing, or one the user locked on purpose, is not erasable by
+        // sweeping a pointer over it. Checked BEFORE anything is recorded, so
+        // sweeping over a locked annotation does not also block whatever sits
+        // near it.
+        if (isRemoteLocked(node.data) || node.data?.locked) return;
+        erasedThisStrokeRef.current.add(key);
+        eraseBlockRectRef.current = rectOfErased(clientX, clientY);
+        setNodes((nds) => nds.filter((n) => n.id !== target.id));
+        onAnnotationChangeRef.current?.('delete');
+        // The same edit-lease handshake every other annotation delete performs.
+        beginEditingRef.current?.([target.id]).then(() => endEditingRef.current?.([target.id]));
+        return;
+      }
+      // Armed for the hide half as well. Recording it only for annotation
+      // deletes left the cascade live for the other half: hiding a graph node
+      // revealed the edge running under it, and the next pointermove hid that
+      // too.
+      erasedThisStrokeRef.current.add(key);
+      eraseBlockRectRef.current = rectOfErased(clientX, clientY);
+      onHide?.(target.id);
+    };
+
+    const handlePointerDown = (event) => {
+      if (!wantsErase(event) || erasingPointerIdRef.current !== null) return;
+      erasingPointerIdRef.current = event.pointerId;
+      erasedThisStrokeRef.current.clear();
+      eraseBlockRectRef.current = null;
+      // Capture the pointer so `pointerup` is delivered here even when the
+      // sweep ends outside the wrapper (over browser chrome, or off-window).
+      // Without it that release is lost, `erasingPointerIdRef` stays set, and
+      // the guard above then rejects every later erase for the life of the
+      // component — the eraser silently dies.
+      try {
+        wrapper.setPointerCapture(event.pointerId);
+      } catch {
+        // Capture is a convenience, not a requirement: the window-level
+        // release listeners below are the backstop.
+      }
+      // Claim the gesture before ReactFlow can start a pan or a marquee with
+      // it. Without this the canvas pans away underneath the stroke.
+      event.preventDefault();
+      event.stopPropagation();
+      eraseAt(event.clientX, event.clientY);
+    };
+
+    const handlePointerMove = (event) => {
+      if (event.pointerId !== erasingPointerIdRef.current) return;
+      event.preventDefault();
+      eraseAt(event.clientX, event.clientY);
+    };
+
+    const endStroke = (event) => {
+      if (event.pointerId !== erasingPointerIdRef.current) return;
+      try {
+        wrapper.releasePointerCapture(event.pointerId);
+      } catch {
+        // Already released, or never captured.
+      }
+      erasingPointerIdRef.current = null;
+      erasedThisStrokeRef.current.clear();
+      eraseBlockRectRef.current = null;
+    };
+
+    // Capture phase so the gesture is claimed before ReactFlow's own pane
+    // handlers see it, for the same reason the freehand capture above runs
+    // where it does.
+    wrapper.addEventListener('pointerdown', handlePointerDown, true);
+    wrapper.addEventListener('pointermove', handlePointerMove, true);
+    wrapper.addEventListener('pointerup', endStroke, true);
+    wrapper.addEventListener('pointercancel', endStroke, true);
+    // Belt to the pointer-capture braces: a release the wrapper never sees at
+    // all still ends the stroke.
+    window.addEventListener('pointerup', endStroke, true);
+    window.addEventListener('pointercancel', endStroke, true);
+    return () => {
+      wrapper.removeEventListener('pointerdown', handlePointerDown, true);
+      wrapper.removeEventListener('pointermove', handlePointerMove, true);
+      wrapper.removeEventListener('pointerup', endStroke, true);
+      wrapper.removeEventListener('pointercancel', endStroke, true);
+      window.removeEventListener('pointerup', endStroke, true);
+      window.removeEventListener('pointercancel', endStroke, true);
+      // Never leave the gesture latched across a teardown.
+      erasingPointerIdRef.current = null;
+      erasedThisStrokeRef.current.clear();
+      eraseBlockRectRef.current = null;
+    };
+    // No `nodes` dependency on purpose — see erasingPointerIdRef above.
+  }, [setNodes, onHide, onHideEdge]);
+
+  // Drag-to-draw placement (task-annotation-drag-to-draw).
+  //
+  // Placement used to ride on ReactFlow's `onPaneClick`, which does not fire
+  // while the pane is in selection mode (`selectionOnDrag`, the desktop
+  // default here) — the pane swallowed the click as a marquee gesture, so an
+  // armed tool produced nothing at all with a mouse. Owning the gesture on the
+  // wrapper, the way the freehand and erase gestures already do, removes that
+  // dependency entirely and is also what makes sizing possible: a press
+  // fixes one corner, the drag sizes the box, and the release commits it, so
+  // the user sees the shape they are going to get before letting go.
+  //
+  // A press with no meaningful drag still creates at the pressed point in the
+  // kind's default size — the plain click-to-place gesture, unchanged.
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return undefined;
+
+    // Only the kinds with a real box can be sized by dragging. A vote dot, an
+    // icon, a label and a text annotation have a fixed or content-driven size
+    // (RESIZABLE_KINDS/SIZED_GENERIC_KINDS exclude them), so a drag would have
+    // nothing to apply; those place at the press point and ignore the rest.
+    const SIZABLE = new Set(['shape', 'note']);
+    const MIN_DRAG_PX = 6;
+    // Matches GenericAnnotationNode's own MIN_SIZE, so a drawn box can never
+    // be smaller than the resizer would allow it to be dragged to.
+    const MIN_DRAWN_SIZE = MIN_ANNOTATION_SIZE;
+
+    const armedPlacement = () => {
+      const tool = activeToolRef.current;
+      if (!tool) return null;
+      if (tool.kind === 'select' || tool.kind === 'eraser' || tool.kind === 'freehand') return null;
+      if (tool.kind === 'image') return null;
+      return tool;
+    };
+
+    const handlePointerDown = (event) => {
+      const tool = armedPlacement();
+      if (!tool) return;
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      // A stylus's eraser tip erases whatever is armed — never draws. This has
+      // to reject exactly what the erase gesture accepts, including the
+      // button-bits form, or on those stacks one flip of the pen would erase
+      // along the stroke AND commit an object on release.
+      if (isEraserTipEvent(event)) return;
+      // A second pointer is the start of a pinch, not a second placement.
+      // Abandoning rather than hijacking is what keeps two-finger zoom usable
+      // while a tool is armed — which matters because these tools are sticky,
+      // so "armed" is the resting state, not a moment.
+      //
+      // Suspended rather than merely nulled: a third contact (a palm landing
+      // during a two-finger zoom, or the first finger re-landing while the
+      // second is still down) would otherwise find no gesture in flight, start
+      // a fresh one, and commit an annotation when it lifted. The suspension
+      // lasts until every pointer is up.
+      if (placementRef.current || placementSuspendedRef.current) {
+        placementRef.current = null;
+        placementSuspendedRef.current = true;
+        hidePreview();
+        return;
+      }
+      // Only a press on EMPTY canvas starts a placement. Landing on an
+      // existing node, an edge or a control has to keep meaning what it
+      // already means — selecting, dragging, pressing a button — or an armed
+      // tool makes the rest of the canvas unusable, and since these tools are
+      // sticky that is the resting state rather than a moment.
+      //
+      // Tested by exclusion, not by requiring `.react-flow__pane`: in
+      // ReactFlow the nodes live INSIDE the pane
+      // (.react-flow__pane > .react-flow__viewport > .react-flow__nodes >
+      // .react-flow__node), so a "did this land in the pane?" check is
+      // satisfied by every node too and let a press on an existing annotation
+      // create a second one on top of it.
+      const target = event.target;
+      if (!target?.closest) return;
+      // `.react-flow__nodesselection` is a DIRECT child of the pane, outside
+      // the viewport, so no node/edge selector reaches it — and its rect
+      // carries `pointer-events: all` across the whole multi-selection box.
+      // Without it here, pressing a multi-selection to drag it created an
+      // annotation on top of the selection instead.
+      if (
+        target.closest(
+          '.react-flow__node, .react-flow__edge, .react-flow__resize-control, .react-flow__nodesselection'
+        )
+      ) {
+        return;
+      }
+      if (target.closest('button, input, textarea, select, [role="button"]')) return;
+      if (!target.closest('.react-flow__pane')) return;
+
+      // Any earlier gesture's pending click is stale by now. On touch and pen
+      // the compatibility click is suppressed by the preventDefault below, so
+      // the flag would otherwise stay armed and the swallow would eat the
+      // user's NEXT tap on the canvas instead.
+      pendingPlacementClickRef.current = false;
+      placementRef.current = {
+        pointerId: event.pointerId,
+        tool,
+        startX: event.clientX,
+        startY: event.clientY,
+        dragged: false,
+      };
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    // Claiming the gesture from ReactFlow needs a SECOND block, on the legacy
+    // events. d3-zoom — which is what `panOnDrag` drives — binds
+    // `mousedown.zoom` and `touchstart.zoom`, not pointer events, so
+    // `stopPropagation` on a pointerdown never reached it and the canvas
+    // panned along with the drag that was sizing the object. Both corners are
+    // then converted at release with the moved transform, collapsing the box
+    // to nothing — which the minimum-size clamp would have quietly turned into
+    // a 40x40 shape at the wrong place instead of an obvious failure.
+    //
+    // Blocked only while THIS gesture owns the pointer, and only for a single
+    // contact: a second finger abandons the placement (see above) and its own
+    // `touchstart` is let through carrying both touches, so d3-zoom can still
+    // start a pinch. That is what keeps zoom usable while a sticky tool is
+    // armed instead of trading one regression for the other.
+    const blockCanvasGesture = (event) => {
+      if (!placementRef.current) return;
+      if (event.type === 'touchstart' && event.touches && event.touches.length > 1) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    // Swallow the click the browser synthesizes at the end of the gesture.
+    // Blocking `mousedown` above means the canvas never recorded a press
+    // position, so its own click handler cannot tell this click apart from a
+    // plain one and falls through to clearing the selection — deselecting the
+    // annotation that was just created and focused. One click, once, per
+    // completed placement.
+    const swallowSyntheticClick = (event) => {
+      if (!pendingPlacementClickRef.current) return;
+      pendingPlacementClickRef.current = false;
+      // Only a click on the canvas surface. The toolbox lives inside this
+      // wrapper too, so an unscoped swallow ate the user's NEXT button press —
+      // arming a different tool right after drawing silently did nothing.
+      if (event.target?.closest?.('button, input, textarea, select, [role="button"]')) return;
+      if (!event.target?.closest?.('.react-flow__pane')) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const hidePreview = () => {
+      const previewEl = placementPreviewRef.current;
+      if (previewEl) previewEl.style.display = 'none';
+    };
+
+    const updatePreview = (event) => {
+      const placement = placementRef.current;
+      const previewEl = placementPreviewRef.current;
+      if (!placement || !previewEl) return;
+      const left = Math.min(placement.startX, event.clientX);
+      const top = Math.min(placement.startY, event.clientY);
+      const width = Math.abs(event.clientX - placement.startX);
+      const height = Math.abs(event.clientY - placement.startY);
+      const rect = wrapper.getBoundingClientRect();
+      previewEl.style.display = 'block';
+      previewEl.style.left = `${left - rect.left}px`;
+      previewEl.style.top = `${top - rect.top}px`;
+      previewEl.style.width = `${width}px`;
+      previewEl.style.height = `${height}px`;
+    };
+
+    const handlePointerMove = (event) => {
+      const placement = placementRef.current;
+      if (!placement || event.pointerId !== placement.pointerId) return;
+      const far =
+        Math.abs(event.clientX - placement.startX) > MIN_DRAG_PX ||
+        Math.abs(event.clientY - placement.startY) > MIN_DRAG_PX;
+      if (far) placement.dragged = true;
+      if (placement.dragged && SIZABLE.has(placement.tool.kind)) updatePreview(event);
+    };
+
+    const handlePointerUp = (event) => {
+      const placement = placementRef.current;
+      if (!placement || event.pointerId !== placement.pointerId) return;
+      placementRef.current = null;
+      pendingPlacementClickRef.current = true;
+      hidePreview();
+
+      const { tool, startX, startY } = placement;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      const sized = placement.dragged && SIZABLE.has(tool.kind);
+
+      if (!sized) {
+        createAnnotationRef.current(
+          tool.kind,
+          screenToFlowPositionRef.current({ x: startX, y: startY }),
+          tool.options
+        );
+        return;
+      }
+
+      // The box is anchored at the press point and grows toward the release
+      // point in flow space, so it is correct at any zoom. Dragging back past
+      // the press point mirrors rather than inverting the box: the drawn
+      // figure points the way the hand moved, which for a triangle or a
+      // process arrow is the whole reason to drag in that direction.
+      const a = screenToFlowPositionRef.current({ x: startX, y: startY });
+      const b = screenToFlowPositionRef.current({ x: event.clientX, y: event.clientY });
+      // `MIN_DRAG_PX` is satisfied by EITHER axis, so a drag along one axis
+      // alone leaves the other at zero. Both are therefore floored at the
+      // resizer's own minimum — and a regular subtype, whose proportion is
+      // recomputed from the WIDTH alone (`regularShapeSize`), is sized from
+      // the longer side rather than from `dx`: sizing it from a near-zero
+      // width meant a mostly-vertical drag always produced a minimum-size
+      // triangle no matter how far the user actually dragged.
+      const sweptWidth = Math.round(Math.abs(b.x - a.x));
+      const sweptHeight = Math.round(Math.abs(b.y - a.y));
+      const regular = regularShapeAspect(tool.options?.shape || 'rectangle') !== null;
+      const box = regular
+        ? { width: Math.max(MIN_DRAWN_SIZE, sweptWidth, sweptHeight), height: MIN_DRAWN_SIZE }
+        : {
+            width: Math.max(MIN_DRAWN_SIZE, sweptWidth),
+            height: Math.max(MIN_DRAWN_SIZE, sweptHeight),
+          };
+      createAnnotationRef.current(
+        tool.kind,
+        { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) },
+        {
+          ...tool.options,
+          box,
+          // Thresholded, not a raw sign test: a long downward drag with a
+          // couple of pixels of leftward jitter would otherwise silently
+          // mirror the shape and aim a process arrow the wrong way.
+          flipX: dx < -MIN_DRAG_PX,
+          flipY: dy < -MIN_DRAG_PX,
+        }
+      );
+    };
+
+    const handlePointerCancel = (event) => {
+      const placement = placementRef.current;
+      if (!placement || event.pointerId !== placement.pointerId) return;
+      placementRef.current = null;
+      hidePreview();
+    };
+
+    // Lifting the LAST contact clears a suspension, so the next press is a
+    // fresh placement again. Tracked with a real set of live pointer ids: the
+    // previous `event.buttons` check was dead code, because `buttons` is 0 on
+    // every pointerup by spec (the contact is gone). The suspension therefore
+    // ended at the first finger up, and a third contact during the rest of a
+    // pinch could start a placement and commit an object — the exact case it
+    // was added to close.
+    const livePointers = new Set();
+    const trackPointerDown = (event) => livePointers.add(event.pointerId);
+    const clearSuspension = (event) => {
+      livePointers.delete(event.pointerId);
+      if (livePointers.size === 0) placementSuspendedRef.current = false;
+    };
+
+    wrapper.addEventListener('pointerdown', handlePointerDown, true);
+    wrapper.addEventListener('pointermove', handlePointerMove, true);
+    wrapper.addEventListener('pointerup', handlePointerUp, true);
+    wrapper.addEventListener('pointercancel', handlePointerCancel, true);
+    wrapper.addEventListener('pointerdown', trackPointerDown, true);
+    wrapper.addEventListener('pointerup', clearSuspension, true);
+    wrapper.addEventListener('pointercancel', clearSuspension, true);
+    // A release the wrapper never sees (pen or mouse let go outside the
+    // window) would otherwise leave the id in `livePointers` forever, so the
+    // set never empties and the suspension never lifts — placement would be
+    // silently dead for the rest of the session. The erase gesture above
+    // carries the same backstop for the same reason.
+    window.addEventListener('pointerup', clearSuspension, true);
+    window.addEventListener('pointercancel', clearSuspension, true);
+    wrapper.addEventListener('mousedown', blockCanvasGesture, true);
+    wrapper.addEventListener('click', swallowSyntheticClick, true);
+    wrapper.addEventListener('touchstart', blockCanvasGesture, { capture: true, passive: false });
+    return () => {
+      wrapper.removeEventListener('pointerdown', handlePointerDown, true);
+      wrapper.removeEventListener('pointermove', handlePointerMove, true);
+      wrapper.removeEventListener('pointerup', handlePointerUp, true);
+      wrapper.removeEventListener('pointercancel', handlePointerCancel, true);
+      wrapper.removeEventListener('pointerdown', trackPointerDown, true);
+      wrapper.removeEventListener('pointerup', clearSuspension, true);
+      wrapper.removeEventListener('pointercancel', clearSuspension, true);
+      window.removeEventListener('pointerup', clearSuspension, true);
+      window.removeEventListener('pointercancel', clearSuspension, true);
+      wrapper.removeEventListener('mousedown', blockCanvasGesture, true);
+      wrapper.removeEventListener('click', swallowSyntheticClick, true);
+      wrapper.removeEventListener('touchstart', blockCanvasGesture, { capture: true });
+      placementRef.current = null;
+      placementSuspendedRef.current = false;
+    };
+  }, []);
 
   // Always prevent browser context menu on the canvas wrapper
   useEffect(() => {
@@ -3272,6 +4109,14 @@ function GraphCanvasInner({
         }
         if (freehandActive) {
           setFreehandActive(false);
+          setActiveTool({ kind: 'select' });
+          return;
+        }
+        // Escape also puts a sticky placement tool (or the eraser) away, the
+        // same "back out of the current mode" meaning it already has for
+        // freehand, an open menu and a live selection.
+        if (activeToolRef.current?.kind !== 'select') {
+          setActiveTool({ kind: 'select' });
           return;
         }
         closeAllMenus();
@@ -3922,7 +4767,15 @@ function GraphCanvasInner({
             // Stop the browser turning a slow stylus/touch stroke into a
             // scroll/pinch gesture mid-draw, which would otherwise fire
             // pointercancel and abandon the stroke unpredictably.
-            touchAction: freehandActive ? 'none' : undefined,
+            // `none` hands every touch gesture to the canvas's own handlers.
+            // Correct while a stroke or an erase sweep owns the pointer, but
+            // it must NOT be the resting state: d3-zoom needs the browser to
+            // keep delivering multi-touch for pinch, so the default is left
+            // alone otherwise.
+            // Not keyed on `placementArmed`: `none` would kill pinch-zoom for as
+            // long as a sticky tool is armed. Drawing gestures still need it,
+            // and those are genuinely momentary modes.
+            touchAction: freehandActive || eraserActive ? 'none' : undefined,
           }}
         >
           <ReactFlow
@@ -3959,11 +4812,34 @@ function GraphCanvasInner({
             minZoom={0.1}
             maxZoom={2}
             defaultEdgeOptions={{ animated: true, style: { strokeWidth: 2 } }}
-            panOnDrag={freehandActive ? false : isTouchMode ? true : [0, 2]}
-            selectionOnDrag={freehandActive ? false : !isTouchMode}
+            // An armed eraser owns the drag the same way freehand does: a
+            // sweep across the canvas has to erase, not pan or marquee-select.
+            // A placement tool owns the pane the same way freehand and the
+            // eraser do. Leaving `selectionOnDrag` on was what swallowed the
+            // click entirely: ReactFlow's pane treats a press in selection
+            // mode as the start of a marquee and never reports the click, so
+            // an armed tool created nothing at all with a mouse.
+            // `placementArmed` deliberately does NOT disable panning or zooming.
+            // Placement tools are sticky, so armed is the resting state —
+            // killing pan and pinch for its whole duration would mean
+            // disarming just to move the viewport between placements. The
+            // placement gesture claims only its own primary pointer and
+            // abandons as soon as a second one arrives, which leaves pinch to
+            // ReactFlow. Marquee selection IS suppressed: it is what swallowed
+            // the press before this gesture existed.
+            panOnDrag={freehandActive || eraserActive ? false : isTouchMode ? true : [0, 2]}
+            selectionOnDrag={
+              freehandActive || eraserActive || placementArmed ? false : !isTouchMode
+            }
             selectionMode={SelectionMode.Partial}
             selectNodesOnDrag={true}
-            nodesDraggable={!freehandActive}
+            nodesDraggable={!freehandActive && !eraserActive}
+            // Two-finger pinch zooms. This is ReactFlow's default; it is
+            // stated explicitly because the actual fix for pinch lives in CSS
+            // (GraphCanvas.css's touch-action rules) and this is the prop a
+            // future reader would otherwise suspect first and "fix" by
+            // toggling. The prop was never the problem.
+            zoomOnPinch
             deleteKeyCode={null}
             multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
             edgesUpdatable={false}
@@ -4133,6 +5009,7 @@ function GraphCanvasInner({
           {!activeFocusRootId && !(isCompact && annotationToolboxPortalContainer) && (
             <AnnotationToolbox
               onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+              onSelectTool={handleSelectTool}
               onDragCreate={handleAnnotationDragCreate}
               labels={atl}
               compact={isCompact}
@@ -4143,7 +5020,7 @@ function GraphCanvasInner({
               // that reports hover while being driven by finger, and an
               // explicit touchMode="on" override.
               touch={isTouchMode}
-              activeKind={freehandActive ? 'freehand' : null}
+              activeKind={activeTool.kind}
             />
           )}
           {!activeFocusRootId &&
@@ -4152,11 +5029,12 @@ function GraphCanvasInner({
             createPortal(
               <AnnotationToolbox
                 onCreate={(kind, options) => createAnnotationAtViewportCenter(kind, options)}
+                onSelectTool={handleSelectTool}
                 onDragCreate={handleAnnotationDragCreate}
                 labels={atl}
                 variant="sheet"
                 touch={isTouchMode}
-                activeKind={freehandActive ? 'freehand' : null}
+                activeKind={activeTool.kind}
               />,
               annotationToolboxPortalContainer
             )}
@@ -4171,6 +5049,17 @@ function GraphCanvasInner({
             onChange={handleImageFileSelected}
             style={{ display: 'none' }}
             data-testid="graph-image-file-input"
+          />
+          {/* Live size preview for a drag-to-draw placement. Screen-space and
+              driven imperatively (see the placement effect's updatePreview) so
+              a pointermove burst changes only this element's own style, never
+              the canvas's React tree. Hidden until a drag actually starts. */}
+          <div
+            ref={placementPreviewRef}
+            className="graph-placement-preview"
+            data-testid="placement-preview"
+            aria-hidden="true"
+            style={{ display: 'none' }}
           />
           {freehandActive && (
             <>
@@ -4187,14 +5076,11 @@ function GraphCanvasInner({
                 className="graph-freehand-preview-overlay"
                 data-testid="freehand-preview-overlay"
               >
-                <path
-                  ref={freehandPreviewPathRef}
-                  stroke={DEFAULT_FREEHAND_COLOR}
-                  strokeWidth={DEFAULT_FREEHAND_STROKE_WIDTH}
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
+                {/* A group, not a single path: updatePreview fills it with one
+                    path per pressure segment so the stroke's thick and thin
+                    parts show while it is being drawn. Each path carries its
+                    own stroke/width, so none are set here. */}
+                <g ref={freehandPreviewPathRef} />
               </svg>
               <div className="graph-freehand-drawing-hint" role="status" aria-live="polite">
                 {cml.freehandDrawingHint}

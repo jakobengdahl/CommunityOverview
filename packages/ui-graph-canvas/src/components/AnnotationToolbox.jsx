@@ -6,6 +6,7 @@ import {
   DEFAULT_ANNOTATION_ICON,
   resolveAnnotationIcon,
 } from '../utils/annotationIcons';
+import { GENERIC_ANNOTATION_COLORS, DEFAULT_GENERIC_COLOR } from '../utils/annotations';
 import { ToolSlotPicker } from './ToolSlotPicker';
 import './AnnotationToolbox.css';
 
@@ -21,6 +22,19 @@ const DRAG_THRESHOLD_PX = 6;
 // border, covers what the standalone `frame` button used to make in one
 // click. There is no longer a dedicated toolbox entry for it.
 const TOOLBOX_ITEMS_LEADING = [
+  // The resting tool (task-annotation-tool-modes). Not a creation item at
+  // all: arming it is how a user goes back to plain
+  // select/drag/marquee on the canvas after using a placement tool, which is
+  // otherwise only reachable by re-tapping the armed tool to disarm it — a
+  // gesture nothing on screen advertises. Deliberately first in the row, the
+  // position every drawing app puts the arrow in. `draggable: false` because
+  // there is no object to carry.
+  {
+    kind: 'select',
+    glyph: { kind: 'toolbox-glyph', name: 'select' },
+    labelKey: 'select',
+    draggable: false,
+  },
   { kind: 'note', glyph: { kind: 'toolbox-glyph', name: 'note' }, labelKey: 'note' },
   { kind: 'text', glyph: { kind: 'toolbox-glyph', name: 'text', text: 'T' }, labelKey: 'text' },
   { kind: 'label', glyph: { kind: 'toolbox-glyph', name: 'label' }, labelKey: 'label' },
@@ -64,8 +78,19 @@ const ICON_VARIANT_KEYS = ICON_VARIANTS.map((variant) => variant.icon);
 const ICON_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:icon-slot';
 const ICON_SLOT_ITEM_KEY = 'icon-slot';
 
+// Every colour a vote dot can be created in — the same list its property
+// editor offers afterwards (GENERIC_ANNOTATION_COLORS), so the two cannot
+// drift apart.
+const VOTE_DOT_VARIANTS = GENERIC_ANNOTATION_COLORS.map((color) => ({
+  color,
+  glyph: { kind: 'vote-dot-swatch', color },
+  label: color,
+}));
+const VOTE_DOT_VARIANT_KEYS = VOTE_DOT_VARIANTS.map((variant) => variant.color);
+const VOTE_DOT_SLOT_STORAGE_KEY = 'communityoverview:annotation-toolbox:vote-dot-slot';
+const VOTE_DOT_SLOT_ITEM_KEY = 'vote-dot-slot';
+
 const TOOLBOX_ITEMS_TRAILING = [
-  { kind: 'vote_dot', glyph: { kind: 'toolbox-glyph', name: 'vote-dot' }, labelKey: 'voteDot' },
   // Opens a file picker rather than creating an object directly — there is
   // nothing to pick up and carry, so this item stays click-only (see
   // `isDraggableKind` below).
@@ -87,11 +112,38 @@ const TOOLBOX_ITEMS_TRAILING = [
     labelKey: 'freehand',
     draggable: false,
   },
+  // Erase-by-drag (task-annotation-tool-modes): dragging over an annotation
+  // deletes it, dragging over a graph node or edge hides it. Like `select`
+  // it arms a mode rather than creating anything, so it is click-only. It is
+  // also what a stylus's inverted (eraser) tip does implicitly, without
+  // arming anything — see GraphCanvas's pointer handling.
+  {
+    kind: 'eraser',
+    glyph: { kind: 'toolbox-glyph', name: 'eraser' },
+    labelKey: 'eraser',
+    draggable: false,
+  },
 ];
+
+// Tools that arm a mode instead of producing an object. They never drag-create
+// and never open a picker; GraphCanvas owns what each one then does.
+const MODE_KINDS = new Set(['select', 'eraser', 'freehand']);
 
 const TOOLTIP_ID = 'annotation-toolbox-tooltip';
 
 function renderGlyph(glyph) {
+  // The vote-dot slot previews the colour it will create in, so the toolbox
+  // answers "which colour am I about to place?" without opening the picker —
+  // the same job the shape slot's outline and the icon slot's glyph do.
+  if (glyph?.kind === 'vote-dot-swatch') {
+    return (
+      <span
+        className="annotation-toolbox-visual annotation-toolbox-visual--vote-dot"
+        style={{ backgroundColor: glyph.color }}
+        aria-hidden="true"
+      />
+    );
+  }
   if (glyph?.kind === 'shape-swatch') {
     return (
       <span
@@ -190,6 +242,7 @@ function renderGlyph(glyph) {
  */
 function AnnotationToolbox({
   onCreate,
+  onSelectTool,
   onDragCreate,
   labels = {},
   compact = false,
@@ -220,10 +273,19 @@ function AnnotationToolbox({
     DEFAULT_ANNOTATION_ICON
   );
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [currentVoteDotColor, setCurrentVoteDotColor] = useToolSlotSelection(
+    VOTE_DOT_SLOT_STORAGE_KEY,
+    VOTE_DOT_VARIANT_KEYS,
+    DEFAULT_GENERIC_COLOR
+  );
+  const [voteDotPickerOpen, setVoteDotPickerOpen] = useState(false);
   const shapeSlotRef = useRef(null);
   const shapeCornerButtonRef = useRef(null);
   const iconSlotRef = useRef(null);
   const iconCornerButtonRef = useRef(null);
+  const voteDotSlotRef = useRef(null);
+  const voteDotCornerButtonRef = useRef(null);
+  const voteDotMainButtonRef = useRef(null);
   // Lets the picker's onSelect callback focus the slot itself after a
   // selection, the same way the slot's own onClick already does — see
   // renderShapeSlot below.
@@ -237,6 +299,7 @@ function AnnotationToolbox({
     if (!expanded) {
       setShapePickerOpen(false);
       setIconPickerOpen(false);
+      setVoteDotPickerOpen(false);
     }
   }, [expanded]);
   // Sole purpose: swallow the click that follows a completed pointer drag
@@ -408,8 +471,12 @@ function AnnotationToolbox({
     iconPickerOpen: 'Choose an icon',
     iconPicker: 'Icons',
     voteDot: 'Vote dot',
+    voteDotPickerOpen: 'Choose a vote dot colour',
+    voteDotPicker: 'Vote dot colours',
     image: 'Image',
     freehand: 'Freehand',
+    select: 'Select',
+    eraser: 'Eraser',
     // What each item will add, shown on hover. Separate from the item's name
     // because the name has to stay short enough to be an accessible label and
     // a touch-mode caption, while this is allowed to say what happens.
@@ -426,7 +493,55 @@ function AnnotationToolbox({
     voteDotHint: 'Add a voting dot',
     imageHint: 'Add an image from a file',
     freehandHint: 'Draw a freehand stroke',
+    selectHint: 'Select and move objects',
+    eraserHint: 'Drag over objects to erase them',
     ...labels,
+  };
+
+  // Arming a tool is what a click does now (task-annotation-tool-modes):
+  // the toolbox picks the tool, the canvas decides where the object goes.
+  // A click used to drop the object at the viewport centre immediately,
+  // which meant placing five vote dots was five round trips between the
+  // toolbox and the canvas, each one landing in the same spot the last had
+  // to be dragged out of. `onCreate` stays the fallback so a host that has
+  // not adopted tool modes (and the drag-to-create path, which carries its
+  // own position) behaves exactly as before.
+  const activateTool = (kind, options) => {
+    if (onSelectTool) onSelectTool(kind, options);
+    else onCreate?.(kind, options);
+  };
+
+  // Enter/Space CREATES rather than arming, at the viewport centre.
+  //
+  // Arming is a pointer contract: the gesture that completes it is a
+  // pointerdown/pointerup on the canvas. Routing keyboard activation through
+  // it too would leave a keyboard user with a live tool and no way to place
+  // anything — silently removing the only keyboard route to a standalone
+  // annotation. Handled as a real key event (and preventDefault'ing the click
+  // the browser would synthesize from it) rather than by sniffing
+  // `event.detail`, which is 0 for plenty of legitimate programmatic clicks
+  // and would misread them as keyboard use.
+  const handleToolKeyDown = (event, kind, options) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    // Holding the key must not spray objects across the canvas.
+    if (event.repeat) return;
+    if (!onCreate) return;
+    // Only the kinds that actually produce an object. `select`, `eraser` and
+    // `freehand` arm a mode and `image` opens a file picker — none of them is
+    // something `createAnnotation` knows how to build, and passing one through
+    // fell out of every branch into the terminal `else` and created an ARROW.
+    // Keyboard-activating the Select tool dropped an arrow on the canvas.
+    if (MODE_KINDS.has(kind) || kind === 'image') {
+      // Still let these arm, so the keyboard reaches them at all — just
+      // through the mode path rather than the creation one.
+      event.preventDefault();
+      setHovered(null);
+      activateTool(kind, options);
+      return;
+    }
+    event.preventDefault();
+    setHovered(null);
+    onCreate(kind, options);
   };
 
   // Shared per-item button, used for every toolbox entry except the shape
@@ -438,7 +553,11 @@ function AnnotationToolbox({
     // image/freehand have no draggable object to create (a file picker, an
     // armed mode) — both stay click-only: no draggable attribute, no
     // dragstart handler, no pointer-drag handlers, no grab cursor.
-    const isDraggableKind = draggable !== false;
+    // A mode tool can never be dragged onto the canvas whatever its own entry
+    // says — there is no object in hand to drop. Deriving it from MODE_KINDS
+    // as well as the explicit flag keeps the two from drifting apart when a
+    // tool is added.
+    const isDraggableKind = draggable !== false && !MODE_KINDS.has(kind);
     const options = shape ? { shape } : undefined;
     const itemKey = `${kind}-${labelKey}`;
     return (
@@ -458,10 +577,16 @@ function AnnotationToolbox({
           // mouseleave until the user touches something else, so without
           // this the tooltip stays on screen after the item is used.
           setHovered(null);
-          onCreate?.(kind, options);
+          activateTool(kind, options);
         }}
+        onKeyDown={(event) => handleToolKeyDown(event, kind, options)}
         aria-label={lbl[labelKey]}
-        aria-pressed={kind === 'freehand' ? activeKind === kind : undefined}
+        // Every item is now a tool that can be armed, not just the one
+        // one-shot drawing mode, so the pressed state reports for all of
+        // them rather than being special-cased to 'freehand'. `image` never
+        // becomes the armed tool, so it reports nothing rather than
+        // permanently announcing an un-pressed toggle it is not.
+        aria-pressed={kind === 'image' ? undefined : activeKind === kind}
         // The description is the accessible *description*, referenced
         // rather than duplicated. A `title` would give the same text a
         // second, native tooltip on top of the styled one — the visual
@@ -562,9 +687,11 @@ function AnnotationToolbox({
             event.currentTarget.focus();
             if (consumeSuppressedClick(SHAPE_SLOT_ITEM_KEY)) return;
             setHovered(null);
-            onCreate?.('shape', options);
+            activateTool('shape', options);
           }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'shape', options)}
           aria-label={lbl[variant.labelKey]}
+          aria-pressed={activeKind === 'shape'}
           aria-describedby={hovered?.key === variant.labelKey ? TOOLTIP_ID : undefined}
           onMouseEnter={(e) => showTip(e, variant.labelKey)}
           onMouseLeave={() => setHovered(null)}
@@ -631,6 +758,13 @@ function AnnotationToolbox({
             onSelect={(key) => {
               setCurrentShape(key);
               setShapePickerOpen(false);
+              // Picking a shape arms it (task-annotation-tool-modes). Choosing
+              // "circle" from the picker and then drawing on the canvas only
+              // to get whatever tool was armed before is the bug this closes:
+              // the picker reads as "I want to draw this now", so it selects
+              // the tool as well as the variant, exactly as clicking the slot
+              // itself does.
+              activateTool('shape', { shape: key });
               // Same reasoning as the main button's own onClick: without an
               // explicit focus() here, ToolSlotPicker's cleanup effect would
               // land focus on the corner button instead of the slot the
@@ -672,9 +806,11 @@ function AnnotationToolbox({
             event.currentTarget.focus();
             if (consumeSuppressedClick(ICON_SLOT_ITEM_KEY)) return;
             setHovered(null);
-            onCreate?.('icon', options);
+            activateTool('icon', options);
           }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'icon', options)}
           aria-label={`${lbl.icon}: ${variant.label}`}
+          aria-pressed={activeKind === 'icon'}
           aria-describedby={hovered?.key === 'icon' ? TOOLTIP_ID : undefined}
           onMouseEnter={(e) => showTip(e, 'icon')}
           onMouseLeave={() => setHovered(null)}
@@ -728,9 +864,111 @@ function AnnotationToolbox({
             onSelect={(key) => {
               setCurrentIcon(key);
               setIconPickerOpen(false);
+              // Same reasoning as the shape picker's onSelect above: picking
+              // the variant also arms the tool that draws it.
+              activateTool('icon', { icon: key });
               iconMainButtonRef.current?.focus();
             }}
             onClose={() => setIconPickerOpen(false)}
+          />
+        )}
+      </div>
+    );
+  };
+
+  // The vote-dot slot: same collapsed-slot pattern as shape and icon, but the
+  // variant IS the colour. A vote dot has no other property worth choosing at
+  // creation time, and picking the colour afterwards through the property
+  // editor meant every dot was placed in the default grey first — laborious
+  // for the one annotation kind people place many of in a row.
+  const renderVoteDotSlot = () => {
+    const variant =
+      VOTE_DOT_VARIANTS.find((candidate) => candidate.color === currentVoteDotColor) ??
+      VOTE_DOT_VARIANTS[0];
+    const options = { color: variant.color };
+    const pickerOptions = VOTE_DOT_VARIANTS.map((candidate) => ({
+      key: candidate.color,
+      glyph: candidate.glyph,
+      label: candidate.label,
+    }));
+
+    return (
+      <div className="annotation-toolbox-slot" key="vote-dot-slot" ref={voteDotSlotRef}>
+        <button
+          ref={voteDotMainButtonRef}
+          type="button"
+          className="annotation-toolbox-item annotation-toolbox-item--draggable"
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            setVoteDotPickerOpen(false);
+          }}
+          onClick={(event) => {
+            setVoteDotPickerOpen(false);
+            event.currentTarget.focus();
+            if (consumeSuppressedClick(VOTE_DOT_SLOT_ITEM_KEY)) return;
+            setHovered(null);
+            activateTool('vote_dot', options);
+          }}
+          onKeyDown={(event) => handleToolKeyDown(event, 'vote_dot', options)}
+          aria-label={lbl.voteDot}
+          aria-pressed={activeKind === 'vote_dot'}
+          aria-describedby={hovered?.key === 'voteDot' ? TOOLTIP_ID : undefined}
+          onMouseEnter={(e) => showTip(e, 'voteDot')}
+          onMouseLeave={() => setHovered(null)}
+          onFocus={(e) => showTip(e, 'voteDot')}
+          onBlur={() => setHovered(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setVoteDotPickerOpen(true);
+          }}
+          draggable={!touch}
+          onDragStart={(e) => {
+            e.dataTransfer.setData(
+              'application/annotation-kind',
+              JSON.stringify({ kind: 'vote_dot', ...options })
+            );
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onPointerDown={
+            touch
+              ? (e) => {
+                  if (e.button === 0) setVoteDotPickerOpen(false);
+                  handlePointerDown(e, 'vote_dot', options, variant.glyph, VOTE_DOT_SLOT_ITEM_KEY);
+                }
+              : undefined
+          }
+        >
+          <span className="annotation-toolbox-item-glyph" aria-hidden="true">
+            {renderGlyph(variant.glyph)}
+          </span>
+          <span className="annotation-toolbox-item-label">{lbl.voteDot}</span>
+        </button>
+        <button
+          ref={voteDotCornerButtonRef}
+          type="button"
+          className="annotation-toolbox-slot-corner"
+          aria-label={lbl.voteDotPickerOpen}
+          aria-haspopup="true"
+          aria-expanded={voteDotPickerOpen}
+          onClick={() => setVoteDotPickerOpen(true)}
+        >
+          <span aria-hidden="true">▾</span>
+        </button>
+        {voteDotPickerOpen && (
+          <ToolSlotPicker
+            anchorRef={voteDotSlotRef}
+            returnFocusRef={voteDotCornerButtonRef}
+            ariaLabel={lbl.voteDotPicker}
+            options={pickerOptions}
+            currentKey={variant.color}
+            renderGlyph={renderGlyph}
+            onSelect={(key) => {
+              setCurrentVoteDotColor(key);
+              setVoteDotPickerOpen(false);
+              activateTool('vote_dot', { color: key });
+              voteDotMainButtonRef.current?.focus();
+            }}
+            onClose={() => setVoteDotPickerOpen(false)}
           />
         )}
       </div>
@@ -766,6 +1004,7 @@ function AnnotationToolbox({
           {TOOLBOX_ITEMS_LEADING.map(renderToolboxItem)}
           {renderShapeSlot()}
           {renderIconSlot()}
+          {renderVoteDotSlot()}
           {TOOLBOX_ITEMS_TRAILING.map(renderToolboxItem)}
         </div>
       )}

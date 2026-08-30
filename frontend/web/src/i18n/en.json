@@ -542,7 +542,9 @@
     "annotation_attach_to_hint": "Choose a target to attach to — Escape to cancel",
     "annotation_attach_to_cancel": "Cancel attaching",
     "annotation_multi_select_mode": "Select multiple",
-    "annotation_overlap_picker_title": "Multiple objects here — choose one"
+    "annotation_overlap_picker_title": "Multiple objects here — choose one",
+    "annotation_size": "Size",
+    "annotation_more_actions": "More actions"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",
@@ -576,7 +578,13 @@
     "icon_hint": "Add an icon",
     "vote_dot_hint": "Add a voting dot",
     "image_hint": "Add an image from a file",
-    "freehand_hint": "Draw a freehand stroke"
+    "freehand_hint": "Draw a freehand stroke",
+    "select": "Select",
+    "eraser": "Eraser",
+    "select_hint": "Select and move objects",
+    "eraser_hint": "Drag over objects to erase them",
+    "vote_dot_picker_open": "Choose a vote dot colour",
+    "vote_dot_picker": "Vote dot colours"
   },
   "common": {
     "saving": "Saving...",

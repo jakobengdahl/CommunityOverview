@@ -12,10 +12,45 @@ import { GraphCanvas } from '../src/index';
 // a second mock shape, since this file needs exactly the same access.
 const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
 
+// Creating from the toolbox is a two-step gesture (task-annotation-tool-modes):
+// the toolbox arms a tool, and the next press on empty canvas is where the
+// object goes. That press is a real pointer gesture on the canvas wrapper, not
+// ReactFlow's `onPaneClick` — that callback never fires while the pane is in
+// selection mode, which is the desktop default, so placement rode on a
+// callback that was never delivered. The mock therefore renders a stand-in
+// pane element for the gesture to land on.
+function pointerEvent(
+  type,
+  { pointerId = 1, pointerType = 'mouse', clientX = 0, clientY = 0 } = {}
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  return event;
+}
+
+// Placement is a pointer gesture on the canvas wrapper (press then release),
+// not ReactFlow's `onPaneClick` — that callback never fires while the pane is
+// in selection mode, which is the desktop default.
+function placeOnPane(x = 120, y = 90) {
+  const pane = screen.getByTestId('pane');
+  act(() => {
+    pane.dispatchEvent(pointerEvent('pointerdown', { clientX: x, clientY: y }));
+    pane.dispatchEvent(pointerEvent('pointerup', { clientX: x, clientY: y }));
+  });
+}
+
 vi.mock('reactflow', () => {
   const MockReactFlow = (props) => {
     store.handlers = { ...store.handlers, ...props };
-    return <div data-testid="react-flow">{props.children}</div>;
+    return (
+      <div data-testid="react-flow" className="react-flow">
+        {/* Placement only starts on empty canvas, which the gesture checks for
+            by looking for this class on the event target. */}
+        <div data-testid="pane" className="react-flow__pane" />
+        {props.children}
+      </div>
+    );
   };
   return {
     __esModule: true,
@@ -226,6 +261,7 @@ describe('GraphCanvas: keyboard creation lands selected and focused, ready to ed
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     const created = store.nodes.find((n) => n.type === 'note' && n.id !== 'already-selected');
     expect(created?.selected).toBe(true);
@@ -283,6 +319,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     expect(document.activeElement).toBe(target);
   });
@@ -303,6 +340,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
       const target = mountFocusTarget('note-1735500000000');
 
       fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+      placeOnPane();
 
       expect(document.activeElement).not.toBe(target);
       // The invariant is "focus never left the sheet", not merely "focus
@@ -320,6 +358,7 @@ describe('GraphCanvas: creation focus must never escape an open modal mobile she
 
     fireEvent.click(screen.getByRole('button', { name: /add annotation/i }));
     fireEvent.click(screen.getByRole('button', { name: /^note$/i }));
+    placeOnPane();
 
     expect(document.activeElement).toBe(target);
   });

@@ -130,6 +130,11 @@ export const AnnotationContext = createContext({
     ariaKindArrow: 'Arrow',
     ariaKindFreehand: 'Freehand stroke',
     ariaKindGroup: 'Group',
+    // The two property-bar groups with no section heading to inherit a name
+    // from (task-annotation-compact-property-bar): 'size' collects the non-drag
+    // width/height controls, 'moreActions' the one-shot commands.
+    size: 'Size',
+    moreActions: 'More actions',
     // Non-drag geometry (task-annotation-accessible-shared-controls).
     width: 'Width',
     height: 'Height',

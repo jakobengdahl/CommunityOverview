@@ -41,9 +41,16 @@
   line-height: 1;
 }
 
+/* One row, always (task-annotation-toolbox-icons-only). With the captions
+   gone every cell is a fixed 44px square, so the whole tool set fits a phone
+   viewport without wrapping; `nowrap` plus an x-scroll is the safety net for
+   the narrowest cases (or a future tool being added) — it degrades to a
+   swipeable strip rather than silently stealing a second row of canvas. */
 .annotation-toolbox-items {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
   justify-content: center;
   gap: 6px;
   padding: 8px;
@@ -68,14 +75,23 @@
   height: 44px;
   padding: 0;
   border-radius: 8px;
-  border: 1px solid rgba(100, 116, 139, 0.85);
-  background: #1f2937;
+  /* Bare glyphs, no chrome (task-annotation-toolbox-icons-only). The filled,
+     outlined cell each item used to draw made the row read as ten buttons
+     competing for attention; with the caption gone the glyph has to be the
+     thing the eye lands on. The drop shadow is what the border used to do —
+     separate the mark from whatever is behind it — without drawing a box.
+     Hover/focus/active still paint a real surface, so the affordance and the
+     armed-tool state stay obvious. */
+  border: 1px solid transparent;
+  background: transparent;
   color: #e2e8f0;
   cursor: pointer;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
 }
 
-.annotation-toolbox-item:hover {
-  border-color: #38bdf8;
+.annotation-toolbox-item:hover,
+.annotation-toolbox-item:focus-visible {
+  border-color: rgba(56, 189, 248, 0.9);
   background: #334155;
 }
 
@@ -204,12 +220,19 @@
   background: #831843;
 }
 
+/* The slot paints its own `background-color` inline, from whichever colour is
+   currently selected, so the button previews the dot it will place. The value
+   here is only the fallback for a glyph rendered without one. The inset ring
+   is dropped: it read as a doughnut rather than as the solid dot the canvas
+   actually draws, which defeated the point of previewing the colour. */
 .annotation-toolbox-visual--vote-dot {
   width: 22px;
   height: 22px;
   border-radius: 999px;
   background: #22c55e;
-  box-shadow: inset 0 0 0 3px rgba(240, 253, 244, 0.65);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 1px 3px rgba(0, 0, 0, 0.45);
 }
 
 .annotation-toolbox-visual--image {
@@ -275,19 +298,81 @@
   transform: rotate(-18deg);
 }
 
+/* The icon slot shows the glyph alone (task-annotation-icon-no-chrome), with
+   no ring or fill behind it — matching what the icon annotation itself now
+   draws on the canvas (GenericAnnotationNode.css's .kind-icon). The circular
+   badge that used to sit here made the slot look like a different class of
+   control from every other item in the row, and it previewed the icon as
+   something the canvas no longer renders. Legibility comes from the item's
+   own drop shadow instead. */
 .annotation-toolbox-icon-glyph {
   width: 24px;
   height: 24px;
-  border-radius: 999px;
-  border: 2px solid #38bdf8;
-  background: rgba(8, 47, 73, 0.65);
+  border: none;
+  background: transparent;
   color: #f8fafc;
-  font-size: 15px;
+  font-size: 19px;
 }
 
 .annotation-toolbox-icon-glyph--abbreviated {
   font-size: 11px;
   text-transform: uppercase;
+}
+
+/* The two mode tools (task-annotation-tool-modes). Both are drawn from
+   pseudo-elements for the same reason every other glyph here is: an emoji
+   renders differently on every platform and a font icon would pull in a
+   dependency the canvas package does not have. */
+
+/* The standard cursor arrow, as ONE clipped shape. It was previously a
+   triangle plus a separately rotated bar for the tail, and the two never met
+   cleanly — the joint read as a kink, which is what made the icon look
+   crooked. A single polygon has no joint to misalign. */
+.annotation-toolbox-visual--select {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--select::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 3px;
+  width: 14px;
+  height: 19px;
+  background: #f8fafc;
+  clip-path: polygon(0 0, 0 76%, 24% 56%, 42% 100%, 60% 92%, 43% 50%, 72% 46%);
+}
+
+/* An eraser block: the rubber (angled, filled) over the surface it clears. */
+.annotation-toolbox-visual--eraser {
+  width: 25px;
+  height: 25px;
+}
+
+.annotation-toolbox-visual--eraser::before,
+.annotation-toolbox-visual--eraser::after {
+  content: '';
+  position: absolute;
+}
+
+.annotation-toolbox-visual--eraser::before {
+  left: 4px;
+  top: 5px;
+  width: 17px;
+  height: 11px;
+  border-radius: 2px;
+  background: #fca5a5;
+  transform: rotate(-28deg);
+}
+
+.annotation-toolbox-visual--eraser::after {
+  left: 4px;
+  bottom: 4px;
+  width: 17px;
+  height: 3px;
+  border-radius: 999px;
+  background: #f8fafc;
 }
 
 .annotation-toolbox-shape-glyph {
@@ -379,16 +464,17 @@
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
 }
 
+/* No caption on a coarse pointer either (task-annotation-toolbox-icons-only).
+   Widening every cell to fit a word is what pushed the row to wrap in two on
+   a narrow viewport, and a two-row toolbox costs canvas height exactly where
+   there is least of it. The glyphs carry the meaning; the hover tooltip and
+   each button's aria-label carry the name. Cells only grow to a 44px touch
+   target here, they do not grow to fit text. */
 @media (hover: none) {
   .annotation-toolbox-item {
-    width: auto;
-    min-width: 44px;
-    gap: 8px;
-    padding: 0 10px;
-  }
-
-  .annotation-toolbox-item-label {
-    display: inline;
+    width: 44px;
+    height: 44px;
+    padding: 0;
   }
 }
 
@@ -429,15 +515,9 @@
    hover-capability query does, and covers the case that query can miss on
    some hybrid devices that report hover while being used by finger. */
 .annotation-toolbox--touch .annotation-toolbox-item {
-  width: auto;
-  min-width: 48px;
+  width: 48px;
   height: 48px;
-  gap: 8px;
-  padding: 0 10px;
-}
-
-.annotation-toolbox--touch .annotation-toolbox-item-label {
-  display: inline;
+  padding: 0;
 }
 
 /* Sheet variant (variant="sheet" in AnnotationToolbox.jsx): portaled into the

@@ -279,6 +279,11 @@ describe('non-drag "Attach to…" wiring (LabelNode, GenericAnnotationNode text/
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByTitle('star'));
+    // GenericAnnotationNode's menu is the compact property bar, so the
+    // attachment commands sit behind its overflow group. LabelNode's menu (the
+    // test above) is still the vertical one and needs no such step — the two
+    // are deliberately compared here, so only this side changes.
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
     fireEvent.click(screen.getByRole('button', { name: /attach to/i }));
     expect(enterAttachMode).toHaveBeenCalledWith('icon-1');
   });
@@ -420,6 +425,7 @@ describe('non-drag width/height (AnnotationSizeControl, via NoteNode and GroupNo
         </AnnotationContext.Provider>
       );
       fireEvent.contextMenu(document.querySelector('.kind-shape'));
+      fireEvent.click(screen.getByRole('button', { name: 'Size' }));
       fireEvent.change(screen.getByRole('spinbutton', { name: 'Width' }), {
         target: { value: '180' },
       });

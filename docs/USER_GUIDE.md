@@ -255,8 +255,8 @@ Annotations are part of the session, not the knowledge graph: they are stored wi
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
 
-**Editing an existing annotation.** Right-click still opens the property menu described
-below, but selecting any annotation — a group box included — also shows a small round
+**Editing an existing annotation.** Right-click (or, with a stylus, press and hold on the
+annotation itself) still opens the property menu described below, but selecting any annotation — a group box included — also shows a small round
 **✎ Edit** button in its corner — a visible way in that works by click or tap alone, and by
 keyboard: Tab to the button and press Enter or Space, or press **Shift+F10** (or the
 keyboard's Menu key) while the annotation itself is focused. It opens the exact same menu
@@ -271,6 +271,20 @@ long-press, which has always been unreliable across browsers and is never the *o
 A freshly created annotation (from the toolbox, the right-click "add" menu, or a
 drag-and-drop) is selected and focused immediately, so its Edit button is one Tab away
 without having to click or tap to find it first.
+
+For **Text**, **Shape**, **Icon**, **Vote dot** and **Image** annotations the property
+menu is a compact row of small icons rather than a tall list of labelled sections. Each
+icon is one property — colour, fill, border, text alignment, text size, font, shape,
+rotation, opacity, size, layer order — and shows what that property is currently set to,
+so a fill button carries the current fill colour. Click one to open just that property's
+controls; click another to switch. **Delete** sits directly in the row, and the remaining
+one-off commands (Duplicate, Add nearby, Attach to…) are behind the **⋯** button. The row
+is deliberately small: the old stacked menu was taller than a phone screen and covered the
+object you were editing.
+
+The nine-position **text alignment** grid mirrors where the text will sit: the top-middle
+button puts the text at the top centre, the bottom-left button at the bottom left, and so
+on.
 
 Some kinds' menus offer a few more non-drag controls, useful with a keyboard or on a
 device with no fine pointer:
@@ -294,30 +308,55 @@ device with no fine pointer:
   selection.
 
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
-annotation** to expand it, then pick a type to drop it at the centre of your current view:
-**Note**, **Text**, **Label**, a **Shape**, **Icon**, **Vote dot**, **Image**,
-or **Freehand**. Each is a single icon — hover one to see what it will add. On a touch
-screen, where there is no hover, the names are shown next to the icons instead. It is
-hidden while a focus view is active, since annotations are set aside during focus (see
-[9. On a phone](#9-on-a-phone) for how focus view works).
+annotation** to expand it, then pick a tool: **Select**, **Note**, **Text**, **Label**, a
+**Shape**, **Icon**, **Vote dot**, **Image**, **Freehand**, or **Eraser**. Each is a
+single icon with no caption — hover one (or read its name with a screen reader) to see
+what it does. The toolbox is hidden while a focus view is active, since annotations are
+set aside during focus (see [9. On a phone](#9-on-a-phone) for how focus view works).
+
+**Picking a tool arms it; the canvas decides where the object goes.** After choosing, say,
+**Vote dot**, every press on empty canvas places one more vote dot at that exact point, and
+the tool stays armed until you pick a different one — so placing a row of dots is a row of
+taps, not a trip back to the toolbox for each. **Select** (the arrow, first in the row) is
+the way back to ordinary clicking, dragging and marquee-selection; pressing Escape does the
+same. You can still drag a tool straight from the toolbox onto the canvas to place a single
+object without arming anything.
+
+**Notes and shapes can be drawn to size.** Instead of pressing and releasing in one spot,
+press and drag: an outline follows the pointer showing the box you are about to get, and
+releasing creates it at that size. Dragging left from where you started mirrors the shape,
+and dragging upwards flips it — which is how a triangle or a process arrow is aimed without
+rotating it afterwards. The other kinds have a fixed or content-driven size, so a drag
+places them exactly like a press does.
+
+The **Vote dot** entry is a slot like Shape and Icon, except the choice is the colour: the
+button shows the colour it will place, and its fold-out picker offers the full palette.
+Pick one and every dot you place is that colour.
 
 The **Shape** entry is a single slot rather than one icon per variant: it shows whichever
 shape (rectangle, circle, triangle, rhombus, hexagon, or process arrow) you last used —
-rectangle to start — and clicking or dragging from it drops that shape, remembering your
+rectangle to start — and clicking or dragging from it uses that shape, remembering your
 choice for next time. A small button in the slot's bottom-right corner opens a picker
-listing every shape; right-clicking the slot does the same. Pick one to make it the
-slot's new default.
+listing every shape; right-clicking the slot does the same. Picking one both sets the
+slot's default and arms the shape tool, so you can choose a circle and draw it straight
+away. The **Icon** slot works the same way.
 
-**Freehand** works differently from the rest of the toolbox: clicking it arms a
-drawing mode (the button stays highlighted and a banner reminds you Escape cancels)
-instead of placing something immediately. Draw one stroke with your mouse, finger or
+The **Eraser** removes things by dragging over them: an annotation you drag across is
+deleted, while a graph node or edge is only **hidden** — the eraser never deletes graph
+data. If your stylus has an eraser on the far end, flipping the pen over erases without
+arming anything.
+
+**Freehand** arms a drawing mode (the button stays highlighted and a banner reminds you
+Escape cancels) and, like every other tool, stays armed: lift the pen and press again to
+draw the next stroke. Escape or picking another tool is how you leave it. On a
+pressure-sensitive stylus the stroke's width follows how hard you press, and the width is
+visible as you draw rather than only after you lift. Draw one stroke with your mouse, finger or
 stylus and the mode turns itself off again once you lift the pointer — click **Freehand**
 again for another stroke. Panning and marquee-selection are disabled while a stroke is
 being drawn, and a second finger touching down mid-stroke is ignored (with a brief notice)
-rather than starting a second line. On a pressure-sensitive stylus the stroke's width
-follows how hard you press; without pressure data (a mouse, a finger, or a pressure-less
-pen) it draws at a constant width instead. Right-click a finished stroke for its own
-colour, stroke-width, smoothing and opacity controls.
+rather than starting a second line. Without pressure data (a mouse, a finger, or a
+pressure-less pen) the stroke draws at a constant width instead. Right-click a finished
+stroke for its own colour, stroke-width, smoothing and opacity controls.
 
 **Image** annotations can be added three ways: pick **Image** in the toolbox to choose a
 file (PNG, JPEG or WebP); paste an image from your clipboard anywhere on the canvas
