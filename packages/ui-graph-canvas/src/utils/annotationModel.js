@@ -50,6 +50,33 @@ const DEFAULT_SIZE = Object.freeze({ w: 160, h: 96 });
 const DEFAULT_LINE_DELTA = Object.freeze({ x: 160, y: 0 });
 const DEFAULT_FREEHAND_STROKE_WIDTH = 2;
 
+// Semantic default layer at creation (task-annotation-render-direct-
+// manipulation's remaining scope: "semantic default layers - a per-kind
+// default z at creation", docs/ANNOTATION_CONTRACT.md's "Layer order").
+// Every kind still starts at 0 except `shape`: a shape is the decorative
+// kind most often used as a background/frame other annotations get drawn
+// over (the merged-in `frame` look — a transparent fill with a coloured
+// border — being the clearest case), so it starts one layer below the 0
+// every graph node and every other annotation kind is created at. That is
+// exactly the relationship "send to back" already produces for a shape
+// manually (see the Layer order section); this makes it the annotation's
+// starting position instead of a step a user has to take themselves.
+// Deliberately narrow: every other kind (including `image`, which can also
+// serve as a backdrop) is left at 0 rather than guessed into a tier the
+// contract's own worked example never describes — see the Layer order
+// section for the full reasoning, including why `group` is excluded here
+// even though dec-annotation-group-background-layering also wants it behind
+// everything (group's paint order does not read `z` at all today, so a
+// default here would be inert; that follow-up task owns its own mechanism).
+// Both annotation-creation paths (this model and GraphCanvas.jsx's own node
+// builder) apply the identical mapping, so a GUI-created and an MCP/REST-
+// created shape start on the same layer.
+export const DEFAULT_ANNOTATION_Z_BY_TYPE = Object.freeze({ shape: -1 });
+
+export function defaultAnnotationZ(type) {
+  return DEFAULT_ANNOTATION_Z_BY_TYPE[type] ?? 0;
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -252,7 +279,7 @@ export function createAnnotation(input = {}) {
     geometry,
     position: { x: geometry.x, y: geometry.y },
     style,
-    z: finiteNumber(input.z, 0),
+    z: finiteNumber(input.z, defaultAnnotationZ(type)),
     locked: Boolean(input.locked),
     ...payload,
   };

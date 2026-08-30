@@ -208,21 +208,30 @@ Nodes can be visually grouped by dragging them into a Group container (create on
 the toolbar or via the group icon). Groups help organise large graphs without affecting
 the underlying data model.
 
-A group's right-click menu offers a colour and **Delete Group**. Deleting a group removes
-the box only — the nodes inside it stay on the canvas, exactly where they appear, and are
-simply no longer grouped. The deletion is recorded in the session panel
-(see [Recent activity](#52-recent-activity-audit-log)) and can be undone from there while it
-is still your most recent undoable action.
+A group's right-click menu offers a colour, a **Group order** row, and **Delete Group**.
+Deleting a group removes the box only — the nodes inside it stay on the canvas, exactly
+where they appear, and are simply no longer grouped. The deletion is recorded in the
+session panel (see [Recent activity](#52-recent-activity-audit-log)) and can be undone
+from there while it is still your most recent undoable action.
+
+**Group order** moves a group's background forward or backward *among your other group
+boxes only* — it never changes where a group sits relative to your graph nodes or to any
+other annotation, which stays fixed: a group background is always behind everything else
+on the canvas, whatever you do here. With only one group on the board the two buttons have
+nothing to do and do nothing; add a second overlapping group and they let you pick which
+one shows through where the two boxes overlap. Reordering groups this way never moves,
+resizes or re-groups anything inside either box — only the boxes themselves change places.
 
 If you used to reach for **Hide Group**, it is gone. It never hid anything: it did exactly
 what **Delete Group** does, under a label that suggested otherwise. Use **Delete Group** —
 it is the same action you were already getting, named for what it does.
 
 A group box can also be locked, the same way an annotation can. A locked group stays where
-it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, or delete
-it. Its right-click menu has a single action — **Unlock** — and choosing it gives the full
-menu back. Locking is done by an assistant or an agent on your behalf, so a group you did
-not lock yourself may already be locked when you open a shared board.
+it is: you cannot drag it, resize it, rename it by double-clicking, recolour it, reorder it
+against your other groups, or delete it. Its right-click menu has a single action —
+**Unlock** — and choosing it gives the full menu back. Locking is done by an assistant or
+an agent on your behalf, so a group you did not lock yourself may already be locked when
+you open a shared board.
 
 Locking protects the group box, not what is inside it. Dragging a node into or out of a
 locked group still works, so the group's membership can change even while the box cannot.
@@ -322,9 +331,13 @@ it stays put and tells you to unlock it first.
 
 Send to back normally goes all the way back, behind your graph's own nodes and edges —
 which is what you want for a shape you're using to frame a group of nodes visually. Bring
-it forward again with **Bring to front**. One gap worth knowing: a group box can be layered
-*against* by other annotations, but cannot be layered itself — its own menu has no Layer
-row.
+it forward again with **Bring to front**.
+
+A group box does not have this Layer row — it is not a member of this set — because a
+group background is *always* behind your graph's own nodes and every other annotation,
+unconditionally; there is nothing to bring to front or send to back it against. What a
+group box has instead is its own **Group order** row, described above, which only reorders
+group boxes against each other. See [2.5 Groups and annotations](#25-groups-and-annotations).
 
 The same set of annotations — notes, labels, arrows, freehand strokes, text,
 shapes, icons, voting dots and images — also has a **Duplicate** action in their

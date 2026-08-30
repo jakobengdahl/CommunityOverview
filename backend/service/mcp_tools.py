@@ -2678,7 +2678,13 @@ def register_mcp_tools(
             style: Optional style dict (color/opacity; for
                 text/shape also fontSize/font/textAlign, and for shape also
                 fill/border — see above).
-            z: Optional layer order (higher draws on top). Defaults to 0.
+            z: Optional layer order (higher draws on top). Defaults to 0 for
+                every type except `shape`, which defaults to -1 so a freshly
+                created shape starts one layer behind the rest — the
+                semantic default described in docs/ANNOTATION_CONTRACT.md's
+                "Layer order" section. Applies only when creating (or
+                upsert-replacing without resending `z`); pass an explicit
+                value to override it.
             locked: Whether the annotation starts locked against edits.
             annotation_id: Stable id to create or replace. Omit to let the
                 server assign one.
@@ -3927,12 +3933,11 @@ def register_mcp_tools(
                 group with. Omit to leave current membership alone on an
                 upsert, or create an empty group. Use `update_group_members`
                 afterward for ongoing add/remove.
-            z: Optional layer order. Defaults to 0. Stored and reported
-                back, but not drawn for a group: the canvas paints groups as
-                backdrops behind their members in node-array order, so a
-                group's `z` does not change what covers what. Set it if you
-                want the value preserved; do not expect it to reorder
-                anything.
+            z: Optional layer order. Defaults to 0. Determines paint order
+                relative to OTHER groups only (higher z paints on top of
+                lower z among group backdrops) — it never affects a group's
+                members, which always paint above every group backdrop
+                regardless of z.
             locked: Whether the group starts locked against edits. The canvas
                 honours it: a locked group refuses recolour, rename, resize,
                 drag and delete, and offers only unlock. A group's menu has

@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   ANNOTATION_SCHEMA_VERSION,
   ANNOTATION_SHAPES,
+  ANNOTATION_TYPES,
   applyAnnotationOperation,
   createAnnotation,
+  defaultAnnotationZ,
   normalizeAnnotationDocument,
   normalizeShapeName,
 } from '../src/utils/annotationModel';
@@ -453,5 +455,32 @@ describe('annotationModel contract v1', () => {
     const annotation = createAnnotation({ id: 'note-1', type: 'note' });
     expect(annotation.version).toBeUndefined();
     expect(annotation.field_versions).toBeUndefined();
+  });
+
+  // task-annotation-render-direct-manipulation's remaining "semantic default
+  // layers" scope: a per-kind default `z` at creation, narrow by design (see
+  // docs/ANNOTATION_CONTRACT.md's Layer order section and this file's own
+  // `defaultAnnotationZ` comment) — only `shape` moves off the shared 0.
+  describe('semantic default layer at creation', () => {
+    it('defaults a freshly created shape to z -1, one layer behind everything else', () => {
+      expect(createAnnotation({ type: 'shape' }).z).toBe(-1);
+      expect(defaultAnnotationZ('shape')).toBe(-1);
+    });
+
+    it.each(ANNOTATION_TYPES.filter((type) => type !== 'shape'))(
+      'still defaults %s to z 0, unchanged',
+      (type) => {
+        expect(createAnnotation({ type }).z).toBe(0);
+        expect(defaultAnnotationZ(type)).toBe(0);
+      }
+    );
+
+    it('an explicit z 0 on a shape is honoured, not treated as absent', () => {
+      expect(createAnnotation({ type: 'shape', z: 0 }).z).toBe(0);
+    });
+
+    it('an explicit z on a shape overrides the -1 default', () => {
+      expect(createAnnotation({ type: 'shape', z: 42 }).z).toBe(42);
+    });
   });
 });

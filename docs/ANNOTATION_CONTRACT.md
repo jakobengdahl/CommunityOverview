@@ -280,8 +280,9 @@ An annotation's `z` orders it against the other annotations on the canvas.
 The `note`, `label`, `line`, `freehand` and generic-kind context menus each
 carry the same layer row (`AnnotationLayerControls`), offering **bring to
 front** and **send to back**. `group` has its own context menu and does *not*
-carry the row — a group box can be ordered against by other annotations but
-cannot be reordered itself.
+carry that row — it carries a separate one, described in [Group background
+layer order](#group-background-layer-order) below, that reorders a group
+against other groups only, never against these five kinds.
 
 The same five menus (not `group`) also carry a **duplicate** action, covered
 below alongside the locked-menu correction it makes to this section's
@@ -306,14 +307,16 @@ CSSOM accepts the fractional value that a real browser discards.
 
 Front/back rather than a one-step forward/back is a deliberate trade. A true
 one-step swap needs distinct integer levels to step between, and every
-annotation is created at `z = 0`, so the common case is a pile of ties.
-Breaking those ties one step at a time means renumbering the annotations
-around the one that moved — and an `annotation_updated` op carries the
-*whole* annotation, which for an embedded image is its entire data URI. A
-renumber touching a few images would exceed the session op batch's byte cap
-and be rejected atomically. Front/back always writes exactly one annotation,
-so it cannot reach that cap. One-step forward/back, and the level compaction
-it would need, are not implemented.
+annotation but `shape` is created at `z = 0` (see [Semantic default
+layers](#semantic-default-layers) below for the one exception), so the common
+case is still a pile of ties — now two piles, one at 0 and one at `shape`'s
+own -1, rather than one. Breaking those ties one step at a time means
+renumbering the annotations around the one that moved — and an
+`annotation_updated` op carries the *whole* annotation, which for an embedded
+image is its entire data URI. A renumber touching a few images would exceed
+the session op batch's byte cap and be rejected atomically. Front/back always
+writes exactly one annotation, so it cannot reach that cap. One-step
+forward/back, and the level compaction it would need, are not implemented.
 
 An annotation tied with the current front is not treated as already in front —
 the tie is what the click exists to break — so it moves. A click that would
@@ -398,15 +401,111 @@ largely its membership, so "a locked group is protected" is true of its box
 and false of its contents. Tracked separately; stated here so this section's
 account of what the flag reaches is not read as more than it claims.
 
-What `group` still lacks is the layer row, not the lock: see
-[Layer order](#layer-order) above. Its `z` is carried through the same
-translators so a value set over MCP survives the canvas round trip, but
-nothing reads it — a group's paint order is array order
-(`reorderNodesForParentChild` puts groups first so they sit behind their
-members as backdrops), and groups are ReactFlow parents whose members carry
-`parentId`. Giving a group a GUI layer control therefore needs a decision
-about how group layering relates to that parent/child backdrop model, which
-has not been taken.
+`group` now has a layer control of its own — narrower than
+[Layer order](#layer-order) above by design; see [Group background layer
+order](#group-background-layer-order) immediately below for the mechanism
+(`dec-annotation-group-background-layering`, resolved by
+`smallfix-group-annotation-has-no-layer-control`).
+
+### Group background layer order
+
+`dec-annotation-group-background-layering` (founder-accepted 2026-08-30)
+draws a hard line: a group background **always** stays behind every graph
+node and every other annotation kind. The **only** thing a user or agent may
+change is the order of group backgrounds **relative to each other**, when two
+or more groups exist. This section is the mechanism that decision resolved
+to, replacing the "has not been taken" note this paragraph used to carry.
+
+**Behind everything is structural, not a `z` comparison.** A group's paint
+order was already array order, not `z` (`reorderNodesForParentChild` in
+`GraphCanvas.jsx` places every group node ahead of every non-group node in the
+ReactFlow array, unconditionally — see [Layer order](#layer-order)'s original
+description of this, unchanged). `GroupNode.css` backs that with
+`.react-flow__node-group { z-index: -1 !important }` against
+`.react-flow__node-custom { z-index: 1 !important }`, so even if two nodes
+ever landed at the same array position a group could not paint over regular
+content. Nothing described below touches either of these — no group-vs-group
+write is ever compared against a `shape`'s `z`, a graph node, or any other
+kind, and no write can move a group out of the groups-first bucket. That is
+deliberate: the follow-up task's own brief was to keep a group behind every
+`shape` position a user could reach by hand (including `shape`'s own `-1`
+[semantic default](#semantic-default-layers) and anywhere bring-to-front/
+send-to-back can move it), in both directions, unconditionally — a numeric
+comparison against `shape`'s `z` could not promise that once `shape` moves
+outside its default; array-order bucketing can, because it never depends on
+what number either side holds.
+
+**Group-to-group order reuses the group's own `z`.** `group` already carried
+a `z` field that round-tripped end to end (`create_group_annotation`,
+`annotationsToGroups`/`groupsToAnnotations` in
+`frontend/web/src/utils/sessionAnnotations.js`) but was never read — this is
+what now reads it, and only for this one purpose. `reorderNodesForParentChild`
+sorts the groups bucket it already builds by each group's own `data.z`
+(ascending — a lower `z` paints earlier, i.e. further back among group
+backgrounds), stable on ties via an explicit index tie-break so the common
+case — every group still at the shared default `z = 0`, nobody having touched
+the new control — keeps exactly the relative order the function already
+produced before this sort existed. No new envelope field, and no new
+plumbing on either translator leg:
+`packages/ui-graph-canvas/src/utils/annotations.js` never touches `group` at
+all (it is a different kind's translator — see its own module comment), and
+`z`/`locked` already flowed through both `annotationsToGroups`/
+`groupsToAnnotations` (`frontend/web/src/utils/sessionAnnotations.js`) before
+this task, verified rather than assumed as part of it.
+
+**The control.** `GroupNode`'s context menu now carries a "Group order"
+section, two buttons: bring this group forward among groups, or send it
+backward among groups (`GROUP_LAYER_FRONT`/`GROUP_LAYER_BACK`,
+`utils/groupLayers.js`). `resolveGroupOrderZ` mirrors `resolveLayerZ`'s
+arithmetic and no-op rules exactly (integer strictly past every other value;
+a tie with the current front is not already in front; both CSS-safe-integer
+bounds checked in both directions) but over the groups-only `data.z` space —
+it never reads a `zIndex`, never reads a non-group node's `z`, and returns
+`null` (a silent no-op, publishing nothing) when there is nothing to order
+the group against: the only group on the canvas, or already alone at that
+end among groups. Always rendered rather than conditionally hidden below two
+groups, the same convention `AnnotationLayerControls` already uses. One write:
+only the clicked group's `data.z` changes; every other group's `data`, and
+every member's `parentId`/position/`z`, are untouched — `reorderNodesForParentChild`
+reorders the *array*, it does not rewrite any node's fields beyond the
+one the click targeted.
+
+**Locks and leases, the same pattern as every other layer control.** The row
+is entirely absent from a locked group's menu (which offers Unlock alone, as
+before); `handleChangeGroupLayer` refuses independently as the hook-level
+backstop, the same two-layer discipline `AnnotationLayerControls`/
+`useAnnotationLayer` already establishes: a live remote edit lease
+(`isRemoteLocked`) refuses and surfaces the attempt via
+`notifyRemoteLockedAttempt`; the persisted `locked` flag refuses silently,
+since the menu already explains itself with Unlock. No new guard was
+invented — this reuses the existing pattern rather than adding a third one.
+
+**Persistence.** Every path that writes a group node already funnels through
+`reorderNodesForParentChild` (local create, this control's own click, the
+`upsert-group` remote op, the `groupsToRestore` saved-view/session-restore
+effect, delete/membership ops) — see [Layer order](#layer-order)'s original
+description of the function. The click's own write is exactly the shape
+`handleSaveView`'s existing `z: g.data.z ?? 0` re-emission and the
+`upsert-group` remote-op handler already carry, so it reaches a saved view, a reload
+and every other connected client through paths that already existed and
+already round-tripped `z`/`locked` for `group` — nothing new was added to
+either leg to make that true.
+
+**Reachable today from the group's own context menu only.** A second,
+related work item — a toolbox-hosted contextual Edit sheet reachable from an
+ordinary tap, not only right-click — was landing on a separate lane in the
+same round this control shipped in and had not yet merged when it did.
+Wiring "Group order" into that surface once it lands is a follow-up, not a
+redesign: the surface would call the same `resolveGroupOrderZ`/
+`reorderNodesForParentChild` path this section describes, the same way the
+sheet is expected to reuse `AnnotationLayerControls`' `useAnnotationLayer` for
+every other kind rather than reimplementing layer arithmetic a second time.
+
+**Rectangular `shape` annotations are unaffected.** This decision and this
+section are about group-vs-group order only. `shape`'s own free layering
+(manual bring-to-front/send-to-back, and its `-1` semantic default at
+creation) is untouched — see [Layer order](#layer-order) and [Semantic
+default layers](#semantic-default-layers).
 
 ### Multi-select align and distribute
 
@@ -534,17 +633,19 @@ Contrast an edit lease, which the server does enforce for browser writes.
 Only other *annotations* are consulted: the ordering is computed against
 them, and no graph node is ever read to decide the result. That is not the
 same as staying within the graph's own band, and should not be read as such.
-Graph nodes carry no layer of their own, so they sit at 0 alongside a freshly
-created annotation, while send-to-back writes one below the backmost
+Graph nodes carry no layer of their own, so they sit at 0 alongside every
+annotation kind except a freshly created `shape` (see [Semantic default
+layers](#semantic-default-layers) below — `shape` now starts one level behind
+that 0 on its own), while send-to-back writes one below the backmost
 annotation. Whenever that backmost annotation is itself at or below 0 — the
-default, since every annotation is created at 0 — the result is negative and
-does place the annotation behind the graph's nodes and edges. That is
-intended and useful, and it is how a `shape` with a transparent fill
-(standing in for the retired `frame`) gets behind the nodes it frames;
-it is not, however, a guarantee. Once every annotation has been pushed above
-0, send-to-back lands at 0 or higher — level with the graph (where paint
-order falls back to document order) or in front of it, but no longer behind
-it.
+default for every kind but `shape`, since every kind but `shape` is still
+created at 0 — the result is negative and does place the annotation behind
+the graph's nodes and edges. That is intended and useful, and it is how a
+`shape` with a transparent fill (standing in for the retired `frame`) gets
+behind the nodes it frames; it is not, however, a guarantee. Once every
+annotation has been pushed above 0, send-to-back lands at 0 or higher — level
+with the graph (where paint order falls back to document order) or in front
+of it, but no longer behind it.
 
 A layer is only ever written when it is an integer strictly past every other
 annotation's *and* inside the signed 32-bit range CSS `z-index` accepts, so
@@ -554,10 +655,101 @@ down to the bound would land level with the neighbour it is meant to pass,
 recreating the tie the control exists to break while publishing an operation
 that changes nothing on screen.
 
-Semantic default layers — a per-kind default `z` at creation time, so a
-transparent-fill shape starts behind the annotations it frames — are **not**
-implemented; every
-annotation is created at `z = 0` and ordered manually from there.
+### Semantic default layers
+
+A per-kind default `z` at creation time (task-annotation-render-direct-
+manipulation's remaining scope) is implemented, narrowly: **only `shape`
+moves off the shared 0.** A freshly created `shape` is now given `z = -1` —
+one level behind the 0 every graph node and every other annotation kind
+(`note`, `text`, `label`, `line`, `icon`, `vote_dot`, `image`, `freehand`,
+`group`) is still created at — so it opens already behind content instead of
+needing a manual send-to-back to get there. That is exactly the relationship
+the paragraph above already describes send-to-back producing for a shape by
+hand (the transparent-fill-standing-in-for-`frame` case); this makes it the
+shape's starting position rather than a step a user or agent has to take
+themselves.
+
+**Why only `shape`.** A shape is the decorative kind most often used as a
+background or frame that other annotations get drawn over — the merged-in
+`frame` look (a transparent fill with a coloured border) is the clearest
+case, but even a filled shape is commonly a backdrop a label or icon sits on
+top of. No other kind carries that same "usually a backdrop" reading strongly
+enough to default it below the rest without guessing at a use the contract
+has no worked example for. `image` was considered — a pasted screenshot or
+diagram is sometimes used the same way, as a backdrop for icons/labels drawn
+over it — but left at 0 deliberately: the contract's own illustrative case
+for this feature names only `shape`, and widening the change to a second kind
+on an inference the contract does not state would be exactly the "guessed"
+default this section exists to avoid. If a real backdrop-image complaint
+shows up in practice, revisit it as its own decision rather than folding it
+into this task's scope.
+
+**Backward compatibility.** The default is applied once, at the moment of
+creation — never retroactively. An annotation already stored before this
+change (every kind, `shape` included) keeps whatever `z` it already has,
+typically 0, exactly as it does for every other envelope field. That old
+`shape` and a *new* `shape` created after this change end up on different
+layers purely because of when each was created — the old one at 0, the new
+one at -1 — which is a real, visible difference: the newer shape now renders
+*behind* the older one by default, opposite of the usual last-created-is-
+on-top expectation. This is judged acceptable rather than confusing because
+(a) `shape` is the one kind this section deliberately treats as a
+backdrop, so "the newest shape is furthest back" reads as the feature working
+as intended, not as a bug, and (b) the manual layer row
+(`AnnotationLayerControls`, described above) still works exactly as before on
+both — a user who wants the new shape back in front of the old one just
+clicks bring-to-front, the same single action this whole feature exists to
+make unnecessary for the *common* case, not to forbid for the exceptional
+one. No stored annotation's `z` is rewritten by this change, and no migration
+was written or is needed. An old `shape` and a newly created non-`shape`
+annotation (say, a `label`) never had this concern in the first place: the
+label still defaults to 0 exactly as it always has, so it ties with the old
+shape exactly as any two same-era annotations already could.
+
+**Both creation paths agree.** The GUI's one-click/drag-to-create toolbox
+path (`GraphCanvas.jsx`'s own node-builder `createAnnotation`, which sets
+`zIndex` explicitly only on the `shape` branch it builds) and the MCP/REST
+creation path (`create_annotation`, `create_image_annotation`, and the image
+REST ingest endpoint, all funnelling through `session_annotations.py`'s
+`build_annotation`) apply the identical `shape → -1, everything else → 0`
+mapping, so a GUI-created and an MCP-created shape start on the same layer.
+`packages/ui-graph-canvas/src/utils/annotationModel.js`'s `createAnnotation` —
+the shared client-side model both the canvas's document normalizer and the
+session save/restore translators route through — carries the same mapping
+too, for the same reason: the model documented as the v1 annotation shape's
+source of truth should not disagree with what actually gets created.
+`duplicate_annotation` (backend) and the GUI's own duplicate action
+(`AnnotationDuplicateControl`) are both unaffected by design — each copies
+the *source's own stored* `z` verbatim rather than passing through the
+default at all, the same as every other envelope field a duplicate carries
+over (see the Layer order section above).
+
+**Explicitly out of scope, tracked separately.** `group` is deliberately
+*not* given a non-zero default here, even though
+dec-annotation-group-background-layering also wants group backgrounds behind
+all content: a group's paint order does not read its `z` at all today (it
+comes from ReactFlow parent/child array order — see the Layer order section
+above), so a default here would be inert, and that decision's own mechanism
+is the smallfix-group-annotation-has-no-layer-control task's to design, not
+this one's. That follow-up task should treat `shape`'s `-1` as the
+one already-claimed layer immediately behind the graph-node baseline: since
+`shape` is "the freely layered decorative alternative" (the decision's own
+phrase) and can be brought forward or back by hand like anything else,
+whatever mechanism the group task builds needs to guarantee a group
+background stays behind *every* `shape` position a user could manually
+reach, in both directions — not just behind `shape`'s -1 default — since
+dec-annotation-group-background-layering requires "behind all content"
+unconditionally, not "behind content's starting position." The true one-step
+forward/back "level compaction" this task's own history flags as unsafe (the
+op-batch byte cap issue described above) is equally out of scope here and
+remains unimplemented.
+
+That follow-up task (`smallfix-group-annotation-has-no-layer-control`) has
+since shipped, meeting exactly the brief above: see [Group background layer
+order](#group-background-layer-order) for the mechanism it built —
+array-order bucketing, not a numeric comparison against `shape`'s `z`, is
+precisely why it can guarantee "behind everything" unconditionally rather
+than only behind `shape`'s starting position.
 
 ## Operation layer
 
@@ -2044,7 +2236,7 @@ rule](#downstream-closure-rule).
 | `text` | ⚠ toolbox create (fixed default), double-click inline edit (live 300ms-debounced sync, matching note/label — task-annotation-doubleclick-to-edit-text), rotate/recolor/layer/duplicate/nine-position alignment/font size/curated font family (right-click — task-annotation-text-alignment-and-font; see [Typography controls](#typography-controls-text-shape); no colour chosen defaults to `#94a3b8`, `GenericAnnotationNode.jsx`'s `DEFAULT_COLOR` — shared by `icon`/`vote_dot` below and by `shape`'s own unset-fill default), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Text — pre-wired with the identical `content.attachment` shape); no way to inspect or clear an attachment other than dragging, and the alignment control's vertical axis has no visible effect since `text` still has no explicit box | ✅ generic tool set | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared gaps as `note` — menu/edit only right-click/long-press, no accessible name (empty when uncaptioned) |
 | `label` | ✅ toolbox create, inline edit, drag, rotate/recolor/resize-text/layer/duplicate (right-click; no colour chosen defaults to `#64748b`, `LabelNode.jsx`'s `DEFAULT_LABEL_COLOR`), attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Label) — previously listed "attach" as done, but it was modeled server-side only and never wired into the canvas translation layer until this slice | ✅ generic tool set | ⚠ two translator drops. `geometry.w`/`h` is reset to the model's 160×96 default by the next autosave that ships the label and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`); only an agent can set one, since a `label` has no resize handles (this row previously claimed "resize" here — corrected, `smallfix-contract-label-row-claims-resize-it-lacks`), so no user-set size is lost. The overlay also carries only `color` and `fontSize` out of `style`, so any other style key an agent sets — `opacity` among them — is dropped on the same leg (`smallfix-label-overlay-drops-nonvisual-style-keys`). `text`, colour, font size, `attachment`, `rotation`, `z` and `locked` do survive | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared gaps as `note` — menu/edit only right-click/long-press, accessible name falls back to its own text with no "label" kind word |
 | `line` | ⚠ toolbox create, endpoint attach/drag, recolor/layer/duplicate/unlock (right-click; no colour chosen defaults to `#111827`, `ArrowNode.jsx`'s `DEFAULT_ARROW_COLOR`); a `rotation` the MCP tools accept is stored and reported but never drawn | ✅ generic tool set (`arrow` alias) | ⚠ three translator drops. `geometry.w`/`h` is rewritten to the model's 160×96 default by the next autosave that ships the line and by any saved view (`smallfix-browser-clobbers-unsized-annotation-geometry`) — minor here only because nothing draws from a line's box: an agent-created line is stored unsized (`build_annotation` defaults `w`/`h` to `0`) and `ArrowNode` sizes itself from the endpoints. The substantive one: the overlay carries the endpoint coordinates (as `position` plus `dx`/`dy`) and the GUI's own `startAnchor`/`endAnchor`, but never the model's `start`/`end` endpoint descriptors, so an `attachment` an agent set on either endpoint (see [Attachment and detach behavior](#attachment-and-detach-behavior)) is rebuilt as a bare point and lost (`smallfix-line-endpoint-attachment-dropped-by-translator`). Third, the overlay carries only `color` out of `style`, so any other style key an agent sets is dropped on the same leg as the box — the identical branch the `label` row above carries, and covered by the same item (`smallfix-label-overlay-drops-nonvisual-style-keys`, whose id reads label-only). `rotation`, `z`, `locked`, arrowheads, colour and the GUI's own anchors all survive | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — pure SVG, no text or title anywhere |
-| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); no layer row — a `z` the MCP tools accept round-trips but is never drawn (paint order is the parent/child backdrop order) — and no duplicate action either, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the header text (folder glyph + label), or the untranslated `"📁 Group"` default when unnamed |
+| `group` | ⚠ toolbar create-group action, inline rename, recolor/delete/unlock (right-click); a group-vs-group-only "Group order" layer row (bring forward / send backward among groups — see [Group background layer order](#group-background-layer-order); `z` is still never drawn as CSS, this row writes it purely as the groups-bucket sort key) — and no duplicate action, deliberately excluded from this task's scope (see [Layer order](#layer-order)) since a group's substance is its member graph nodes, not its own content | ✅ `create_group_annotation` creates or upserts the box — editing an existing group's label/color/geometry goes through this same upsert-by-id path (resend every field you want kept, unlike the generic types' dedicated patch tool) rather than a separate update tool — `update_group_members` adds/removes member ids without a full resend, and `delete_group_annotation` deletes the box (member graph nodes are never cascade-deleted — a group never owns them as annotations) | ✅ | ✅ | ⚠ creating/deleting the group annotation itself is actor-scoped undoable like any other type, but `group_membership_changed` is outside `session_activity.UNDOABLE_OPS` by design — a membership change is not itself undoable through `undo_last_action` | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the header text (folder glyph + label), or the untranslated `"📁 Group"` default when unnamed |
 | `shape` | ✅ toolbox creates all six variants, each drawn distinctly; double-click inline caption editing (live 300ms-debounced sync — task-annotation-doubleclick-to-edit-text), inset to the axis-aligned rectangle each variant's clip-path is proven to contain (`SHAPE_TEXT_INSET`) so a caption never spills past the painted outline at the corners; right-click editor changes an existing shape's subtype, independent Fill and Border swatch sections (each a colour or `"transparent"` — task-annotation-merge-frame-into-shape-rectangle, see [Fill and border](#fill-and-border-shape); unset fill defaults to `#94a3b8` same as `text` above, unset border defaults to transparent — this is also where the retired `frame` kind's GUI cell merged into, since a transparent-fill, coloured-border shape is what `frame` used to be, with the border-rendering limitation for the four clip-path variants noted there), rotation, layer (front/back), duplicate, and the caption's alignment/font size/font family (task-annotation-text-alignment-and-font — see [Typography controls](#typography-controls-text-shape)). `triangle`, `rhombus` and `hexagon` are created at a ratio chosen per subtype, and a subtype switch re-proportions the box to the new subtype's ratio — keeping the width the shape already has, so a deliberate resize survives it; switching *to* `rectangle`, `circle` or `process_arrow` leaves the box alone, since those fill whatever they are given. Their resize preserves whatever ratio the box currently has. For `triangle` and `hexagon` that ratio (2 : √3) is what makes the sides equal; a rhombus clip-path has equal sides at *every* ratio, so its 1:1 is there to make it a square on its corner rather than a flat lozenge. Because the resizer takes no target ratio (reactflow's `keepAspectRatio` is a boolean and preserves the measured box), the guarantee holds only for shapes whose box was set by one of those two paths — a shape stored at 160×96 before this stays squashed and locks that. `rectangle`, `circle` and `process_arrow` fill whatever box they are given, so a `circle` in a non-square box is an ellipse | ✅ generic tool set (`content.shape`, `content.text`, `style.fill`/`style.border`) | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the caption when set (any subtype), **empty** when uncaptioned — every subtype indistinguishable by name |
 | `icon` | ✅ toolbox create (fixed default glyph), move, rotate (right-click) and attach by dragging near a node/annotation or, at creation time, via the "nearby object menu" (right-click an eligible node/annotation's own menu, "Add nearby" → Icon); right-click picker grid over the full icon vocabulary changes an existing icon's name — renders every one of the 75 host-registry icon names as its own distinct glyph (see [Canvas rendering](#canvas-rendering)) — plus colour (same `#94a3b8` default as `text` above), layer and duplicate | ✅ generic tool set | ✅ | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name falls back to the rendered glyph CHARACTER (e.g. "★"), not the icon's name — the `title={data.icon}` attribute is never reached |
 | `vote_dot` | ✅ toolbox create, move, rotate/recolor (same `#94a3b8` default as `text` above)/layer/duplicate (right-click) — a plain coloured dot with a fixed black ring and drop shadow (`GenericAnnotationNode.css`'s `.kind-vote_dot`), no other content of its own. task-annotation-vote-dot-simplify removed the value it used to render and its right-click stepper, and retired its attachment behaviour entirely: it is no longer offered on the "nearby object menu", is not a member of `ATTACHABLE_OVERLAY_KINDS`, and does not attach by dragging near a node/annotation the way `label`/`text`/`icon` do | ✅ generic tool set (no type-specific `content` field any more; `style.color` sets its fill the same as `icon`) | ✅ — a stored `value`/`attachment` from before this change round-trips as inert, unread data rather than crashing (`AnnotationBadData.test.jsx`'s vote_dot case) | ✅ | ✅ | ❌ audited 2026-08-30 (see [audit](#keyboard-touch-and-screen-reader-controls-audit-v1-accessibility-baseline)): same shared menu/touch gaps; accessible name is **empty** — no text, no title anywhere in its markup |

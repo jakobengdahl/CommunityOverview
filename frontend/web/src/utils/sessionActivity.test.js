@@ -210,11 +210,22 @@ describe('describeActivity', () => {
       });
     }
 
+    // `z: 0` is explicit on every fixture, not left to `createAnnotation`'s
+    // own default: these fixtures model an already-stored annotation's
+    // *current* z at the moment of the edit under test, which is a property
+    // of that annotation's history, not of what kind it is. Leaving it
+    // implicit would make the `before` snapshot pick up
+    // `defaultAnnotationZ('shape')` (-1, task-annotation-render-direct-
+    // manipulation's semantic default layers) for the `shape` case only,
+    // silently changing what "before" means between kinds and making the
+    // send-to-back case below (`z: -1`) a no-op for `shape` alone — the
+    // "before" and "after" z would both already be -1, so `changed.has('z')`
+    // would be false and the assertion would test nothing.
     const KINDS = [
-      { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 } },
-      { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 } },
-      { id: 'i1', type: 'icon', icon: 'circle', position: { x: 0, y: 0 } },
-      { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 } },
+      { id: 'n1', type: 'note', text: 'hello', position: { x: 0, y: 0 }, z: 0 },
+      { id: 'l1', type: 'label', text: 'a label', position: { x: 0, y: 0 }, z: 0 },
+      { id: 'i1', type: 'icon', icon: 'circle', position: { x: 0, y: 0 }, z: 0 },
+      { id: 's1', type: 'shape', shape: 'rectangle', position: { x: 0, y: 0 }, z: 0 },
     ];
 
     it.each(KINDS)('classifies a bring-to-front on $type as "raised", not "unlocked"', (base) => {

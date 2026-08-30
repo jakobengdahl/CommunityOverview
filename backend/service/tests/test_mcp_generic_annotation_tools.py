@@ -721,6 +721,85 @@ class TestCreateAnnotation:
         assert result["success"] is False
 
 
+class TestCreateAnnotationSemanticDefaultLayer:
+    """task-annotation-render-direct-manipulation's remaining "semantic
+    default layers" scope: a per-kind default `z` at creation, applied
+    through `create_annotation` exactly like every other envelope default —
+    see `session_annotations.py`'s `default_annotation_z` for the mapping and
+    docs/ANNOTATION_CONTRACT.md's Layer order section for the reasoning.
+    Only `shape` moves off the shared 0; this pins that through the real MCP
+    tool, not just the pure `build_annotation` helper
+    (test_session_annotations_generic.py already covers that leg).
+    """
+
+    def test_shape_created_without_z_defaults_to_minus_one(self, annotation_tools):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0
+        )
+        assert result["success"] is True
+        assert result["annotation"]["z"] == -1
+
+        listed = tools_map["list_annotations"](session_id=session.id, types=["shape"])
+        assert listed["annotations"][0]["z"] == -1
+
+    @pytest.mark.parametrize("ann_type", ["text", "label", "line", "icon", "vote_dot"])
+    def test_every_other_generic_type_still_defaults_to_zero(
+        self, annotation_tools, ann_type
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type=ann_type, x=0, y=0
+        )
+        assert result["annotation"]["z"] == 0
+
+    def test_explicit_z_zero_on_a_shape_is_honoured_not_defaulted(
+        self, annotation_tools
+    ):
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        result = tools_map["create_annotation"](
+            session_id=session.id, type="shape", x=0, y=0, z=0
+        )
+        assert result["annotation"]["z"] == 0
+
+    def test_upsert_replace_without_resending_z_applies_the_same_default(
+        self, annotation_tools
+    ):
+        """An upsert-replace (matching `annotation_id`) that omits `z` is not
+        a *new* creation, but `build_annotation` does not distinguish the two
+        — the same pre-existing behaviour as the flat-0 default it replaces
+        (an omitted-z resend already reset to 0 before this change). Pinning
+        the now-per-kind value here so this stays a documented, unchanged
+        quirk rather than an accidental regression this task introduces.
+        """
+        tools_map, manager = annotation_tools
+        session = manager.create_session()
+
+        tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=0,
+            y=0,
+            z=9,
+            annotation_id="shape-upsert-1",
+        )
+        replaced = tools_map["create_annotation"](
+            session_id=session.id,
+            type="shape",
+            x=5,
+            y=5,
+            annotation_id="shape-upsert-1",
+        )
+        assert replaced["success"] is True
+        assert replaced["annotation"]["z"] == -1
+
+
 class TestUpdateAnnotation:
     def test_partial_geometry_update_preserves_content(self, annotation_tools):
         tools_map, manager = annotation_tools
