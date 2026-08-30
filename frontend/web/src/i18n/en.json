@@ -542,7 +542,9 @@
     "annotation_attach_to_hint": "Choose a target to attach to — Escape to cancel",
     "annotation_attach_to_cancel": "Cancel attaching",
     "annotation_multi_select_mode": "Select multiple",
-    "annotation_overlap_picker_title": "Multiple objects here — choose one"
+    "annotation_overlap_picker_title": "Multiple objects here — choose one",
+    "annotation_size": "Size",
+    "annotation_more_actions": "More actions"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",

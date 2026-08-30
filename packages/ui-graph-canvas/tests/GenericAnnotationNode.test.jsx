@@ -407,6 +407,23 @@ describe('GenericAnnotationNode', () => {
   });
 });
 
+// The property editor is a compact bar of group triggers now
+// (task-annotation-compact-property-bar): a property's controls exist in the
+// DOM only once its group has been opened. Opening a group is therefore part
+// of reaching any control below, exactly as it is for a user — the section
+// headings that used to make every control visible at once are gone, and with
+// them the tall column that covered the object being edited.
+// Tolerant of a group that is not offered at all: several tests below assert
+// that a kind does NOT get a given property (no shape picker on a vote_dot, no
+// typography on an image, nothing but unlock/copy on a locked annotation). For
+// those the group trigger is legitimately absent, and "open it if it is there"
+// keeps the assertion that matters — the control is still not reachable — the
+// thing the test is actually about.
+function openGroup(name) {
+  const trigger = screen.queryByRole('button', { name });
+  if (trigger) fireEvent.click(trigger);
+}
+
 // task-annotation-render-direct-manipulation: a right-click property editor
 // (shape subtype picker + rotation control) for every kind this component
 // renders — previously none of them had any GUI editor at all.
@@ -418,14 +435,18 @@ describe('GenericAnnotationNode property editor', () => {
   it('opens a shape-subtype picker and rotation controls for a shape annotation', () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    // One group's controls are visible at a time, so reach each in turn.
+    openGroup('Shape');
     expect(screen.getByLabelText('circle')).toBeInTheDocument();
     expect(screen.getByLabelText('triangle')).toBeInTheDocument();
+    openGroup('Rotation');
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
 
   it('marks the current shape as the active picker option', () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'hexagon' }} />);
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    openGroup('Shape');
     expect(screen.getByLabelText('hexagon').className).toContain('active');
     expect(screen.getByLabelText('circle').className).not.toContain('active');
   });
@@ -433,6 +454,7 @@ describe('GenericAnnotationNode property editor', () => {
   it("changes an existing shape annotation's subtype from the picker", () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    openGroup('Shape');
     fireEvent.click(screen.getByLabelText('triangle'));
     expect(applyLatestUpdate({ id: 's1', data: { shape: 'circle' } }).data.shape).toBe('triangle');
   });
@@ -440,7 +462,11 @@ describe('GenericAnnotationNode property editor', () => {
   it('does not show a shape picker for a non-shape kind', () => {
     const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
     fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    // A vote_dot gets no Shape group at all, so there is nothing to open and
+    // the subtype swatches stay unreachable — which is the point here.
+    openGroup('Shape');
     expect(screen.queryByLabelText('circle')).toBeNull();
+    openGroup('Rotation');
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
 
@@ -451,14 +477,17 @@ describe('GenericAnnotationNode property editor', () => {
   it('opens an icon picker over the full vocabulary for an icon annotation', () => {
     render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />);
     fireEvent.contextMenu(screen.getByTitle('circle'));
+    openGroup('Icon');
     expect(screen.getByLabelText('flag')).toBeInTheDocument();
     expect(screen.getByLabelText('person_fill')).toBeInTheDocument();
+    openGroup('Rotation');
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
   });
 
   it('marks the current icon as the active picker option', () => {
     render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'flag' }} />);
     fireEvent.contextMenu(screen.getByTitle('flag'));
+    openGroup('Icon');
     expect(screen.getByLabelText('flag').className).toContain('active');
     expect(screen.getByLabelText('circle').className).not.toContain('active');
   });
@@ -466,6 +495,7 @@ describe('GenericAnnotationNode property editor', () => {
   it("changes an existing icon annotation's name from the picker", () => {
     render(<GenericAnnotationNode id="i1" type="icon" data={{ icon: 'circle' }} />);
     fireEvent.contextMenu(screen.getByTitle('circle'));
+    openGroup('Icon');
     fireEvent.click(screen.getByLabelText('flag'));
     expect(applyLatestUpdate({ id: 'i1', data: { icon: 'circle' } }).data.icon).toBe('flag');
   });
@@ -473,6 +503,7 @@ describe('GenericAnnotationNode property editor', () => {
   it('does not show an icon picker for a non-icon kind', () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    openGroup('Icon');
     expect(screen.queryByLabelText('flag')).toBeNull();
   });
 
@@ -493,6 +524,7 @@ describe('GenericAnnotationNode property editor', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByTitle('circle'));
+    openGroup('Icon');
     expect(screen.queryByLabelText('flag')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
@@ -517,6 +549,7 @@ describe('GenericAnnotationNode property editor', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    openGroup('Rotation');
     expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
     expect(container.querySelector('.graph-node-remote-badge').textContent).toBe('Ada');
@@ -533,6 +566,7 @@ describe('GenericAnnotationNode property editor', () => {
         kind === 'shape' ? '[data-testid="shape-halo"]' : `.kind-${kind}`
       );
       fireEvent.contextMenu(root);
+      openGroup('Rotation');
       fireEvent.click(screen.getByLabelText('Rotate right 15°'));
       expect(applyLatestUpdate({ id: 'n1', data }).data.rotation).toBe(5);
     }
@@ -541,6 +575,7 @@ describe('GenericAnnotationNode property editor', () => {
   it('resets rotation to 0 via the reset button, showing the current angle on it', () => {
     render(<GenericAnnotationNode id="n1" type="text" data={{ rotation: 45, text: 'x' }} />);
     fireEvent.contextMenu(screen.getByText('x'));
+    openGroup('Rotation');
     expect(screen.getByLabelText('Reset rotation').textContent).toBe('45°');
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(applyLatestUpdate({ id: 'n1', data: { rotation: 45 } }).data.rotation).toBe(0);
@@ -549,7 +584,10 @@ describe('GenericAnnotationNode property editor', () => {
   it('deletes the annotation via the context menu delete button', () => {
     const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
     fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
-    fireEvent.click(screen.getByText(/Delete/));
+    // Delete stays directly in the bar rather than behind a group — it is the
+    // action this menu is most often opened for. It is icon-only now, so its
+    // accessible name comes from aria-label, not from button text.
+    fireEvent.click(screen.getByRole('button', { name: /delete/i }));
     const call = hoisted.setNodes.mock.calls.at(-1);
     expect(call[0]([{ id: 'v1' }, { id: 'other' }])).toEqual([{ id: 'other' }]);
   });
@@ -567,6 +605,7 @@ describe('GenericAnnotationNode property editor', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    openGroup('Rotation');
     fireEvent.click(screen.getByLabelText('Reset rotation'));
     expect(notifyChange).toHaveBeenCalledTimes(1);
   });
@@ -583,6 +622,7 @@ describe('GenericAnnotationNode property editor', () => {
     ])('offers colour swatches for a %s annotation', (kind, find, data) => {
       const { container } = render(<GenericAnnotationNode id="a1" type={kind} data={data} />);
       fireEvent.contextMenu(find(container));
+      openGroup('Colour');
       expect(screen.getByLabelText('#ef4444')).toBeInTheDocument();
     });
 
@@ -591,7 +631,11 @@ describe('GenericAnnotationNode property editor', () => {
         <GenericAnnotationNode id="im1" type="image" data={{ image: { url: 'x.png' } }} />
       );
       fireEvent.contextMenu(container.querySelector('.kind-image'));
+      // An image gets no Colour group at all, so there is nothing to open and
+      // the swatches stay unreachable — which is what this asserts.
+      openGroup('Colour');
       expect(screen.queryByLabelText('#ef4444')).toBeNull();
+      openGroup('Rotation');
       expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
     });
 
@@ -603,15 +647,21 @@ describe('GenericAnnotationNode property editor', () => {
     it('offers independent Fill and Border swatch sections (including transparent) for a shape annotation, not the generic colour section', () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      // Fill and Border are separate groups now, which is itself the
+      // independence this test is about — each has its own trigger, its own
+      // current-value swatch, and its own panel.
+      openGroup('Fill');
       expect(screen.getByLabelText('Fill #ef4444')).toBeInTheDocument();
-      expect(screen.getByLabelText('Border #ef4444')).toBeInTheDocument();
       expect(screen.getByLabelText('Fill Transparent')).toBeInTheDocument();
+      openGroup('Border');
+      expect(screen.getByLabelText('Border #ef4444')).toBeInTheDocument();
       expect(screen.getByLabelText('Border Transparent')).toBeInTheDocument();
     });
 
     it("changes a shape's fill from the fill picker, independently of its border", () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Fill');
       fireEvent.click(screen.getByLabelText('Fill #22c55e'));
       const updated = applyLatestUpdate({ id: 's1', data: { shape: 'circle' } });
       expect(updated.data.fill).toBe('#22c55e');
@@ -621,6 +671,7 @@ describe('GenericAnnotationNode property editor', () => {
     it("changes a shape's border from the border picker, independently of its fill", () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Border');
       fireEvent.click(screen.getByLabelText('Border #3b82f6'));
       const updated = applyLatestUpdate({ id: 's1', data: { shape: 'circle' } });
       expect(updated.data.border).toBe('#3b82f6');
@@ -630,8 +681,10 @@ describe('GenericAnnotationNode property editor', () => {
     it('can set a shape to a transparent fill with a coloured border — the retired frame look', () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'rectangle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Fill');
       fireEvent.click(screen.getByLabelText('Fill Transparent'));
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Border');
       fireEvent.click(screen.getByLabelText('Border #94a3b8'));
       const updated = applyLatestUpdate({
         id: 's1',
@@ -650,8 +703,10 @@ describe('GenericAnnotationNode property editor', () => {
         />
       );
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Fill');
       expect(screen.getByLabelText('Fill #3b82f6').className).toContain('active');
       expect(screen.getByLabelText('Fill #ef4444').className).not.toContain('active');
+      openGroup('Border');
       expect(screen.getByLabelText('Border Transparent').className).toContain('active');
       expect(screen.getByLabelText('Border #3b82f6').className).not.toContain('active');
     });
@@ -693,6 +748,7 @@ describe('GenericAnnotationNode property editor', () => {
     it('offers no value stepper on a kind that never had one either', () => {
       render(<GenericAnnotationNode id="s1" type="shape" data={{ shape: 'circle' }} />);
       fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+      openGroup('Layer');
       expect(screen.queryByLabelText('Increase value')).toBeNull();
     });
   });
@@ -709,6 +765,7 @@ describe('GenericAnnotationNode property editor', () => {
       ];
       const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      openGroup('Layer');
       fireEvent.click(screen.getByLabelText('Bring to front'));
       const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
       expect(updated[0].zIndex).toBe(2);
@@ -740,6 +797,7 @@ describe('GenericAnnotationNode property editor', () => {
       // A remote claim refuses the context menu outright, so the row is never
       // reachable — the attempt is surfaced rather than silently ignored.
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      openGroup('Layer');
       expect(notifyRemoteLockedAttempt).toHaveBeenCalled();
       expect(hoisted.setNodes).not.toHaveBeenCalled();
     });
@@ -758,6 +816,7 @@ describe('GenericAnnotationNode property editor', () => {
         </AnnotationContext.Provider>
       );
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      openGroup('Layer');
       fireEvent.click(screen.getByLabelText('Bring to front'));
       expect(hoisted.setNodes).not.toHaveBeenCalled();
       expect(notifyChange).not.toHaveBeenCalled();
@@ -768,6 +827,7 @@ describe('GenericAnnotationNode property editor', () => {
         <GenericAnnotationNode id="v1" type="vote_dot" data={{ locked: true }} />
       );
       fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+      openGroup('Rotation');
       expect(screen.queryByLabelText('Bring to front')).toBeNull();
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
     });
@@ -776,6 +836,7 @@ describe('GenericAnnotationNode property editor', () => {
   it('closes the context menu on Escape', async () => {
     const { container } = render(<GenericAnnotationNode id="v1" type="vote_dot" data={{}} />);
     fireEvent.contextMenu(container.querySelector('.kind-vote_dot'));
+    openGroup('Rotation');
     expect(screen.getByLabelText('Reset rotation')).toBeInTheDocument();
     // The dismiss listeners are wired up on a setTimeout(0) (so the very
     // contextmenu event that opened the menu doesn't immediately close it);
@@ -814,6 +875,7 @@ describe('GenericAnnotationNode locked context menu', () => {
           ? screen.getByTestId('shape-halo')
           : container.querySelector(`.kind-${kind}`);
       fireEvent.contextMenu(root);
+      openGroup('Shape');
       expect(screen.getByText(/Unlock/)).toBeInTheDocument();
       expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
       expect(screen.queryByLabelText('Rotate left 15°')).toBeNull();
@@ -830,6 +892,7 @@ describe('GenericAnnotationNode locked context menu', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.kind-shape'));
+    openGroup('Rotation');
     fireEvent.click(screen.getByText(/Unlock/));
     const updated = applyLatestUpdate({ id: 's1', data: { locked: true }, draggable: false });
     expect(updated.data.locked).toBe(false);
@@ -840,9 +903,12 @@ describe('GenericAnnotationNode locked context menu', () => {
   it('still shows the full property editor when unlocked', () => {
     render(<GenericAnnotationNode id="s1" type="shape" data={{ locked: false }} selected />);
     fireEvent.contextMenu(document.querySelector('.kind-shape'));
+    // One group's controls are visible at a time, so reach each in turn.
+    openGroup('Rotation');
     expect(screen.getByLabelText('Rotate left 15°')).toBeInTheDocument();
+    openGroup('More actions');
     expect(screen.getByText(/Duplicate/)).toBeInTheDocument();
-    expect(screen.getByText(/Delete/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /delete/i })).toBeInTheDocument();
   });
 
   // Resize/drag already refuse a locked annotation; the resizer must stay
@@ -877,6 +943,7 @@ describe('GenericAnnotationNode duplicate control', () => {
           ? screen.getByTestId('shape-halo')
           : container.querySelector(`.kind-${kind}`);
       fireEvent.contextMenu(root);
+      openGroup('More actions');
       fireEvent.click(screen.getByText(/Duplicate/));
       const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
       expect(updated).toHaveLength(2);
@@ -904,6 +971,7 @@ describe('GenericAnnotationNode duplicate control', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.kind-shape'));
+    openGroup('More actions');
     fireEvent.click(screen.getByText(/Duplicate/));
     const updated = hoisted.setNodes.mock.calls.at(-1)[0](hoisted.nodes);
     const copy = updated.find((n) => n.id !== 's1');
@@ -925,6 +993,7 @@ describe('GenericAnnotationNode duplicate control', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.kind-text'));
+    openGroup('More actions');
     fireEvent.click(screen.getByText(/Duplicate/));
     expect(notifyChange).toHaveBeenCalledWith('create');
   });
@@ -1235,6 +1304,7 @@ describe('regular shape geometry', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    openGroup('Shape');
     fireEvent.click(screen.getByLabelText('triangle'));
 
     const updated = applyLatestUpdate({
@@ -1258,6 +1328,7 @@ describe('regular shape geometry', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    openGroup('Shape');
     fireEvent.click(screen.getByLabelText('hexagon'));
 
     const updated = applyLatestUpdate({
@@ -1280,6 +1351,7 @@ describe('regular shape geometry', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('[data-testid="shape-halo"]'));
+    openGroup('Shape');
     fireEvent.click(screen.getByLabelText('rectangle'));
 
     const updated = applyLatestUpdate({
@@ -1401,8 +1473,14 @@ describe('text/shape typography', () => {
       const target =
         kind === 'shape' ? screen.getByTestId('shape-halo') : container.querySelector('.kind-text');
       fireEvent.contextMenu(target);
+      // Alignment, text size and font are three groups now, each reached on
+      // its own — the three stacked sections this used to see at once are
+      // exactly the height the compact bar exists to reclaim.
+      openGroup('Alignment');
       expect(document.querySelectorAll('.align-picker-button')).toHaveLength(9);
+      openGroup('Text size');
       expect(document.querySelector('.context-menu-sizes')).toBeTruthy();
+      openGroup('Font');
       // Button text is the translated family label (labels.fontFamily*), not
       // the bare stored keyword — packages/ui-graph-canvas's i18n rule.
       expect(screen.getByText('Default')).toBeInTheDocument();
@@ -1418,6 +1496,7 @@ describe('text/shape typography', () => {
     const target =
       kind === 'icon' ? screen.getByTitle('flag') : container.querySelector(`.kind-${kind}`);
     fireEvent.contextMenu(target);
+    openGroup('Alignment');
     expect(document.querySelector('.context-menu-align')).toBeNull();
     expect(document.querySelector('.context-menu-fonts')).toBeNull();
   });
@@ -1447,6 +1526,7 @@ describe('text/shape typography', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByText('Hi'));
+    openGroup('Alignment');
     fireEvent.click(screen.getByLabelText('Bottom Right'));
     expect(applyLatestUpdate({ id: 't1', data: {} }).data.textAlign).toBe('bottom-right');
     expect(notifyChange).toHaveBeenCalledWith('style');
@@ -1455,16 +1535,19 @@ describe('text/shape typography', () => {
   it('sets fontSize on click', () => {
     render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi' }} />);
     fireEvent.contextMenu(screen.getByText('Hi'));
+    openGroup('Text size');
     // Every GENERIC_TEXT_FONT_SIZES button renders the same "A" glyph at a
     // different size — pick the first (smallest, 12) rather than an
-    // ambiguous text match.
-    fireEvent.click(screen.getAllByText('A')[0]);
+    // ambiguous text match. The group trigger draws an "A" too, so scope the
+    // match to the panel's own buttons.
+    fireEvent.click(document.querySelectorAll('.size-button')[0]);
     expect(applyLatestUpdate({ id: 't1', data: {} }).data.fontSize).toBe(12);
   });
 
   it('sets and clears a font-family override on click', () => {
     render(<GenericAnnotationNode id="t1" type="text" data={{ text: 'Hi', font: 'serif' }} />);
     fireEvent.contextMenu(screen.getByText('Hi'));
+    openGroup('Font');
     // Clicked by its translated label ("Monospace"), matching what the DOM
     // actually shows; the stored value it writes is still the bare keyword.
     fireEvent.click(screen.getByText('Monospace'));
@@ -1506,6 +1589,7 @@ describe('text/shape typography', () => {
     // notifies and returns) — matching every other mutation on a remote-locked
     // annotation, so there is nothing to click here at all.
     fireEvent.contextMenu(screen.getByText('Hi'));
+    openGroup('Alignment');
     expect(document.querySelector('.context-menu-align')).toBeNull();
     expect(notifyRemoteLockedAttempt).toHaveBeenCalledTimes(1);
   });
@@ -1538,6 +1622,7 @@ describe('GenericAnnotationNode "Nearby object menu"', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByTitle('circle'));
+    openGroup('More actions');
     fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
     expect(attachNearby).toHaveBeenCalledWith('i1', 'label');
   });
@@ -1560,6 +1645,7 @@ describe('GenericAnnotationNode "Nearby object menu"', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(screen.getByTestId('shape-halo'));
+    openGroup('More actions');
     expect(screen.getByText('Add nearby')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
     expect(attachNearby).toHaveBeenCalledWith('s1', 'label');
@@ -1578,6 +1664,7 @@ describe('GenericAnnotationNode "Nearby object menu"', () => {
       </AnnotationContext.Provider>
     );
     fireEvent.contextMenu(document.querySelector('.kind-vote_dot'));
+    openGroup('More actions');
     expect(screen.queryByText('Add nearby')).toBeNull();
   });
 });

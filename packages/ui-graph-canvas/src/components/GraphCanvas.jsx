@@ -487,6 +487,8 @@ function GraphCanvasInner({
     ariaKindGroup: 'Group',
     annotationWidth: 'Width',
     annotationHeight: 'Height',
+    annotationSize: 'Size',
+    annotationMoreActions: 'More actions',
     annotationApplySize: 'Apply size',
     annotationAttachTo: 'Attach to…',
     annotationDetach: 'Detach',
@@ -941,6 +943,8 @@ function GraphCanvasInner({
         ariaKindGroup: cml.ariaKindGroup,
         width: cml.annotationWidth,
         height: cml.annotationHeight,
+        size: cml.annotationSize,
+        moreActions: cml.annotationMoreActions,
         applySize: cml.annotationApplySize,
         attachTo: cml.annotationAttachTo,
         detach: cml.annotationDetach,
@@ -4206,15 +4210,12 @@ function GraphCanvasInner({
             selectionMode={SelectionMode.Partial}
             selectNodesOnDrag={true}
             nodesDraggable={!freehandActive && !eraserActive}
-            // Two-finger pinch zooms on a touch screen. Stated explicitly
-            // rather than left to the library default so that it cannot be
-            // silently lost, and so the pairing with `panOnScroll={false}`
-            // below is visible in one place: with panOnScroll on, a
-            // trackpad/touch pinch is delivered as a scroll and pans instead
-            // of zooming, which is what made pinch appear to do nothing.
+            // Two-finger pinch zooms. This is ReactFlow's default; it is
+            // stated explicitly because the actual fix for pinch lives in CSS
+            // (GraphCanvas.css's touch-action rules) and this is the prop a
+            // future reader would otherwise suspect first and "fix" by
+            // toggling. The prop was never the problem.
             zoomOnPinch
-            panOnScroll={false}
-            zoomOnScroll
             deleteKeyCode={null}
             multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
             edgesUpdatable={false}

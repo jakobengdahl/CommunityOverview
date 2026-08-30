@@ -542,7 +542,9 @@
     "annotation_attach_to_hint": "Välj ett mål att fästa vid — Escape för att avbryta",
     "annotation_attach_to_cancel": "Avbryt fästning",
     "annotation_multi_select_mode": "Markera flera",
-    "annotation_overlap_picker_title": "Flera objekt här — välj ett"
+    "annotation_overlap_picker_title": "Flera objekt här — välj ett",
+    "annotation_size": "Storlek",
+    "annotation_more_actions": "Fler åtgärder"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",

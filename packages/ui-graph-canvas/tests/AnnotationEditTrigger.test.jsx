@@ -210,6 +210,9 @@ describe('the Edit trigger on a GenericAnnotationNode kind (text)', () => {
     const button = screen.getByRole('button', { name: 'Edit' });
     fireEvent.click(button);
     expect(document.querySelector('.graph-annotation-context-menu')).not.toBeNull();
-    expect(screen.getByText('Opacity')).toBeInTheDocument();
+    // GenericAnnotationNode's editor is the compact property bar
+    // (task-annotation-compact-property-bar): each property is a named group
+    // trigger, so its name is an accessible name rather than a visible caption.
+    expect(screen.getByRole('button', { name: 'Opacity' })).toBeInTheDocument();
   });
 });

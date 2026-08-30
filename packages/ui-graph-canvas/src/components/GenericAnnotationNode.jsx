@@ -23,6 +23,7 @@ import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerCo
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
 import AnnotationSizeControl from './AnnotationSizeControl';
+import { AnnotationMenuGroup } from './AnnotationMenuGroup';
 import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
@@ -1112,6 +1113,10 @@ function ContextMenuPortal({
   // it — see useAnnotationEditTrigger's own doc comment), so there is
   // nothing to portal into until then.
   const handleMenuKeyDown = useAnnotationMenuKeyNav(menuRef);
+  // Which property group's panel is open, or null for none. One at a time:
+  // two open panels would overlap each other on a pointer-positioned menu,
+  // and the bar exists to keep the surface small.
+  const [openGroup, setOpenGroup] = useState(null);
   const portalTarget = sheet ? sheetContainer : document.body;
   if (!portalTarget) return null;
   const menuClassName = `graph-annotation-context-menu${sheet ? ' sheet' : ''}`;
@@ -1127,11 +1132,36 @@ function ContextMenuPortal({
       portalTarget
     );
   }
+  // The compact property bar (task-annotation-compact-property-bar). Every
+  // section that used to stack vertically under its own visible heading is now
+  // one trigger in a horizontal row, opening its controls in a panel on
+  // demand. See AnnotationMenuGroup for why. The sections' own markup is
+  // unchanged inside each panel — only the chrome around them moved.
+  const alignPreview = TEXT_ALIGN_STYLES[textAlign] || TEXT_ALIGN_STYLES['top-left'];
+  const toggleGroup = (next) => setOpenGroup(next);
+  // A group trigger's accessible name is the ONLY name it has — the bar has
+  // no room for a visible caption — so it must never be empty. The host
+  // always supplies these (GraphCanvas's annotation labels, translated in
+  // App.jsx); the English fallback covers a caller that passes a partial
+  // label set, which would otherwise leave an unnamed button in an
+  // icon-only row. Same convention AnnotationToolbox uses for its own labels.
+  const gl = (key, fallback) => labels[key] || fallback;
   return createPortal(
-    <div ref={menuRef} className={menuClassName} style={menuStyle} onKeyDown={handleMenuKeyDown}>
+    <div
+      ref={menuRef}
+      className={`${menuClassName} graph-annotation-context-menu--bar`}
+      style={menuStyle}
+      onKeyDown={handleMenuKeyDown}
+    >
       {COLORABLE_KINDS.has(kind) && (
-        <>
-          <div className="context-menu-title">{labels.color}</div>
+        <AnnotationMenuGroup
+          groupKey="color"
+          label={gl('color', 'Color')}
+          glyph="●"
+          swatch={color}
+          open={openGroup === 'color'}
+          onToggle={toggleGroup}
+        >
           <div className="context-menu-colors">
             {GENERIC_COLORS.map((c) => (
               <button
@@ -1144,111 +1174,171 @@ function ContextMenuPortal({
               />
             ))}
           </div>
-        </>
+        </AnnotationMenuGroup>
       )}
       {kind === 'shape' && (
         <>
-          <div className="context-menu-title">{labels.fill}</div>
-          <div className="context-menu-colors">
-            {FILL_BORDER_SWATCHES.map((c) => (
-              <button
-                key={`fill-${c}`}
-                type="button"
-                className={`color-button${
-                  c === 'transparent' ? ' color-button-transparent' : ''
-                }${fill === c ? ' active' : ''}`}
-                style={c === 'transparent' ? undefined : { backgroundColor: c }}
-                aria-label={`${labels.fill} ${c === 'transparent' ? labels.transparent : c}`}
-                onClick={() => onChangeFill(c)}
-              />
-            ))}
-          </div>
-          <div className="context-menu-title">{labels.border}</div>
-          <div className="context-menu-colors">
-            {FILL_BORDER_SWATCHES.map((c) => (
-              <button
-                key={`border-${c}`}
-                type="button"
-                className={`color-button${
-                  c === 'transparent' ? ' color-button-transparent' : ''
-                }${border === c ? ' active' : ''}`}
-                style={c === 'transparent' ? undefined : { backgroundColor: c }}
-                aria-label={`${labels.border} ${c === 'transparent' ? labels.transparent : c}`}
-                onClick={() => onChangeBorder(c)}
-              />
-            ))}
-          </div>
+          <AnnotationMenuGroup
+            groupKey="fill"
+            label={gl('fill', 'Fill')}
+            glyph="◼"
+            swatch={fill ?? 'transparent'}
+            open={openGroup === 'fill'}
+            onToggle={toggleGroup}
+          >
+            <div className="context-menu-colors">
+              {FILL_BORDER_SWATCHES.map((c) => (
+                <button
+                  key={`fill-${c}`}
+                  type="button"
+                  className={`color-button${
+                    c === 'transparent' ? ' color-button-transparent' : ''
+                  }${fill === c ? ' active' : ''}`}
+                  style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                  aria-label={`${labels.fill} ${c === 'transparent' ? labels.transparent : c}`}
+                  onClick={() => onChangeFill(c)}
+                />
+              ))}
+            </div>
+          </AnnotationMenuGroup>
+          <AnnotationMenuGroup
+            groupKey="border"
+            label={gl('border', 'Border')}
+            glyph="◻"
+            swatch={border ?? 'transparent'}
+            open={openGroup === 'border'}
+            onToggle={toggleGroup}
+          >
+            <div className="context-menu-colors">
+              {FILL_BORDER_SWATCHES.map((c) => (
+                <button
+                  key={`border-${c}`}
+                  type="button"
+                  className={`color-button${
+                    c === 'transparent' ? ' color-button-transparent' : ''
+                  }${border === c ? ' active' : ''}`}
+                  style={c === 'transparent' ? undefined : { backgroundColor: c }}
+                  aria-label={`${labels.border} ${c === 'transparent' ? labels.transparent : c}`}
+                  onClick={() => onChangeBorder(c)}
+                />
+              ))}
+            </div>
+          </AnnotationMenuGroup>
         </>
       )}
       {EDITABLE_TEXT_KINDS.has(kind) && (
         <>
-          <div className="context-menu-title">{labels.textAlign}</div>
-          <div className="context-menu-align">
-            {TEXT_ALIGN_VALUES.map((pos) => {
-              const [vertical, horizontal] = pos.split('-');
-              const ariaLabel = `${labels[ALIGN_LABEL_KEYS[vertical]]} ${labels[ALIGN_LABEL_KEYS[horizontal]]}`;
-              return (
-                <button
-                  key={pos}
-                  type="button"
-                  className={`align-picker-button${textAlign === pos ? ' active' : ''}`}
-                  aria-label={ariaLabel}
-                  title={ariaLabel}
-                  onClick={() => onChangeTextAlign(pos)}
-                >
-                  <span
-                    className="align-picker-dot"
-                    style={{
-                      justifyContent: TEXT_ALIGN_STYLES[pos].justifyContent,
-                      alignItems: TEXT_ALIGN_STYLES[pos].alignItems,
-                    }}
+          <AnnotationMenuGroup
+            groupKey="textAlign"
+            label={gl('textAlign', 'Text alignment')}
+            // The trigger previews the CURRENT alignment using the same dot
+            // the nine options draw, so the bar shows where the text sits
+            // without opening anything.
+            glyph={
+              <span
+                className="align-picker-dot"
+                style={{
+                  justifyContent: alignPreview.justifyContent,
+                  alignItems: alignPreview.alignItems,
+                }}
+              >
+                <span className="align-picker-dot-mark" />
+              </span>
+            }
+            open={openGroup === 'textAlign'}
+            onToggle={toggleGroup}
+          >
+            <div className="context-menu-align">
+              {TEXT_ALIGN_VALUES.map((pos) => {
+                const [vertical, horizontal] = pos.split('-');
+                const ariaLabel = `${labels[ALIGN_LABEL_KEYS[vertical]]} ${labels[ALIGN_LABEL_KEYS[horizontal]]}`;
+                return (
+                  <button
+                    key={pos}
+                    type="button"
+                    className={`align-picker-button${textAlign === pos ? ' active' : ''}`}
+                    aria-label={ariaLabel}
+                    title={ariaLabel}
+                    onClick={() => onChangeTextAlign(pos)}
                   >
-                    <span className="align-picker-dot-mark" />
-                  </span>
+                    <span
+                      className="align-picker-dot"
+                      style={{
+                        justifyContent: TEXT_ALIGN_STYLES[pos].justifyContent,
+                        alignItems: TEXT_ALIGN_STYLES[pos].alignItems,
+                      }}
+                    >
+                      <span className="align-picker-dot-mark" />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </AnnotationMenuGroup>
+          <AnnotationMenuGroup
+            groupKey="textSize"
+            label={gl('textSize', 'Text size')}
+            glyph="A"
+            open={openGroup === 'textSize'}
+            onToggle={toggleGroup}
+          >
+            <div className="context-menu-sizes">
+              {GENERIC_TEXT_FONT_SIZES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`size-button${fontSize === s ? ' active' : ''}`}
+                  style={{ fontSize: Math.min(s, 18) }}
+                  onClick={() => onChangeFontSize(s)}
+                >
+                  A
                 </button>
-              );
-            })}
-          </div>
-          <div className="context-menu-title">{labels.textSize}</div>
-          <div className="context-menu-sizes">
-            {GENERIC_TEXT_FONT_SIZES.map((s) => (
+              ))}
+            </div>
+          </AnnotationMenuGroup>
+          <AnnotationMenuGroup
+            groupKey="font"
+            label={gl('fontFamily', 'Font')}
+            glyph="Aa"
+            open={openGroup === 'font'}
+            onToggle={toggleGroup}
+          >
+            <div className="context-menu-fonts">
               <button
-                key={s}
                 type="button"
-                className={`size-button${fontSize === s ? ' active' : ''}`}
-                style={{ fontSize: Math.min(s, 18) }}
-                onClick={() => onChangeFontSize(s)}
+                className={`font-button${!font ? ' active' : ''}`}
+                onClick={() => onChangeFont(null)}
               >
-                A
+                {labels.fontDefault}
               </button>
-            ))}
-          </div>
-          <div className="context-menu-title">{labels.fontFamily}</div>
-          <div className="context-menu-fonts">
-            <button
-              type="button"
-              className={`font-button${!font ? ' active' : ''}`}
-              onClick={() => onChangeFont(null)}
-            >
-              {labels.fontDefault}
-            </button>
-            {GENERIC_FONT_FAMILIES.map((family) => (
-              <button
-                key={family}
-                type="button"
-                className={`font-button${font === family ? ' active' : ''}`}
-                style={{ fontFamily: family }}
-                onClick={() => onChangeFont(family)}
-              >
-                {labels[FONT_FAMILY_LABEL_KEYS[family]] || family}
-              </button>
-            ))}
-          </div>
+              {GENERIC_FONT_FAMILIES.map((family) => (
+                <button
+                  key={family}
+                  type="button"
+                  className={`font-button${font === family ? ' active' : ''}`}
+                  style={{ fontFamily: family }}
+                  onClick={() => onChangeFont(family)}
+                >
+                  {labels[FONT_FAMILY_LABEL_KEYS[family]] || family}
+                </button>
+              ))}
+            </div>
+          </AnnotationMenuGroup>
         </>
       )}
       {kind === 'shape' && (
-        <>
-          <div className="context-menu-title">{labels.shape}</div>
+        <AnnotationMenuGroup
+          groupKey="shape"
+          label={gl('shape', 'Shape')}
+          glyph={
+            <span
+              className={`shape-picker-swatch shape-${shape}`}
+              style={SHAPE_STYLES[shape] || SHAPE_STYLES.rectangle}
+            />
+          }
+          open={openGroup === 'shape'}
+          onToggle={toggleGroup}
+        >
           <div className="context-menu-shapes">
             {SHAPE_NAMES.map((name) => (
               <button
@@ -1266,11 +1356,16 @@ function ContextMenuPortal({
               </button>
             ))}
           </div>
-        </>
+        </AnnotationMenuGroup>
       )}
       {kind === 'icon' && (
-        <>
-          <div className="context-menu-title">{labels.icon}</div>
+        <AnnotationMenuGroup
+          groupKey="icon"
+          label={gl('icon', 'Icon')}
+          glyph={resolveAnnotationIcon(icon).text}
+          open={openGroup === 'icon'}
+          onToggle={toggleGroup}
+        >
           <div className="context-menu-icons">
             {ICON_NAMES.map((name) => (
               <button
@@ -1285,68 +1380,120 @@ function ContextMenuPortal({
               </button>
             ))}
           </div>
-        </>
+        </AnnotationMenuGroup>
       )}
-      <div className="context-menu-title">{labels.rotation}</div>
-      <div className="context-menu-rotate">
-        <button
-          type="button"
-          className="rotate-button"
-          aria-label={labels.rotateLeft}
-          onClick={() => onChangeRotation(rotation - ROTATE_STEP)}
-        >
-          ⟲
-        </button>
-        <button
-          type="button"
-          className="rotate-button rotate-reset"
-          aria-label={labels.rotateReset}
-          onClick={() => onChangeRotation(0)}
-        >
-          {Math.round(rotation)}°
-        </button>
-        <button
-          type="button"
-          className="rotate-button"
-          aria-label={labels.rotateRight}
-          onClick={() => onChangeRotation(rotation + ROTATE_STEP)}
-        >
-          ⟳
-        </button>
-      </div>
-      <AnnotationOpacityControl
-        labels={labels}
-        opacity={opacity}
-        onChangeOpacity={onChangeOpacity}
-      />
+      <AnnotationMenuGroup
+        groupKey="rotation"
+        label={gl('rotation', 'Rotation')}
+        glyph="⟳"
+        open={openGroup === 'rotation'}
+        onToggle={toggleGroup}
+      >
+        <div className="context-menu-rotate">
+          <button
+            type="button"
+            className="rotate-button"
+            aria-label={labels.rotateLeft}
+            onClick={() => onChangeRotation(rotation - ROTATE_STEP)}
+          >
+            ⟲
+          </button>
+          <button
+            type="button"
+            className="rotate-button rotate-reset"
+            aria-label={labels.rotateReset}
+            onClick={() => onChangeRotation(0)}
+          >
+            {Math.round(rotation)}°
+          </button>
+          <button
+            type="button"
+            className="rotate-button"
+            aria-label={labels.rotateRight}
+            onClick={() => onChangeRotation(rotation + ROTATE_STEP)}
+          >
+            ⟳
+          </button>
+        </div>
+      </AnnotationMenuGroup>
+      <AnnotationMenuGroup
+        groupKey="opacity"
+        label={gl('opacity', 'Opacity')}
+        glyph="◐"
+        open={openGroup === 'opacity'}
+        onToggle={toggleGroup}
+      >
+        <AnnotationOpacityControl
+          labels={labels}
+          opacity={opacity}
+          onChangeOpacity={onChangeOpacity}
+        />
+      </AnnotationMenuGroup>
       {/* Non-drag alternative to the NodeResizer handles `shape`/`image`
           render above — task-annotation-accessible-shared-controls.
           `text`/`icon`/`vote_dot` have no explicit box (RESIZABLE_KINDS
           excludes them; see this component's own doc comment), so nothing
           renders for those kinds — matching what the drag handles already
           do (or rather, do not) offer them. */}
-      {RESIZABLE_KINDS.has(kind) && <AnnotationSizeControl id={id} data={data} labels={labels} />}
-      <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
-      <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
-      {/* Non-drag "Attach to…" target-tap mode
-          (task-annotation-accessible-shared-controls) — offered only for the
-          kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
-          `label` gets the identical pair in its own component). Unlike the
-          "Add nearby" section above (creates a NEW pre-attached annotation),
-          this attaches THIS existing one. */}
-      {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
-        <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
-          🧷 {labels.attachTo}
-        </button>
+      {RESIZABLE_KINDS.has(kind) && (
+        <AnnotationMenuGroup
+          groupKey="size"
+          label={gl('size', 'Size')}
+          glyph="⤢"
+          open={openGroup === 'size'}
+          onToggle={toggleGroup}
+        >
+          <AnnotationSizeControl id={id} data={data} labels={labels} />
+        </AnnotationMenuGroup>
       )}
-      {ATTACHABLE_OVERLAY_KINDS.has(kind) && data?.attachment && (
-        <button type="button" className="context-menu-attach" onClick={onDetach}>
-          {labels.detach}
-        </button>
-      )}
-      <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
-      <button type="button" className="context-menu-delete" onClick={onDelete}>
-        🗑️ {labels.delete}
+      <AnnotationMenuGroup
+        groupKey="layer"
+        label={gl('layer', 'Layer')}
+        glyph="≡"
+        open={openGroup === 'layer'}
+        onToggle={toggleGroup}
+      >
+        <AnnotationLayerControls labels={labels} locked={locked} onChangeLayer={onChangeLayer} />
+      </AnnotationMenuGroup>
+      {/* Duplicate, the two attachment actions and "Add nearby" are one-shot
+          commands rather than settings, so they share a single overflow group
+          instead of each spending a slot in the bar. Delete stays out of it,
+          directly reachable, because it is the action a user most often opens
+          this menu for. */}
+      <AnnotationMenuGroup
+        groupKey="actions"
+        label={gl('moreActions', 'More actions')}
+        glyph="⋯"
+        open={openGroup === 'actions'}
+        onToggle={toggleGroup}
+      >
+        <NearbyObjectMenuSection labels={labels} onAttach={onAttachNearby} />
+        {/* Non-drag "Attach to…" target-tap mode
+            (task-annotation-accessible-shared-controls) — offered only for the
+            kinds ATTACHABLE_OVERLAY_KINDS actually names (`text`, `icon` here;
+            `label` gets the identical pair in its own component). Unlike the
+            "Add nearby" section above (creates a NEW pre-attached annotation),
+            this attaches THIS existing one. */}
+        {ATTACHABLE_OVERLAY_KINDS.has(kind) && onEnterAttachMode && (
+          <button type="button" className="context-menu-attach" onClick={onEnterAttachMode}>
+            🧷 {labels.attachTo}
+          </button>
+        )}
+        {ATTACHABLE_OVERLAY_KINDS.has(kind) && data?.attachment && (
+          <button type="button" className="context-menu-attach" onClick={onDetach}>
+            {labels.detach}
+          </button>
+        )}
+        <AnnotationDuplicateControl labels={labels} onDuplicate={onDuplicate} />
+      </AnnotationMenuGroup>
+      <button
+        type="button"
+        className="context-menu-delete"
+        aria-label={gl('delete', 'Delete')}
+        title={gl('delete', 'Delete')}
+        onClick={onDelete}
+      >
+        🗑️
       </button>
     </div>,
     portalTarget

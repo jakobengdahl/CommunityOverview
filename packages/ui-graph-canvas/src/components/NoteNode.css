@@ -261,6 +261,121 @@
   border-color: #60a5fa;
 }
 
+/* The compact property bar (task-annotation-compact-property-bar). The menu
+   used to be a single tall column — a heading plus a control row per property
+   — which on a shape ran well past a phone's screen height, covered the object
+   being edited, and needed scrolling to reach the controls at the bottom. Each
+   property is now one small trigger in a horizontal row (see
+   AnnotationMenuGroup.jsx), and its controls appear in a panel only when asked
+   for. Same controls, a fraction of the resting footprint. */
+.graph-annotation-context-menu--bar {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  min-width: 0;
+  /* The panels are positioned against this, so it must be the containing
+     block for their absolute positioning. */
+  position: fixed;
+}
+
+/* The sheet variant is laid out in normal flow inside the host's BottomSheet
+   (see the .sheet rules above), which `position: fixed` would take it out of.
+   It keeps the row, and its panels anchor against the group instead. */
+.graph-annotation-context-menu--bar.sheet {
+  position: static;
+  justify-content: flex-start;
+  padding: 8px 0;
+}
+
+.annotation-menu-group {
+  position: relative;
+  display: inline-flex;
+}
+
+.annotation-menu-group-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #e6edf3;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-menu-group-trigger:hover,
+.annotation-menu-group-trigger:focus-visible {
+  border-color: #666;
+  background: #333;
+}
+
+.annotation-menu-group-trigger.open {
+  border-color: #60a5fa;
+  background: #1e293b;
+}
+
+.annotation-menu-group-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+/* The trigger's current-value preview: what the group is set to, without
+   opening it. A colour group shows its colour; 'transparent' shows the same
+   checkerboard the swatch list uses for it, so "no fill" is not mistaken for
+   a dark fill. */
+.annotation-menu-group-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 2px;
+}
+
+.annotation-menu-group-swatch--transparent {
+  background-image:
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%),
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%);
+  background-size: 6px 6px;
+  background-position:
+    0 0,
+    3px 3px;
+}
+
+/* Opens upward by default: the menu is positioned at the pointer, which is on
+   the object being edited, so a panel below would cover what the user is
+   looking at more often than one above. */
+.annotation-menu-group-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 1;
+  min-width: 150px;
+  padding: 8px;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #2a2a2a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* A panel's own controls keep the spacing they had as sections, minus the
+   bottom margin that separated one section from the next — inside a panel
+   there is no next section. */
+.annotation-menu-group-panel > *:last-child {
+  margin-bottom: 0;
+}
+
 /* Column direction is load-bearing, not cosmetic. TEXT_ALIGN_STYLES (see its
    doc comment in utils/annotations.js) defines `justifyContent` as the
    VERTICAL position and `alignItems` as the horizontal one — which is only

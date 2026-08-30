@@ -128,7 +128,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const text = findCreatedNode('text');
     expect(text).toBeTruthy();
     expect(text.data).toEqual({ text: '', color: undefined, fontSize: undefined });
@@ -155,7 +154,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
     expect(shape.data.fill).toBeUndefined();
@@ -174,7 +172,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
     placeOnPane();
-
 
     const shape = findCreatedNode('shape');
     expect(shape.zIndex).toBe(-1);
@@ -197,7 +194,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const node = findCreatedNode('shape');
     expect(node.data.shape).toBe(shape);
     expect(node.style).toEqual(expected);
@@ -209,7 +205,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^rectangle$/i }));
 
     placeOnPane();
-
 
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
@@ -223,7 +218,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^circle$/i }));
 
     placeOnPane();
-
 
     const shape = findCreatedNode('shape');
     expect(shape).toBeTruthy();
@@ -240,7 +234,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const shape = findCreatedNode('shape');
     expect(shape.data.text).toBe('');
   });
@@ -251,7 +244,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^icon: circle$/i }));
 
     placeOnPane();
-
 
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
@@ -275,7 +267,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const icon = findCreatedNode('icon');
     expect(icon).toBeTruthy();
     expect(icon.data.icon).toBe('star');
@@ -292,7 +283,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
 
     placeOnPane();
 
-
     const voteDot = findCreatedNode('vote_dot');
     expect(voteDot).toBeTruthy();
     expect(voteDot.data.value).toBeUndefined();
@@ -307,7 +297,6 @@ describe('GraphCanvas bottom annotation toolbox', () => {
     fireEvent.click(screen.getByRole('button', { name: /^label$/i }));
 
     placeOnPane();
-
 
     const label = findCreatedNode('label');
     expect(label).toBeTruthy();

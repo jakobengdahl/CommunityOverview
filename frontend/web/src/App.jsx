@@ -2610,6 +2610,8 @@ function App() {
             ariaKindGroup: t('context_menu.aria_kind_group'),
             annotationWidth: t('context_menu.annotation_width'),
             annotationHeight: t('context_menu.annotation_height'),
+            annotationSize: t('context_menu.annotation_size'),
+            annotationMoreActions: t('context_menu.annotation_more_actions'),
             annotationApplySize: t('context_menu.annotation_apply_size'),
             annotationAttachTo: t('context_menu.annotation_attach_to'),
             annotationDetach: t('context_menu.annotation_detach'),

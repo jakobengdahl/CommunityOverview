@@ -114,6 +114,21 @@ MCP. The required entry points are:
 - **Desktop collapsible bottom toolbox** — the primary creation surface.
   Collapsed by default to a slim strip; expands to show every v1 type
   grouped by family (notes/text, shapes, connectors, marks, media).
+  The toolbox selects a TOOL rather than creating immediately
+  (task-annotation-tool-modes): activating a type arms it, and each
+  subsequent click/tap on empty canvas creates one instance of that type at
+  the pointed-at position, until a different tool is armed. `select` (plain
+  selection/drag/marquee) and `eraser` are tools in the same row, and
+  Escape returns to `select`. Drag-to-create from the toolbox is unchanged
+  and still places a single object without arming anything. `freehand`
+  remains the one deliberately one-shot tool: it disarms itself after a
+  single stroke.
+- **Eraser** — dragging over an annotation deletes it; dragging over a graph
+  node or edge HIDES it. The eraser must never delete graph data: a
+  dragged-over node is far too easy to hit for the destructive reading to be
+  acceptable. A stylus's inverted tip (`pointerType === 'eraser'`) erases
+  regardless of which tool is armed, since flipping the pen over is itself
+  the gesture.
 - **Nearby object menu** — a contextual menu anchored to an existing
   object (node or annotation) offering the attachable types (label/callout,
   icon, text/heading, arrow) pre-wired to attach to that object.
@@ -144,6 +159,22 @@ MCP. The required entry points are:
   below); activating it — click, tap, or Tab then Enter/Space — opens the
   same property editor `onContextMenu` (right-click, or a long-press that
   synthesizes it) already opens, which keeps working unchanged alongside it.
+  The long-press path accepts `pointerType` **`pen`** as well as `touch`
+  (task-annotation-pen-long-press): a stylus reports `pen`, so restricting the
+  detector to `touch` left a pen-first device — which has no right-click of
+  its own — with no route to any annotation's menu at all. A pen is admitted
+  regardless of the host's coarse-pointer signal, since a hybrid device driven
+  by pen can legitimately report a fine pointer; mouse still never long-presses.
+
+  For the `GenericAnnotationNode` kinds the editor is a **compact property
+  bar** (task-annotation-compact-property-bar): one small trigger per
+  property, each carrying that property's current value, opening its controls
+  in a panel on demand — one panel at a time. It replaces the single tall
+  column of labelled sections, which on a `shape` exceeded a phone's screen
+  height, covered the object being edited, and needed scrolling to reach its
+  own lower controls. Delete stays directly in the bar; the one-shot commands
+  (duplicate, add-nearby, attach/detach) share an overflow group. The controls
+  inside each panel are unchanged — only how many taps it takes to see them.
   Desktop and a compact host with no `MobileShell` (e.g. `frontend/widget`)
   get that same editor as a floating menu anchored to the button; a compact,
   integrated host portals it into the shared mobile bottom sheet instead —

@@ -410,6 +410,9 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
     act(() => {
       fireEvent.contextMenu(screen.getByTitle('circle'));
     });
+    // "Add nearby" is one of the one-shot commands behind the property bar's
+    // overflow group now (task-annotation-compact-property-bar).
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
     fireEvent.click(screen.getByRole('button', { name: '+ Label' }));
 
     const created = store.nodes.find((n) => n.type === 'label');
