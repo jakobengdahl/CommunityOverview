@@ -50,6 +50,25 @@
   min-width: 150px;
 }
 
+/* The contextual "Edit" surface's mobile-sheet variant
+   (task-annotation-responsive-bottom-toolbox): the same menu markup and
+   every one of the rules above/below it, but laid out for the host's
+   BottomSheet content area instead of a floating, pointer-positioned panel —
+   the annotation-editing equivalent of AnnotationToolbox's own
+   `variant="sheet"` (AnnotationToolbox.css). No `position`/`left`/`top` (the
+   sheet itself is what's positioned), full width, and unconstrained height
+   since the BottomSheet's own content area already scrolls. */
+.graph-annotation-context-menu.sheet {
+  position: static;
+  width: 100%;
+  min-width: 0;
+  box-shadow: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 0 12px;
+}
+
 .graph-annotation-context-menu .context-menu-title {
   font-size: 12px;
   color: #999;

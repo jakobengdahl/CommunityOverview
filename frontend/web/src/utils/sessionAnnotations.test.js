@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   annotationDocumentToLegacyMetadata,
   annotationsToGroups,
+  annotationsToOverlays,
   groupsToAnnotations,
   legacyMetadataToAnnotationDocument,
+  overlaysToAnnotations,
 } from './sessionAnnotations';
 
 describe('group description round-trip (R12)', () => {
@@ -269,5 +271,55 @@ describe('group envelope round-trip (locked, z)', () => {
       annotations: [],
     });
     expect(document.annotations[0]).toEqual(expect.objectContaining({ locked: true, z: 4 }));
+  });
+});
+
+// Opacity (task-annotation-responsive-bottom-toolbox's edit-surface half) was
+// previously freehand-only on this leg too (`style.opacity`, freehand's own
+// pre-existing convention); every kind now carries it the same way.
+describe('opacity round-trip through the server annotation document', () => {
+  it('carries opacity into a note/label/line annotation as style.opacity', () => {
+    const [note, label, line] = overlaysToAnnotations([
+      { id: 'n1', kind: 'note', position: { x: 0, y: 0 }, text: 'x', opacity: 0.5 },
+      { id: 'l1', kind: 'label', position: { x: 0, y: 0 }, text: 'x', opacity: 0.75 },
+      { id: 'a1', kind: 'arrow', position: { x: 0, y: 0 }, dx: 160, dy: 0, opacity: 0.3 },
+    ]);
+    expect(note.style.opacity).toBe(0.5);
+    expect(label.style.opacity).toBe(0.75);
+    expect(line.style.opacity).toBe(0.3);
+  });
+
+  it('carries opacity into a generic (text/shape/icon/vote_dot/image) annotation as style.opacity', () => {
+    for (const kind of ['text', 'shape', 'icon', 'vote_dot', 'image']) {
+      const [ann] = overlaysToAnnotations([
+        { id: `${kind}-1`, kind, position: { x: 0, y: 0 }, opacity: 0.4 },
+      ]);
+      expect(ann.style.opacity).toBe(0.4);
+    }
+  });
+
+  it('reads opacity back out of style.opacity for every kind (the inverse leg)', () => {
+    const overlays = annotationsToOverlays([
+      { id: 'n1', type: 'note', position: { x: 0, y: 0 }, text: 'x', style: { opacity: 0.6 } },
+      { id: 'l1', type: 'label', position: { x: 0, y: 0 }, text: 'x', style: { opacity: 0.6 } },
+      {
+        id: 'a1',
+        type: 'line',
+        from: { x: 0, y: 0 },
+        to: { x: 160, y: 0 },
+        style: { opacity: 0.6 },
+      },
+      { id: 't1', type: 'text', position: { x: 0, y: 0 }, style: { opacity: 0.6 } },
+    ]);
+    for (const overlay of overlays) {
+      expect(overlay.opacity).toBe(0.6);
+    }
+  });
+
+  it('leaves opacity absent by default, not forced to a value', () => {
+    const [note] = overlaysToAnnotations([
+      { id: 'n1', kind: 'note', position: { x: 0, y: 0 }, text: 'x' },
+    ]);
+    expect(note.style.opacity).toBeUndefined();
   });
 });

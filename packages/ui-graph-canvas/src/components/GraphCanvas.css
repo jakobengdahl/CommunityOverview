@@ -695,3 +695,67 @@ body.graph-suppress-selection * {
     color: #374151;
   }
 }
+
+/* The contextual "Edit" surface's visible entry point
+   (task-annotation-responsive-bottom-toolbox), rendered by every annotation
+   kind's own component (NoteNode, LabelNode, ArrowNode,
+   GenericAnnotationNode, FreehandAnnotationNode) — one shared rule set here
+   rather than five copies, since the button is visually and behaviourally
+   identical everywhere. Positioned like `.graph-node-remote-badge`
+   (CustomNode.css): `position: absolute` against the nearest positioned
+   ancestor, which is ReactFlow's own `.react-flow__node` wrapper when this
+   renders as a direct sibling of a kind's content (every kind but
+   freehand/arrow, which anchor it near their own stroke/endpoint origin
+   instead — see their own inline `style` for why). Sits above the remote
+   badge (z-index 6) so the two never fight for a hover/click target when
+   both are showing. `nodrag nopan` (ReactFlow's own class-based opt-outs)
+   keep a click/tap on this button from ever starting a canvas pan or a node
+   drag. */
+.annotation-edit-trigger {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  z-index: 7;
+}
+
+.annotation-edit-trigger:hover {
+  background: #3a3a3a;
+}
+
+.annotation-edit-trigger:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+/* ArrowNode has no box to anchor a top-right corner to — see its own doc
+   comment on this button for why it sits near the flow-position origin
+   instead. */
+.annotation-edit-trigger-arrow {
+  top: -28px;
+  left: -12px;
+  right: auto;
+}
+
+@media (prefers-color-scheme: light) {
+  .annotation-edit-trigger {
+    background: #1f2937;
+  }
+
+  .annotation-edit-trigger:hover {
+    background: #374151;
+  }
+}

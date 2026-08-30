@@ -517,7 +517,9 @@
     "annotation_nearby_menu": "Lägg till i närheten",
     "annotation_nearby_label": "Etikett",
     "annotation_nearby_icon": "Ikon",
-    "annotation_nearby_text": "Text"
+    "annotation_nearby_text": "Text",
+    "annotation_opacity": "Opacitet",
+    "edit_annotation": "Redigera"
   },
   "annotation_toolbox": {
     "toggle_expand": "Lägg till kommentar",
@@ -672,6 +674,7 @@
     "search_panel_title": "Sök",
     "create_panel_title": "Skapa",
     "annotate_panel_title": "Kommentera",
+    "edit_panel_title": "Redigera annotering",
     "chat_panel_title": "Assistent"
   }
 }

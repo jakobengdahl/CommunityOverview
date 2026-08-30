@@ -310,6 +310,27 @@ function GraphCanvasInner({
   // still gets a working annotation toolbox rather than losing it silently.
   // Desktop (isCompact false) never consults this prop.
   annotationToolboxPortalContainer = null,
+  // The EDIT-time counterpart of annotationToolboxPortalContainer above
+  // (task-annotation-responsive-bottom-toolbox): the contextual "Edit"
+  // surface for an already-selected annotation portals its property editor
+  // into this host-owned DOM node on a compact/integrated host, instead of
+  // the floating menu every kind's right-click path already renders. Read
+  // only through AnnotationContext's `editSheet.container` (see that
+  // context's doc comment); node components never read this prop directly.
+  annotationEditSheetPortalContainer = null,
+  // Asks the host to open its mobile edit sheet (bound to `MobileShell`'s
+  // `'detail'` surface in `frontend/web`) — called by a node's Edit button
+  // before the container above has necessarily mounted; the button's own
+  // menu state is set to sheet mode regardless, and picks up the container
+  // once the host's next render supplies it. Its presence (not
+  // `isCompact`/`touch` alone) is what makes `editSheet.capable` true, the
+  // same "does the host support this" signal `annotationToolboxPortalContainer`
+  // effectively already is for the creation toolbox.
+  onRequestAnnotationEditSheet = null,
+  // Asks the host to close the mobile edit sheet again — called when the
+  // node's own menu-dismiss logic (outside click, Escape, an action that
+  // closes the menu) fires while it was opened in sheet mode.
+  onCloseAnnotationEditSheet = null,
   // 'auto' detects a coarse (touch) pointer itself via matchMedia — this
   // package has no access to the host app's viewport-mode hook, so
   // detection must be self-contained. 'on'/'off' force the mode (mainly for
@@ -419,6 +440,8 @@ function GraphCanvasInner({
     annotationNearbyLabel: 'Label',
     annotationNearbyIcon: 'Icon',
     annotationNearbyText: 'Text',
+    annotationOpacity: 'Opacity',
+    editAnnotation: 'Edit',
     ...contextMenuLabels,
   };
   // Read through a ref inside the freehand pointer-capture effect below, for
@@ -737,6 +760,17 @@ function GraphCanvasInner({
       beginEditing,
       endEditing,
       attachNearby,
+      // task-annotation-responsive-bottom-toolbox's edit-surface half — see
+      // AnnotationContext's own doc comment on this field for what each part
+      // means. `isCompact` alone (not `isTouchMode`) is the gate, mirroring
+      // exactly how `annotationToolboxPortalContainer`'s own compact-vs-desktop
+      // branch below is decided.
+      editSheet: {
+        capable: isCompact && Boolean(onRequestAnnotationEditSheet),
+        container: annotationEditSheetPortalContainer,
+        requestOpen: onRequestAnnotationEditSheet,
+        requestClose: onCloseAnnotationEditSheet,
+      },
       labels: {
         color: cml.annotationColor,
         fill: cml.annotationFill,
@@ -780,6 +814,8 @@ function GraphCanvasInner({
         nearbyLabel: cml.annotationNearbyLabel,
         nearbyIcon: cml.annotationNearbyIcon,
         nearbyText: cml.annotationNearbyText,
+        opacity: cml.annotationOpacity,
+        editAnnotation: cml.editAnnotation,
       },
     }),
     [
@@ -788,6 +824,12 @@ function GraphCanvasInner({
       beginEditing,
       endEditing,
       attachNearby,
+      isCompact,
+      onRequestAnnotationEditSheet,
+      annotationEditSheetPortalContainer,
+      onCloseAnnotationEditSheet,
+      cml.annotationOpacity,
+      cml.editAnnotation,
       cml.annotationColor,
       cml.annotationFill,
       cml.annotationBorder,

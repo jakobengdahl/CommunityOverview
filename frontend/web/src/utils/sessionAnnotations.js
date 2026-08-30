@@ -171,6 +171,10 @@ function genericAnnotationToOverlay(a) {
     kind: a.type,
     position: a.position || { x: 0, y: 0 },
     color: a.style?.color,
+    // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface
+    // half) — same `style.opacity` slot `freehand` has always used, now
+    // read for every generic kind (text/shape/icon/vote_dot/image).
+    opacity: a.style?.opacity,
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
@@ -240,10 +244,17 @@ function genericOverlayToAnnotation(o) {
           fontSize: o.fontSize,
           font: o.font,
           textAlign: o.textAlign,
+          opacity: o.opacity,
         }
       : o.kind === 'text'
-        ? { color: o.color, fontSize: o.fontSize, font: o.font, textAlign: o.textAlign }
-        : { color: o.color };
+        ? {
+            color: o.color,
+            fontSize: o.fontSize,
+            font: o.font,
+            textAlign: o.textAlign,
+            opacity: o.opacity,
+          }
+        : { color: o.color, opacity: o.opacity };
   if (o.kind === 'text') {
     input.text = o.text || '';
     input.attachment = o.attachment;
@@ -331,6 +342,13 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.color,
         fontSize: a.fontSize,
+        // Opacity (task-annotation-responsive-bottom-toolbox's edit-surface
+        // half) lives under `style` for every kind, freehand's pre-existing
+        // convention — note's own `color`/`fontSize` stay top-level fields
+        // (an established inconsistency this task does not touch), but a
+        // brand-new field has no legacy shape to match, so it follows the
+        // convention every other kind already uses.
+        opacity: a.style?.opacity,
         size: a.size,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
@@ -344,6 +362,7 @@ export function annotationsToOverlays(annotations) {
         text: a.text || '',
         color: a.style?.color,
         fontSize: a.style?.fontSize,
+        opacity: a.style?.opacity,
         attachment: a.attachment,
         z: a.z ?? 0,
         locked: Boolean(a.locked),
@@ -359,6 +378,7 @@ export function annotationsToOverlays(annotations) {
         dx: to.x - from.x,
         dy: to.y - from.y,
         color: a.style?.color,
+        opacity: a.style?.opacity,
         startArrow: a.startArrow ?? false,
         endArrow: a.endArrow ?? true,
         z: a.z ?? 0,
@@ -404,6 +424,7 @@ export function overlaysToAnnotations(overlays) {
             text: o.text || '',
             color: o.color,
             fontSize: o.fontSize,
+            style: { opacity: o.opacity },
             size: o.size,
             z: o.z ?? 0,
             locked: Boolean(o.locked),
@@ -419,7 +440,7 @@ export function overlaysToAnnotations(overlays) {
             type: 'label',
             position: o.position || { x: 0, y: 0 },
             text: o.text || '',
-            style: { color: o.color, fontSize: o.fontSize },
+            style: { color: o.color, fontSize: o.fontSize, opacity: o.opacity },
             attachment: o.attachment,
             z: o.z ?? 0,
             locked: Boolean(o.locked),
@@ -449,7 +470,7 @@ export function overlaysToAnnotations(overlays) {
         position: { x: from.x, y: from.y },
         from: { x: from.x, y: from.y },
         to: { x: from.x + dx, y: from.y + dy },
-        style: { color: o.color },
+        style: { color: o.color, opacity: o.opacity },
         startArrow: o.startArrow ?? false,
         endArrow: o.endArrow ?? true,
         z: o.z ?? 0,

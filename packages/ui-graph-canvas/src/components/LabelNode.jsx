@@ -11,9 +11,11 @@ import {
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import AnnotationOpacityControl, { useAnnotationOpacity } from './AnnotationOpacityControl';
 import { NearbyObjectMenuSection } from './ContextMenus';
 import { useEditableText } from '../hooks/useEditableText';
 import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
 import './LabelNode.css';
 
 /**
@@ -37,6 +39,7 @@ function LabelNode({ id, data, selected }) {
   const remoteLocked = isRemoteLocked(data);
   const changeLayer = useAnnotationLayer(id, data);
   const duplicate = useAnnotationDuplicate(id, data);
+  const changeOpacity = useAnnotationOpacity(id, data);
   const locked = Boolean(data?.locked);
   // A single-line `<input>` commits on Enter too, unlike NoteNode/
   // GenericAnnotationNode's `<textarea>` which leaves Enter alone to insert
@@ -44,6 +47,11 @@ function LabelNode({ id, data, selected }) {
   const { isEditing, text, inputRef, startEditing, commitText, handleTextChange, handleKeyDown } =
     useEditableText(id, data, { commitOnEnter: true });
   useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -134,6 +142,7 @@ function LabelNode({ id, data, selected }) {
 
   const color = data.color || DEFAULT_LABEL_COLOR;
   const fontSize = data.fontSize || DEFAULT_LABEL_FONT_SIZE;
+  const opacity = Number.isFinite(data.opacity) ? data.opacity : 1;
   const badge = remoteEditBadge(data);
 
   return (
@@ -143,6 +152,7 @@ function LabelNode({ id, data, selected }) {
         style={{
           color,
           fontSize,
+          opacity,
           ...rotationStyle('label', data.rotation),
           outline: badge ? `2px solid ${badge.color}` : undefined,
           outlineOffset: badge ? '2px' : undefined,
@@ -185,13 +195,35 @@ function LabelNode({ id, data, selected }) {
           </span>
         )}
       </div>
+      {/* See NoteNode's equivalent comment: a real, focusable button,
+          shown only while selected. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
 
       {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
         createPortal(
           <div
             ref={contextMenuRef}
-            className="graph-annotation-context-menu"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
           >
             {locked ? (
               // The capability baseline's two actions for a locked object:
@@ -258,6 +290,11 @@ function LabelNode({ id, data, selected }) {
                     ⟳
                   </button>
                 </div>
+                <AnnotationOpacityControl
+                  labels={labels}
+                  opacity={opacity}
+                  onChangeOpacity={changeOpacity}
+                />
                 <AnnotationLayerControls
                   labels={labels}
                   locked={data.locked}
@@ -274,7 +311,7 @@ function LabelNode({ id, data, selected }) {
               </>
             )}
           </div>,
-          document.body
+          contextMenu.sheet ? sheetContainer : document.body
         )}
     </>
   );

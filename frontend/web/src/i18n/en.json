@@ -517,7 +517,9 @@
     "annotation_nearby_menu": "Add nearby",
     "annotation_nearby_label": "Label",
     "annotation_nearby_icon": "Icon",
-    "annotation_nearby_text": "Text"
+    "annotation_nearby_text": "Text",
+    "annotation_opacity": "Opacity",
+    "edit_annotation": "Edit"
   },
   "annotation_toolbox": {
     "toggle_expand": "Add annotation",
@@ -672,6 +674,7 @@
     "search_panel_title": "Search",
     "create_panel_title": "Create",
     "annotate_panel_title": "Annotate",
+    "edit_panel_title": "Edit annotation",
     "chat_panel_title": "Assistant"
   }
 }

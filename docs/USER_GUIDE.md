@@ -246,6 +246,15 @@ Annotations are part of the session, not the knowledge graph: they are stored wi
 session (so everyone sharing the session sees them) and never change the underlying node
 and edge data. Select an annotation and press **Delete** to remove it.
 
+**Editing an existing annotation.** Right-click still opens the property menu described
+below, but selecting any annotation also shows a small round **✎ Edit** button in its
+corner — a visible way in that works by click or tap alone, and by keyboard: Tab to the
+button and press Enter or Space. It opens the exact same menu right-click does, positioned
+next to the button instead of at a pointer position. On a phone (or any narrow,
+touch screen), tapping it opens the annotation's editor in the same bottom sheet the
+**Annotate** slot uses for creating one (see [9. On a phone](#9-on-a-phone)) — no need to
+long-press, which has always been unreliable across browsers and is never the *only* way in.
+
 A collapsible toolbox is also anchored to the bottom of the canvas. Click **Add
 annotation** to expand it, then pick a type to drop it at the centre of your current view:
 **Note**, **Text**, **Label**, a **Shape**, **Icon**, **Vote dot**, **Image**,
@@ -310,6 +319,12 @@ dot** is a plain coloured dot — right-click it for the same colour picker as t
 kinds; it has no value to set and does not attach to a node or another annotation the
 way Icon does. Icon annotations do support that same attach behaviour as labels once
 placed: drag one near a node or another annotation to attach it.
+
+Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
+images all also have an **Opacity** row in their menu, offering four levels (30%, 50%,
+75%, 100%) — useful for fading a shape or note behind the nodes it's framing without
+hiding it entirely. Freehand strokes have had this since drawing shipped; every other
+kind gets it from the same row now too.
 
 Notes, labels, arrows, freehand strokes, text, shapes, icons, voting dots and
 images all have a **Layer** row in their right-click menu, just above Delete. **Bring to
@@ -970,6 +985,15 @@ open, so the canvas is never covered by more than one panel at once. On a phone
 the annotation toolbox is *only* reachable through the **Annotate** slot; unlike
 on desktop, it does not also float over the canvas as a small always-visible
 strip, so it never competes with the bottom navigation for space.
+
+**Editing an existing annotation on a phone.** Tap an annotation to select it, then tap
+the small **✎ Edit** button that appears on it. That opens its property editor — colour,
+opacity, rotation, layer, duplicate, delete, and whatever else that kind offers — in a
+seventh sheet, laid out full-width for a thumb the same way the Annotate sheet is, and
+subject to the same "only one panel open" rule as everything else in the list above
+(opening it closes Annotate/Search/Create/Chat/Menu, and opening any of those closes it).
+It has no bottom-nav slot of its own — it only opens contextually, from the annotation's
+own Edit button, since it always needs an annotation to edit.
 
 **Canvas controls.** The desktop zoom cluster is replaced by a compact pill in
 the bottom-right corner with four touch-sized buttons: **zoom in**, **zoom out**,

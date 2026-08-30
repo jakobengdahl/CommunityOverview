@@ -91,14 +91,20 @@ export const ATTACHABLE_OVERLAY_KINDS = new Set(['text', 'label', 'icon']);
 // either a colour or the literal string `'transparent'`, so a shape can be a
 // solid fill with no border (the old plain-shape look), a transparent fill
 // with a coloured border (what `frame` used to draw), both, or neither.
+// `opacity` (0-1, task-annotation-responsive-bottom-toolbox's edit-surface
+// half) is appended to every one of these five kinds' field lists — it was
+// previously a `freehand`-only control (see that kind's own list below); an
+// omitted value keeps rendering fully opaque, the same "absent field = no
+// change from before this task" contract every other newly-added optional
+// field here already follows.
 const GENERIC_OVERLAY_FIELDS = {
-  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment'],
+  text: ['text', 'color', 'fontSize', 'textAlign', 'font', 'attachment', 'opacity'],
   // `text` here is a `shape`'s optional caption
   // (task-annotation-doubleclick-to-edit-text), not a separate annotation
   // kind — a shape with no caption keeps `text: ''`, matching every other
   // kind's empty-string default rather than an absent field.
-  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font'],
-  icon: ['icon', 'color', 'attachment'],
+  shape: ['shape', 'fill', 'border', 'text', 'fontSize', 'textAlign', 'font', 'opacity'],
+  icon: ['icon', 'color', 'attachment', 'opacity'],
   // A vote dot is a plain coloured dot (task-annotation-vote-dot-simplify):
   // no `value` (the number it used to render and the stepper that changed
   // it are both gone) and no `attachment` (it is not in
@@ -107,8 +113,8 @@ const GENERIC_OVERLAY_FIELDS = {
   // change simply never has it projected onto the live node — see this
   // object's own doc comment above for why that is enough, with no
   // migration, to make old data render correctly.
-  vote_dot: ['color'],
-  image: ['image', 'alt', 'color'],
+  vote_dot: ['color', 'opacity'],
+  image: ['image', 'alt', 'color', 'opacity'],
   // `points` are node-relative (relative to the node's own `position`, the
   // stroke's anchor/first sampled point) — the same convention arrow's
   // dx/dy uses, so a plain ReactFlow drag (which only updates `position`)
@@ -400,6 +406,7 @@ export function overlayToFlowNode(overlay) {
         text: overlay.text || '',
         color: overlay.color,
         fontSize: overlay.fontSize,
+        opacity: overlay.opacity,
         locked,
         rotation,
       },
@@ -418,6 +425,7 @@ export function overlayToFlowNode(overlay) {
         color: overlay.color,
         fontSize: overlay.fontSize,
         attachment: overlay.attachment,
+        opacity: overlay.opacity,
         locked,
         rotation,
       },
@@ -454,6 +462,7 @@ export function overlayToFlowNode(overlay) {
     dx: overlay.dx ?? 160,
     dy: overlay.dy ?? 0,
     color: overlay.color,
+    opacity: overlay.opacity,
     startArrow: overlay.startArrow ?? false,
     endArrow: overlay.endArrow ?? true,
     locked,
@@ -492,6 +501,7 @@ export function flowNodeToOverlay(node) {
       text: node.data?.text || '',
       color: node.data?.color,
       fontSize: node.data?.fontSize,
+      opacity: node.data?.opacity,
       size: node.style ? { w: node.style.width, h: node.style.height } : undefined,
       z,
       locked,
@@ -505,6 +515,7 @@ export function flowNodeToOverlay(node) {
       color: node.data?.color,
       fontSize: node.data?.fontSize,
       attachment: node.data?.attachment,
+      opacity: node.data?.opacity,
       z,
       locked,
       rotation,
@@ -528,6 +539,7 @@ export function flowNodeToOverlay(node) {
     dx: node.data?.dx ?? 160,
     dy: node.data?.dy ?? 0,
     color: node.data?.color,
+    opacity: node.data?.opacity,
     startArrow: node.data?.startArrow ?? false,
     endArrow: node.data?.endArrow ?? true,
     z,
