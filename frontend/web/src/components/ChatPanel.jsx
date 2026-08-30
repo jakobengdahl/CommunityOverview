@@ -14,7 +14,6 @@ import { positionNewNodes } from '@community-graph/ui-graph-canvas';
 import ExpertAgentSelector from './ExpertAgentSelector';
 import CollectionForm from './CollectionForm';
 import MarkdownMessage from './MarkdownMessage';
-import { useVisualViewportInset } from '../hooks/useVisualViewportInset';
 import './ChatPanel.css';
 
 /** Extract a present_form spec from a chat response, or null if none. */
@@ -85,11 +84,6 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const handleSendRef = useRef(null);
-
-  // Keyboard-aware composer (sheet variant only, see the JSX below) — disabled
-  // outright for the floating (desktop) variant so it never subscribes to
-  // visualViewport resize/scroll for a value that variant never reads.
-  const keyboardInset = useVisualViewportInset(isSheet);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -892,10 +886,7 @@ function ChatPanel({ collectionShortName, variant = 'floating' }) {
 
       {error && <div className="chat-error">{error}</div>}
 
-      <div
-        className="chat-input-container"
-        style={isSheet && keyboardInset ? { marginBottom: `${keyboardInset}px` } : undefined}
-      >
+      <div className="chat-input-container">
         {selectionSummary && (
           <div className="selection-indicator">
             <div className="selection-indicator-content">
