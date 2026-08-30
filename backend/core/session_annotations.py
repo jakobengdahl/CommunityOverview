@@ -402,10 +402,13 @@ def project_note(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "rotation": geometry.get("rotation", 0),
         "z": annotation.get("z", 0),
         "locked": bool(annotation.get("locked", False)),
-        # Read-only: pass straight back as update_annotation's base_version
-        # to opt into field-level conflict checking on a later write
-        # (dec-annotation-field-patches-and-conflicts). Defaults to 1 for an
-        # annotation stored before this field existed.
+        # Read-only bookkeeping (dec-annotation-field-patches-and-conflicts):
+        # bumped on every applied write. `update_sticky_note` does not accept
+        # it back as a `base_version` yet (unlike the generic
+        # `update_annotation` tool) — projected here regardless so a future
+        # caller/UI has it available, and so this shape matches
+        # `project_annotation`'s. Defaults to 1 for an annotation stored
+        # before this field existed.
         "version": annotation.get("version", 1),
         "created_at": annotation.get("created_at"),
         "updated_at": annotation.get("updated_at"),
