@@ -1965,9 +1965,24 @@ function App() {
       // in flight when this fires must know to exclude them from what it
       // folds/replays, or it would resurrect content the server just
       // permanently rejected.
-      onDropped: (batch) => {
+      //
+      // A 409 drop is the same "never retry this stale content" terminal
+      // handling, but a different cause: LeaseConflict
+      // (task-annotation-exclusive-edit-leases) means another client holds a
+      // live edit lease on the annotation this op targeted, not that the op
+      // itself is malformed. Show the same "someone else is editing this
+      // annotation" notice the direct-acquire denial already uses
+      // (GraphCanvas.jsx's annotationRemoteLocked) instead of the generic
+      // sync-error text, so the queued-op path — the actual enforcement point
+      // for most real edits per useAnnotationEditLease's own docstring — tells
+      // the user why their change didn't apply rather than staying silent.
+      onDropped: (batch, status) => {
         (batch || []).forEach((op) => recentlyDroppedOpsRef.current.add(op));
-        showNotification('error', t('sessions.change_not_saved'));
+        if (status === 409) {
+          showNotification('info', t('context_menu.annotation_remote_locked'));
+        } else {
+          showNotification('error', t('sessions.change_not_saved'));
+        }
         resyncFromServer(sessionId);
       },
     };

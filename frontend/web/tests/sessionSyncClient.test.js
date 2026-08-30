@@ -809,6 +809,41 @@ describe('SessionSyncClient', () => {
     expect(pendingDuringDrop).toEqual([]);
   });
 
+  // Regression for the review finding on PR #527 (task-annotation-exclusive-
+  // edit-leases): before the fix, 409/LeaseConflict fell into the generic
+  // "429 / 5xx / unknown" branch, so a queued op rejected by another client's
+  // live edit lease was requeued with its original, aging content and retried
+  // on the backoff timer forever — silently, since onDropped only ever fired
+  // for 400/413/404/410. Once the lease that was blocking it finally cleared,
+  // that stale content would then replay unconditionally against whatever the
+  // annotation's current state had become, silently overwriting real work.
+  it('drops a 409/LeaseConflict op instead of retrying it forever, and never replays it once the conflict clears', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
+    const onDropped = vi.fn();
+    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+
+    client.syncState({ node_refs: ['a'] });
+    await new Promise((r) => setTimeout(r, 30)); // let the first flush's fetch settle
+
+    // Terminal handling: onDropped fires with the 409 status so the UI can
+    // tell the user their edit didn't apply, and the op is gone from the
+    // queue rather than sitting there to be resent.
+    expect(onDropped).toHaveBeenCalledTimes(1);
+    expect(onDropped.mock.calls[0][1]).toBe(409);
+    expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
+    expect(client.getPendingOps()).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Wait well past the retry-backoff window (500ms floor). If the silent-
+    // infinite-retry bug were still present, the op would be resent here with
+    // its original, now-stale content — exactly the replay this fix rules out.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(onDropped).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
     // Regression for the shared-session "moves silently stop persisting over
     // time" data-loss bug: a single hung POST (a half-open request held by a
@@ -1440,7 +1475,9 @@ describe('SessionSyncClient edit leases', () => {
       {
         ok: true,
         status: 200,
-        json: async () => ({ applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }] }),
+        json: async () => ({
+          applied: [{ op: 'edit_lease_acquired', element_ids: ['node-a'], denied: {} }],
+        }),
       },
     ]);
     const { client } = makeClient({ fetchImpl });
@@ -1463,13 +1500,15 @@ describe('SessionSyncClient edit leases', () => {
     ]);
   });
 
-  it('beginEditing reports a denial with the holder\'s display name', async () => {
+  it("beginEditing reports a denial with the holder's display name", async () => {
     const fetchImpl = makeFetch([
       {
         ok: true,
         status: 200,
         json: async () => ({
-          applied: [{ op: 'edit_lease_acquired', element_ids: [], denied: { 'node-a': 'client-other' } }],
+          applied: [
+            { op: 'edit_lease_acquired', element_ids: [], denied: { 'node-a': 'client-other' } },
+          ],
         }),
       },
     ]);
@@ -1561,7 +1600,9 @@ describe('SessionSyncClient edit leases', () => {
     client.endEditing(['node-a']);
     // Nothing to release yet from the caller's point of view — the id was
     // never actually held — so no op is enqueued for it here.
-    expect(fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released')).toHaveLength(0);
+    expect(fetchImpl.calls.filter((c) => c.body.ops[0]?.op === 'edit_lease_released')).toHaveLength(
+      0
+    );
 
     // The server now grants the acquisition the caller no longer wants.
     resolveFetch({
@@ -1614,7 +1655,7 @@ describe('SessionSyncClient edit leases', () => {
     expect(client.getRemoteLeases()['node-c']).toBeUndefined();
   });
 
-  it('drops a departed client\'s leases on presence_left', () => {
+  it("drops a departed client's leases on presence_left", () => {
     const { client } = makeClient();
     client.connect();
     const es = FakeEventSource.instances[0];

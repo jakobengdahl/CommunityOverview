@@ -1194,13 +1194,29 @@ export class SessionSyncClient {
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
       } else if (
         resp &&
-        (resp.status === 400 || resp.status === 413 || resp.status === 404 || resp.status === 410)
+        (resp.status === 400 ||
+          resp.status === 413 ||
+          resp.status === 404 ||
+          resp.status === 410 ||
+          resp.status === 409)
       ) {
-        // Terminal rejection (malformed / too large / session gone). Retrying
-        // never succeeds. If this was a multi-op batch, requeue and switch to
+        // Terminal rejection (malformed / too large / session gone / lease
+        // conflict). Retrying never succeeds — including 409/LeaseConflict
+        // (task-annotation-exclusive-edit-leases): unlike a 5xx, the batch
+        // isn't wrong because of a transient server hiccup, it lost the race
+        // for an exclusive edit lease another client actually holds, and
+        // resending the same frozen op content once that lease clears would
+        // silently overwrite whatever real edit the lease-holder made in the
+        // interim — the exact data-loss path this lease mechanism exists to
+        // prevent. Drop it here the same as a permanently-invalid op; the
+        // caller (onDropped, keyed by resp.status) is responsible for telling
+        // the user their change didn't apply and, if it wants to retry at
+        // all, doing so with fresh current-state content rather than this
+        // stale queued op. If this was a multi-op batch, requeue and switch to
         // one-at-a-time so only the offending op is ultimately dropped; a lone
         // rejected op is dropped outright (its effect stays in the baseline, but
-        // it is genuinely un-persistable — e.g. a hard annotation-limit hit).
+        // it is genuinely un-persistable — e.g. a hard annotation-limit hit, or
+        // an annotation another client is actively editing).
         if (batch.length > 1) {
           this._queue = batch.concat(this._queue);
           this._forceSingle = true;
