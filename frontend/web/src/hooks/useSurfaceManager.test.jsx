@@ -41,6 +41,21 @@ describe('useSurfaceManager', () => {
     expect(result.current.openSurface).toBe('chat');
   });
 
+  it('opening annotate closes create, and vice versa (they are distinct, mutually exclusive surfaces)', () => {
+    const { result } = renderHook(() => useSurfaceManager());
+
+    act(() => result.current.open('create'));
+    expect(result.current.isOpen('create')).toBe(true);
+
+    act(() => result.current.open('annotate'));
+    expect(result.current.isOpen('annotate')).toBe(true);
+    expect(result.current.isOpen('create')).toBe(false);
+
+    act(() => result.current.open('create'));
+    expect(result.current.isOpen('create')).toBe(true);
+    expect(result.current.isOpen('annotate')).toBe(false);
+  });
+
   it('never reports more than one surface open at a time, across every surface pair', () => {
     const { result } = renderHook(() => useSurfaceManager());
 
