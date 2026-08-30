@@ -10,6 +10,7 @@ import {
   computeAttachmentToTarget,
   isEligibleAttachTarget,
   nodesAtPoint,
+  resolveRotatedResizeGeometry,
 } from '../src/utils/annotations';
 
 // task-annotation-accessible-shared-controls: closes the gaps the accepted
@@ -330,6 +331,116 @@ describe('non-drag width/height (AnnotationSizeControl, via NoteNode and GroupNo
     );
     fireEvent.contextMenu(screen.getByText('G'));
     expect(screen.getByRole('spinbutton', { name: 'Width' }).value).toBe('300');
+  });
+
+  // Regression coverage for the rotated-resize position jump: applying a new
+  // size via this control must compensate `position` exactly the way
+  // drag-resize's own resolveRotatedResizeGeometry already does for
+  // NoteNode/GenericAnnotationNode (see their handleResizeEnd), since CSS
+  // rotation here pivots around the box's own centre (transform-origin:
+  // center center in rotationStyle()) — changing width/height without
+  // compensating position visibly shifts a rotated box on screen.
+  it('an UNROTATED note: applying a size change leaves position untouched — the common case must not regress', () => {
+    const notifyChange = vi.fn();
+    hoisted.nodes = [
+      { id: 'note-1', position: { x: 50, y: 50 }, style: { width: 200, height: 140 } },
+    ];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange, notifyRemoteLockedAttempt: vi.fn(), labels: menuLabels }}
+      >
+        <NoteNode id="note-1" data={{ text: 'x' }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Width' }), {
+      target: { value: '260' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply size' }));
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    const result = updater(hoisted.nodes)[0];
+    expect(result.position.x).toBeCloseTo(50);
+    expect(result.position.y).toBeCloseTo(50);
+    expect(result.style).toEqual({ width: 260, height: 140 });
+  });
+
+  it('a ROTATED note: applying a size change compensates position the same way a drag-resize achieving the same final size would (hand-derived for a 90° rotation)', () => {
+    hoisted.nodes = [
+      {
+        id: 'note-1',
+        position: { x: 50, y: 50 },
+        style: { width: 200, height: 140 },
+      },
+    ];
+    render(
+      <AnnotationContext.Provider
+        value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn(), labels: menuLabels }}
+      >
+        <NoteNode id="note-1" data={{ text: 'x', rotation: 90 }} selected />
+      </AnnotationContext.Provider>
+    );
+    fireEvent.contextMenu(screen.getByText('x'));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Width' }), {
+      target: { value: '260' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply size' }));
+    const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+    const result = updater(hoisted.nodes)[0];
+    // Hand-derived: rotating a box whose unrotated top-left corner is the
+    // resize anchor by 90° around its centre. Old centre (150, 120); old
+    // anchor (top-left, local offset (-100,-70)) rotates to global (220, 20).
+    // New size 260x140 has local top-left offset (-130,-70), which at 90°
+    // rotates to (70,-130) from the new centre, so new centre = (150, 150)
+    // and new top-left = (20, 80).
+    expect(result.position.x).toBeCloseTo(20);
+    expect(result.position.y).toBeCloseTo(80);
+    expect(result.style).toEqual({ width: 260, height: 140 });
+  });
+
+  it('a ROTATED shape (GenericAnnotationNode): the control produces IDENTICAL geometry to what resolveRotatedResizeGeometry gives for an equivalent drag, across several rotation angles', () => {
+    for (const rotation of [30, 90, 137, 200, -45]) {
+      hoisted.setNodes.mockClear();
+      hoisted.nodes = [
+        {
+          id: 'shape-1',
+          position: { x: 10, y: 20 },
+          style: { width: 100, height: 60 },
+        },
+      ];
+      const { unmount } = render(
+        <AnnotationContext.Provider
+          value={{ notifyChange: vi.fn(), notifyRemoteLockedAttempt: vi.fn(), labels: menuLabels }}
+        >
+          <GenericAnnotationNode
+            id="shape-1"
+            type="shape"
+            data={{ shape: 'rectangle', rotation }}
+            selected
+          />
+        </AnnotationContext.Provider>
+      );
+      fireEvent.contextMenu(document.querySelector('.kind-shape'));
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Width' }), {
+        target: { value: '180' },
+      });
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Height' }), {
+        target: { value: '60' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Apply size' }));
+      const updater = hoisted.setNodes.mock.calls.at(-1)[0];
+      const result = updater(hoisted.nodes)[0];
+
+      const expected = resolveRotatedResizeGeometry({
+        start: { x: 10, y: 20, width: 100, height: 60 },
+        end: { x: 10, y: 20, width: 180, height: 60 },
+        rotation,
+      });
+      expect(result.position.x).toBeCloseTo(expected.x);
+      expect(result.position.y).toBeCloseTo(expected.y);
+      expect(result.style.width).toBe(expected.width);
+      expect(result.style.height).toBe(expected.height);
+      unmount();
+    }
   });
 });
 

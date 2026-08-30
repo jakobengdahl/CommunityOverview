@@ -1,7 +1,7 @@
 import { useContext, useState } from 'react';
 import { useReactFlow } from 'reactflow';
 import { AnnotationContext } from './AnnotationContext';
-import { isRemoteLocked, nodeSize } from '../utils/annotations';
+import { isRemoteLocked, nodeSize, resolveRotatedResizeGeometry } from '../utils/annotations';
 
 // Matches NodeResizer's own MIN_SIZE/minWidth/minHeight conventions across
 // the kinds that use it (NoteNode: 120x80, GenericAnnotationNode's
@@ -61,8 +61,37 @@ export default function AnnotationSizeControl({ id, data, labels }) {
     if (data?.locked) return;
     const width = Math.max(MIN_DIMENSION, Math.round(Number(draft.width)) || MIN_DIMENSION);
     const height = Math.max(MIN_DIMENSION, Math.round(Number(draft.height)) || MIN_DIMENSION);
+    // This control never moves position itself — a committed width/height
+    // must still land where a drag-resize achieving the same final size
+    // would have (resolveRotatedResizeGeometry's own comment explains why a
+    // rotated box's centre has to shift for its unmoved corner to stay put).
+    // Passing the same x/y for `start` and `end` tells that function "no
+    // handle inverted this drag", i.e. the equivalent of dragging the
+    // bottom-right handle — the box's top-left corner is the anchor, which
+    // matches what leaving position untouched already meant at rotation 0.
+    // At rotation 0 this reduces to exactly that no-op (see the function's
+    // own comment), so the unrotated case is unaffected by this change.
+    const current =
+      typeof getNode === 'function'
+        ? getNode(id)
+        : (typeof getNodes === 'function' ? getNodes() : []).find((n) => n.id === id);
+    const { w: startWidth, h: startHeight } = nodeSize(current || {});
+    const pos = current?.position || { x: 0, y: 0 };
+    const geometry = resolveRotatedResizeGeometry({
+      start: { x: pos.x, y: pos.y, width: startWidth, height: startHeight },
+      end: { x: pos.x, y: pos.y, width, height },
+      rotation: data?.rotation ?? 0,
+    });
     setNodes((nds) =>
-      nds.map((n) => (n.id === id ? { ...n, style: { ...n.style, width, height } } : n))
+      nds.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              position: { x: geometry.x, y: geometry.y },
+              style: { ...n.style, width: geometry.width, height: geometry.height },
+            }
+          : n
+      )
     );
     notifyChange('geometry');
   };
