@@ -269,6 +269,42 @@ function App() {
   // touches only the entities the op names, so a concurrent local edit is never
   // clobbered (unlike a wholesale reload). The sync client has already folded
   // the op into its baseline, so the store changes here do not echo back out.
+  // The actual canvas-mutating half of an annotation create/update — shared by
+  // applyRemoteOp's claim-gated case below (a genuine remote op, or one of an
+  // image ingest's two racing deliveries — see createSelfEchoDedup) and by
+  // onLocalAnnotationsApplied (this client's own op just acked with a fresh
+  // server version — see sessionSyncClient.js's _flush). The two callers must
+  // NOT share the claim() gate: onLocalAnnotationsApplied's id was never
+  // markPending'd for an image-ingest race (that mechanism is scoped to the
+  // dedicated ingest endpoint, never the ops queue this ack comes from), but
+  // claim() cannot tell "an id that happens to collide with an unrelated
+  // in-flight ingest race" apart from "the second half of that race" — routing
+  // an ack through claim() risks consuming a marker the real echo still needs
+  // (e.g. an image annotation moved immediately after being pasted, before its
+  // own echo has arrived), silently reverting that move when the stale echo
+  // then lands unguarded.
+  const applyAnnotationUpsertToCanvas = useCallback(
+    (ann) => {
+      if (!ann || !ann.id) return false;
+      if (ann.kind === 'group') {
+        const [group] = annotationsToGroups([ann]).groups;
+        setRemoteAnnotationOps((prev) => [
+          ...(prev || []),
+          { action: 'upsert-group', group, members: ann.member_node_ids || [] },
+        ]);
+      } else {
+        const [overlay] = annotationsToOverlays([ann]);
+        if (overlay)
+          setRemoteAnnotationOps((prev) => [
+            ...(prev || []),
+            { action: 'upsert-overlay', overlay },
+          ]);
+      }
+      return true;
+    },
+    [setRemoteAnnotationOps]
+  );
+
   const applyRemoteOp = useCallback(
     async (op) => {
       const store = useGraphStore.getState();
@@ -425,21 +461,7 @@ function App() {
           // loser must not, since the winner (or the winner's own baseline
           // fold, for the echo case) already did.
           if (!selfIngestedImageAnnotationIdsRef.current.claim(ann.id)) return false;
-          if (ann.kind === 'group') {
-            const [group] = annotationsToGroups([ann]).groups;
-            setRemoteAnnotationOps((prev) => [
-              ...(prev || []),
-              { action: 'upsert-group', group, members: ann.member_node_ids || [] },
-            ]);
-          } else {
-            const [overlay] = annotationsToOverlays([ann]);
-            if (overlay)
-              setRemoteAnnotationOps((prev) => [
-                ...(prev || []),
-                { action: 'upsert-overlay', overlay },
-              ]);
-          }
-          return true;
+          return applyAnnotationUpsertToCanvas(ann);
         }
         case 'annotation_deleted':
           if (op.annotation_id)
@@ -472,6 +494,7 @@ function App() {
       setAnimatedLayout,
       setRemoteAnnotationOps,
       syncRef,
+      applyAnnotationUpsertToCanvas,
     ]
   );
 
@@ -1926,6 +1949,21 @@ function App() {
       onRemoteOps: (ops) => {
         (ops || []).forEach((op) => applyRemoteOp(op));
       },
+      // This client's own annotation write just got acked with a fresh
+      // server version/field_versions (dec-annotation-field-patches-and-
+      // conflicts) — sessionSyncClient.js already folded it into its own
+      // sync baseline; thread it onto the *live canvas node* too, so the
+      // next local edit's autosave snapshot (which rebuilds from canvas node
+      // data, not from the sync baseline) carries the true version forward
+      // instead of the stale one from before this write. Without this, this
+      // client's own next edit to the same annotation would send a stale
+      // base_version and could spuriously conflict against nothing but its
+      // own prior write. Goes through applyAnnotationUpsertToCanvas directly
+      // rather than applyRemoteOp/its claim() gate — see that helper's own
+      // comment for why this ack must not touch the image-ingest dedup.
+      onLocalAnnotationsApplied: (ops) => {
+        (ops || []).forEach((op) => applyAnnotationUpsertToCanvas(op?.annotation));
+      },
       onPresence: (r) => setRoster(r),
       onSelections: (s) => setRemoteSelections(s),
       onLeases: (l) => setRemoteLeases(l),
@@ -1999,6 +2037,7 @@ function App() {
     sessionId,
     resyncFromServer,
     applyRemoteOp,
+    applyAnnotationUpsertToCanvas,
     clearVisualization,
     resetSessionScopedUi,
     showNotification,

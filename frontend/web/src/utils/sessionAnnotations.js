@@ -95,6 +95,14 @@ export function annotationsToGroups(annotations) {
       // preserving the value is not the same as offering a control for it.
       z: a.z ?? 0,
       locked: Boolean(a.locked),
+      // Same server-owned same-field-conflict bookkeeping as every other
+      // annotation kind (dec-annotation-field-patches-and-conflicts) — a
+      // group is an ordinary annotation server-side (session_store.py's
+      // version/field_versions handling is not type-scoped), so its label/
+      // description/color are just as subject to a same-field race as any
+      // generic annotation's content.
+      version: a.version,
+      field_versions: a.field_versions,
     });
     for (const m of a.member_node_ids || []) parentIds[m] = a.id;
   }
@@ -134,6 +142,8 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           member_node_ids: membersByGroup[g.id] || [],
           z: g.z ?? 0,
           locked: Boolean(g.locked),
+          version: g.version,
+          field_versions: g.field_versions,
         })
       );
     } catch (error) {
@@ -175,6 +185,15 @@ function genericAnnotationToOverlay(a) {
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
     size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
+    // Server-owned same-field-conflict bookkeeping (dec-annotation-field-
+    // patches-and-conflicts) — the same envelope treatment as z/locked/
+    // rotation above, not per-kind content. See this module's own note on
+    // annotationsToOverlays/overlaysToAnnotations for why dropping it here
+    // is the bug this carries through: sessionSyncClient.js's
+    // diffAnnotationFields already reads `version` for `base_version` and
+    // never diffs it as content — it just never received a real value.
+    version: a.version,
+    field_versions: a.field_versions,
   };
   if (a.type === 'text') {
     overlay.text = a.text || '';
@@ -225,6 +244,8 @@ function genericOverlayToAnnotation(o) {
     z: o.z ?? 0,
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
+    version: o.version,
+    field_versions: o.field_versions,
   };
   // `text` and `shape` (task-annotation-text-alignment-and-font) both carry
   // fontSize/font/textAlign under `style`, mirroring `text`'s pre-existing
@@ -288,6 +309,8 @@ function freehandAnnotationToOverlay(a) {
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
+    version: a.version,
+    field_versions: a.field_versions,
   };
 }
 
@@ -312,6 +335,8 @@ function freehandOverlayToAnnotation(o) {
     z: o.z ?? 0,
     locked: Boolean(o.locked),
     rotation: o.rotation ?? 0,
+    version: o.version,
+    field_versions: o.field_versions,
   });
 }
 
@@ -335,6 +360,8 @@ export function annotationsToOverlays(annotations) {
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       });
     } else if (a?.type === 'label') {
       out.push({
@@ -348,6 +375,8 @@ export function annotationsToOverlays(annotations) {
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       });
     } else if (a?.type === 'line') {
       const from = a.from || a.position || { x: 0, y: 0 };
@@ -364,6 +393,8 @@ export function annotationsToOverlays(annotations) {
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
+        version: a.version,
+        field_versions: a.field_versions,
       };
       if (a.startAnchor) overlay.startAnchor = a.startAnchor;
       if (a.endAnchor) overlay.endAnchor = a.endAnchor;
@@ -408,6 +439,8 @@ export function overlaysToAnnotations(overlays) {
             z: o.z ?? 0,
             locked: Boolean(o.locked),
             rotation: o.rotation ?? 0,
+            version: o.version,
+            field_versions: o.field_versions,
           })
         );
         continue;
@@ -424,6 +457,8 @@ export function overlaysToAnnotations(overlays) {
             z: o.z ?? 0,
             locked: Boolean(o.locked),
             rotation: o.rotation ?? 0,
+            version: o.version,
+            field_versions: o.field_versions,
           })
         );
         continue;
@@ -455,6 +490,8 @@ export function overlaysToAnnotations(overlays) {
         z: o.z ?? 0,
         locked: Boolean(o.locked),
         rotation: o.rotation ?? 0,
+        version: o.version,
+        field_versions: o.field_versions,
       };
       if (o.startAnchor) ann.startAnchor = o.startAnchor;
       if (o.endAnchor) ann.endAnchor = o.endAnchor;

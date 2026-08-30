@@ -5,6 +5,7 @@ import {
   applyOpToMirror,
   SessionSyncClient,
 } from '../src/services/sessionSyncClient';
+import { annotationsToOverlays } from '../src/utils/sessionAnnotations';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
 class FakeEventSource {
@@ -1819,5 +1820,161 @@ describe('SessionSyncClient edit leases', () => {
     expect(client.getRemoteLeases()['node-a']).toBeTruthy();
     now += 31_000;
     expect(client.getRemoteLeases()).toEqual({});
+  });
+});
+
+// smallfix-annotation-version-dropped-by-browser-pipeline: end-to-end
+// reproduction of the bug an independent review found and traced through
+// this exact pipeline. `computeOps`/`diffAnnotationFields` themselves were
+// never broken — they already correctly excluded `version`/`field_versions`
+// from the outgoing content diff and read `before.version` for
+// `base_version` (see the "Field patches" tests above, which pin that in
+// isolation). The break was upstream: `annotationsToOverlays` (frontend/web/
+// src/utils/sessionAnnotations.js) — the function `useSharedSession.js`'s
+// serverStateToMirror calls to build a browser's hydration baseline — used
+// to silently drop `version`/`field_versions` off every server annotation,
+// so `before.version` was always `undefined` for a real browser and
+// `base_version` never reached the server at all. These tests go through
+// `annotationsToOverlays` for real (not a hand-built mirror object, unlike
+// every test above it) and a fake server implementing the identical
+// field-version-conflict rule `session_store.py` enforces, so the assertions
+// below fail on the pre-fix code and pass on the fixed code — see this
+// task's PR/commit message for the before/after run this was verified with.
+describe('two-client same-field race through the real browser pipeline (smallfix-annotation-version-dropped-by-browser-pipeline)', () => {
+  // Mirrors SessionStore.apply_state_op's annotation_updated branch
+  // (backend/core/session_store.py): a field is "touched" only when its
+  // incoming value actually differs, `base_version` given but omitted from a
+  // field's history defaults to version 1, and any touched field newer than
+  // `base_version` refuses the whole op with a 409 shaped like the real
+  // `AnnotationFieldConflict` HTTP detail (rest_api.py).
+  function makeFieldVersionServer(initialAnnotations) {
+    const store = new Map(initialAnnotations.map((a) => [a.id, { ...a }]));
+    const fetchImpl = vi.fn(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      const applied = [];
+      for (const op of body.ops) {
+        if (op.op !== 'annotation_updated') continue;
+        const target = store.get(op.annotation.id);
+        const changedFields = Object.keys(op.annotation).filter(
+          (k) =>
+            !['id', 'type', 'kind'].includes(k) &&
+            JSON.stringify(op.annotation[k]) !== JSON.stringify(target[k])
+        );
+        if (op.base_version != null) {
+          const conflicts = {};
+          for (const field of changedFields) {
+            const fieldVersion = (target.field_versions || {})[field] ?? 1;
+            if (fieldVersion > op.base_version) conflicts[field] = fieldVersion;
+          }
+          if (Object.keys(conflicts).length) {
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({
+                detail: {
+                  error: 'field_conflict',
+                  annotation_id: target.id,
+                  conflicting_fields: conflicts,
+                  server_version: target.version,
+                },
+              }),
+            };
+          }
+        }
+        const newVersion = (target.version || 1) + 1;
+        Object.assign(target, op.annotation);
+        target.version = newVersion;
+        target.field_versions = { ...(target.field_versions || {}) };
+        for (const field of changedFields) target.field_versions[field] = newVersion;
+        applied.push({ op: 'annotation_updated', annotation: { ...target } });
+      }
+      return { ok: true, status: 200, json: async () => ({ applied, seq: 1 }) };
+    });
+    return { fetchImpl, store };
+  }
+
+  function makeReadyClient(fetchImpl, overrides = {}) {
+    const { client } = makeClient({ fetchImpl, ...overrides });
+    client.connect();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    return client;
+  }
+
+  it('a hydrated overlay carries the real server version into base_version, not undefined', async () => {
+    const serverAnnotation = {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      z: 0,
+      locked: false,
+      version: 7,
+      field_versions: { shape: 5 },
+    };
+    // The exact hydration call useSharedSession.js's serverStateToMirror makes.
+    const [overlay] = annotationsToOverlays([serverAnnotation]);
+    const { fetchImpl } = makeFieldVersionServer([serverAnnotation]);
+    const client = makeReadyClient(fetchImpl);
+    client.setBaseline({ annotations: [overlay] });
+
+    client.syncState({ annotations: [{ ...overlay, fill: '#60A5FA' }] });
+    await flush();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sentOp = JSON.parse(fetchImpl.mock.calls[0][1].body).ops[0];
+    expect(sentOp.op).toBe('annotation_updated');
+    expect(sentOp.base_version).toBe(7); // not undefined
+  });
+
+  it('two browsers racing the same field: the second genuinely gets 409 field_conflict, not a silent clobber', async () => {
+    const serverAnnotation = {
+      id: 'shape-1',
+      type: 'shape',
+      kind: 'shape',
+      shape: 'rectangle',
+      text: 'orig',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 160, h: 96, rotation: 0 },
+      style: {},
+      z: 0,
+      locked: false,
+      version: 1,
+      field_versions: {},
+    };
+    const { fetchImpl, store } = makeFieldVersionServer([serverAnnotation]);
+
+    // Both browsers hydrate independently from the same server state, through
+    // the real translator — the exact path the review traced.
+    const [overlayForA] = annotationsToOverlays([serverAnnotation]);
+    const [overlayForB] = annotationsToOverlays([serverAnnotation]);
+
+    const onDroppedB = vi.fn();
+    const clientA = makeReadyClient(fetchImpl);
+    const clientB = makeReadyClient(fetchImpl, { handlers: { onDropped: onDroppedB } });
+    clientA.setBaseline({ annotations: [overlayForA] });
+    clientB.setBaseline({ annotations: [overlayForB] });
+
+    // A publishes first and wins.
+    clientA.syncState({ annotations: [{ ...overlayForA, text: 'A wins' }] });
+    await flush();
+
+    // B never saw A's update (it is still working off the original
+    // version-1 hydration) and now publishes a conflicting edit to the same
+    // field.
+    clientB.syncState({ annotations: [{ ...overlayForB, text: 'B loses' }] });
+    await flush();
+
+    expect(onDroppedB).toHaveBeenCalledTimes(1);
+    const [, status, body] = onDroppedB.mock.calls[0];
+    expect(status).toBe(409);
+    expect(body.detail.error).toBe('field_conflict');
+    expect(body.detail.conflicting_fields).toHaveProperty('text');
+
+    // A's write genuinely stands — the server-side store still holds A's text.
+    expect(store.get('shape-1').text).toBe('A wins');
   });
 });

@@ -802,6 +802,33 @@ protection. A real (post-fix) browser never produces an op shaped like that
 any more — `computeOps` always emits a field-diffed patch with `base_version`
 set — so this fallback is now purely a compatibility path, not the default.
 
+**Update — this was not actually true for a real browser until
+smallfix-annotation-version-dropped-by-browser-pipeline (fixed after
+`dec-annotation-field-patches-and-conflicts` was accepted).** `computeOps`
+itself always did the right thing — `diffAnnotationFields` correctly excludes
+`version`/`field_versions` from the outgoing content diff and reads
+`before.version` for `base_version` (see `sessionSyncClient.js` and its own
+tests) — but every annotation the *rest* of the browser pipeline handed to it
+had already lost both fields before `computeOps` ever saw them:
+`useSharedSession.js`'s `serverStateToMirror` (session hydration),
+`sessionAnnotations.js`'s `annotationsToOverlays`/`overlaysToAnnotations`, the
+live-canvas round trip in `packages/ui-graph-canvas/src/utils/annotations.js`
+(`overlayToFlowNode`/`flowNodeToOverlay`), and `createAnnotation` in
+`annotationModel.js` all built or read their output from a fixed field
+whitelist that did not include `version`/`field_versions`. The result: a real
+browser's `base_version` was `undefined` on *every* `annotation_updated` op it
+ever sent — `JSON.stringify` drops the key entirely — so every real
+browser-originated write landed on exactly the legacy fallback this paragraph
+says a real browser "never produces... any more". The matrix row below and the
+"A real client" language throughout this section describe the *protocol* as
+verified against `SessionManager.update_annotation` directly
+(`TestFieldVersionedPatches`, `test_session_manager.py`) with a hand-supplied
+`base_version` — correct for that path, but not a description of what a real
+browser tab was actually sending before this fix. Both translator layers now
+carry `version`/`field_versions` through unconditionally (the same envelope
+treatment `z`/`locked`/`rotation` already got), so the "A real (post-fix)
+browser" claim above is accurate as of this fix, not before it.
+
 **The matrix.** Rows are what two clients (A writes first; B is the second
 writer, arriving after A) attempt on the same annotation — same mutation
 category on both sides (e.g. both edit text) or a different one (e.g. A edits
@@ -932,15 +959,21 @@ rather than replaying the stale one.
 (the shared chokepoint every MCP annotation-patch tool calls into, exactly
 like the browser's `POST /ops`) accepts `base_version` uniformly, so the
 version/conflict semantics are identical for both entry points, not a
-separate mechanism. Only the **generic** `update_annotation` MCP tool exposes
-`base_version` to its caller today — the narrower single-field convenience
-tools (`update_sticky_note`, `reorder_annotation`, `set_annotation_lock`)
-still omit it and so stay on the documented legacy-fallback (unconditional
-merge) path, the same as they did before this task; each already scopes its
-own patch to the one or two fields it manages, so the field-level clobber
-this task closes was never their exposure in the first place. Widening those
-three to accept `base_version` too is straightforward follow-up, not a
-correctness gap this task leaves open.
+separate mechanism. The generic `update_annotation` MCP tool exposes
+`base_version` to its caller, and so does `update_sticky_note` (added by
+smallfix-annotation-version-dropped-by-browser-pipeline): a note's
+`build_note_patch` still resends the whole `geometry` sub-object on any
+position/size/rotation change (see that function's shallow-merge note above),
+so without `base_version` a position-only move silently clobbered a
+concurrent geometry-subfield edit — e.g. a resize — with no conflict raised,
+exactly the class of bug this section otherwise closes. `reorder_annotation`
+and `set_annotation_lock` still omit `base_version` and so stay on the
+documented legacy-fallback (unconditional merge) path; each of those two
+patches exactly one field it alone manages (`z`, `locked`), so there is no
+second field in the same patch for a concurrent edit to race against, unlike
+`update_sticky_note`'s combined geometry write. Widening those two to accept
+`base_version` too is straightforward follow-up, not a correctness gap this
+task leaves open.
 
 **Reconnect/catch-up and undo.** Neither needed a protocol change:
 `SessionStore.apply_state_op` already returns (and always did) the **whole**
@@ -1198,6 +1231,11 @@ go through the session op protocol (`annotation_created` / `annotation_updated`
 / `annotation_deleted`) and share its optimistic-concurrency contract
 (`expected_revision` / `revision_conflict`) — see
 `backend/DEVELOPMENT.md`'s "Sticky note tools" section for the full contract.
+`update_sticky_note` additionally accepts the same optional `base_version` as
+the generic `update_annotation` tool, rejecting a stale same-field write with
+`field_conflict` instead of silently merging it — see [Field-level patches and
+base_version](#field-level-patches-and-base_version) and "MCP path parity"
+above.
 
 The rest of the v1 model except `group` — `text`, `label`, `line` (`arrow`
 accepted as a legacy alias), `shape`, `icon`, `vote_dot`, `image`,

@@ -418,7 +418,11 @@ export class SessionSyncClient {
    * @param {string} opts.opsUrl     Full POST URL for op batches.
    * @param {Object} [opts.handlers] onReady, onResync, onRemoteOps, onPresence,
    *   onSelections, onLeases, onPresenceJoined, onPresenceLeft, onSessionRenamed,
-   *   onSessionDeleted, onDropped, onCommand.
+   *   onSessionDeleted, onDropped, onCommand, onLocalAnnotationsApplied (fired
+   *   with the acked annotation_created/annotation_updated `applied` entries
+   *   after this client's own op batch lands, so the caller can thread the
+   *   server's confirmed version/field_versions back onto the live canvas —
+   *   see `_flush`'s success branch).
    * @param {number} [opts.flushIntervalMs]
    * @param {Function} [opts.fetchImpl]
    * @param {Function} [opts.EventSourceImpl]
@@ -1250,6 +1254,42 @@ export class SessionSyncClient {
       if (resp && resp.ok) {
         const body = await resp.json().catch(() => ({}));
         if (typeof body.seq === 'number') this._seq = body.seq;
+        // A successful annotation_created/annotation_updated bumps `version`/
+        // `field_versions` server-side (dec-annotation-field-patches-and-
+        // conflicts) — the acked `body.applied` entry carries the full
+        // merged annotation with the new value, not just the patch this
+        // client sent. Fold it into the baseline the same way a remote op's
+        // echo would (foldOpIntoBaseline: no dedup marker needed — this is
+        // this client's own op, so its SSE echo is already filtered by the
+        // "echo of our own op" check in _handleEvent and will never reach
+        // here a second time). Without this, this client's OWN next edit to
+        // the same annotation would still read the pre-write version out of
+        // the baseline and send it back as `base_version`, which the server
+        // would then judge stale against the bump this very write just
+        // made — a spurious field_conflict against no one but itself.
+        const appliedAnnotations = [];
+        for (const entry of body.applied || []) {
+          if (
+            (entry?.op === 'annotation_created' || entry?.op === 'annotation_updated') &&
+            entry.annotation?.id
+          ) {
+            this.foldOpIntoBaseline(entry);
+            appliedAnnotations.push(entry);
+          }
+        }
+        // Also hand these to the host so the *live canvas* node — not just
+        // this internal baseline — picks up the fresh version: syncState()
+        // rebuilds its next baseline wholesale from the canvas snapshot on
+        // every call (see its own docstring), so a version corrected only
+        // here would be overwritten by the canvas's still-stale value on
+        // the very next snapshot. onRemoteOps already knows how to turn an
+        // annotation_created/updated op into a canvas node update
+        // (App.jsx's applyRemoteOp) — this reuses that exact path rather
+        // than adding a second one, the same way handleImageIngest already
+        // reuses it for its own direct-apply case.
+        if (appliedAnnotations.length && this.handlers.onLocalAnnotationsApplied) {
+          this.handlers.onLocalAnnotationsApplied(appliedAnnotations);
+        }
         if (this._forceSingle && this._queue.length === 0) this._forceSingle = false;
       } else if (
         resp &&

@@ -1019,6 +1019,13 @@ and a position-only or size-only update leaves the other half exactly as it
 was. `delete_sticky_note` and `update_sticky_note` both resolve
 `annotation_id` against notes only — an id that names a different annotation
 type (e.g. a `line`) reports `not_found` rather than editing across types.
+`update_sticky_note` also accepts the same optional `base_version` the
+generic `update_annotation` tool does (docs/ANNOTATION_CONTRACT.md's
+"Field-level patches and base_version"): given, a write that touches a field
+someone else has changed since — including a position-only move's carried-
+forward `w`/`h`, since `geometry` is always resent as a whole sub-object —
+is rejected as `field_conflict` instead of silently clobbering a concurrent
+edit to that field.
 
 `create_sticky_note` and `update_sticky_note` are also where a note's
 `rotation`, `z` and `locked` are set — the generic `reorder_annotation`/

@@ -424,4 +424,34 @@ describe('annotationModel contract v1', () => {
     expect(onSkipped).toHaveBeenCalledTimes(1);
     expect(onSkipped.mock.calls[0][0]).toMatchObject({ id: 'f-1', type: 'frame' });
   });
+
+  // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
+  // `field_versions` (dec-annotation-field-patches-and-conflicts) are
+  // server-owned same-field-conflict bookkeeping, carried the same envelope
+  // way as created_by/updated_by/created_at/updated_at — never per-kind
+  // content, so this must hold for every type this function builds, not just
+  // one. A regression here is exactly what made a real browser's
+  // `base_version` always come out `undefined` (dropped before
+  // sessionSyncClient.js's computeOps ever saw the annotation), silently
+  // disabling the field-conflict protection for every real browser write.
+  it.each(['note', 'label', 'shape', 'icon', 'text'])(
+    'carries version/field_versions through for a %s annotation when present on input',
+    (type) => {
+      const annotation = createAnnotation({
+        id: `${type}-1`,
+        type,
+        position: { x: 0, y: 0 },
+        version: 7,
+        field_versions: { text: 7, geometry: 5 },
+      });
+      expect(annotation.version).toBe(7);
+      expect(annotation.field_versions).toEqual({ text: 7, geometry: 5 });
+    }
+  );
+
+  it('does not invent a version when the input has none', () => {
+    const annotation = createAnnotation({ id: 'note-1', type: 'note' });
+    expect(annotation.version).toBeUndefined();
+    expect(annotation.field_versions).toBeUndefined();
+  });
 });
