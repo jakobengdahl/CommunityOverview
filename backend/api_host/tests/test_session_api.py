@@ -1295,9 +1295,56 @@ class TestSessionsDirIsolation:
         )
         return TestClient(create_app(config))
 
+    def test_apps_that_omit_sessions_dir_but_share_a_graph_parent_do_share_a_store(
+        self, tmp_path
+    ):
+        """Reproduces the actual pre-fix mechanism: AppConfig.sessions_dir left
+        unset falls back to ``graph_path.parent / "sessions"`` (server.py), and
+        tempfile.NamedTemporaryFile() places every graph file directly under the
+        bare system temp dir by default — so two apps that both omit
+        sessions_dir end up pointed at the identical on-disk session store."""
+        from backend.api_host import create_app, AppConfig
+
+        shared_graph_parent = tmp_path / "shared-graph-parent"
+        shared_graph_parent.mkdir()
+
+        def make_app_without_sessions_dir(name: str) -> TestClient:
+            root = tmp_path / name
+            web_dir = root / "web"
+            widget_dir = root / "widget"
+            web_dir.mkdir(parents=True)
+            widget_dir.mkdir(parents=True)
+            (web_dir / "index.html").write_text("<html></html>")
+            (widget_dir / "index.html").write_text("<html></html>")
+            graph_file = shared_graph_parent / f"{name}-graph.json"
+            graph_file.write_text('{"nodes": [], "edges": []}')
+            config = AppConfig(
+                graph_file=str(graph_file),
+                web_static_path=str(web_dir),
+                widget_static_path=str(widget_dir),
+                auth_enabled=False,
+            )
+            return TestClient(create_app(config))
+
+        app_a = make_app_without_sessions_dir("app-a")
+        app_b = make_app_without_sessions_dir("app-b")
+
+        assert (
+            app_a.app.state.session_store._backend.directory
+            == app_b.app.state.session_store._backend.directory
+        )
+
+        sid = "1234-9999"
+        app_a.app.state.session_manager.get_or_create(sid)
+        assert app_b.get(f"/api/sessions/{sid}").status_code == 200
+
     def test_two_independently_configured_apps_do_not_share_a_session_store(
         self, tmp_path
     ):
+        """This is the fixed state: every fixture/test app in this suite now
+        passes an explicit, per-app sessions_dir (see app_config and
+        test_app_empty_graph in conftest.py), so the leak mechanism the
+        previous test reproduces cannot occur in the actual test suite."""
         app_a = self._make_app(tmp_path, "app-a")
         app_b = self._make_app(tmp_path, "app-b")
 
