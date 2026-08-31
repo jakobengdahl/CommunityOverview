@@ -9,6 +9,7 @@ contract of the request/response endpoints.
 
 import base64
 import io
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -52,9 +53,6 @@ class TestSessionCrud:
         materialise it rather than 404, or the name is lost once it later saves
         with a null server name."""
         sid = "9999-9997"
-        test_app.delete(
-            f"/api/sessions/{sid}"
-        )  # clean slate (shared temp dir across test runs)
         resp = test_app.patch(f"/api/sessions/{sid}", json={"name": "renamed"})
         assert resp.status_code == 200
         assert resp.json()["name"] == "renamed"
@@ -99,7 +97,7 @@ class TestSessionLookupRateLimit:
         assert resp.status_code == 429
 
     def test_rate_limit_keys_on_real_client_behind_proxy(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """With a trusted proxy, each real client gets its own budget and a
         client cannot spoof X-Forwarded-For to mint a fresh one."""
@@ -111,6 +109,7 @@ class TestSessionLookupRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -185,7 +184,7 @@ class TestLegacyStreamRateLimit:
         assert resp.status_code == 200
 
     def test_legacy_stream_rate_limit_keys_on_real_client_behind_proxy(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """Per-IP budget applies; clients cannot spoof X-Forwarded-For."""
         import os
@@ -198,6 +197,7 @@ class TestLegacyStreamRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -1066,7 +1066,7 @@ class TestImageIngestRateLimit:
     proxy every request would key on the proxy's own address instead."""
 
     @staticmethod
-    def _app_behind_proxy(temp_graph_file, temp_static_dirs, capacity: float):
+    def _app_behind_proxy(temp_graph_file, temp_static_dirs, tmp_path, capacity: float):
         from backend.api_host import create_app, AppConfig
         from backend.core.session_manager import _TokenBucket
 
@@ -1075,6 +1075,7 @@ class TestImageIngestRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -1096,9 +1097,11 @@ class TestImageIngestRateLimit:
         )
 
     def test_one_source_exhausting_its_budget_does_not_lock_out_another(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1").status_code == 200
@@ -1107,14 +1110,16 @@ class TestImageIngestRateLimit:
         assert self._upload(client, sid, "2.2.2.2").status_code == 200
 
     def test_budget_tracks_the_source_and_ignores_the_caller_supplied_client_id(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """Both halves together pin which of the two the key actually is: a new
         ``client_id`` on a spent source buys nothing, and the same ``client_id``
         on a fresh source is unaffected. The handler does not forward the
         browser's ``client_id`` into the throttle at all today, so this is the
         guard against a rewiring that starts to."""
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1", client_id="b1").status_code == 200
@@ -1122,16 +1127,18 @@ class TestImageIngestRateLimit:
         assert self._upload(client, sid, "2.2.2.2", client_id="b1").status_code == 200
 
     def test_spoofed_forwarded_for_entry_does_not_mint_a_fresh_budget(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1").status_code == 200
         assert self._upload(client, sid, "9.9.9.9, 1.1.1.1").status_code == 429
 
     def test_ops_traffic_cannot_drain_a_source_image_budget(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """The image budget is keyed on a source address while the op bucket is
         keyed on self-declared client ids. They must not share a keyspace, or a
@@ -1139,7 +1146,9 @@ class TestImageIngestRateLimit:
         that victim's image budget through ``/ops``."""
         from backend.core.session_manager import _TokenBucket
 
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         client.app.state.session_manager._bucket = _TokenBucket(1.0, 0.0)
         sid = client.post("/api/sessions", json={}).json()["id"]
 
@@ -1249,3 +1258,61 @@ class TestImageIngestBodyCap:
             headers={"content-type": "application/json"},
         )
         assert resp.status_code == 422
+
+
+class TestSessionsDirIsolation:
+    """Regression for the shared session store: ``app_config`` previously left
+    ``sessions_dir`` unset, so it fell back to a "sessions" directory next to
+    the ``NamedTemporaryFile`` graph path — bare ``/tmp`` — which every test
+    app in the process resolved to identically. Sessions leaked across test
+    files and runs, could push ``max_sessions``, and could flip a test that
+    asserts a fixed session id is absent."""
+
+    def test_app_config_puts_sessions_dir_under_this_tests_own_tmp_path(
+        self, app_config, tmp_path
+    ):
+        assert Path(app_config.sessions_dir).is_relative_to(tmp_path)
+
+    def _make_app(self, tmp_path: Path, name: str) -> TestClient:
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / name
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=str(root / "sessions"),
+            auth_enabled=False,
+        )
+        return TestClient(create_app(config))
+
+    def test_two_independently_configured_apps_do_not_share_a_session_store(
+        self, tmp_path
+    ):
+        app_a = self._make_app(tmp_path, "app-a")
+        app_b = self._make_app(tmp_path, "app-b")
+
+        sid = "1234-5678"
+        app_a.app.state.session_manager.get_or_create(sid)
+        resp = app_a.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "nodes_added", "node_ids": ["node-x"]}],
+            },
+        )
+        assert resp.status_code == 200
+
+        assert app_a.get(f"/api/sessions/{sid}").status_code == 200
+        # A session materialised in app A's store must stay invisible to a
+        # second, independently configured app using the same id.
+        assert app_b.get(f"/api/sessions/{sid}").status_code == 404
