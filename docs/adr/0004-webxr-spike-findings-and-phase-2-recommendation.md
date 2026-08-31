@@ -45,7 +45,7 @@ that has not yet happened.
   `SessionControls`), reflects the connected id into `?session=<id>` so a
   desktop share link opens the headset straight into the same session, and
   renders the roster/node count once connected.
-- This machinery is exercised by 39 unit tests across `sceneSession.test.js`
+- This machinery is exercised by 37 unit tests across `sceneSession.test.js`
   (406 lines) and `sceneModel.test.js` (211 lines) against a **fake** sync
   client that drives the same handler surface the real SSE stream calls
   (`onReady`, `onResync`, `onRemoteOps`, `onPresence`, `onSelections`,
