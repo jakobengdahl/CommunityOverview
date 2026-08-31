@@ -231,13 +231,22 @@ def temp_static_dirs() -> Generator[tuple, None, None]:
 
 
 @pytest.fixture
-def app_config(temp_graph_file, temp_static_dirs) -> AppConfig:
-    """Create test AppConfig with temporary files."""
+def app_config(temp_graph_file, temp_static_dirs, tmp_path) -> AppConfig:
+    """Create test AppConfig with temporary files.
+
+    ``sessions_dir`` is set explicitly to pytest's per-test ``tmp_path`` rather
+    than left to its default (a "sessions" directory next to the graph file,
+    which ``temp_graph_file`` places directly under the bare system temp dir).
+    Without this, every test app in the process shares one on-disk session
+    store — sessions leak across test files and runs, and can flip tests that
+    assert a fixed session id is absent.
+    """
     web_path, widget_path = temp_static_dirs
     return AppConfig(
         graph_file=temp_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
         api_prefix="/api",
         auth_enabled=False,
         mcp_basic_auth=False,
@@ -292,13 +301,14 @@ def empty_graph_file() -> Generator[str, None, None]:
 
 
 @pytest.fixture
-def test_app_empty_graph(empty_graph_file, temp_static_dirs) -> TestClient:
+def test_app_empty_graph(empty_graph_file, temp_static_dirs, tmp_path) -> TestClient:
     """Create test application with empty graph."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
         graph_file=empty_graph_file,
         web_static_path=web_path,
         widget_static_path=widget_path,
+        sessions_dir=str(tmp_path / "sessions"),
     )
     app = create_app(config)
     return TestClient(app)
