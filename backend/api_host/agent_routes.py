@@ -1,9 +1,9 @@
 """Federation and agent-system status endpoints for the api_host application."""
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,94 @@ def register_agent_routes(
         needing to parse agent node metadata directly.
         """
         return agent_registry.get_schedules()
+
+    @app.get("/agents/runs")
+    async def agents_runs(
+        agent_id: Optional[str] = Query(None),
+        kind: Optional[str] = Query(None, description="Trigger: scheduled | event"),
+        status: Optional[str] = Query(
+            None,
+            description="queued | running | succeeded | failed | cancelled",
+        ),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """
+        List durable AgentRun history, newest-first.
+
+        Each run records the trigger, agent, status, timestamps, correlation,
+        attempts and terminal outcome, persisted behind the execution-store
+        seam so it survives a restart.
+        """
+        return agent_registry.list_runs(
+            agent_id=agent_id, kind=kind, status=status, limit=limit
+        )
+
+    @app.get("/agents/runs/{run_id}")
+    async def agents_run_detail(run_id: str) -> Dict[str, Any]:
+        """Get a single AgentRun by id."""
+        run = agent_registry.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        return run
+
+    @app.get("/agents/proposals")
+    async def agents_proposals(
+        agent_id: Optional[str] = Query(None),
+        status: Optional[str] = Query(
+            None,
+            description="pending | approved | rejected | applied | apply_failed",
+        ),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """
+        List durable agent proposals, newest-first.
+
+        A proposal is a mutating action an agent recorded (under the propose /
+        act_after_approval autonomy levels) awaiting a human approve/reject
+        decision.
+        """
+        return agent_registry.list_proposals(
+            agent_id=agent_id, status=status, limit=limit
+        )
+
+    @app.get("/agents/proposals/{proposal_id}")
+    async def agents_proposal_detail(proposal_id: str) -> Dict[str, Any]:
+        """Get a single proposal by id."""
+        proposal = agent_registry.get_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return proposal
+
+    @app.post("/agents/proposals/{proposal_id}/approve")
+    async def agents_proposal_approve(
+        proposal_id: str,
+        decided_by: Optional[str] = Query(None),
+    ) -> Dict[str, Any]:
+        """
+        Approve a proposal. For act_after_approval agents this also applies the
+        captured action and reports the outcome.
+        """
+        result = agent_registry.approve_proposal(proposal_id, decided_by=decided_by)
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return result
+
+    @app.post("/agents/proposals/{proposal_id}/reject")
+    async def agents_proposal_reject(
+        proposal_id: str,
+        decided_by: Optional[str] = Query(None),
+    ) -> Dict[str, Any]:
+        """Reject a proposal."""
+        result = agent_registry.reject_proposal(proposal_id, decided_by=decided_by)
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"Proposal '{proposal_id}' not found"
+            )
+        return result
 
     @app.post("/agents/{agent_id}/trigger")
     async def agent_trigger(agent_id: str):

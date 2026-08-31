@@ -30,13 +30,23 @@
       "DataSet": {
         "fields": [
           "name",
+          "title",
           "description",
           "summary",
+          "purpose",
+          "version",
+          "status",
+          "reference_date",
+          "valid_from",
+          "valid_to",
+          "measurement_information",
+          "owner",
+          "source_system",
           "tags",
           "subtypes"
         ],
         "category": "domain",
-        "description": "Published statistical datasets or aggregated data tables produced by statistical programmes",
+        "description": "Statistical datasets: published aggregate tables, register-based data collections and other statistical data holdings. Register structure is expressed with the subtypes Register, RegisterVariant and RegisterVersion rather than with separate node types.",
         "color": "#06B6D4",
         "icon": "DatabaseFill"
       },
@@ -52,19 +62,6 @@
         "description": "Data structures, schemas or dimensional models defining the layout of statistical datasets (identifiers, measures, attributes)",
         "color": "#8B5CF6",
         "icon": "Diagram3Fill"
-      },
-      "InstanceVariable": {
-        "fields": [
-          "name",
-          "description",
-          "summary",
-          "tags",
-          "subtypes"
-        ],
-        "category": "domain",
-        "description": "Variables or dimensions observed in a dataset or data structure, with a defined role (identifier or measure)",
-        "color": "#14B8A6",
-        "icon": "Sliders"
       },
       "Concept": {
         "fields": [
@@ -96,12 +93,18 @@
         "fields": [
           "name",
           "description",
-          "summary",
+          "version",
+          "data_type",
+          "codes",
+          "valid_from",
+          "valid_to",
+          "status",
           "tags",
-          "subtypes"
+          "subtypes",
+          "summary"
         ],
         "category": "domain",
-        "description": "Controlled code lists, classifications or enumerations used by variables (e.g. sex codes, labour status codes, NUTS regions)",
+        "description": "Simple, normally flat code or value lists used by variables and value domains. Formal managed classifications belong to Classification.",
         "color": "#FBBF24",
         "icon": "ListOl"
       },
@@ -135,12 +138,22 @@
         "fields": [
           "name",
           "description",
-          "summary",
+          "version",
+          "level",
+          "data_type",
+          "domain_type",
+          "minimum_value",
+          "maximum_value",
+          "unit",
+          "descriptive_rule",
+          "valid_from",
+          "valid_to",
           "tags",
-          "subtypes"
+          "subtypes",
+          "summary"
         ],
         "category": "domain",
-        "description": "The set of permissible values for a variable or questionnaire response, either described (e.g. a numeric range) or enumerated (e.g. a code list)",
+        "description": "The set of permissible values for a variable or questionnaire response. Subtypes: EnumeratedValueDomain, NumericRangeValueDomain, DescribedValueDomain.",
         "color": "#D97706",
         "icon": "ListCheck"
       },
@@ -211,6 +224,93 @@
         "description": "A methodological process step in a statistical production chain that transforms input datasets into an output dataset (e.g. coding, weighting, aggregation). metadata may carry: {classification_applied, transformation, methodological_notes}",
         "color": "#0EA5E9",
         "icon": "GearFill"
+      },
+      "Variable": {
+        "fields": [
+          "name",
+          "definition",
+          "description",
+          "summary",
+          "operational_definition",
+          "external_comment",
+          "column_name",
+          "data_type",
+          "length",
+          "format",
+          "unit_of_measure",
+          "sensitive_personal_data_status",
+          "identity_status",
+          "assessment_note",
+          "documentation_quality",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "A statistical variable. Subtypes distinguish the conceptual level (RepresentedVariable, InstanceVariable) from the semantic role (Identifier, Measure, Attribute); a node may carry several. Column-level information (column_name, data_type, length, format) is held as attributes here rather than as a separate Column node type. sensitive_personal_data_status takes one of confirmed | not_confirmed | context_dependent | unknown; identity_status takes one of confirmed | not_confirmed | potential | unknown. These are documented values, not schema-validated enums, in this step.",
+        "color": "#14B8A6",
+        "icon": "Sliders"
+      },
+      "Population": {
+        "fields": [
+          "name",
+          "definition",
+          "description",
+          "geographic_scope",
+          "inclusion_criteria",
+          "exclusion_criteria",
+          "valid_from",
+          "valid_to",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "The set of units a dataset or register version describes. Population timing that belongs to a specific register version is carried on the HAS_POPULATION edge (edge metadata is supported), not on this node.",
+        "color": "#FB7185",
+        "icon": "PersonLinesFill"
+      },
+      "Classification": {
+        "fields": [
+          "name",
+          "official_name",
+          "description",
+          "purpose",
+          "version",
+          "status",
+          "publisher",
+          "legal_basis",
+          "valid_from",
+          "valid_to",
+          "source_uri",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "A formal, managed and often hierarchical statistical classification (e.g. NACE, NUTS, COICOP). Subtypes: ClassificationSeries, ClassificationVersion, ClassificationVariant. Simple flat value lists stay as CodeList.",
+        "color": "#B45309",
+        "icon": "ListNested"
+      },
+      "ClassificationItem": {
+        "fields": [
+          "code",
+          "name",
+          "official_name",
+          "definition",
+          "description",
+          "level_number",
+          "level_name",
+          "display_order",
+          "inclusion_notes",
+          "exclusion_notes",
+          "valid_from",
+          "valid_to",
+          "generated",
+          "tags",
+          "subtypes"
+        ],
+        "category": "domain",
+        "description": "A single code or category within a Classification. The hierarchy is expressed with HAS_CHILD_ITEM between items rather than with a separate level node type.",
+        "color": "#FDE68A",
+        "icon": "TagFill"
       }
     },
     "relationship_types": {
@@ -221,58 +321,116 @@
         "description": "Part of (variable is part of a data structure, NSI is part of the ESS)"
       },
       "PRODUCES": {
-        "description": "Produces (statistical programme produces dataset, actor produces statistics)"
+        "description": "Produces (statistical programme produces dataset, actor produces statistics)",
+        "source_types": ["StatisticalProgramme", "Actor"],
+        "target_types": ["DataSet"]
       },
       "HAS_STRUCTURE": {
-        "description": "Has structure (dataset has a defined data structure)"
+        "description": "Has structure (dataset has a defined data structure)",
+        "source_types": ["DataSet"],
+        "target_types": ["DataStructure"]
       },
       "HAS_VARIABLE": {
-        "description": "Has variable (data structure contains an instance variable)"
+        "description": "Has variable (data structure contains an instance variable)",
+        "source_types": ["DataStructure"],
+        "target_types": ["InstanceVariable"]
       },
       "HAS_QUESTIONNAIRE": {
-        "description": "Has questionnaire (statistical programme employs a questionnaire as its data collection instrument)"
+        "description": "Has questionnaire (statistical programme employs a questionnaire as its data collection instrument)",
+        "source_types": ["StatisticalProgramme"],
+        "target_types": ["Questionnaire"]
       },
       "HAS_COMPONENT": {
-        "description": "Has component (questionnaire contains a questionnaire component / individual question)"
+        "description": "Has component (questionnaire contains a questionnaire component / individual question)",
+        "source_types": ["Questionnaire"],
+        "target_types": ["QuestionnaireComponent"]
       },
       "COLLECTS": {
-        "description": "Collects (questionnaire component collects data for an instance variable)"
+        "description": "Collects (questionnaire component collects data for an instance variable)",
+        "source_types": ["QuestionnaireComponent"],
+        "target_types": ["InstanceVariable"]
       },
       "USES_VALUE_DOMAIN": {
-        "description": "Uses value domain (questionnaire component or instance variable uses a value domain to constrain permissible responses)"
+        "description": "Uses value domain (questionnaire component or instance variable uses a value domain to constrain permissible responses)",
+        "source_types": ["QuestionnaireComponent", "InstanceVariable"],
+        "target_types": ["ValueDomain"]
       },
       "MEASURES": {
-        "description": "Measures (instance variable measures a concept)"
+        "description": "Measures (instance variable measures a concept)",
+        "source_types": ["InstanceVariable"],
+        "target_types": ["Concept"]
       },
       "OBSERVED_FOR": {
-        "description": "Observed for (instance variable is observed for a unit type)"
+        "description": "Observed for (instance variable is observed for a unit type)",
+        "source_types": ["InstanceVariable"],
+        "target_types": ["UnitType"]
       },
       "USES_CODE_LIST": {
-        "description": "Uses code list (instance variable uses a code list for its values)"
+        "description": "Uses code list (instance variable uses a code list for its values)",
+        "source_types": ["InstanceVariable", "ValueDomain"],
+        "target_types": ["CodeList"]
       },
       "RELATES_TO": {
         "description": "Relates to (general connection)"
       },
       "USES": {
-        "description": "Uses (production solution uses a statistical programme as its processing basis)"
+        "description": "Uses (production solution uses a statistical programme as its processing basis)",
+        "source_types": ["ProductionSolution"],
+        "target_types": ["StatisticalProgramme"]
       },
       "INPUT_TO": {
-        "description": "Input to (an input dataset feeds into a process step in the production chain). Source = input dataset, target = process step."
+        "description": "Input to (an input dataset feeds into a process step in the production chain). Source = input dataset, target = process step.",
+        "source_types": ["DataSet"],
+        "target_types": ["ProcessStep"]
       },
       "PRODUCES_OUTPUT": {
-        "description": "Produces output (a process step produces an output dataset). Source = process step, target = output dataset."
+        "description": "Produces output (a process step produces an output dataset). Source = process step, target = output dataset.",
+        "source_types": ["ProcessStep"],
+        "target_types": ["DataSet"]
+      },
+      "HAS_VARIANT": {
+        "description": "Has variant (register has a register variant; classification version has a variant)"
+      },
+      "HAS_VERSION": {
+        "description": "Has version (register variant has a register version; classification series has a version)"
+      },
+      "HAS_POPULATION": {
+        "description": "Has population (a register version describes a population)"
+      },
+      "SOURCED_FROM": {
+        "description": "Sourced from (a dataset originates from an actor)"
+      },
+      "OF_UNIT_TYPE": {
+        "description": "Of unit type (a population consists of units of a unit type)"
+      },
+      "USES_CLASSIFICATION": {
+        "description": "Uses classification (a value domain is defined by a statistical classification)"
+      },
+      "HAS_ITEM": {
+        "description": "Has item (a classification contains a classification item)"
+      },
+      "HAS_CHILD_ITEM": {
+        "description": "Has child item (hierarchy between classification items)"
+      },
+      "DERIVED_FROM": {
+        "description": "Derived from (a classification is derived from another)"
+      },
+      "PREDECESSOR_OF": {
+        "description": "Predecessor of (a classification precedes a later one in time)"
+      },
+      "CORRESPONDS_TO": {
+        "description": "Corresponds to (mapping between classification items)"
       }
     }
   },
   "presentation": {
     "title": "European Statistical System — Metadata Knowledge Graph",
-    "introduction": "Explore the metadata landscape of the European Statistical System (ESS). This graph maps statistical offices, programmes, datasets, data structures, variables, concepts, code lists and their relationships.\n\nTry asking:\n• \"Which NSIs are part of the ESS?\"\n• \"Show the data structure for the LFS dataset\"\n• \"What variables measure labour market status?\"\n• \"Which code lists are used in the Party Preference Survey?\"",
+    "introduction": "Explore the metadata landscape of the European Statistical System (ESS). This graph maps statistical offices, programmes, datasets, registers, data structures, variables, populations, concepts, code lists, classifications and their relationships.\n\nTry asking:\n• \"Which NSIs are part of the ESS?\"\n• \"Show the data structure for the LFS dataset\"\n• \"What variables measure labour market status?\"\n• \"Which code lists are used in the Party Preference Survey?\"\n• \"Which classifications does the NACE value domain use?\"",
     "colors": {
       "Actor": "#3B82F6",
       "StatisticalProgramme": "#10B981",
       "DataSet": "#06B6D4",
       "DataStructure": "#8B5CF6",
-      "InstanceVariable": "#14B8A6",
       "Concept": "#F97316",
       "UnitType": "#EF4444",
       "CodeList": "#FBBF24",
@@ -282,9 +440,13 @@
       "ProductionSolution": "#7C3AED",
       "SubjectField": "#84CC16",
       "Initiative": "#10B981",
-      "ProcessStep": "#0EA5E9"
+      "ProcessStep": "#0EA5E9",
+      "Variable": "#14B8A6",
+      "Population": "#FB7185",
+      "Classification": "#B45309",
+      "ClassificationItem": "#FDE68A"
     },
-    "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, questionnaires, datasets, data structures, instance variables, concepts, unit types and code lists.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **Questionnaire**: Data collection instruments (survey forms) used by statistical programmes to gather variable data from respondents\n- **QuestionnaireComponent**: An individual question or item within a questionnaire, linking the questionnaire to the instance variable it collects and the value domain of permissible responses\n- **ValueDomain**: The set of permissible values for a variable or question response — either described (numeric range, text pattern) or enumerated (code list)\n- **DataSet**: Published aggregate tables produced by statistical programmes\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **InstanceVariable**: Concrete variables used in a data structure or questionnaire, with roles (identifier or measure)\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Enumerated value sets used by coded variables (e.g. sex codes, NUTS regions, political party codes)\n- **ProductionSolution**: A technical system, tool or application (with a git repository) that processes data from a statistical programme to produce a dataset. Has a `repo` field with the git repository URL.\n- **SubjectField**: A thematic subject field or statistical domain (e.g. Labour market, Prices, Population, Agriculture, National accounts) that classifies statistical programmes.\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- StatisticalProgramme BELONGS_TO SubjectField\n- StatisticalProgramme RELATES_TO StatisticalProgramme (e.g. related surveys, successor/predecessor programmes)\n- StatisticalProgramme PART_OF StatisticalProgramme (e.g. a sub-programme is part of a larger programme)\n- ProductionSolution USES StatisticalProgramme\n- ProductionSolution PRODUCES DataSet\n- StatisticalProgramme HAS_QUESTIONNAIRE Questionnaire\n- Questionnaire HAS_COMPONENT QuestionnaireComponent\n- QuestionnaireComponent COLLECTS InstanceVariable\n- QuestionnaireComponent USES_VALUE_DOMAIN ValueDomain\n- InstanceVariable USES_VALUE_DOMAIN ValueDomain\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE InstanceVariable\n- InstanceVariable MEASURES Concept\n- InstanceVariable OBSERVED_FOR UnitType\n- InstanceVariable USES_CODE_LIST CodeList\n- Actor PART_OF network/system",
+    "prompt_prefix": "You are a knowledge agent for the European Statistical System (ESS) metadata knowledge graph. The graph contains statistical offices (NSIs), international statistical organisations, statistical programmes, questionnaires, datasets, registers, data structures, variables, populations, concepts, unit types, code lists and statistical classifications.\n\nKey node types and their roles:\n- **Actor**: Statistical offices (NSIs) and international organisations (Eurostat, UNSD, OECD, IMF, ECB, BIS, World Bank, FAO, ILO, WHO)\n- **StatisticalProgramme**: Recurring statistical production activities (e.g. Labour Force Survey, Party Preference Survey)\n- **Questionnaire**: Data collection instruments (survey forms) used by statistical programmes to gather variable data from respondents\n- **QuestionnaireComponent**: An individual question or item within a questionnaire, linking the questionnaire to the variable it collects and the value domain of permissible responses\n- **ValueDomain**: The set of permissible values for a variable or question response — either described (numeric range, text pattern) or enumerated (code list)\n- **DataSet**: Statistical datasets — published aggregate tables as well as register-based holdings. Register structure is expressed with the subtypes Register, RegisterVariant and RegisterVersion rather than separate node types\n- **DataStructure**: Dimensional layouts defining identifiers and measures for datasets\n- **Variable**: Statistical variables used in a data structure, register version or questionnaire. Subtypes separate the conceptual level (RepresentedVariable, InstanceVariable) from the semantic role (Identifier, Measure, Attribute), and a variable may carry several. Column-level details (column_name, data_type, length, format) are attributes on the variable, not a separate node type\n- **Population**: The set of units a dataset or register version describes, with inclusion and exclusion criteria and a geographic scope\n- **Classification**: Formal, managed and often hierarchical statistical classifications (e.g. NACE, NUTS, COICOP), with the subtypes ClassificationSeries, ClassificationVersion and ClassificationVariant\n- **ClassificationItem**: An individual code or category within a classification; hierarchy is expressed with HAS_CHILD_ITEM between items\n- **Concept**: Abstract statistical concepts that variables measure (e.g. Region, Sex, Labour market status)\n- **UnitType**: Units of observation (e.g. Person)\n- **CodeList**: Simple, normally flat code or value lists used by coded variables (e.g. sex codes, political party codes). Formal managed classifications are Classification nodes instead\n- **ProductionSolution**: A technical system, tool or application (with a git repository) that processes data from a statistical programme to produce a dataset. Has a `repo` field with the git repository URL.\n- **SubjectField**: A thematic subject field or statistical domain (e.g. Labour market, Prices, Population, Agriculture, National accounts) that classifies statistical programmes.\n\nKey relationships:\n- StatisticalProgramme PRODUCES DataSet\n- StatisticalProgramme BELONGS_TO SubjectField\n- StatisticalProgramme RELATES_TO StatisticalProgramme (e.g. related surveys, successor/predecessor programmes)\n- StatisticalProgramme PART_OF StatisticalProgramme (e.g. a sub-programme is part of a larger programme)\n- ProductionSolution USES StatisticalProgramme\n- ProductionSolution PRODUCES DataSet\n- StatisticalProgramme HAS_QUESTIONNAIRE Questionnaire\n- Questionnaire HAS_COMPONENT QuestionnaireComponent\n- QuestionnaireComponent COLLECTS Variable\n- QuestionnaireComponent USES_VALUE_DOMAIN ValueDomain\n- Variable USES_VALUE_DOMAIN ValueDomain\n- DataSet HAS_STRUCTURE DataStructure\n- DataStructure HAS_VARIABLE Variable\n- Variable MEASURES Concept\n- Variable OBSERVED_FOR UnitType\n- Variable USES_CODE_LIST CodeList\n- Actor PART_OF network/system\n- DataSet:Register HAS_VARIANT DataSet:RegisterVariant\n- DataSet:RegisterVariant HAS_VERSION DataSet:RegisterVersion\n- DataSet:RegisterVersion HAS_POPULATION Population (reference_date is carried on the edge)\n- DataSet:RegisterVersion HAS_VARIABLE Variable\n- DataSet SOURCED_FROM Actor\n- Population OF_UNIT_TYPE UnitType\n- ValueDomain USES_CLASSIFICATION Classification\n- Classification:ClassificationSeries HAS_VERSION Classification:ClassificationVersion\n- Classification:ClassificationVersion HAS_VARIANT Classification:ClassificationVariant\n- Classification HAS_ITEM ClassificationItem\n- ClassificationItem HAS_CHILD_ITEM ClassificationItem\n- Classification DERIVED_FROM Classification\n- Classification PREDECESSOR_OF Classification\n- ClassificationItem CORRESPONDS_TO ClassificationItem",
     "prompt_suffix": "Always suggest exploring related metadata when relevant (e.g. from a dataset, suggest looking at its structure and variables). Ask for confirmation before making changes to the graph.\n\nFormatting: Never use markdown tables — they do not render correctly in this interface. Use bullet points, numbered lists, or plain prose instead.\n\nDocument analysis: When analysing an uploaded document and proposing matches to existing nodes in the metadata graph, always state a confidence score for each proposed match (e.g. 90% — exact name match, or Low — loose semantic similarity) and briefly explain the reasoning behind the score, such as whether it is based on an identical name, a synonym, a shared concept definition, or a general thematic overlap.",
     "default_language": "en",
     "language_policy": {

@@ -6,6 +6,29 @@ audit any backward-compatibility concerns.
 
 ---
 
+## Relationship Type Applicability
+
+Relationship types may now declare directed `source_types` and `target_types`
+arrays in `schema_config.json`. Missing arrays preserve the previous behavior:
+the relationship type remains globally available. A `"*"` entry permits any node
+type for that side of the relationship.
+
+New edge writes are rejected when the selected relationship type does not apply
+to the source node type and target node type. Existing graph data is not changed
+on load. To inspect legacy data before tightening a schema, run:
+
+```bash
+PYTHONPATH=. python scripts/audit_relationship_applicability.py \
+  --schema config/stat-metadata/schema_config.json \
+  --graph config/stat-metadata/graph.json
+```
+
+Resolve reported violations by changing the edge type, reversing the edge
+direction when that represents the intended meaning, or relaxing the schema rule
+if the reported pattern is valid for the graph.
+
+---
+
 ## What Changed
 
 ### Workflows removed

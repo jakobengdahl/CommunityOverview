@@ -158,6 +158,16 @@ NODE_COLORS = {
 }
 
 
+# Text-field length limits, enforced on every write. The graph is rejected at load
+# time if any node exceeds these (Node.from_dict validates), so the write paths must
+# enforce them too — otherwise an over-limit update silently persists and bricks the
+# next graph load. Scalar limits mirror the Field(max_length=...) below; the list
+# limits cover tags/aliases, which have no per-field max_length.
+FIELD_LIMITS = {"name": 200, "description": 2000, "summary": 300}
+LIST_FIELD_TOTAL_LIMIT = 2000  # total characters across all tags / all aliases
+LIST_FIELD_ITEM_LIMIT = 200  # per individual tag / alias
+
+
 class Node(BaseModel):
     """Base model for a node in the graph"""
 
@@ -174,6 +184,9 @@ class Node(BaseModel):
         default_factory=list
     )  # Alternative names/synonyms; matched in search
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    archived: bool = Field(
+        default=False
+    )  # Lifecycle flag: archived nodes are hidden from search/traversal by default
     embedding: Optional[List[float]] = None  # For future vector search
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -192,6 +205,27 @@ class Node(BaseModel):
                 # Accept any string type (config-defined or legacy)
                 return v
         raise ValueError(f"Node type must be string or NodeType, got {type(v)}")
+
+    @field_validator("tags", "aliases")
+    @classmethod
+    def _limit_list_text(cls, v, info):
+        """Bound tags/aliases so an over-large write can't brick the graph at load.
+
+        name/description/summary are already capped by Field(max_length=...); tags and
+        aliases have no such cap, so enforce a per-item and a total-length limit here.
+        """
+        total = sum(len(str(item)) for item in v)
+        if total > LIST_FIELD_TOTAL_LIMIT:
+            raise ValueError(
+                f"{info.field_name} total length {total} exceeds "
+                f"{LIST_FIELD_TOTAL_LIMIT} characters"
+            )
+        for item in v:
+            if len(str(item)) > LIST_FIELD_ITEM_LIMIT:
+                raise ValueError(
+                    f"{info.field_name} entry exceeds {LIST_FIELD_ITEM_LIMIT} characters"
+                )
+        return v
 
     @property
     def type_str(self) -> str:
@@ -214,6 +248,8 @@ class Node(BaseModel):
             data["created_at"] = _parse_datetime(data["created_at"])
         if isinstance(data.get("updated_at"), str):
             data["updated_at"] = _parse_datetime(data["updated_at"])
+        # Legacy data predates the archived flag; absent means not archived.
+        data.setdefault("archived", False)
         return cls(**data)
 
     def get_color(self) -> str:
@@ -232,6 +268,9 @@ class Edge(BaseModel):
     )  # Optional, defaults to general connection
     label: str = Field(default="")  # Optional free-text label for the connection
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    archived: bool = Field(
+        default=False
+    )  # Lifecycle flag: archived edges are hidden from search/traversal by default
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("type", mode="before")
@@ -276,6 +315,8 @@ class Edge(BaseModel):
         # Handle legacy data without label field
         if "label" not in data:
             data["label"] = ""
+        # Legacy data predates the archived flag; absent means not archived.
+        data.setdefault("archived", False)
         return cls(**data)
 
 
@@ -293,6 +334,7 @@ class GraphStats(BaseModel):
     total_nodes: int
     total_edges: int
     nodes_by_type: Dict[str, int]
+    edges_by_type: Dict[str, int] = Field(default_factory=dict)
     last_updated: datetime
 
 

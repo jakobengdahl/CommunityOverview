@@ -45,33 +45,74 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
         (n) => n.type !== 'Community' && n.data?.type !== 'Community'
       );
 
+      // Merge returned nodes into the current view (additive placement). Shared
+      // by the explicit add_to_visualization action and the no-explicit-action
+      // default so a plain additive request never clears the canvas.
+      const addNodesToView = () => {
+        if (filtered.length === 0) return;
+        const allEdges = [...currentEdges, ...(toolResult.edges || [])];
+        const vp = latestViewport.current;
+        const viewportCenter = vp
+          ? {
+              x: (window.innerWidth / 2 - vp.x) / vp.zoom,
+              y: (window.innerHeight / 2 - vp.y) / vp.zoom,
+            }
+          : null;
+        const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
+        addNodes(positioned, toolResult.edges || []);
+      };
+
       if (toolResult.action === 'add_to_visualization') {
-        if (filtered.length > 0) {
-          const allEdges = [...currentEdges, ...(toolResult.edges || [])];
-          const vp = latestViewport.current;
-          const viewportCenter = vp
-            ? {
-                x: (window.innerWidth / 2 - vp.x) / vp.zoom,
-                y: (window.innerHeight / 2 - vp.y) / vp.zoom,
-              }
-            : null;
-          const positioned = positionNewNodes(filtered, currentNodes, allEdges, { viewportCenter });
-          addNodes(positioned, toolResult.edges || []);
-        }
+        addNodesToView();
       } else if (
         toolResult.action === 'load_visualization' ||
-        toolResult.action === 'clear_visualization'
+        toolResult.action === 'clear_visualization' ||
+        toolResult.action === 'replace_visualization'
       ) {
+        // Explicit replace/clear/load: swap the whole view for the results.
         clearViz();
         if (filtered.length > 0) {
           updateViz(filtered, toolResult.edges || []);
         }
+      } else if (toolResult.action === 'update_in_visualization') {
+        // In-place update: replace matching nodes, keep the rest, append any
+        // genuinely new nodes. Kept in sync with the ChatPanel apply path.
+        if (filtered.length > 0) {
+          const updatedIds = new Set(filtered.map((n) => n.id));
+          const merged = currentNodes.map((n) =>
+            updatedIds.has(n.id) ? filtered.find((u) => u.id === n.id) : n
+          );
+          const newNodes = filtered.filter((n) => !currentNodes.some((cn) => cn.id === n.id));
+          updateViz([...merged, ...newNodes], currentEdges);
+        }
       } else if (filtered.length > 0) {
-        updateViz(filtered, toolResult.edges || []);
+        // No explicit view-content action: default to additive so a plain
+        // additive request (or any node-returning tool) never silently clears
+        // the current view.
+        addNodesToView();
       }
     },
     [latestViewport]
   );
+
+  // Apply a `node_pulse` command (external pulse-trigger URLs): play a transient
+  // visual pulse on the targeted node. Shares the same command-id dedup as
+  // tool-result commands so a pulse that arrives on both the legacy stream and
+  // the op stream during handover only fires once.
+  const applyPulseCommand = useCallback((command, commandId) => {
+    if (!command?.node_id) return;
+    if (commandId) {
+      if (appliedCommandIdsRef.current.includes(commandId)) return;
+      appliedCommandIdsRef.current.push(commandId);
+      if (appliedCommandIdsRef.current.length > 20) appliedCommandIdsRef.current.shift();
+    }
+    const pulse = command.pulse || {};
+    useGraphStore.getState().pulseNode(command.node_id, {
+      style: pulse.style,
+      color: pulse.color,
+      durationMs: pulse.duration_ms,
+    });
+  }, []);
 
   // ── Visualization session: legacy SSE connection ────────────────────────
   // Opens the single-consumer push stream so external AI clients can push
@@ -88,6 +129,10 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       try {
         const cmd = JSON.parse(e.data);
         if (cmd.type === 'ping' || cmd.type === 'connected') return;
+        if (cmd.type === 'node_pulse') {
+          applyPulseCommand(cmd, cmd.command_id);
+          return;
+        }
         if (cmd.type !== 'tool_result' || !cmd.result) return;
         applyToolResultCommand(cmd.result, cmd.command_id);
       } catch (err) {
@@ -98,7 +143,7 @@ export function useToolResultCommands({ sessionId, opStreamReady, latestViewport
       // Browser auto-reconnects on SSE errors; no manual retry needed.
     };
     return () => evtSource.close();
-  }, [sessionId, opStreamReady, applyToolResultCommand]);
+  }, [sessionId, opStreamReady, applyToolResultCommand, applyPulseCommand]);
 
-  return applyToolResultCommand;
+  return { applyToolResultCommand, applyPulseCommand };
 }

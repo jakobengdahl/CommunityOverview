@@ -2,6 +2,7 @@
   position: relative;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   --session-drawer-width: 280px;
 }
@@ -14,10 +15,39 @@
   left: 0;
 }
 
+.app.fullscreen-canvas-mode > :not(.app-canvas):not(.fullscreen-canvas-exit) {
+  display: none !important;
+}
+
+.fullscreen-canvas-exit {
+  position: fixed;
+  top: calc(16px + env(safe-area-inset-top));
+  right: calc(16px + env(safe-area-inset-right));
+  z-index: 1000;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: #f3f4f6;
+  background: rgba(17, 24, 39, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.72;
+}
+
+.fullscreen-canvas-exit:hover,
+.fullscreen-canvas-exit:focus-visible {
+  opacity: 1;
+  outline: 2px solid #aab4ff;
+  outline-offset: 2px;
+}
+
 /* Notifications */
 .app-notification {
   position: fixed;
   bottom: 20px;
+  bottom: calc(20px + env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
   background: #2a2a2a;
@@ -68,6 +98,12 @@
 
 .app-notification button:hover {
   color: #999;
+}
+
+@media (pointer: coarse) {
+  .app-notification {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+  }
 }
 
 .app-a11y-depth-live {

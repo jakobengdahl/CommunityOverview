@@ -23,7 +23,14 @@ vi.mock('reactflow', () => {
           <div
             key={edge.id}
             data-testid={`edge-${edge.id}`}
-            className="react-flow__edge"
+            className={`react-flow__edge${edge.className ? ` ${edge.className}` : ''}`}
+            data-animated={String(!!edge.animated)}
+            data-stroke={edge.style?.stroke ?? ''}
+            data-stroke-width={String(edge.style?.strokeWidth ?? '')}
+            data-stroke-opacity={String(edge.style?.strokeOpacity ?? '')}
+            data-edge-opacity-var={String(edge.style?.['--edge-opacity'] ?? '')}
+            data-marker-end={edge.markerEnd ? String(edge.markerEnd.type) : ''}
+            data-marker-start={edge.markerStart ? String(edge.markerStart.type) : ''}
             onContextMenu={(event) => onEdgeContextMenu?.(event, edge)}
           >
             {edge.label || edge.type}
@@ -61,7 +68,7 @@ vi.mock('reactflow', () => {
     SelectionMode: { Partial: 'partial' },
     Handle: ({ type }) => <div data-testid={`handle-${type}`} />,
     Position: { Top: 'top', Bottom: 'bottom', Left: 'left', Right: 'right' },
-    MarkerType: { ArrowClosed: 'arrowclosed' },
+    MarkerType: { ArrowClosed: 'arrowclosed', Arrow: 'arrow' },
   };
 });
 
@@ -111,6 +118,127 @@ describe('GraphCanvas', () => {
     );
 
     expect(screen.queryByLabelText('Federated search depth selector')).not.toBeInTheDocument();
+  });
+
+  it('renders edges without visual metadata using the default look', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke', '#666');
+    expect(edge).toHaveAttribute('data-stroke-width', '2');
+    expect(edge).toHaveAttribute('data-animated', 'false');
+    expect(edge).toHaveAttribute('data-marker-end', '');
+    expect(edge).toHaveAttribute('data-marker-start', '');
+    expect(edge.className).toBe('react-flow__edge');
+  });
+
+  // task-session-focus-dimming-controls: a dimmed edge's opacity must reach
+  // the rendered edge both as a plain inline style (the non-animated case)
+  // and as the `--edge-opacity` custom property the rf-edge-pulse keyframe
+  // reads via calc() — a CSS animation overrides a plain inline style for
+  // the property it drives, so without this second copy an animated edge's
+  // dim/edge-intensity opacity would be silently cancelled by its own pulse.
+  it('carries the resolved edge opacity both as stroke-opacity and as --edge-opacity', () => {
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        edgeIntensity={0.6}
+        dimmedEdgeIds={['edge-1']}
+      />
+    );
+    const edge = screen.getByTestId('edge-edge-1');
+    // Dimmed at intensity 0.6 caps at the dimmed ceiling (0.25).
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.25');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.25');
+  });
+
+  it('renders a non-dimmed edge at the plain edge-intensity baseline', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} edgeIntensity={0.6} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke-opacity', '0.6');
+    expect(edge).toHaveAttribute('data-edge-opacity-var', '0.6');
+  });
+
+  // Endpoint-presence contract behind edge recovery on reload: when a load hands
+  // the canvas resolved nodes and their edges together, the visibleEdges filter
+  // must keep every edge whose *both* endpoints are present and drop an edge that
+  // references an absent node (you cannot draw a half-edge). A filter too strict
+  // would drop valid edges when a session is reloaded; one too loose would leave
+  // dangling edges. This pins the by-endpoint-presence contract both ways. (The
+  // reload glue that feeds resolved edges here is covered in useSharedSession.test.)
+  it('renders edges between present nodes and drops edges with an absent endpoint', () => {
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={[
+          { id: 'edge-present', source: 'node-1', target: 'node-2', type: 'RELATES_TO' },
+          { id: 'edge-dangling', source: 'node-2', target: 'node-absent', type: 'RELATES_TO' },
+        ]}
+      />
+    );
+    expect(screen.getByTestId('edge-edge-present')).toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-dangling')).not.toBeInTheDocument();
+  });
+
+  // Regression: reloading a session with more than LAZY_LOAD_THRESHOLD (200)
+  // nodes renders only the first INITIAL_LOAD_COUNT (100) in order, and
+  // visibleEdges drops every edge whose other endpoint sits in the un-loaded
+  // remainder. Those edges used to vanish silently. The lazy-load banner must
+  // now disclose how many connections from loaded nodes are hidden, counting
+  // only real (non-dangling) edges that would reappear on "Load More".
+  it('discloses connections hidden by the lazy-load slice on a >200-node reload', () => {
+    const manyNodes = Array.from({ length: 250 }, (_, i) => ({
+      id: `node-${i}`,
+      name: `Node ${i}`,
+      type: 'Actor',
+    }));
+    const edges = [
+      // both endpoints in the loaded slice -> drawn, not counted as hidden
+      { id: 'edge-loaded', source: 'node-0', target: 'node-1', type: 'RELATES_TO' },
+      // source loaded, target in the un-loaded remainder -> dropped, counted
+      { id: 'edge-crosses', source: 'node-0', target: 'node-200', type: 'RELATES_TO' },
+      // both endpoints un-loaded -> dropped, not counted (no visible end)
+      { id: 'edge-offscreen', source: 'node-210', target: 'node-220', type: 'RELATES_TO' },
+    ];
+
+    render(<GraphCanvas nodes={manyNodes} edges={edges} />);
+
+    expect(screen.getByTestId('edge-edge-loaded')).toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-crosses')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('edge-edge-offscreen')).not.toBeInTheDocument();
+
+    expect(screen.getByText('Showing 100 of 250 nodes')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '1 connections to nodes not yet loaded are hidden — Load More to reveal them'
+      )
+    ).toBeInTheDocument();
+  });
+
+  it('reflects edge visual metadata onto the rendered React Flow edge', () => {
+    const styledEdges = [
+      {
+        id: 'edge-1',
+        source: 'node-1',
+        target: 'node-2',
+        type: 'RELATES_TO',
+        metadata: {
+          color: '#ff8800',
+          thickness: 5,
+          direction: 'both',
+          arrow: 'open',
+          animated: true,
+        },
+      },
+    ];
+    render(<GraphCanvas nodes={sampleNodes} edges={styledEdges} />);
+    const edge = screen.getByTestId('edge-edge-1');
+    expect(edge).toHaveAttribute('data-stroke', '#ff8800');
+    expect(edge).toHaveAttribute('data-stroke-width', '5');
+    expect(edge).toHaveAttribute('data-animated', 'true');
+    expect(edge).toHaveAttribute('data-marker-end', 'arrow');
+    expect(edge).toHaveAttribute('data-marker-start', 'arrow');
+    expect(edge.className).toContain('rf-edge-pulse');
   });
 
   it('suppresses text selection while modifier-clicking to multi-select', () => {
@@ -184,12 +312,48 @@ describe('GraphCanvas', () => {
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
 
+    // Types are grouped behind a "Change type" submenu instead of the root menu.
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
     // General connection is always offered and reflects the RELATES_TO edge.
     expect(screen.getByRole('button', { name: /general connection/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^belongs_to$/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'BELONGS_TO');
+  });
+
+  it('filters edge relationship types by source and target node type', () => {
+    const schema = {
+      relationship_types: {
+        RELATES_TO: { description: 'Relates to' },
+        WORKS_FOR: {
+          description: 'Applies to Actor -> Initiative',
+          source_types: ['Actor'],
+          target_types: ['Initiative'],
+        },
+        IMPLEMENTS: {
+          description: 'Wrong direction for this edge',
+          source_types: ['Initiative'],
+          target_types: ['Actor'],
+        },
+      },
+    };
+
+    render(
+      <GraphCanvas
+        nodes={sampleNodes}
+        edges={sampleEdges}
+        schema={schema}
+        onSetEdgeType={vi.fn()}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
+
+    expect(screen.getByRole('button', { name: /^works_for$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^implements$/i })).toBeNull();
   });
 
   it('resets an edge to a general connection from its context menu', () => {
@@ -206,6 +370,7 @@ describe('GraphCanvas', () => {
     );
 
     fireEvent.contextMenu(screen.getByTestId('edge-edge-1'));
+    fireEvent.click(screen.getByRole('button', { name: /^change type$/i }));
     fireEvent.click(screen.getByRole('button', { name: /general connection/i }));
 
     expect(onSetEdgeType).toHaveBeenCalledWith('edge-1', 'RELATES_TO');

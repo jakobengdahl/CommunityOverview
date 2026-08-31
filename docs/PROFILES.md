@@ -40,7 +40,8 @@ Start the application with a specific profile using `--profile`:
 # Use the SCB profile
 ./start-dev.sh --profile scb
 
-# Combine with language and data options
+# Combine with language and data options (--lang is currently inert; the UI
+# is temporarily locked to English — see docs/USER_GUIDE.md#language)
 ./start-dev.sh --profile scb --lang sv --data data/examples/scb-seed.json
 ```
 
@@ -96,6 +97,11 @@ The schema config defines the metadata model. It has two main sections:
     "prompt_prefix": "System prompt context for the AI assistant.",
     "prompt_suffix": "Reminders appended to the AI system prompt.",
     "default_language": "en"
+  },
+  "ui": {
+    "ai_assistant": {
+      "default_collapsed": false
+    }
   }
 }
 ```
@@ -121,8 +127,8 @@ Each node type has the following fields:
 | `fields` | No | List of fields for this type. Defaults to `["name", "description", "summary"]` |
 | `category` | No | `"domain"` (default) or `"system"`. Domain types appear in the toolbar |
 | `description` | No | Describes the node type. Shown in MCP instructions to AI clients |
-| `color` | No | Hex color code for UI display. Defaults to `#9CA3AF` (gray) |
-| `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`) |
+| `color` | No | Hex color code for UI display. A declared color is authoritative: it takes precedence over the built-in color a known type name would otherwise get, so a profile can recolor `Actor`, `Capability`, `Theme` and the other built-in types. Omitted, it defaults to `#9CA3AF` (gray) — the built-in colors only cover type names a profile does not declare at all. Note that a `presentation.colors` entry for the same type overrides this value on the canvas and on the other node-scoped surfaces (the create/edit/detail dialogs, node history, chat type chips); the toolbar, search results and the node-type statistics lists use this value directly (see the presentation section below) |
+| `icon` | No | Bootstrap Icon name for the toolbar (e.g. `"DatabaseFill"`, `"PeopleFill"`). Omitted or unregistered names fall back to the built-in icon for known type names, otherwise to a neutral circle |
 | `static` | No | If `true`, nodes of this type cannot be created via the chat. Used for system types |
 | `ui_form` | No | Specialized creation dialog. `"skill"` opens the SKILL.md-compatible form |
 | `context_menu` | No | Array of extra items for the right-click context menu (see below) |
@@ -202,7 +208,8 @@ The presentation section controls the UI and AI behavior:
     },
     "prompt_prefix": "You are a knowledge agent for my domain...",
     "prompt_suffix": "Always confirm before making changes.",
-    "default_language": "en"
+    "default_language": "en",
+    "default_chat_collapsed": false
   }
 }
 ```
@@ -215,7 +222,52 @@ The presentation section controls the UI and AI behavior:
 | `prompt_prefix` | Injected at the start of the AI system prompt |
 | `prompt_suffix` | Appended to the AI system prompt |
 | `default_language` | Default UI language (`"en"` or `"sv"`) |
+| `default_chat_collapsed` | Whether the assistant panel starts collapsed for a visitor with no stored preference of their own (default `false`, i.e. open). A visitor's own explicit open/collapse choice, once made, is stored in their browser and takes precedence over this on every later visit until they reset it |
 | `skills_config` | Skills loader settings (see below) |
+
+The optional top-level `ui.ai_assistant.default_collapsed` boolean controls the
+assistant's initial state for browsers that have not made a choice. It defaults
+to `false`, preserving the expanded assistant. Expanding or collapsing the
+assistant stores a browser-local preference under
+`community-graph:ui:ai-assistant-collapsed`; that preference takes precedence
+over profile configuration on later visits. It does not require an account and
+does not affect deployments where the assistant is unavailable.
+
+#### Model profiles
+
+`model_profiles` is an optional top-level section in `schema_config.json`. If omitted or empty, the application keeps the legacy single-provider behavior (`LLM_PROVIDER`, `LLM_MODEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). If configured, each enabled chat request and background agent resolves to a named profile; agents may set `metadata.model_profile_id`, while chat users can select profiles in the UI when selection is enabled.
+
+```json
+{
+  "model_profiles": {
+    "selection_enabled": true,
+    "profiles": [
+      {
+        "id": "fast-openai",
+        "name": "Fast OpenAI",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "default": true,
+        "credential_ref": "OPENAI_API_KEY"
+      },
+      {
+        "id": "local-llm",
+        "name": "Local OpenAI-compatible LLM",
+        "provider": "openai",
+        "model": "qwen2.5-coder",
+        "endpoint": "http://localhost:8080/v1",
+        "credential_ref": "LOCAL_LLM_API_KEY"
+      }
+    ]
+  }
+}
+```
+
+Rules:
+- exactly one configured profile must be `default: true`, and it must be enabled
+- `credential_ref` is an environment variable name, never an inline API key
+- the public capabilities API only exposes enabled profile id/name/provider/model/default, never credentials or endpoints
+- `provider: "openai"` supports OpenAI-compatible endpoints via `endpoint`
 
 #### Skills configuration
 
@@ -341,6 +393,73 @@ The `config/scb/` profile demonstrates a domain-specific configuration for Stati
 - **Klassifikation** — Statistical classifications (SNI, SSYK, etc.)
 
 These are in addition to the common types (Actor, Initiative, Resource, etc.) that are shared across profiles.
+
+## Example: stat-metadata Profile
+
+The `config/stat-metadata/` profile models European Statistical System metadata.
+Its metamodel covers the MetaPlus concepts while deliberately keeping the number
+of node types small:
+
+- **DataSet** — statistical datasets. Register structure is expressed with the
+  subtypes `Register`, `RegisterVariant` and `RegisterVersion` rather than with
+  separate node types.
+- **Variable** — statistical variables. Subtypes carry both the conceptual level
+  (`RepresentedVariable`, `InstanceVariable`) and the semantic role (`Identifier`,
+  `Measure`, `Attribute`), and one node may hold several. Column-level details
+  (`column_name`, `data_type`, `length`, `format`) are attributes on the variable;
+  there is no separate Column node type.
+- **Population** — the set of units a dataset or register version describes.
+  Version-specific timing is carried on the `HAS_POPULATION` edge.
+- **ValueDomain** — permissible values, with the subtypes `EnumeratedValueDomain`,
+  `NumericRangeValueDomain` and `DescribedValueDomain`.
+- **CodeList** — simple, normally flat value lists. Structured entries live under
+  the metadata key `codes` as `[{code, label}, …]`.
+- **Classification** / **ClassificationItem** — formal, managed and often
+  hierarchical classifications (NACE, NUTS, COICOP) and their codes. The hierarchy
+  is expressed with `HAS_CHILD_ITEM` between items rather than with level nodes.
+
+`Variable` replaced `InstanceVariable` as the primary node type. Existing data is
+migrated with `scripts/migrate_stat_metadata_metaplus.py`, which converts each
+`InstanceVariable` node to `Variable` while adding `InstanceVariable` as a subtype,
+so nothing about a variable's meaning is lost. `InstanceVariable` remains a valid
+subtype; it is no longer a primary type.
+
+A `CodeList` becomes a `Classification` only when it explicitly says it is one —
+`metadata.is_classification`, or the `Statistical Classification` subtype. A node
+whose name merely looks like a classification is left alone and reported. This
+profile's data is demonstration data, and some of its nodes were stubs, so
+`demo_enrichment.json` supplies the metadata they were missing before that rule
+runs (`--enrich`). Keeping enrichment in its own reviewable file means the
+conversion rule stays strict and every node that passes only because of an
+enrichment is visible in one place.
+
+The profile's `graph.json` is example data only. Runtime state — `SavedView`,
+`VisualizationView`, `EventSubscription`, `Agent` and `Skill` nodes — is created by
+people using a running deployment and does not belong in it. A seed captured by
+exporting a live instance carries that state along, so run
+`scripts/strip_profile_runtime_nodes.py` over any such export before committing it:
+it removes those node types and every edge touching them, and refuses to write if
+the result would leave a dangling edge. Watch for what rides along in them —
+`EventSubscription` nodes carry webhook URLs, which is how a personal lab hostname
+once reached this repository.
+
+Metadata keys on `Variable` are snake_case, matching the convention every other
+profile follows. Nine camelCase keys remain on `DataSet`, `DataStructure` and
+`StatisticalProgramme` from an earlier import; none has a declared counterpart,
+so they are undeclared and left for a hygiene pass that renames and declares
+them together. A `Variable` node's
+semantic role is carried by its subtypes (`Identifier`, `Measure`, `Attribute`)
+and nowhere else — some nodes still hold a leftover `role` metadata key from an
+earlier import, which is deliberately left undeclared: declaring it would give
+the UI a second, separately editable copy of the subtype that can drift out of
+agreement with it.
+
+Two values are documented rather than schema-validated in this step:
+
+```text
+sensitive_personal_data_status: confirmed | not_confirmed | context_dependent | unknown
+identity_status:                confirmed | not_confirmed | potential | unknown
+```
 
 ## System Node Types
 

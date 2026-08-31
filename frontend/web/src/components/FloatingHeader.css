@@ -1,14 +1,20 @@
 .floating-header {
   position: fixed;
   top: 16px;
+  top: calc(16px + env(safe-area-inset-top));
   left: 16px;
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 100;
   transition: left 0.2s ease-out;
+  max-width: calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));
 }
 
 /* When the session drawer is docked to the left edge, the header keeps its
-   original 16px offset relative to the drawer's right edge. */
-.app.session-drawer-open .floating-header {
+   original 16px offset relative to the drawer's right edge. FloatingHeader
+   isn't mounted in mobile mode (MobileShell has its own topbar instead), but
+   the override is scoped off .is-mobile defensively so this rule can never
+   offset mobile chrome even if that ever changes. */
+.app.session-drawer-open:not(.is-mobile) .floating-header {
   left: calc(var(--session-drawer-width, 280px) + 16px);
 }
 
@@ -28,6 +34,8 @@
   border: 1px solid #333;
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .floating-header-hamburger {
@@ -56,6 +64,8 @@
   color: #fff;
   white-space: nowrap;
   user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .floating-header-session-id {
@@ -70,6 +80,33 @@
   user-select: all;
   cursor: default;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 600px) {
+  .floating-header,
+  .app.session-drawer-open:not(.is-mobile) .floating-header {
+    left: calc(16px + env(safe-area-inset-left));
+  }
+
+  .floating-header-bar {
+    max-width: 100%;
+    padding-right: 10px;
+  }
+
+  .floating-header-title,
+  .floating-header-session-id {
+    min-width: 0;
+  }
+
+  .floating-header-title {
+    flex: 1 1 auto;
+  }
+
+  .floating-header-session-id {
+    flex: 0 1 7rem;
+  }
 }
 
 .floating-header-presence {
@@ -131,4 +168,30 @@
 .floating-header-clear:hover {
   background: rgba(229, 115, 115, 0.15);
   color: #e57373;
+}
+
+/* Touch targets: an invisible ::after overlay extends the hit area to
+   44x44px without growing the button's own box. .floating-header,
+   .floating-toolbar and .chat-panel-floating are separate `position: fixed`
+   siblings stacked at hardcoded pixel offsets (16px / 80px / 80px) rather
+   than being flow-connected, so growing the header bar's height here (its
+   tallest child sets the bar's height) would have shrunk the ~18px
+   clearance above .floating-toolbar to a couple of px. The overlay keeps
+   the bar's height, and therefore that clearance, unchanged. */
+@media (pointer: coarse) {
+  .floating-header-hamburger,
+  .floating-header-clear {
+    position: relative;
+  }
+
+  .floating-header-hamburger::after,
+  .floating-header-clear::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
 }

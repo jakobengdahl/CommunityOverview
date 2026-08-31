@@ -9,7 +9,7 @@ import asyncio
 import time
 import pytest
 
-from backend.core.session_registry import SessionRegistry
+from backend.core.session_registry import SessionRegistry, _MAX_QUEUE_SIZE
 
 
 class TestSessionIdValidation:
@@ -173,6 +173,71 @@ class TestStream:
         assert received == [{"type": "cmd", "action": "test"}]
 
 
+class TestBoundedQueue:
+    """The legacy push queue stays bounded once the browser stops draining it.
+
+    Regression for the resource leak where a session that has switched to the
+    shared op stream closes its legacy SSE consumer, so nothing drains the
+    queue; every subsequent MCP-tool/pulse push previously grew an unbounded
+    queue for the session's lifetime.
+    """
+
+    @pytest.mark.asyncio
+    async def test_async_push_bounded_drops_oldest(self):
+        reg = SessionRegistry()
+        queue = reg.get_or_create("1234-5678")
+
+        # No consumer connected (browser is on the op stream). Push far past the
+        # cap; the queue must not grow without bound.
+        total = _MAX_QUEUE_SIZE + 50
+        for i in range(total):
+            assert await reg.push_command("1234-5678", {"type": "cmd", "seq": i})
+
+        assert queue.qsize() == _MAX_QUEUE_SIZE
+        # Oldest commands were dropped: the surviving window is the most recent.
+        first = queue.get_nowait()
+        assert first["seq"] == total - _MAX_QUEUE_SIZE
+
+    @pytest.mark.asyncio
+    async def test_sync_push_bounded_drops_oldest(self):
+        reg = SessionRegistry()
+        loop = asyncio.get_running_loop()
+        reg.set_event_loop(loop)
+        queue = reg.get_or_create("1234-5678")
+
+        total = _MAX_QUEUE_SIZE + 50
+        for i in range(total):
+            assert reg.push_command_sync("1234-5678", {"type": "cmd", "seq": i})
+        # push_command_sync enqueues via loop.call_soon; let the callbacks run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert queue.qsize() == _MAX_QUEUE_SIZE
+        # Same drop-oldest invariant as the async path: the newest window survives.
+        first = queue.get_nowait()
+        assert first["seq"] == total - _MAX_QUEUE_SIZE
+
+    @pytest.mark.asyncio
+    async def test_handover_delivers_queued_commands_to_late_consumer(self):
+        """Commands enqueued during the handover window still reach a legacy
+        consumer that connects within it."""
+        reg = SessionRegistry()
+        reg.get_or_create("1234-5678")
+
+        # Pushes arriving before the browser's SSE stream connects (or a brief
+        # reconnect during the legacy→op handover) must be buffered, not lost.
+        for i in range(3):
+            await reg.push_command("1234-5678", {"type": "cmd", "seq": i})
+
+        received = []
+        async for item in reg.stream("1234-5678"):
+            received.append(item["seq"])
+            if len(received) == 3:
+                break
+
+        assert received == [0, 1, 2]
+
+
 class TestTTLEviction:
     """cleanup_stale removes old sessions."""
 
@@ -191,3 +256,46 @@ class TestTTLEviction:
         evicted = reg.cleanup_stale()
         assert evicted == 0
         assert reg.session_exists("1234-5678")
+
+
+class TestTriggerTokens:
+    """mint_trigger_token / verify_trigger_token: capability-scoped pulse secrets."""
+
+    def test_mint_creates_session_and_returns_token(self):
+        reg = SessionRegistry()
+        token = reg.mint_trigger_token("1234-5678")
+        assert token
+        assert reg.session_exists("1234-5678")
+
+    def test_verify_accepts_minted_token(self):
+        reg = SessionRegistry()
+        token = reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", token) is True
+
+    def test_verify_rejects_wrong_token(self):
+        reg = SessionRegistry()
+        reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "wrong") is False
+
+    def test_verify_rejects_empty_and_none(self):
+        reg = SessionRegistry()
+        reg.mint_trigger_token("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "") is False
+        assert reg.verify_trigger_token("1234-5678", None) is False
+
+    def test_verify_rejects_unknown_session(self):
+        reg = SessionRegistry()
+        assert reg.verify_trigger_token("0000-0000", "anything") is False
+
+    def test_verify_rejects_session_without_token(self):
+        reg = SessionRegistry()
+        reg.get_or_create("1234-5678")
+        assert reg.verify_trigger_token("1234-5678", "anything") is False
+
+    def test_reminting_rotates_token(self):
+        reg = SessionRegistry()
+        first = reg.mint_trigger_token("1234-5678")
+        second = reg.mint_trigger_token("1234-5678")
+        assert first != second
+        assert reg.verify_trigger_token("1234-5678", first) is False
+        assert reg.verify_trigger_token("1234-5678", second) is True

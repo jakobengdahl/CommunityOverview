@@ -17,11 +17,27 @@ const API_BASE = getPathRoot() + '/api';
 // ============================================================
 
 /**
+ * Mint a random lowercase-hex token of `length` characters.
+ *
+ * Backed by crypto.getRandomValues, like generateVisualizationSessionId below.
+ * Math.random is seeded per page and its output is recoverable from earlier
+ * draws, so identifiers minted from it are guessable across clients; neither id
+ * built on this helper is treated as a capability today, but they are shared
+ * with collaborators, so they are minted unpredictably.
+ */
+function randomToken(length) {
+  const bytes = crypto.getRandomValues(new Uint8Array(Math.ceil(length / 2)));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, length);
+}
+
+/**
  * Generate a unique session ID for event tracking.
  * This helps with webhook loop prevention.
  */
 function generateSessionId() {
-  return 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+  return 'session-' + Date.now().toString(36) + '-' + randomToken(9);
 }
 
 // Session ID for this browser session (persisted in sessionStorage)
@@ -69,7 +85,14 @@ async function apiFetch(url, options = {}) {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    const error = new Error(errorData.error || `HTTP error: ${response.status}`);
+    // Most endpoints return {"error": "..."}; a few (e.g. the session
+    // activity/undo routes, which raise a plain FastAPI HTTPException) return
+    // {"detail": "..."} instead — fall back to that so callers branching on
+    // `error.message` (activity/undo conflict feedback) see the real reason
+    // rather than a generic "HTTP error: 409".
+    const error = new Error(
+      errorData.error || errorData.detail || `HTTP error: ${response.status}`
+    );
     error.status = response.status;
     throw error;
   }
@@ -407,6 +430,9 @@ export async function sendChatMessage(messages, documentContext = null, options 
   if (options.federationDepth) {
     body.federation_depth = options.federationDepth;
   }
+  if (options.modelProfileId) {
+    body.model_profile_id = options.modelProfileId;
+  }
   if (options.expertAgentId) {
     body.expert_agent_id = options.expertAgentId;
   }
@@ -454,9 +480,10 @@ export async function sendSimpleChatMessage(message, documentContext = null, opt
  * @param {boolean} analyze - Whether to analyze with LLM (default: false, just extract text)
  * @returns {Promise<{success: boolean, filename: string, text: string, analysis?: string}>}
  */
-export async function uploadFile(file, analyze = false) {
+export async function uploadFile(file, analyze = false, options = {}) {
   const formData = new FormData();
   formData.append('file', file);
+  if (options.modelProfileId) formData.append('model_profile_id', options.modelProfileId);
 
   const endpoint = analyze ? `${UI_API_BASE}/upload` : `${UI_API_BASE}/upload/extract`;
 
@@ -511,6 +538,7 @@ export async function proposeNodesFromText(text, options = {}) {
       text,
       node_type: options.nodeType,
       communities: options.communities,
+      model_profile_id: options.modelProfileId,
     }),
   });
 }
@@ -531,8 +559,22 @@ export async function getCollectConfig(shortName) {
  * @returns {string}
  */
 export function generateVisualizationSessionId() {
-  const buf = crypto.getRandomValues(new Uint16Array(4));
-  return Array.from(buf, (n) => String(n % 10000).padStart(4, '0')).join('-');
+  // Rejection sampling, not a bare `% 10000`: a Uint16 spans 65536 values, so
+  // folding the whole range would draw 0000-5535 six times per cycle and
+  // 5536-9999 only five, biasing every group. 0-59999 is an exact six-fold
+  // cover of the 10000 outcomes, so discarding the tail keeps each group
+  // uniform and the address space at its full ~10^16. This id is the
+  // capability that guards a shared session (design D7), so the bias is worth
+  // the extra draws.
+  const groups = [];
+  while (groups.length < 4) {
+    for (const n of crypto.getRandomValues(new Uint16Array(4))) {
+      if (n >= 60000) continue;
+      groups.push(String(n % 10000).padStart(4, '0'));
+      if (groups.length === 4) break;
+    }
+  }
+  return groups.join('-');
 }
 
 /**
@@ -548,6 +590,24 @@ export function getVisualizationStreamUrl(sessionId) {
 }
 
 /**
+ * Mint (or rotate) the pulse-trigger token for a live visualization session and
+ * return the absolute trigger URL an external system calls to pulse a node.
+ * Re-minting rotates the token, so any previously shared URL stops working.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{ url: string, token: string }>}
+ */
+export async function mintPulseTriggerUrl(sessionId) {
+  const data = await apiFetch(
+    `${getPathRoot()}/sessions/${encodeURIComponent(sessionId)}/trigger-token`,
+    { method: 'POST' }
+  );
+  const base = new URL(`${getPathRoot()}${data.pulse_path}`, window.location.origin);
+  base.searchParams.set('token', data.trigger_token);
+  return { url: base.toString(), token: data.trigger_token };
+}
+
+/**
  * Return the realtime op-protocol SSE stream URL for a shared session
  * (design step 6). Distinct from the legacy MCP-push stream above: this one
  * carries applied ops, presence and claims from the fan-out hub.
@@ -560,7 +620,9 @@ export function getSessionStreamUrl(sessionId) {
 }
 
 // Stable per-browser client id for shared-session presence and op attribution
-// (design 3.4). Kept in localStorage so it survives reloads.
+// (design 3.4). Kept in localStorage so it survives reloads. 12 hex chars: the
+// server keys element claims and rate-limit buckets on this id, so two live
+// clients colliding would let one release the other's claims.
 const CLIENT_ID_KEY = 'graph_client_id';
 let _clientId = null;
 
@@ -572,7 +634,7 @@ export function getClientId() {
     _clientId = null;
   }
   if (!_clientId) {
-    _clientId = 'client-' + Math.random().toString(36).slice(2, 10);
+    _clientId = 'client-' + randomToken(12);
     try {
       window.localStorage.setItem(CLIENT_ID_KEY, _clientId);
     } catch {
@@ -675,4 +737,101 @@ export async function deleteServerSession(sessionId, clientId) {
  */
 export function getSessionOpsUrl(sessionId) {
   return `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/ops`;
+}
+
+/**
+ * Ingest a human-pasted/uploaded image as a session `image` annotation.
+ *
+ * A plain POST, not a sessionSyncClient op: the server validates, optimizes
+ * and embeds the image (the same pipeline the MCP `create_image_annotation`
+ * tool uses — backend/service/rest_api.py's `ingest_session_image`), so the
+ * result cannot be diffed client-side the way a note or shape can. The
+ * response here is informational only — the annotation the server actually
+ * stored arrives over this browser's own SSE subscription, attributed to a
+ * dedicated server client id rather than `clientId`, specifically so that
+ * echo is not dropped as a self-authored op (see the endpoint's docstring).
+ *
+ * @param {string} sessionId
+ * @param {Object} image
+ * @param {number} image.x
+ * @param {number} image.y
+ * @param {string} [image.imageData] - a data: URL or bare base64 string
+ * @param {string} [image.imageUrl] - an http(s) URL, fetched once server-side
+ * @param {number} [image.w]
+ * @param {number} [image.h]
+ * @param {number} [image.rotation]
+ * @param {string} [image.alt]
+ * @param {Object} [image.style]
+ * @param {number} [image.z]
+ * @param {boolean} [image.locked]
+ * @param {string} [image.annotationId]
+ * @param {number} [image.expectedRevision]
+ * @returns {Promise<{annotation: Object, revision: number}>}
+ */
+export async function ingestSessionImage(sessionId, image) {
+  const response = await fetch(
+    `${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/annotations/image`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getClientId(),
+        x: image.x,
+        y: image.y,
+        image_data: image.imageData || null,
+        image_url: image.imageUrl || null,
+        w: image.w ?? null,
+        h: image.h ?? null,
+        rotation: image.rotation ?? null,
+        alt: image.alt || null,
+        style: image.style || null,
+        z: image.z ?? null,
+        locked: !!image.locked,
+        annotation_id: image.annotationId || null,
+        expected_revision: image.expectedRevision ?? null,
+      }),
+    }
+  );
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Image ingest failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * Recent per-session annotation/canvas activity, newest first (backend PR #423:
+ * persisted, actor-scoped, bounded to 500 records / 7 days per session).
+ * @param {string} sessionId
+ * @param {{actor?: string, limit?: number}} [options]
+ * @returns {Promise<{session_id: string, activity: Array}>}
+ */
+export async function getSessionActivity(sessionId, { actor, limit } = {}) {
+  const params = new URLSearchParams();
+  if (actor) params.set('actor', actor);
+  if (limit) params.set('limit', String(limit));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/activity${suffix}`);
+}
+
+/**
+ * Undo the requesting actor's latest eligible session activity record.
+ * Only the actor's own most recent not-yet-undone action is eligible; a
+ * thrown error's `status` is 404 (nothing to undo / session gone), 409 (the
+ * affected state changed since; another client holds a live selection claim on
+ * the annotation — retry; or the session is mid-write — retry), or 429 (rate
+ * limited) — see backend/core/session_manager.py's undo_last_action. A fourth
+ * 409 (a mismatched `expected_revision`) exists at the endpoint but not here,
+ * since this call never sends that field. The three it can reach are told
+ * apart by message in sessionActivity.js's classifyUndoError, since only the
+ * first is permanent.
+ * @param {string} sessionId
+ * @param {string} clientId
+ * @returns {Promise<{undone_activity_id: string, undone_op: string, applied: Object, revision: number}>}
+ */
+export async function undoSessionAction(sessionId, clientId) {
+  return apiFetch(`${SESSIONS_BASE()}/${encodeURIComponent(sessionId)}/undo`, {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientId }),
+  });
 }

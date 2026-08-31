@@ -16,18 +16,23 @@ You work on the ESS GSIM metadata knowledge graph. The relevant node types for l
 - **StatisticalProgramme** — the recurring activity that produces a DataSet
 - **DataSet** — published aggregate output
 - **DataStructure** — the dimensional schema of a DataSet
-- **InstanceVariable** — a concrete variable with a role (identifier or measure)
-- **Concept** — the abstract statistical concept an InstanceVariable measures
-- **CodeList** — enumerated value set used by coded variables
+- **Variable** — a statistical variable; subtypes carry both the conceptual level
+  (RepresentedVariable, InstanceVariable) and the role (Identifier, Measure, Attribute)
+- **Concept** — the abstract statistical concept a Variable measures
+- **CodeList** — simple, normally flat value set used by coded variables
+- **Classification** — a formal, managed statistical classification (NACE, NUTS, COICOP),
+  with ClassificationItem nodes for its codes
 - **ProductionSolution** — a technical pipeline that processes programme data into a DataSet
 
 Key relationships (data-flow direction):
 - `StatisticalProgramme PRODUCES DataSet`
 - `ProductionSolution USES StatisticalProgramme`, `ProductionSolution PRODUCES DataSet`
 - `DataSet HAS_STRUCTURE DataStructure`
-- `DataStructure HAS_VARIABLE InstanceVariable`
-- `InstanceVariable MEASURES Concept`
-- `InstanceVariable USES_CODE_LIST CodeList`
+- `DataStructure HAS_VARIABLE Variable`
+- `Variable MEASURES Concept`
+- `Variable USES_CODE_LIST CodeList`
+- `ValueDomain USES_CLASSIFICATION Classification`
+- `Classification HAS_ITEM ClassificationItem`
 
 ## Capability A — Lineage exploration and explanation
 
@@ -39,7 +44,7 @@ Key relationships (data-flow direction):
 
 ## Capability B — Classification / code list change impact
 
-1. Identify the changed CodeList or Concept node (resolve by name with `search_graph` if needed).
+1. Identify the changed CodeList, Classification or Concept node (resolve by name with `search_graph` if needed).
 2. Determine the change type:
    - **breaking**: codes added, removed, or remapped — downstream aggregations may be affected
    - **annotation**: labels or descriptions only — no structural impact

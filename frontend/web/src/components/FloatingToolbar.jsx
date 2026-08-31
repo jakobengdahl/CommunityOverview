@@ -23,6 +23,7 @@ import {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CircleFill,
   CardChecklist,
   InputCursorText,
   ListCheck,
@@ -73,14 +74,20 @@ import {
   BinocularsFill,
   EyeFill,
   Translate,
+  PersonLinesFill,
+  ListNested,
+  TagFill,
 } from 'react-bootstrap-icons';
 import useGraphStore from '../store/graphStore';
 import { useI18n } from '../i18n';
+import { useViewportMode } from '../hooks/useViewportMode';
 import './FloatingToolbar.css';
 
 // Registry of available icons, keyed by Bootstrap Icon name.
 // The schema_config.json "icon" field references these keys.
-const ICON_REGISTRY = {
+// Null prototype: keys come from config, and a plain object literal would resolve
+// "toString" or "constructor" to an inherited member that is not a component.
+const ICON_REGISTRY = Object.assign(Object.create(null), {
   PersonFill,
   RocketTakeoffFill,
   LightningFill,
@@ -103,6 +110,7 @@ const ICON_REGISTRY = {
   Diagram3Fill,
   StarFill,
   QuestionCircleFill,
+  CircleFill,
   CardChecklist,
   InputCursorText,
   ListCheck,
@@ -152,10 +160,14 @@ const ICON_REGISTRY = {
   BinocularsFill,
   EyeFill,
   Translate,
-};
+  PersonLinesFill,
+  ListNested,
+  TagFill,
+});
 
 // Legacy fallback: maps node type name -> icon name (used when schema has no icon field)
-const LEGACY_ICON_MAP = {
+// Null prototype for the same reason as ICON_REGISTRY: node type names come from config.
+const LEGACY_ICON_MAP = Object.assign(Object.create(null), {
   Actor: 'PersonFill',
   Initiative: 'RocketTakeoffFill',
   Capability: 'LightningFill',
@@ -178,9 +190,10 @@ const LEGACY_ICON_MAP = {
   EventSubscription: 'BellFill',
   SavedView: 'BookmarkFill',
   Group: 'FolderFill',
-};
+});
 
-const COLOR_MAP = {
+// Null prototype for the same reason as ICON_REGISTRY: node type names come from config.
+const COLOR_MAP = Object.assign(Object.create(null), {
   Actor: '#3B82F6',
   Initiative: '#10B981',
   Capability: '#F97316',
@@ -203,7 +216,9 @@ const COLOR_MAP = {
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   Group: '#646cff',
-};
+});
+
+const DEFAULT_COLOR = '#9CA3AF';
 
 // System types always shown at the bottom (not from schema)
 const SYSTEM_TYPES = ['Agent', 'Skill', 'EventSubscription', 'ActiveKnowledgeCollection', 'Group'];
@@ -223,9 +238,13 @@ const FALLBACK_DOMAIN_ORDER = [
   'Risk',
 ];
 
+// Neutral glyph for node types with no registered icon. A question mark here
+// would read as a rendering error rather than as an unconfigured icon.
+const DEFAULT_ICON = CircleFill;
+
 /**
  * Resolve icon component for a node type.
- * Priority: schema icon field -> legacy fallback -> QuestionCircleFill
+ * Priority: schema icon field -> legacy fallback -> DEFAULT_ICON
  */
 function resolveIcon(nodeType, schema) {
   // 1. Check schema icon field
@@ -239,7 +258,25 @@ function resolveIcon(nodeType, schema) {
     return ICON_REGISTRY[legacyName];
   }
   // 3. Default
-  return QuestionCircleFill;
+  return DEFAULT_ICON;
+}
+
+/**
+ * Resolve display color for a node type.
+ * Priority: schema color field -> legacy COLOR_MAP -> DEFAULT_COLOR
+ *
+ * Same precedence order as resolveIcon, though a declared color is honoured
+ * unconditionally where a declared icon name must also exist in ICON_REGISTRY.
+ * The backend fills in a default color for every node type a profile declares
+ * (config_loader.NodeTypeConfig.color), so COLOR_MAP covers only the names the
+ * active profile does not declare: Group, any type disabled via
+ * system.disabled_node_types, and any type that reaches this helper from the
+ * data rather than the schema — nodes of a type the profile dropped, and
+ * federated search results carrying a remote profile's types. It also covers
+ * the window before the schema loads.
+ */
+function resolveColor(nodeType, schema) {
+  return schema?.node_types?.[nodeType]?.color || COLOR_MAP[nodeType] || DEFAULT_COLOR;
 }
 
 function FloatingToolbar({
@@ -249,8 +286,10 @@ function FloatingToolbar({
   onSaveView,
   onCreateGroup,
   onCreateActiveKnowledgeCollection,
+  variant = 'floating',
 }) {
   const { t } = useI18n();
+  const { isCoarsePointer } = useViewportMode();
   const [hoveredType, setHoveredType] = useState(null);
   const [tooltipPos, setTooltipPos] = useState(null);
   const buttonRefs = useRef({});
@@ -331,15 +370,22 @@ function FloatingToolbar({
 
   return (
     <>
-      <div className="floating-toolbar" id="guide-target-toolbar">
+      <div
+        className={`floating-toolbar${variant === 'sheet' ? ' floating-toolbar--sheet' : ''}`}
+        id="guide-target-toolbar"
+      >
         {toolbarOrder.map((nodeType, index) => {
           if (nodeType === null) {
             return <div key={`sep-${index}`} className="floating-toolbar-separator" />;
           }
 
           const Icon = resolveIcon(nodeType, schema);
-          const color = COLOR_MAP[nodeType] || schema?.node_types?.[nodeType]?.color || '#9CA3AF';
-          const isDraggable = nodeType !== 'SavedView';
+          const color = resolveColor(nodeType, schema);
+          // HTML5 dataTransfer drag never fires on a touch pointer, so a coarse
+          // pointer only ever gets the tap path below — draggable stays true for
+          // desktop's unchanged drag-to-canvas path (App.jsx's onDropCreateNode).
+          const isDraggable = nodeType !== 'SavedView' && !isCoarsePointer;
+          const label = getTooltipLabel(nodeType);
 
           return (
             <button
@@ -353,9 +399,14 @@ function FloatingToolbar({
               onMouseLeave={handleMouseLeave}
               draggable={isDraggable}
               onDragStart={(e) => handleDragStart(e, nodeType)}
+              aria-label={label}
               style={{ '--toolbar-item-color': color }}
             >
               {Icon && <Icon size={18} />}
+              {/* Always rendered; CSS shows it whenever hover is unavailable
+                  (@media (hover: none) or .app.is-touch) instead of relying on
+                  the hover-only portal tooltip below. */}
+              <span className="floating-toolbar-item-label">{label}</span>
             </button>
           );
         })}
@@ -375,5 +426,5 @@ function FloatingToolbar({
   );
 }
 
-export { resolveIcon, COLOR_MAP, ICON_REGISTRY };
+export { resolveIcon, resolveColor, COLOR_MAP, ICON_REGISTRY, DEFAULT_ICON, DEFAULT_COLOR };
 export default FloatingToolbar;

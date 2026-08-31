@@ -226,7 +226,6 @@
   border-radius: 12px;
   max-width: 75%;
   word-wrap: break-word;
-  white-space: pre-wrap;
 }
 
 .kiosk-message-user .kiosk-message-bubble {
@@ -244,6 +243,62 @@
   font-size: 0.92rem;
   line-height: 1.6;
   color: #ddd;
+}
+
+/* User (plain-text) messages keep literal line breaks. Assistant messages are
+   rendered as markdown, whose block elements handle their own spacing. */
+.kiosk-message-user .kiosk-message-content {
+  white-space: pre-wrap;
+}
+
+/* Markdown rendered inside assistant bubbles — mirrors ChatPanel's styling. */
+.kiosk-message-content p {
+  margin: 0 0 0.4em;
+}
+.kiosk-message-content p:last-child {
+  margin-bottom: 0;
+}
+.kiosk-message-content ul,
+.kiosk-message-content ol {
+  margin: 0.2em 0 0.4em 1.2em;
+  padding: 0;
+}
+.kiosk-message-content li {
+  margin-bottom: 0.15em;
+}
+.kiosk-message-content strong {
+  font-weight: 600;
+}
+.kiosk-message-content a {
+  color: #f59e0b;
+  text-decoration: underline;
+}
+.kiosk-message-content code {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  padding: 0.1em 0.3em;
+  font-size: 0.8em;
+}
+.kiosk-message-content pre {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+  overflow-x: auto;
+  margin: 0.4em 0;
+}
+.kiosk-message-content pre code {
+  background: none;
+  padding: 0;
+}
+.kiosk-message-content table {
+  border-collapse: collapse;
+  margin: 0.4em 0;
+}
+.kiosk-message-content th,
+.kiosk-message-content td {
+  border: 1px solid #333;
+  padding: 0.3em 0.5em;
+  text-align: left;
 }
 
 .kiosk-message-meta {

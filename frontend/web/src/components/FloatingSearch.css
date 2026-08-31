@@ -1,11 +1,14 @@
 .floating-search {
   position: fixed;
   top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(16px + env(safe-area-inset-top));
+  left: var(--floating-search-left, calc(16px + env(safe-area-inset-left)));
   z-index: 100;
-  width: 400px;
-  max-width: calc(100vw - 200px);
+  width: var(
+    --floating-search-width,
+    calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right))
+  );
+  max-width: calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right));
 }
 
 .floating-search-bar {
@@ -166,4 +169,33 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+@media (pointer: coarse) {
+  .floating-search-bar {
+    min-height: 44px;
+  }
+
+  .floating-search-result {
+    min-height: 44px;
+  }
+}
+
+.floating-search[data-stacked='true'] {
+  top: calc(var(--floating-header-bottom, 60px) + 8px);
+  max-width: none;
+}
+
+/* Sheet variant: content hosted inside MobileShell's BottomSheet rather than
+   floating fixed near the top of the viewport — the sheet primitive already
+   owns positioning, so this only needs to lay out normally inside it. */
+.floating-search--sheet {
+  position: static;
+  top: auto;
+  left: auto;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }

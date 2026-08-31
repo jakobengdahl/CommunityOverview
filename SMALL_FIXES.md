@@ -1,5 +1,7 @@
 # Small Fixes Backlog
 
+> **Open small-fixes now live in the Corp planning graph** as `small-fix`-tagged Task nodes (migrated 2026-08-13). Log newly discovered deferred issues there, not in this file. This file is retained only as a historical record of previously resolved fixes.
+
 Issues discovered during feature development that are pre-existing and out of
 scope for the active session. Addressed in dedicated small-fix sessions.
 
@@ -19,12 +21,37 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 
 ---
 
-## Open
+### [2026-08-12] SecretProvider seam is declared and unit-tested but not wired into the runtime consumption path
+- **File(s):** `backend/agents/secrets/provider.py` (`SecretProvider`, `EnvSecretProvider`, `resolve_secret`); `backend/agents/config.py:178` (`MCPIntegration.resolved_env`); `backend/agents/mcp_loader.py` (`_execute_search_tool` reads `os.environ.get("BRAVE_API_KEY")` directly; `_connect_stdio` does not spawn with `resolved_env`)
+- **Context:** Discovered during `claude/core-request-scope-seams` while mapping the merged seam surface (PR #334).
+- **Issue:** The SecretProvider contract + `EnvSecretProvider` adapter + tests exist, but `resolved_env` is only ever called from `test_secrets.py`. No `SecretProvider` is instantiated or injected in non-test code, and the actual MCP subprocess launch path reads `os.environ` directly instead of resolving through the seam. Wiring the provider into `mcp_loader` (stdio env resolution) would make the seam load-bearing. Out of scope for the request/scope/authz-seam task.
+- **Effort:** M
 
-### [2026-07-19] Scheduled-trigger envelope omits `schema_version`
-- **File(s):** `backend/agents/scheduler.py:161` (`_build_payload`), test in `backend/agents/tests/test_scheduler.py:406`
-- **Context:** Discovered during `claude/saas-v1-slice-test-w6i7zp` (event envelope versioning)
-- **Issue:** `_build_payload` hand-builds a `scheduled_trigger` payload in the same envelope family (`event_id`/`event_type`/`occurred_at`/`origin`/`entity`) consumed by the same agent path (`build_event_user_message`), but does not carry the new top-level `schema_version`. This is an internal agent-processing message, not an external webhook delivery, so it is intentionally out of the versioned webhook contract for now. If the version stamp should apply to every envelope a consumer might read, extend it here and assert it in `test_payload_structure`.
+### [2026-08-12] Visibility helper reaches into FederationManager private `_cache`
+- **File(s):** `backend/service/access.py:163` (`get_federated_search_limit`)
+- **Context:** Discovered during `claude/core-request-scope-seams`.
+- **Issue:** `get_federated_search_limit` sums `federation_manager._cache.values()` node counts by reaching into a private attribute. A small public accessor (e.g. `FederationManager.total_cached_node_count()`) would remove the layering smell. Behavior is correct today; this is a maintainability note.
+- **Effort:** XS
+
+### [2026-08-12] MCP create_session_auto_add_agent skips the session-count cap the REST path enforces
+
+- **File(s):** `backend/service/mcp_tools.py` (`create_session_auto_add_agent`, `session_registry.get_or_create` call); compare `backend/api_host/session_stream.py` (`create_auto_add_agent` checks `session_count >= SESSION_MAX_COUNT` before materialising)
+- **Context:** Discovered during `claude/session-scoped-autoadd-agent` (PR #328 review)
+- **Issue:** The REST create endpoint guards `session_registry.session_count >= SESSION_MAX_COUNT` before `get_or_create`; the MCP tool does not. Impact is bounded — MCP is the authenticated/trusted surface and `add_rule` still enforces `MAX_SESSIONS_WITH_RULES = 5000`, so registry growth is capped either way — so this is a consistency note, not a security hole. Align the MCP tool with the REST guard if the surfaces should behave identically.
+- **Effort:** XS
+
+### [2026-08-12] Mixed update+add assistant turn can leave an edited node stale in the view
+
+- **File(s):** `backend/ui/chat_logic.py` (`_handle_tool_use` last-action-wins capture); `frontend/web/src/store/graphStore.js:337-341` (`addNodesToVisualization` dedupes by id)
+- **Context:** Discovered during `claude/fix-assistant-clear-on-add` (PR #327 review round 2)
+- **Issue:** The single `toolResult.action` slot uses last-action-wins. A turn that calls `update_node` (→ `update_in_visualization`) and then `search_graph(add_to_visualization)` resolves to `add_to_visualization`; the additive apply path skips nodes already on canvas, so the edited node's on-canvas copy is not refreshed (the DB write still lands). The reverse order works because the in-place merge appends new nodes. Inherent to the one-action-per-result design; a proper fix needs richer per-node merge semantics (e.g. carry per-node placement intent instead of one turn-level action).
+- **Effort:** M
+
+### [2026-08-12] ChatPanel markdown lacks table styling that the kiosk now has
+
+- **File(s):** `frontend/web/src/components/ChatPanel.css:198-232` (markdown block); compare `frontend/web/src/components/CollectKioskView.css` table rules
+- **Context:** Discovered during `claude/kiosk-rich-text` (PR #317 review). Both the main Graph assistant and the kiosk now render GFM tables via the shared `MarkdownMessage` component, but only the kiosk styles `table`/`th`/`td`. ChatPanel tables fall back to unstyled browser defaults.
+- **Issue:** Minor visual inconsistency — assistant tables render borderless/cramped in ChatPanel while looking correct in the kiosk. Not a regression (pre-existing: ChatPanel never styled tables). Add matching `.message-content table/th/td` rules to `ChatPanel.css` for consistency.
 - **Effort:** XS
 
 ---
@@ -131,3 +158,4 @@ Effort scale: XS = single-line fix · S = up to ~30 lines / one file · M = mult
 - **`_parse_datetime` produces naive datetimes from timezone-unaware strings** — `backend/core/models.py`. Attach `timezone.utc` when a parsed ISO string has no timezone info, so datetimes loaded from pre-migration JSON stay aware and comparable. Regression tests added in `backend/core/tests/test_models.py`.
 - **`federationDepthFlow.test.jsx` strict `toEqual` on the chat payload** — `frontend/web/tests/federationDepthFlow.test.jsx`. Changed the `sendChatMessage` options assertion from `toEqual` to `toMatchObject`, tolerating the extra context fields now sent alongside `federationDepth`. (Resolved the duplicate 2026-07-01 and 2026-07-02 entries for this same line.)
 - **`GraphCanvas.test.jsx` edge-delete test asserts a stale Swedish label** — `packages/ui-graph-canvas/tests/GraphCanvas.test.jsx`. Matched the edge-delete button by its actual English default label (`/delete/i`) instead of `/ta bort/i`. (Resolved the duplicate 2026-07-02 and 2026-07-03 entries for this same test.)
+

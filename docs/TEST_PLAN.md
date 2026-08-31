@@ -213,7 +213,7 @@ Step-by-step guides triggered via URL parameter or AI assistant. Tooltips positi
 | 17a.1 | Open app with `?guide=first_intro` in URL | Guide starts automatically after config loads; tooltip appears near header | ⬜ |
 | 17a.2 | Open app with `?guide=actions_demo` | Actions demo guide starts | ⬜ |
 | 17a.3 | Open app with `?guide=nonexistent` | No guide starts; app loads normally | ⬜ |
-| 17a.4 | Switch language (sv/en) while URL has `?guide=first_intro` | Guide does NOT restart on language change (one-shot guard) | ⬜ |
+| 17a.4 | Switch language (sv/en) while URL has `?guide=first_intro` — not currently exercisable via the UI while the app is English-only, see 17k | Guide does NOT restart on language change (one-shot guard) | ⬜ |
 
 ### 17b. Navigation and keyboard
 
@@ -299,6 +299,11 @@ Step-by-step guides triggered via URL parameter or AI assistant. Tooltips positi
 | 17j.3 | Screen reader / tab navigation | Guide tooltip is focusable; ARIA role="dialog" present | ⬜ |
 
 ### 17k. i18n
+
+Not currently exercisable via the UI: the app is temporarily locked to English
+(no in-app language switcher — see the "Language" subsection of
+`docs/USER_GUIDE.md`). The underlying language-switching mechanism these steps
+exercise is unchanged, so re-test them once the lock is lifted.
 
 | # | Step | Expected | Status |
 |---|------|----------|--------|

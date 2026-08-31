@@ -37,6 +37,7 @@ Tooling and constraints:
 - You can only act through the available MCP tools. Tools are namespaced with double underscore, e.g. GRAPH__search_graph, WEB__fetch, SEARCH__search, FS__write_file.
 - If you need additional information, use tools rather than guessing.
 - Prefer read-only actions first. Only write back to the graph (e.g., GRAPH__update_node / GRAPH__add_nodes / GRAPH__delete_nodes) if your task_prompt explicitly requires it.
+- Nodes and edges have an `archived` flag. Archiving (GRAPH__archive_nodes / GRAPH__archive_edges, reversible via the unarchive_* tools) hides an item from search and traversal by default without deleting it; deletion is permanent. Search and get_related_nodes exclude archived items unless you pass include_archived=true. Prefer archiving over deletion when the intent is to hide or retire something rather than remove it for good.
 - Avoid infinite loops: if the event_origin indicates the event was caused by an agent (e.g., starts with "agent:"), be conservative about writing changes that would retrigger the same subscription. If your task_prompt requires writing, do it once and include minimal changes.
 - Always produce a short structured outcome for each event: (1) what you decided to do, (2) which tools you used, (3) what changes (if any) you made, and (4) any follow-up recommendation.
 
@@ -85,7 +86,17 @@ def build_schema_context(schema: Dict[str, Any]) -> str:
         lines.append("\nRelationship types (use ONLY these exact type names):")
         for type_name, type_config in rel_types.items():
             desc = type_config.get("description", "")
+            source_types = type_config.get("source_types") or []
+            target_types = type_config.get("target_types") or []
+            rule_parts = []
+            if source_types:
+                rule_parts.append(f"source_types=[{', '.join(source_types)}]")
+            if target_types:
+                rule_parts.append(f"target_types=[{', '.join(target_types)}]")
+            rules = f" ({'; '.join(rule_parts)})" if rule_parts else ""
             lines.append(f"  - {type_name}: {desc}")
+            if rules:
+                lines[-1] += rules
 
     # Node structure reference
     lines.append("""
@@ -102,6 +113,7 @@ Field limits:
 
 Edge type is OPTIONAL. If omitted, the edge defaults to "RELATES_TO" (a general connection).
 You may specify a type from the relationship types list above when a more specific relationship is known.
+When a relationship type lists source_types or target_types, respect those directed applicability rules. "*" means any node type.
 --- END SCHEMA ---""")
 
     return "\n".join(lines)

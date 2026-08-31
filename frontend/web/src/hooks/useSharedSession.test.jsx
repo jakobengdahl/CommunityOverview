@@ -16,10 +16,14 @@ function makeDeps(overrides = {}) {
     addNodesToVisualization: vi.fn(),
     setHiddenNodeIds: vi.fn(),
     setHiddenEdgeIds: vi.fn(),
+    setDimmedNodeIds: vi.fn(),
+    setDimmedEdgeIds: vi.fn(),
+    setEdgeIntensity: vi.fn(),
     setPendingGroups: vi.fn(),
     setPendingAnnotations: vi.fn(),
     ensureSyncConnected: vi.fn(() => ({ setBaseline: vi.fn(), sessionId: null })),
     syncRef: { current: null },
+    resetSessionScopedState: vi.fn(),
     ...overrides,
   };
 }
@@ -88,6 +92,74 @@ describe('useSharedSession.applyServerSession', () => {
     expect(edges).toEqual([{ id: 'e1', source: 'node-a', target: 'node-a' }]);
     expect(deps.setHiddenNodeIds).toHaveBeenCalledWith(['h1']);
     expect(deps.setPendingGroups).toHaveBeenCalled();
+  });
+
+  it('restores saved session overlay annotations from server state', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: {
+          annotations: [
+            {
+              id: 'note-1',
+              type: 'note',
+              kind: 'note',
+              position: { x: 7, y: 8 },
+              text: 'saved note',
+            },
+          ],
+        },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setPendingAnnotations).toHaveBeenCalledWith([
+      expect.objectContaining({
+        id: 'note-1',
+        kind: 'note',
+        position: { x: 7, y: 8 },
+        text: 'saved note',
+      }),
+    ]);
+  });
+
+  it('restores dimmed ids and the edge-intensity baseline from session state', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: {
+          dimmed_node_ids: ['n1'],
+          dimmed_edge_ids: ['e1', 'e2'],
+          edge_intensity: 0.4,
+          annotations: [],
+        },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setDimmedNodeIds).toHaveBeenCalledWith(['n1']);
+    expect(deps.setDimmedEdgeIds).toHaveBeenCalledWith(['e1', 'e2']);
+    expect(deps.setEdgeIntensity).toHaveBeenCalledWith(0.4);
+  });
+
+  it('does not call the dim/intensity setters when the session carries none', () => {
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    act(() => {
+      result.current.applyServerSession({
+        state: { annotations: [] },
+        resolved: { nodes: [NODE_A], edges: [] },
+      });
+    });
+
+    expect(deps.setDimmedNodeIds).not.toHaveBeenCalled();
+    expect(deps.setDimmedEdgeIds).not.toHaveBeenCalled();
+    expect(deps.setEdgeIntensity).not.toHaveBeenCalled();
   });
 
   // Regression (SMALL_FIXES 2026-07-10): a truthy non-array resolved.edges must
@@ -169,6 +241,44 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(setBaseline).toHaveBeenCalledWith({});
   });
 
+  it('calls onMissing on a 404 while still seeding the empty fallback', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
+    const err = new Error('not found');
+    err.status = 404;
+    api.getSession.mockRejectedValueOnce(err);
+    const onMissing = vi.fn();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678', {
+        eagerConnect: true,
+        onMissing,
+      });
+    });
+
+    // The not-found notice fires, and the empty-session fallback still runs.
+    expect(onMissing).toHaveBeenCalledWith('1234-5678');
+    expect(setBaseline).toHaveBeenCalledWith({});
+  });
+
+  it('does not call onMissing when the session loads successfully', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });
+    api.getSession.mockResolvedValueOnce({
+      state: { annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+    });
+    const onMissing = vi.fn();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678', { onMissing });
+    });
+
+    expect(onMissing).not.toHaveBeenCalled();
+  });
+
   it('re-throws a non-404 load error without clearing the canvas', async () => {
     const deps = makeDeps();
     const err = new Error('boom');
@@ -182,6 +292,54 @@ describe('useSharedSession.loadSessionFromServer', () => {
       })
     ).rejects.toThrow('boom');
     expect(deps.clearVisualization).not.toHaveBeenCalled();
+  });
+
+  // Session-switch isolation: loading a different session's content must reset
+  // the carried-over UI state (assistant history, experts, node overlays,
+  // selection) once, after the canvas is applied — on both the loaded-content
+  // path and the empty (404) session path.
+  it('resets session-scoped state after loading resolved content', async () => {
+    const deps = makeDeps();
+    api.getSession.mockResolvedValueOnce({
+      state: { annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+    });
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+
+    expect(deps.resetSessionScopedState).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets session-scoped state when switching into an empty (404) session', async () => {
+    const err = new Error('not found');
+    err.status = 404;
+    api.getSession.mockRejectedValueOnce(err);
+    const deps = makeDeps();
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678', { eagerConnect: true });
+    });
+
+    expect(deps.resetSessionScopedState).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reset session-scoped state when the switch fails atomically', async () => {
+    const deps = makeDeps();
+    const err = new Error('boom');
+    err.status = 500;
+    api.getSession.mockRejectedValueOnce(err);
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await expect(
+      act(async () => {
+        await result.current.loadSessionFromServer('1234-5678');
+      })
+    ).rejects.toThrow('boom');
+    expect(deps.resetSessionScopedState).not.toHaveBeenCalled();
   });
 
   // Regression (SMALL_FIXES 2026-07-10): a malformed resolved.edges from the

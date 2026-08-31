@@ -6,6 +6,13 @@ const translations = { en, sv };
 const SUPPORTED_LANGUAGES = ['en', 'sv'];
 const DEFAULT_LANGUAGE = 'en';
 
+// TEMPORARY interim product constraint (founder note 2026-08-26): the UI is
+// English-only pending a localization needs analysis. This flag is the only
+// gate — it does not remove sv.json, SUPPORTED_LANGUAGES, or the translation
+// mechanism, so restoring language switching later is a one-line flip back
+// to `true`.
+const LANGUAGE_SWITCHING_ENABLED = false;
+
 const I18nContext = createContext(null);
 
 /**
@@ -27,6 +34,10 @@ function interpolate(str, params) {
  * Detect the initial language from URL parameters, localStorage, or default.
  */
 function detectLanguage() {
+  if (!LANGUAGE_SWITCHING_ENABLED) {
+    return DEFAULT_LANGUAGE;
+  }
+
   // 1. Check URL parameter ?lang=sv
   const urlParams = new URLSearchParams(window.location.search);
   const urlLang = urlParams.get('lang');
@@ -52,6 +63,7 @@ export function I18nProvider({ children, defaultLanguage }) {
     const detected = detectLanguage();
     // If a defaultLanguage from backend config is provided and no URL/localStorage override
     if (
+      LANGUAGE_SWITCHING_ENABLED &&
       defaultLanguage &&
       !new URLSearchParams(window.location.search).get('lang') &&
       !localStorage.getItem('app_language')
@@ -62,6 +74,7 @@ export function I18nProvider({ children, defaultLanguage }) {
   });
 
   const setLanguage = useCallback((lang) => {
+    if (!LANGUAGE_SWITCHING_ENABLED) return;
     if (SUPPORTED_LANGUAGES.includes(lang)) {
       setLanguageState(lang);
       localStorage.setItem('app_language', lang);
@@ -70,6 +83,7 @@ export function I18nProvider({ children, defaultLanguage }) {
 
   // Update language when backend config provides a default (only if no user override)
   useEffect(() => {
+    if (!LANGUAGE_SWITCHING_ENABLED) return;
     if (
       defaultLanguage &&
       !localStorage.getItem('app_language') &&
@@ -102,7 +116,13 @@ export function I18nProvider({ children, defaultLanguage }) {
     [language]
   );
 
-  const value = { language, setLanguage, t, supportedLanguages: SUPPORTED_LANGUAGES };
+  const value = {
+    language,
+    setLanguage,
+    t,
+    supportedLanguages: SUPPORTED_LANGUAGES,
+    languageSwitchingEnabled: LANGUAGE_SWITCHING_ENABLED,
+  };
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
@@ -128,9 +148,10 @@ export function useI18n() {
         return typeof value === 'string' ? interpolate(value, params) : value;
       },
       supportedLanguages: SUPPORTED_LANGUAGES,
+      languageSwitchingEnabled: LANGUAGE_SWITCHING_ENABLED,
     };
   }
   return ctx;
 }
 
-export { SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE };
+export { SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, LANGUAGE_SWITCHING_ENABLED };

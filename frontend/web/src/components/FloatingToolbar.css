@@ -1,7 +1,9 @@
 .floating-toolbar {
   position: fixed;
   left: 16px;
+  left: calc(16px + env(safe-area-inset-left));
   top: 80px;
+  top: calc(80px + env(safe-area-inset-top));
   z-index: 100;
   transition: left 0.2s ease-out;
   display: grid;
@@ -15,14 +17,20 @@
   border-radius: 10px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   max-height: calc(100vh - 100px);
+  max-height: calc(100dvh - 100px);
+  max-height: calc(100dvh - 100px - env(safe-area-inset-bottom));
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: #555 transparent;
 }
 
 /* The toolbar follows the session drawer: it stays "floating" at the same
-   16px distance from the drawer's edge as it had from the screen edge. */
-.app.session-drawer-open .floating-toolbar {
+   16px distance from the drawer's edge as it had from the screen edge. This
+   fixed-position .floating-toolbar isn't mounted in mobile mode (MobileShell
+   hosts it as the sheet variant instead, laid out in normal flow), but the
+   override is scoped off .is-mobile defensively so it can never offset
+   mobile chrome even if that ever changes. */
+.app.session-drawer-open:not(.is-mobile) .floating-toolbar {
   left: calc(var(--session-drawer-width, 280px) + 16px);
 }
 
@@ -82,6 +90,73 @@
 
 .floating-toolbar-item[draggable='true']:active {
   cursor: grabbing;
+}
+
+/* Hidden by default: the desktop hover tooltip (portal, below) carries the
+   name instead. Shown whenever hover is unavailable, so a touch user never
+   has to hover to learn what an icon means. Two independent signals cover
+   this: the hover-capability media query (belt) and the .is-touch class
+   App.jsx already derives from the same isCoarsePointer flag (suspenders) —
+   see the .app.is-touch rules below. */
+.floating-toolbar-item-label {
+  display: none;
+  margin-left: 8px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  color: inherit;
+}
+
+/* The floating (left) rail stays a two-column grid of bare icons on every
+   pointer type (task-annotation-toolbox-icons-only). It used to collapse to
+   one captioned row per node type without hover, which is what turned a
+   compact 2xN icon rail into a tall single column of text — on a phone that
+   is most of the canvas height, and the rail scrolls rather than fits. The
+   captions were there to replace an unavailable hover tooltip; the long-press
+   tooltip below (FloatingToolbar.jsx's own touch handling) covers that need
+   without spending the canvas area. Cells only grow to a 44px touch target.
+   The sheet variant is deliberately NOT included: it is a dedicated
+   full-width surface inside MobileShell's BottomSheet where a caption costs
+   nothing, and it keeps its labels. */
+@media (hover: none) {
+  .floating-toolbar-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.app.is-touch .floating-toolbar-item {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Sheet variant: content hosted inside MobileShell's BottomSheet rather than
+   floating fixed on screen — the sheet primitive already owns positioning and
+   scrolling, so this drops the fixed chrome and always uses the single-column,
+   always-labelled layout the touch styles above already define. */
+.floating-toolbar--sheet {
+  position: static;
+  left: auto;
+  top: auto;
+  max-height: none;
+  width: 100%;
+  grid-template-columns: 1fr;
+  box-shadow: none;
+  border: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+}
+
+.floating-toolbar--sheet .floating-toolbar-item {
+  width: auto;
+  min-height: 44px;
+  justify-content: flex-start;
+  padding: 0 10px;
+}
+
+.floating-toolbar--sheet .floating-toolbar-item-label {
+  display: inline;
 }
 
 .floating-toolbar-tooltip {

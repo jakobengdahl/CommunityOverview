@@ -142,3 +142,25 @@
   background: #333;
   color: #ddd;
 }
+
+/* Touch targets: the "x" close button grows via flex-centering (glyph
+   stays the same visual size); form controls and action buttons get a
+   min-height floor. Textareas already exceed 44px and are left alone. */
+@media (pointer: coarse) {
+  .edit-dialog .close-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .edit-dialog .form-group input,
+  .edit-dialog .form-group select {
+    min-height: 44px;
+  }
+
+  .edit-dialog .form-actions button {
+    min-height: 44px;
+  }
+}

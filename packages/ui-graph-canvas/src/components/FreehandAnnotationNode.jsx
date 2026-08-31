@@ -1,0 +1,413 @@
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useReactFlow } from 'reactflow';
+import { AnnotationContext } from './AnnotationContext';
+import {
+  reduceFreehandPoints,
+  smoothAnchors,
+  pointsToPathData,
+  hasPressureData,
+  segmentsFromCurvePoints,
+} from '../utils/freehandPath';
+import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
+import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
+import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
+import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
+import { useAnnotationEditLease } from '../hooks/useAnnotationEditLease';
+import { useAnnotationEditTrigger } from '../hooks/useAnnotationEditTrigger';
+import './FreehandAnnotationNode.css';
+
+/**
+ * FreehandAnnotationNode - renders a freehand/vector-stroke annotation as an
+ * SVG path, following the same per-node inline-SVG pattern as ArrowNode.
+ * `data.points` are node-relative (relative to the node's own `position`,
+ * the stroke's anchor point — see `annotations.js`'s `GENERIC_OVERLAY_FIELDS`
+ * comment), so a plain ReactFlow drag moves the whole stroke without this
+ * component touching point coordinates itself.
+ *
+ * Selection, move (drag) and the envelope's z/locked semantics are handled
+ * generically by GraphCanvas/overlayToFlowNode for every annotation type
+ * (freehand is one of the GENERIC_OVERLAY_TYPES); this component adds the
+ * visual selection outline, the locked cursor, and — new here — a right-click
+ * property editor (smoothing/color/width/opacity), matching the pattern
+ * GenericAnnotationNode's shape/rotation editor established. When any sampled
+ * point carries pressure the stroke renders as several short width-varying
+ * segments (buildPressureSegments) instead of one uniform-width path — see
+ * that helper's doc comment for why segments rather than one continuous
+ * variable-width curve.
+ */
+// Black, because a stroke has to be visible on the canvas the app actually
+// renders. The previous default was the near-white '#e6edf3' this package's
+// palettes were picked for when the canvas was dark; on the light canvas a
+// freehand stroke drawn with it is invisible, so the tool reads as broken
+// rather than as mis-coloured. Kept in the swatch list too — a white stroke is
+// still wanted for a dark background — but it is no longer what you get by
+// drawing without choosing.
+export const DEFAULT_FREEHAND_COLOR = '#111827';
+const DEFAULT_COLOR = DEFAULT_FREEHAND_COLOR;
+const DEFAULT_STROKE_WIDTH = 2;
+const PAD = 8;
+
+const FREEHAND_COLORS = [
+  DEFAULT_COLOR,
+  '#e6edf3',
+  '#FDE047',
+  '#4ADE80',
+  '#60A5FA',
+  '#F472B6',
+  '#FB923C',
+];
+const FREEHAND_WIDTHS = [1.5, 2, 3, 5, 8];
+const FREEHAND_SMOOTHING_LEVELS = [0, 0.3, 0.6, 1];
+const FREEHAND_OPACITY_LEVELS = [0.3, 0.5, 0.75, 1];
+
+// Stable empty-array reference for the no-points fallback below, so a
+// missing/invalid `data.points` doesn't itself defeat this component's
+// useMemo (a fresh `[]` literal every render would count as "changed").
+const EMPTY_POINTS = [];
+
+function boundingBox(points) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (!Number.isFinite(minX)) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  return { minX, minY, maxX, maxY };
+}
+
+function FreehandAnnotationNode({ id, data, selected }) {
+  const rawPoints = Array.isArray(data?.points) ? data.points : EMPTY_POINTS;
+  const color = data?.color || DEFAULT_COLOR;
+  const strokeWidth = Number.isFinite(data?.strokeWidth) ? data.strokeWidth : DEFAULT_STROKE_WIDTH;
+  const smoothing = data?.smoothing ?? 0;
+  const opacity = Number.isFinite(data?.opacity) ? data.opacity : 1;
+  const locked = Boolean(data?.locked);
+  const { notifyChange, notifyRemoteLockedAttempt, labels, attachNearby } =
+    useContext(AnnotationContext);
+  // Another client's live edit lease (task-annotation-exclusive-edit-leases):
+  // dragging is already refused centrally via `draggable` (GraphCanvas's
+  // remote-lease effect); the context-menu guards below refuse the
+  // per-component mutations this component does have (colour/width/
+  // smoothing/opacity/delete/unlock).
+  const remoteLocked = isRemoteLocked(data);
+  const changeLayer = useAnnotationLayer(id, data);
+  const duplicate = useAnnotationDuplicate(id, data);
+  const { setNodes } = useReactFlow();
+  // Cosmetic "who's here" marker — prefers the active editor over a mere
+  // selection (see remoteEditBadge's doc comment).
+  const badge = remoteEditBadge(data);
+
+  const [contextMenu, setContextMenu] = useState(null);
+  const contextMenuRef = useRef(null);
+  useAnnotationEditLease(id, Boolean(contextMenu));
+  const { editButtonRef, openEditMenu, sheetContainer } = useAnnotationEditTrigger({
+    contextMenu,
+    setContextMenu,
+    menuRef: contextMenuRef,
+  });
+  const handleMenuKeyDown = useAnnotationMenuKeyNav(contextMenuRef);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleDismiss = (e) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target)) return;
+      setContextMenu(null);
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleDismiss, true);
+      document.addEventListener('contextmenu', handleDismiss, true);
+      document.addEventListener('keydown', handleKeyDown, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleDismiss, true);
+      document.removeEventListener('contextmenu', handleDismiss, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const updateStyle = (patch) => {
+    if (remoteLocked) {
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
+    notifyChange('style');
+  };
+
+  const remove = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) => nds.filter((n) => n.id !== id));
+    setContextMenu(null);
+    notifyChange('delete');
+  };
+
+  // Locking withholds everything except the two actions the capability
+  // baseline names for a locked object: unlock, and duplicate —
+  // colour/width/smoothing/opacity/delete stay out of reach while `locked`
+  // is set, matching NoteNode/LabelNode/GenericAnnotationNode's context
+  // menus.
+  const unlock = () => {
+    if (remoteLocked) {
+      setContextMenu(null);
+      notifyRemoteLockedAttempt();
+      return;
+    }
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== id) return n;
+        const nextData = { ...n.data, locked: false };
+        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+      })
+    );
+    setContextMenu(null);
+    notifyChange('style');
+  };
+
+  const { minX, minY, maxX, maxY } = boundingBox(rawPoints);
+  const boxW = Math.max(1, maxX - minX) + PAD * 2;
+  const boxH = Math.max(1, maxY - minY) + PAD * 2;
+  // Shift every point into positive local SVG space (like ArrowNode's
+  // originX/originY), then pull the wrapping div back by the same amount so
+  // the stroke's own anchor point still lines up with the node's flow
+  // position.
+  const originX = PAD - minX;
+  const originY = PAD - minY;
+  // Curve-fitting (Catmull-Rom resampling, task-annotation-freehand-true-
+  // smoothing) can now emit several times more points than it reduces at
+  // high smoothing, the opposite of the old RDP-decimation cost profile —
+  // so this stage is memoized on the actual sampled points rather than
+  // recomputed every render. `rawPoints` (`data.points`) is a stable
+  // reference across a drag (drag moves the node's flow position, not its
+  // points array — see this component's own doc comment), so a stroke's
+  // curve is only rebuilt when its points, smoothing, or origin truly
+  // change — deliberately NOT keyed on `strokeWidth`, which this stage never
+  // reads; splitting it out keeps a plain width change (no effect on the
+  // curve at all) from re-running reduce+curve-fit for nothing.
+  const { localPoints, curved } = useMemo(() => {
+    const lp = rawPoints.map((p) => ({
+      x: p.x + originX,
+      y: p.y + originY,
+      pressure: p.pressure,
+    }));
+    const reduced = reduceFreehandPoints(lp, smoothing);
+    return { localPoints: lp, curved: smoothAnchors(reduced, smoothing) };
+  }, [rawPoints, originX, originY, smoothing]);
+  const pressureAware = useMemo(() => hasPressureData(localPoints), [localPoints]);
+  // `curved` can hold up to ~7x the reduced point count at high smoothing,
+  // so building `d` (used unconditionally, even for pressure-aware strokes'
+  // hit-target path below) is memoized too — otherwise a re-render that
+  // touches neither points nor smoothing (selection, remote-selection badge,
+  // context menu open/close, locked/opacity) would still re-walk it.
+  const d = useMemo(() => pointsToPathData(curved), [curved]);
+  // Splitting into per-segment widths is a cheap single pass over the
+  // already curve-fit points (unlike the reduce+curve-fit stage above), so
+  // it's fine for this one to depend on `strokeWidth` directly.
+  const segments = useMemo(
+    () => (pressureAware ? segmentsFromCurvePoints(curved, strokeWidth) : null),
+    [pressureAware, curved, strokeWidth]
+  );
+
+  return (
+    <div
+      className={`graph-freehand-node${selected ? ' selected' : ''}${locked ? ' locked' : ''}`}
+      style={{
+        marginLeft: -originX,
+        marginTop: -originY,
+        outline: badge ? `2px solid ${badge.color}` : undefined,
+        outlineOffset: badge ? '2px' : undefined,
+      }}
+      onContextMenu={openContextMenu}
+    >
+      {badge && (
+        <div
+          className="graph-node-remote-badge"
+          style={{ backgroundColor: badge.color, left: originX - 2, top: originY - 11 }}
+          title={badge.displayName}
+        >
+          {badge.displayName}
+        </div>
+      )}
+      <svg width={boxW} height={boxH} style={{ overflow: 'visible', display: 'block' }}>
+        {/* Transparent wide hit target so a thin stroke is easy to select/grab. */}
+        <path
+          d={d}
+          stroke="transparent"
+          strokeWidth={Math.max(16, strokeWidth + 12)}
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <g
+          className="graph-freehand-stroke"
+          opacity={opacity}
+          style={selected ? { filter: 'drop-shadow(0 0 3px rgba(255, 255, 255, 0.7))' } : undefined}
+        >
+          {pressureAware ? (
+            segments.map((segment, i) => (
+              <path
+                key={i}
+                d={segment.d}
+                stroke={color}
+                strokeWidth={segment.width}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ))
+          ) : (
+            <path
+              d={d}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+        </g>
+      </svg>
+      {/* See NoteNode's equivalent comment: a real, focusable button, shown
+          only while selected. Positioned near the stroke's anchor point
+          (like the remote badge above), offset above it so the two never
+          overlap. */}
+      {selected && (
+        <button
+          ref={editButtonRef}
+          type="button"
+          className="annotation-edit-trigger nodrag nopan"
+          style={{ left: originX - 12, top: originY - 34 }}
+          aria-label={labels.editAnnotation}
+          aria-haspopup="true"
+          aria-expanded={Boolean(contextMenu)}
+          onClick={(e) => {
+            if (remoteLocked) {
+              notifyRemoteLockedAttempt();
+              return;
+            }
+            openEditMenu(e);
+          }}
+        >
+          ✏️
+        </button>
+      )}
+      {contextMenu &&
+        (contextMenu.sheet ? sheetContainer : document.body) &&
+        createPortal(
+          <div
+            ref={contextMenuRef}
+            className={`graph-annotation-context-menu${contextMenu.sheet ? ' sheet' : ''}`}
+            style={contextMenu.sheet ? undefined : { left: contextMenu.x, top: contextMenu.y }}
+            onKeyDown={handleMenuKeyDown}
+          >
+            {locked ? (
+              // The capability baseline's two actions for a locked object:
+              // unlock, and duplicate — everything else stays out of reach
+              // while `locked` is set, matching the pattern established in
+              // NoteNode/LabelNode/GenericAnnotationNode.
+              <>
+                <button type="button" className="context-menu-unlock" onClick={unlock}>
+                  🔓 {labels.unlock}
+                </button>
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+              </>
+            ) : (
+              <>
+                <div className="context-menu-title">{labels.freehandColor}</div>
+                <div className="context-menu-colors">
+                  {FREEHAND_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`color-button${color === c ? ' active' : ''}`}
+                      style={{ backgroundColor: c }}
+                      aria-label={c}
+                      onClick={() => updateStyle({ color: c })}
+                    />
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandWidth}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_WIDTHS.map((w) => (
+                    <button
+                      key={w}
+                      type="button"
+                      className={`size-button${strokeWidth === w ? ' active' : ''}`}
+                      onClick={() => updateStyle({ strokeWidth: w })}
+                    >
+                      {w}
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandSmoothing}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_SMOOTHING_LEVELS.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={`size-button${smoothing === s ? ' active' : ''}`}
+                      onClick={() => updateStyle({ smoothing: s })}
+                    >
+                      {Math.round(s * 100)}%
+                    </button>
+                  ))}
+                </div>
+                <div className="context-menu-title">{labels.freehandOpacity}</div>
+                <div className="context-menu-sizes">
+                  {FREEHAND_OPACITY_LEVELS.map((o) => (
+                    <button
+                      key={o}
+                      type="button"
+                      className={`size-button${opacity === o ? ' active' : ''}`}
+                      onClick={() => updateStyle({ opacity: o })}
+                    >
+                      {Math.round(o * 100)}%
+                    </button>
+                  ))}
+                </div>
+                <AnnotationLayerControls
+                  labels={labels}
+                  locked={data.locked}
+                  onChangeLayer={changeLayer}
+                />
+                <NearbyObjectMenuSection
+                  labels={labels}
+                  onAttach={(kind) => attachNearby(id, kind)}
+                />
+                <AnnotationDuplicateControl labels={labels} onDuplicate={duplicate} />
+                <button type="button" className="context-menu-delete" onClick={remove}>
+                  🗑️ {labels.delete}
+                </button>
+              </>
+            )}
+          </div>,
+          contextMenu.sheet ? sheetContainer : document.body
+        )}
+    </div>
+  );
+}
+
+export default memo(FreehandAnnotationNode);

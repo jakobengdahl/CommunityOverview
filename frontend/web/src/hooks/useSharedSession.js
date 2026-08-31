@@ -16,11 +16,15 @@ export function serverStateToMirror(state, resolvedNodeIds) {
   const s = state || {};
   const { groups, parentIds } = annotationsToGroups(s.annotations);
   const overlays = annotationsToOverlays(s.annotations);
+  const intensity = Number(s.edge_intensity);
   return {
     node_refs: resolvedNodeIds || s.node_refs || [],
     positions: s.positions || {},
     hidden_node_ids: s.hidden_node_ids || [],
     hidden_edge_ids: s.hidden_edge_ids || [],
+    dimmed_node_ids: s.dimmed_node_ids || [],
+    dimmed_edge_ids: s.dimmed_edge_ids || [],
+    edge_intensity: Number.isFinite(intensity) ? Math.max(0, Math.min(1, intensity)) : 1.0,
     annotations: [...groupsToAnnotations(groups, parentIds), ...overlaysToAnnotations(overlays)],
   };
 }
@@ -50,10 +54,19 @@ export function useSharedSession({
   addNodesToVisualization,
   setHiddenNodeIds,
   setHiddenEdgeIds,
+  setDimmedNodeIds,
+  setDimmedEdgeIds,
+  setEdgeIntensity,
   setPendingGroups,
   setPendingAnnotations,
   ensureSyncConnected,
   syncRef,
+  // Reset session-scoped UI state (assistant history, experts, node overlays,
+  // selection) once a *different* session's content is loaded. Injected so the
+  // hook stays UI-agnostic; optional so callers that don't need it can omit it.
+  // Deliberately NOT invoked from applyServerSession — that path is reused by
+  // same-session resync, which must keep the current session's assistant state.
+  resetSessionScopedState,
 }) {
   // Load a session's canvas content from the server (resolved node refs +
   // layout + group annotations) onto the store.
@@ -74,6 +87,9 @@ export function useSharedSession({
       }
       if (state.hidden_node_ids?.length) setHiddenNodeIds(state.hidden_node_ids);
       if (state.hidden_edge_ids?.length) setHiddenEdgeIds(state.hidden_edge_ids);
+      if (state.dimmed_node_ids?.length) setDimmedNodeIds(state.dimmed_node_ids);
+      if (state.dimmed_edge_ids?.length) setDimmedEdgeIds(state.dimmed_edge_ids);
+      if (typeof state.edge_intensity === 'number') setEdgeIntensity(state.edge_intensity);
       const { groups, parentIds } = annotationsToGroups(state.annotations);
       if (groups.length) setPendingGroups({ groups, parentIds });
       const overlays = annotationsToOverlays(state.annotations);
@@ -84,13 +100,16 @@ export function useSharedSession({
       addNodesToVisualization,
       setHiddenNodeIds,
       setHiddenEdgeIds,
+      setDimmedNodeIds,
+      setDimmedEdgeIds,
+      setEdgeIntensity,
       setPendingGroups,
       setPendingAnnotations,
     ]
   );
 
   const loadSessionFromServer = useCallback(
-    async (targetId, { eagerConnect = false } = {}) => {
+    async (targetId, { eagerConnect = false, onMissing = null } = {}) => {
       try {
         const payload = await api.getSession(targetId, { resolve: true });
         // Compute the sync baseline before touching the canvas: it runs the same
@@ -102,6 +121,9 @@ export function useSharedSession({
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
         const baselineMirror = serverStateToMirror(payload?.state, resolvedIds);
         applyServerSession(payload);
+        // The target session's canvas is now loaded — drop any UI state carried
+        // over from the previous session before wiring up its realtime stream.
+        resetSessionScopedState?.();
         // Connect the realtime stream for this existing session and seed the sync
         // baseline from its state so later edits diff against what the server holds.
         // Best-effort from here on: the canvas above already loaded correctly, so a
@@ -115,18 +137,27 @@ export function useSharedSession({
         // Session does not exist server-side yet — new / not-yet-saved share URL.
         if (error?.status === 404) {
           clearVisualization();
+          // Switching into a brand-new / empty session is still a session switch:
+          // reset the carried-over UI state just as the loaded-content path does.
+          resetSessionScopedState?.();
           if (eagerConnect) {
             ensureSyncConnected(targetId)?.setBaseline({});
           } else if (syncRef.current && syncRef.current.sessionId === targetId) {
             syncRef.current.setBaseline({});
           }
+          // A 404 is ambiguous: a brand-new session materialises on first save,
+          // but a *deep link* to a session that was deleted or never existed
+          // should not silently present an empty canvas as if it were valid
+          // (contract §5.3). The caller opts in to that notice via onMissing;
+          // the empty-session fallback above still runs so nothing breaks.
+          onMissing?.(targetId);
         } else {
           console.error('Error loading session:', error);
           throw error;
         }
       }
     },
-    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef]
+    [applyServerSession, clearVisualization, ensureSyncConnected, syncRef, resetSessionScopedState]
   );
 
   return { applyServerSession, loadSessionFromServer };

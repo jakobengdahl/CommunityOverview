@@ -2,8 +2,13 @@
  * Graph canvas constants
  */
 
+import { MarkerType } from 'reactflow';
+
 // Node type color mapping from metamodel
-export const NODE_COLORS = {
+// Null prototype: node type names come from profile config, and a plain object
+// literal would resolve "toString" or "constructor" to an inherited member and
+// return it as a color.
+export const NODE_COLORS = Object.assign(Object.create(null), {
   Actor: '#3B82F6',
   Initiative: '#10B981',
   Capability: '#F97316',
@@ -18,13 +23,107 @@ export const NODE_COLORS = {
   EventSubscription: '#8B5CF6',
   SavedView: '#6B7280',
   VisualizationView: '#6B7280', // Legacy support
-};
+});
 
 // Default edge styling
 export const DEFAULT_EDGE_STYLE = {
   stroke: '#666',
   strokeWidth: 2,
 };
+
+// Clamp bounds for the per-edge `thickness` attribute so a stray value can't
+// render an invisible or canvas-swallowing line.
+export const EDGE_MIN_THICKNESS = 1;
+export const EDGE_MAX_THICKNESS = 12;
+
+// Directions in which an arrowhead is drawn. 'forward' points at the target,
+// 'backward' at the source, 'both' at each end, 'none' draws a plain line.
+const FORWARD_DIRECTIONS = new Set(['forward', 'both']);
+const BACKWARD_DIRECTIONS = new Set(['backward', 'both']);
+
+/**
+ * Translate an edge's free-form `metadata` into React Flow visual props.
+ *
+ * All attributes are optional; when absent the returned props reproduce the
+ * historical default look exactly (grey #666, width 2, no arrowheads, static).
+ * This keeps existing graphs visually unchanged while letting edges that do
+ * carry visual metadata opt into direction, colour, arrow style, thickness and
+ * a pulse/static animation state.
+ *
+ * Recognised metadata keys:
+ *   - color:     CSS colour string for the stroke (and arrowheads)
+ *   - thickness: stroke width in px, clamped to [EDGE_MIN, EDGE_MAX]
+ *   - direction: 'forward' | 'backward' | 'both' | 'none'
+ *   - arrow:     'closed' (filled) | 'open' (line) arrowhead style
+ *   - animated / pulse: truthy => animated ("pulse") edge, else static
+ */
+export function resolveEdgeVisuals(metadata) {
+  const meta = metadata && typeof metadata === 'object' ? metadata : {};
+
+  const stroke =
+    typeof meta.color === 'string' && meta.color.trim()
+      ? meta.color.trim()
+      : DEFAULT_EDGE_STYLE.stroke;
+
+  let strokeWidth = DEFAULT_EDGE_STYLE.strokeWidth;
+  const thickness = Number(meta.thickness);
+  if (Number.isFinite(thickness) && thickness > 0) {
+    strokeWidth = Math.min(EDGE_MAX_THICKNESS, Math.max(EDGE_MIN_THICKNESS, thickness));
+  }
+
+  const direction =
+    typeof meta.direction === 'string' ? meta.direction.trim().toLowerCase() : 'none';
+  const marker = {
+    type: meta.arrow === 'open' ? MarkerType.Arrow : MarkerType.ArrowClosed,
+    color: stroke,
+  };
+
+  const animated = meta.animated === true || meta.pulse === true;
+
+  return {
+    style: { stroke, strokeWidth },
+    markerStart: BACKWARD_DIRECTIONS.has(direction) ? marker : undefined,
+    markerEnd: FORWARD_DIRECTIONS.has(direction) ? marker : undefined,
+    animated,
+    // Kept representable for the sibling external pulse-trigger task; the class
+    // adds a subtle stroke pulse on top of React Flow's native dash animation.
+    className: animated ? 'rf-edge-pulse' : undefined,
+  };
+}
+
+// Session-local focus (task-session-focus-dimming-controls): composition
+// rule for an edge's rendered stroke-opacity.
+//
+// `edgeIntensity` (0-1, session-global) is the baseline every non-dimmed
+// edge renders at. A dimmed edge (a per-object override — the edge itself,
+// or incident to a dimmed node) always renders *below* that baseline rather
+// than at an independent fixed value, so raising the global baseline back
+// up does not make a deliberately-dimmed edge outshine the rest.
+// DIMMED_EDGE_OPACITY_CEILING caps how prominent a dimmed edge can ever get
+// even at full intensity; ACCESSIBLE_MIN_EDGE_OPACITY floors it so it never
+// disappears outright (selection/hover CSS overrides both floors again —
+// see GraphCanvas.css's `.selected`/`:hover` rules, the "selection and
+// hover always win" half of this composition).
+export const DIMMED_EDGE_OPACITY_CEILING = 0.25;
+export const ACCESSIBLE_MIN_EDGE_OPACITY = 0.12;
+
+/**
+ * Resolve one edge's rendered stroke-opacity from the session's global
+ * `edgeIntensity` baseline and whether this particular edge is dimmed.
+ * Pure — exported for unit testing (mirrors resolveEdgeVisuals's contract).
+ */
+export function resolveEdgeOpacity(edgeIntensity, isDimmed) {
+  const intensity = Number.isFinite(edgeIntensity) ? Math.max(0, Math.min(1, edgeIntensity)) : 1;
+  if (!isDimmed) return intensity;
+  // The accessibility floor must never exceed the baseline itself: the UI
+  // slider keeps edgeIntensity at 0.2+, but MCP/a foreign session document
+  // can set it anywhere in [0,1] (see edge_intensity_set's backend clamp).
+  // Without capping the floor at `intensity`, a baseline below the floor
+  // (e.g. 0.05) would make a *dimmed* edge render more opaque than the
+  // "normal" edges around it — the opposite of what dimming means.
+  const floor = Math.min(ACCESSIBLE_MIN_EDGE_OPACITY, intensity);
+  return Math.max(floor, Math.min(intensity, DIMMED_EDGE_OPACITY_CEILING));
+}
 
 // Lazy loading thresholds
 export const LAZY_LOAD_THRESHOLD = 200;

@@ -23,6 +23,7 @@ This system helps organizations avoid overlapping investments by making visible:
 
 *AI chat & intelligence*
 - **AI-powered chat:** Natural language interface (Claude or OpenAI) for exploring and managing the graph
+- **Configurable model profiles:** Define named chat/agent model profiles in `schema_config.json`; users can select enabled profiles while agents can bind to a profile by id
 - **Multi-provider support:** Switch between Claude (Anthropic), OpenAI, and any OpenAI-compatible endpoint (Ollama, Groq, Azure, etc.)
 - **Document upload:** Upload PDF, Word, or text documents for automatic entity extraction
 - **Node proposals:** LLM suggests entities with duplicate detection; user confirms before any node is added
@@ -40,7 +41,7 @@ This system helps organizations avoid overlapping investments by making visible:
 
 *Operations & deployment*
 - **Runs without LLM keys:** Graph API and MCP server work without any API key; AI chat is simply hidden
-- **Multi-language:** English and Swedish UI, selectable via URL, startup flag, or schema config
+- **Multi-language architecture:** English and Swedish translations, with a `?lang`/startup-flag/schema-config switching mechanism; the UI is currently locked to English (see below)
 - **Authentication:** Basic Auth for all endpoints or MCP-only (for Cloud Run + IAP setups)
 - **Profile system:** Run with different metadata models, AI prompts, and seed data per deployment profile
 - **Data management:** Example datasets with easy loading from local files or URLs
@@ -122,6 +123,7 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     /src/store                    # Zustand state
     /tests                        # Unit and e2e tests
   /widget                         # ChatGPT embeddable widget
+  /xr                             # WebXR immersive client for Quest (spike)
 /packages                         # Shared packages
   /ui-graph-canvas                # Shared React Flow component
 /services                         # Standalone auxiliary services
@@ -230,6 +232,10 @@ export ANTHROPIC_API_KEY=sk-ant-xxxxx # For Claude
 # Start with data from a URL
 ./start-dev.sh --data https://example.github.io/data/graph.json
 ```
+
+> **Note:** `--lang sv` / `?lang=sv` currently has no effect — the UI is
+> temporarily locked to English (see [docs/USER_GUIDE.md](./docs/USER_GUIDE.md#language)).
+> The Swedish translations and the switching mechanism are unchanged underneath.
 
 The script will:
 - Check for and set up active graph data (copies example data on first run)

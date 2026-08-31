@@ -171,9 +171,57 @@ class TestConfigLoader:
 
         # Check custom relationship types
         assert "CUSTOM_RELATION" in schema["relationship_types"]
+        assert schema["relationship_types"]["TEST_EDGE"]["source_types"] == [
+            "CustomActor"
+        ]
+        assert schema["relationship_types"]["TEST_EDGE"]["target_types"] == ["TestNode"]
 
         # Clean up
         del os.environ["SCHEMA_FILE"]
+
+    def test_relationship_type_applicability_helper(self, tmp_path):
+        """Relationship applicability supports direction, wildcards, and absent rules."""
+        from backend.config import config_loader
+
+        config = {
+            "schema": {
+                "node_types": {
+                    "Source": {"fields": ["name"]},
+                    "Target": {"fields": ["name"]},
+                    "Other": {"fields": ["name"]},
+                },
+                "relationship_types": {
+                    "DIRECTED": {
+                        "source_types": ["Source"],
+                        "target_types": ["Target"],
+                    },
+                    "WILDCARD": {
+                        "source_types": ["*"],
+                        "target_types": ["Target"],
+                    },
+                    "GLOBAL": {"description": "No applicability rules"},
+                },
+            }
+        }
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(json.dumps(config), encoding="utf-8")
+        os.environ["SCHEMA_FILE"] = str(config_file)
+        config_loader.reset_loader()
+
+        assert config_loader.relationship_type_allows_node_types(
+            "DIRECTED", "Source", "Target"
+        )["allowed"]
+        blocked = config_loader.relationship_type_allows_node_types(
+            "DIRECTED", "Target", "Source"
+        )
+        assert blocked["allowed"] is False
+        assert "source type 'Target' is not allowed" in blocked["message"]
+        assert config_loader.relationship_type_allows_node_types(
+            "WILDCARD", "Other", "Target"
+        )["allowed"]
+        assert config_loader.relationship_type_allows_node_types(
+            "GLOBAL", "Other", "Source"
+        )["allowed"]
 
     def test_get_presentation(self):
         """Test getting presentation configuration."""
@@ -188,7 +236,17 @@ class TestConfigLoader:
         assert "prompt_prefix" in presentation
         assert "prompt_suffix" in presentation
         assert "default_language" in presentation
+        assert "default_chat_collapsed" in presentation
         assert "language_policy" in presentation
+        assert presentation["ui"]["ai_assistant"]["default_collapsed"] is False
+
+    def test_default_chat_collapsed_defaults_false(self):
+        """A config without an explicit setting keeps the assistant panel open."""
+        from backend.config import config_loader
+
+        presentation = config_loader.get_presentation()
+
+        assert presentation["default_chat_collapsed"] is False
 
     def test_custom_presentation(self):
         """Test presentation from custom config."""
@@ -230,13 +288,19 @@ class TestConfigLoader:
 
         del os.environ["SCHEMA_FILE"]
 
-    def test_get_capabilities_defaults_to_empty_list(self):
-        """Test capability manifest defaults to an empty list when not configured."""
+    def test_get_capabilities_always_reports_animated_layout(self):
+        """A deployment that declares nothing still answers the animation question.
+
+        An agent sending an ``apply_visualization_layout`` animation hint cannot
+        otherwise tell a tween from a snap, so the flag must be present whether
+        or not a deployment configured a manifest.
+        """
         from backend.config import config_loader
 
-        capabilities = config_loader.get_capabilities()
+        capabilities = config_loader.get_capabilities()["capabilities"]
 
-        assert capabilities == {"capabilities": []}
+        assert [c["id"] for c in capabilities] == ["animated_layout"]
+        assert capabilities[0]["enabled"] is True
 
     def test_get_capabilities_from_custom_config(self):
         """Test capability manifest is loaded from custom config."""
@@ -251,26 +315,55 @@ class TestConfigLoader:
         os.environ["SCHEMA_FILE"] = test_config_path
         config_loader.reset_loader()
 
-        capabilities = config_loader.get_capabilities()
+        capabilities = config_loader.get_capabilities()["capabilities"]
 
-        assert capabilities == {
-            "capabilities": [
-                {
-                    "id": "graph_export",
-                    "name": "Graph export",
-                    "description": "Allows clients to export graph data for offline analysis.",
-                    "enabled": True,
-                },
-                {
-                    "id": "assistant_guidance",
-                    "name": "Assistant guidance",
-                    "description": "Provides configuration for guided assistant interactions.",
-                    "enabled": False,
-                },
-            ]
-        }
+        assert capabilities[:2] == [
+            {
+                "id": "graph_export",
+                "name": "Graph export",
+                "description": "Allows clients to export graph data for offline analysis.",
+                "enabled": True,
+            },
+            {
+                "id": "assistant_guidance",
+                "name": "Assistant guidance",
+                "description": "Provides configuration for guided assistant interactions.",
+                "enabled": False,
+            },
+        ]
+        assert [c["id"] for c in capabilities[2:]] == ["animated_layout"]
 
         del os.environ["SCHEMA_FILE"]
+
+    def test_declared_animated_layout_capability_wins(self, tmp_path):
+        """A deployment whose canvas does not tween says so, and is not overruled."""
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "node_types": {},
+                    "relationship_types": {},
+                    "presentation": {
+                        "capabilities": [
+                            {
+                                "id": "animated_layout",
+                                "name": "Animated layout",
+                                "enabled": False,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert [c["id"] for c in capabilities] == ["animated_layout"]
+        assert capabilities[0]["enabled"] is False
 
     def test_get_runtime_info_defaults_to_standalone(self):
         """Test runtime metadata defaults to standalone mode with no extensions."""
@@ -519,7 +612,9 @@ class TestSchemaIntegration:
             assert "colors" in presentation
 
             capabilities = service.get_capabilities()
-            assert capabilities == {"capabilities": []}
+            assert [c["id"] for c in capabilities["capabilities"]] == [
+                "animated_layout"
+            ]
         finally:
             os.unlink(temp_path)
 
@@ -796,3 +891,53 @@ class TestConfigContext:
         assert "tenant_config_dir" not in result
         assert "schema_config_path" not in result
         assert "federation_config_path" not in result
+
+
+class TestBuildSessionUrl:
+    """Canonical ?session=<id> deep-link construction (contract §5)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_base_url(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV
+
+        os.environ.pop(PUBLIC_BASE_URL_ENV, None)
+        yield
+        os.environ.pop(PUBLIC_BASE_URL_ENV, None)
+
+    def test_none_when_unconfigured(self):
+        from backend.config.config_loader import build_session_url
+
+        assert build_session_url("1234-5678-9012-3456") is None
+
+    def test_bare_origin_gets_root_path(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test"
+        assert (
+            build_session_url("1234-5678")
+            == "https://app.example.test/?session=1234-5678"
+        )
+
+    def test_trailing_slash_is_not_doubled(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test/"
+        assert (
+            build_session_url("1234-5678")
+            == "https://app.example.test/?session=1234-5678"
+        )
+
+    def test_base_path_is_preserved(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://example.test/app"
+        assert (
+            build_session_url("1234-5678")
+            == "https://example.test/app?session=1234-5678"
+        )
+
+    def test_empty_session_id_is_none(self):
+        from backend.config.config_loader import PUBLIC_BASE_URL_ENV, build_session_url
+
+        os.environ[PUBLIC_BASE_URL_ENV] = "https://app.example.test"
+        assert build_session_url("") is None

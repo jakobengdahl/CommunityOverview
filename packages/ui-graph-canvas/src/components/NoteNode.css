@@ -50,6 +50,25 @@
   min-width: 150px;
 }
 
+/* The contextual "Edit" surface's mobile-sheet variant
+   (task-annotation-responsive-bottom-toolbox): the same menu markup and
+   every one of the rules above/below it, but laid out for the host's
+   BottomSheet content area instead of a floating, pointer-positioned panel —
+   the annotation-editing equivalent of AnnotationToolbox's own
+   `variant="sheet"` (AnnotationToolbox.css). No `position`/`left`/`top` (the
+   sheet itself is what's positioned), full width, and unconstrained height
+   since the BottomSheet's own content area already scrolls. */
+.graph-annotation-context-menu.sheet {
+  position: static;
+  width: 100%;
+  min-width: 0;
+  box-shadow: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 0 12px;
+}
+
 .graph-annotation-context-menu .context-menu-title {
   font-size: 12px;
   color: #999;
@@ -64,17 +83,32 @@
   margin-bottom: 8px;
 }
 
+/* The swatch is the control's entire content — there is no label — so it has
+   to be big enough to judge a colour from, especially the darker entries. */
 .graph-annotation-context-menu .color-button {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  border: 2px solid transparent;
+  /* A resting border, not just transparent, so a dark swatch (e.g. arrow's
+     '#111827' or the generic annotation's '#0f172a') stays distinguishable
+     against this menu's own dark background (#2a2a2a above) instead of
+     nearly disappearing until hovered. */
+  border: 2px solid rgba(255, 255, 255, 0.3);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .graph-annotation-context-menu .color-button:hover {
   transform: scale(1.1);
+  border-color: white;
+}
+
+/* Marks which swatch is the annotation's current colour (ArrowNode,
+   LabelNode, NoteNode and GenericAnnotationNode's colour rows all apply the
+   `active` class here; FreehandAnnotationNode originated the pattern),
+   mirroring the `.size-button.active`/`.shape-picker-button.active`
+   convention those already use. */
+.graph-annotation-context-menu .color-button.active {
   border-color: white;
 }
 
@@ -142,4 +176,446 @@
 .graph-annotation-context-menu .context-menu-delete:hover {
   background: #ef4444;
   color: white;
+}
+
+.graph-annotation-context-menu .context-menu-unlock {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #60a5fa;
+  color: #60a5fa;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .context-menu-unlock:hover {
+  background: #60a5fa;
+  color: white;
+}
+
+.graph-annotation-context-menu .context-menu-shapes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .shape-picker-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 6px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .shape-picker-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .shape-picker-button.active {
+  border-color: #60a5fa;
+}
+
+.graph-annotation-context-menu .shape-picker-swatch {
+  display: block;
+  width: 18px;
+  height: 18px;
+  background: #94a3b8;
+}
+
+/* Nine-position alignment picker (task-annotation-text-alignment-and-font) —
+   same 3-column grid as .context-menu-shapes above, but every button doubles
+   as its own live preview: a small dot positioned inside it with the exact
+   justify-content/align-items pair that value applies to the annotation's own
+   text, rather than an icon standing in for the concept. */
+.graph-annotation-context-menu .context-menu-align {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .align-picker-button {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 3px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .align-picker-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .align-picker-button.active {
+  border-color: #60a5fa;
+}
+
+/* The compact property bar (task-annotation-compact-property-bar). The menu
+   used to be a single tall column — a heading plus a control row per property
+   — which on a shape ran well past a phone's screen height, covered the object
+   being edited, and needed scrolling to reach the controls at the bottom. Each
+   property is now one small trigger in a horizontal row (see
+   AnnotationMenuGroup.jsx), and its controls appear in a panel only when asked
+   for. Same controls, a fraction of the resting footprint. */
+.graph-annotation-context-menu--bar {
+  display: flex;
+  flex-direction: row;
+  /* Wraps, and is NOT a scroll container. `overflow-x: auto` here was a
+     mistake with a large blast radius: per CSS Overflow 3 a non-visible value
+     on one axis computes the other to `auto` too, so the bar became a ~52px
+     scrollport that clipped every group panel — the panels open outside the
+     bar's own box by design, so activating one showed nothing at all. Wrapping
+     also keeps all thirteen groups reachable on a narrow screen, which a
+     silent horizontal scroll did not. */
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  min-width: 0;
+  /* The panels are positioned against this, so it must be the containing
+     block for their absolute positioning. */
+  position: fixed;
+}
+
+/* The sheet variant is laid out in normal flow inside the host's BottomSheet
+   (see the .sheet rules above), which `position: fixed` would take it out of.
+   It keeps the row, and its panels anchor against the group instead. */
+.graph-annotation-context-menu--bar.sheet {
+  position: static;
+  justify-content: flex-start;
+  padding: 8px 0;
+}
+
+.annotation-menu-group {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Sized up ~50% from the first cut (30px cell / 14px glyph / 8px swatch).
+   The bar has no captions, so the glyph and its current-value swatch are the
+   only things carrying meaning — at the original size the swatch in
+   particular was too small to read a colour off, which is most of what it is
+   there for. */
+.annotation-menu-group-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #e6edf3;
+  font-size: 21px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.annotation-menu-group-trigger:hover,
+.annotation-menu-group-trigger:focus-visible {
+  border-color: #666;
+  background: #333;
+}
+
+.annotation-menu-group-trigger.open {
+  border-color: #60a5fa;
+  background: #1e293b;
+}
+
+.annotation-menu-group-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+
+/* The trigger's current-value preview: what the group is set to, without
+   opening it. A colour group shows its colour; 'transparent' shows the same
+   checkerboard the swatch list uses for it, so "no fill" is not mistaken for
+   a dark fill. */
+.annotation-menu-group-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 3px;
+}
+
+.annotation-menu-group-swatch--transparent {
+  background-image:
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%),
+    linear-gradient(45deg, #666 25%, transparent 25%, transparent 75%, #666 75%);
+  background-size: 8px 8px;
+  background-position:
+    0 0,
+    4px 4px;
+}
+
+/* Opens upward by default: the menu is positioned at the pointer, which is on
+   the object being edited, so a panel below would cover what the user is
+   looking at more often than one above. */
+.annotation-menu-group-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 1;
+  min-width: 150px;
+  max-width: min(280px, 92vw);
+  /* Capping the height and letting the panel itself scroll keeps every
+     control reachable wherever the menu lands. The panel is its own scroll
+     container; the bar above it deliberately is not. */
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #2a2a2a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* In the mobile sheet the bar is the first content of a scrolling container,
+   so "above the trigger" is off the top of that container — the panel would
+   open into space the user cannot scroll to. It drops below instead, where
+   the sheet's own scrolling can reach it. */
+.graph-annotation-context-menu--bar.sheet .annotation-menu-group-panel {
+  bottom: auto;
+  top: calc(100% + 6px);
+  max-height: none;
+}
+
+/* Panels are kept on screen by clamping the MENU itself into the viewport
+   (ContextMenuPortal measures and adjusts), not by guessing which groups sit
+   near an edge. The previous `nth-last-child` rule keyed off DOM order, which
+   stops tracking visual order the moment the bar wraps — it would right-anchor
+   panels in the middle of a wrapped bar and leave the actual rightmost ones
+   hanging off the edge. */
+
+/* A panel's own controls keep the spacing they had as sections, minus the
+   bottom margin that separated one section from the next — inside a panel
+   there is no next section. */
+.annotation-menu-group-panel > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Column direction is load-bearing, not cosmetic. TEXT_ALIGN_STYLES (see its
+   doc comment in utils/annotations.js) defines `justifyContent` as the
+   VERTICAL position and `alignItems` as the horizontal one — which is only
+   true for a column-direction container, the direction the annotation's own
+   text box uses. Rendering the preview in the default `row` direction swapped
+   the two axes, so every off-diagonal cell previewed its own transpose: the
+   top-centre button showed its dot at middle-left, and picking it looked like
+   it had set the wrong alignment. Row-major TEXT_ALIGN_VALUES already puts
+   the buttons in the right grid cells; this is what makes each button's dot
+   match the position that button actually applies. */
+.graph-annotation-context-menu .align-picker-dot {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-annotation-context-menu .align-picker-dot-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e6edf3;
+}
+
+/* Font-family picker (task-annotation-text-alignment-and-font) — a 2-column
+   grid rather than .context-menu-sizes' single flex row, since the curated
+   family names ("Default", "serif", "monospace", "cursive") are longer than
+   a number and would crowd four abreast in the menu's ~150px width. Each
+   button renders its own label IN that family (except "Default", which has
+   no family of its own to preview in — see GENERIC_FONT_FAMILIES's doc
+   comment) as a lightweight live preview. */
+.graph-annotation-context-menu .context-menu-fonts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .font-button {
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .font-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .font-button.active {
+  border-color: #60a5fa;
+  color: #60a5fa;
+}
+
+/* The icon picker's vocabulary is much larger than the shape picker's six
+   variants (annotationIcons.js's full set), so it uses more, smaller columns
+   and scrolls instead of growing the menu past a usable height. */
+.graph-annotation-context-menu .context-menu-icons {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .icon-picker-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e6edf3;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .icon-picker-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .icon-picker-button.active {
+  border-color: #60a5fa;
+  color: #60a5fa;
+}
+
+.graph-annotation-context-menu .context-menu-rotate {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .rotate-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .rotate-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+.graph-annotation-context-menu .rotate-button.rotate-reset {
+  flex: 1.4;
+  font-size: 12px;
+}
+
+/* Shared by every annotation context menu (note, label, arrow, freehand and
+   the generic kinds) — the layer row AnnotationLayerControls renders,
+   styled on the rotate row's pattern above so the menu reads as one control
+   set rather than several. (A vote-dot value stepper used to share this
+   pattern too; task-annotation-vote-dot-simplify removed it along with the
+   value it edited — the rules for `.context-menu-vote-value`/
+   `.vote-value-button`/`.vote-value-current` are retired with it, since
+   nothing renders those classes any more.) */
+.graph-annotation-context-menu .context-menu-layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-annotation-context-menu .layer-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .layer-button:hover {
+  border-color: #666;
+  background: #333;
+}
+
+/* "Nearby object menu" section (docs/ANNOTATION_CONTRACT.md "Human
+   authoring surfaces") — the label/icon/text row every context
+   menu offers it from (NodeContextMenu plus the note/label/arrow/freehand/
+   generic annotation menus). Wraps rather than a fixed 4-column grid, since
+   NodeContextMenu's own min-width is narrower than these annotation menus'.
+   NodeContextMenu (`.node-context-menu`) needs its own title rule too — it
+   uses GraphCanvas.css's plain `.graph-context-menu`, which has no
+   `.context-menu-title` styling of its own the way the annotation menus'
+   `.graph-annotation-context-menu` already does above — and its own
+   `width: auto` override, since GraphCanvas.css's `.graph-context-menu
+   button` rule otherwise forces every button here to `width: 100%`,
+   stacking what this row means to lay out side by side. */
+.graph-annotation-context-menu .context-menu-nearby,
+.node-context-menu .context-menu-nearby {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.node-context-menu .context-menu-title {
+  font-size: 12px;
+  color: #999;
+  margin: 4px 12px 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #444;
+}
+
+.graph-annotation-context-menu .context-menu-nearby-button,
+.node-context-menu .context-menu-nearby-button {
+  flex: 1 1 auto;
+  width: auto;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.graph-annotation-context-menu .context-menu-nearby-button:hover,
+.node-context-menu .context-menu-nearby-button:hover {
+  border-color: #666;
+  background: #333;
 }

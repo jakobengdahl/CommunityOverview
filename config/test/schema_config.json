@@ -33,7 +33,9 @@
         "description": "Custom relationship for testing"
       },
       "TEST_EDGE": {
-        "description": "Test edge type"
+        "description": "Test edge type",
+        "source_types": ["CustomActor"],
+        "target_types": ["TestNode"]
       }
     }
   },

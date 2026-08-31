@@ -1,4 +1,4 @@
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Optional
 import os
 import json
 import logging
@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 import inspect
 from backend.llm.llm_providers import create_provider, LLMProvider
 from backend.config import config_loader
+from backend.config.model_profiles import (
+    create_provider_from_profile,
+    resolve_profile_reference,
+)
 from backend.llm.language_policy import format_language_policy_for_prompt
 
 # Initialize logger
@@ -13,6 +17,70 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Visualization actions that decide how node/edge results affect the current
+# canvas (add vs. replace vs. clear vs. in-place update). These are the only
+# actions that determine view-content placement; pure overlays/side-effects
+# (mark_nodes, present_form, save_view, start_guide, node_pulse) are
+# intentionally excluded so they never override how returned nodes are
+# displayed. When a node-returning tool leaves the action unset, the assistant
+# defaults to additive placement — a plain "add X" request must only add, never
+# silently clear the view. Mirrors the additive default of
+# _push_visualization_command (backend/service/mcp_tools.py).
+_VIEW_CONTENT_ACTIONS = frozenset(
+    {
+        "add_to_visualization",
+        "replace_visualization",
+        "load_visualization",
+        "clear_visualization",
+        "update_in_visualization",
+    }
+)
+
+_COLOR_NAMES = {
+    "#3B82F6": "blue",
+    "#A855F7": "purple",
+    "#10B981": "green",
+    "#F97316": "orange",
+    "#FBBF24": "yellow",
+    "#EF4444": "red",
+    "#14B8A6": "teal",
+    "#6366F1": "indigo",
+    "#D946EF": "fuchsia",
+    "#6B7280": "gray",
+}
+
+
+def _build_node_types_section(schema: dict) -> str:
+    """Build the node types section for the system prompt."""
+    node_types_section_parts = ["METAMODEL - Node Types:\n"]
+
+    # Add domain types
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("category") == "system":
+            continue  # Skip system types in the main domain list
+        color = type_config.get("color", "#9CA3AF")
+        desc = type_config.get("description", "")
+        # Map color to name for readability
+        color_name = _COLOR_NAMES.get(color, "")
+        node_types_section_parts.append(f"- {type_name} ({color_name}): {desc}\n")
+
+    # Add system types at the end
+    for type_name, type_config in schema.get("node_types", {}).items():
+        if type_config.get("category") == "system":
+            desc = type_config.get("description", "")
+            node_types_section_parts.append(f"- {type_name} (gray): {desc}\n")
+
+    return "".join(node_types_section_parts)
+
+
+def _build_relationship_types_section(schema: dict) -> str:
+    """Build the relationship types section for the system prompt."""
+    rel_types_section_parts = ["RELATIONSHIP TYPES:\n"]
+    for type_name, type_config in schema.get("relationship_types", {}).items():
+        desc = type_config.get("description", "")
+        rel_types_section_parts.append(f"- {type_name}: {desc}\n")
+    return "".join(rel_types_section_parts)
 
 
 def _build_system_prompt() -> str:
@@ -28,39 +96,10 @@ def _build_system_prompt() -> str:
     presentation = config_loader.get_presentation()
 
     # Build node types section from config
-    node_types_section = "METAMODEL - Node Types:\n"
-    for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("category") == "system":
-            continue  # Skip system types in the main domain list
-        color = type_config.get("color", "#9CA3AF")
-        desc = type_config.get("description", "")
-        # Map color to name for readability
-        color_names = {
-            "#3B82F6": "blue",
-            "#A855F7": "purple",
-            "#10B981": "green",
-            "#F97316": "orange",
-            "#FBBF24": "yellow",
-            "#EF4444": "red",
-            "#14B8A6": "teal",
-            "#6366F1": "indigo",
-            "#D946EF": "fuchsia",
-            "#6B7280": "gray",
-        }
-        color_name = color_names.get(color, "")
-        node_types_section += f"- {type_name} ({color_name}): {desc}\n"
-
-    # Add system types at the end
-    for type_name, type_config in schema.get("node_types", {}).items():
-        if type_config.get("category") == "system":
-            desc = type_config.get("description", "")
-            node_types_section += f"- {type_name} (gray): {desc}\n"
+    node_types_section = _build_node_types_section(schema)
 
     # Build relationship types section from config
-    rel_types_section = "RELATIONSHIP TYPES:\n"
-    for type_name, type_config in schema.get("relationship_types", {}).items():
-        desc = type_config.get("description", "")
-        rel_types_section += f"- {type_name}: {desc}\n"
+    rel_types_section = _build_relationship_types_section(schema)
 
     # Get custom prompt parts
     prompt_prefix = presentation.get("prompt_prefix", "")
@@ -165,6 +204,22 @@ All nodes can have tags for better categorization and searchability:
 - Users can edit tags via the edit dialog OR by asking you to add/update them
 - ALWAYS suggest 3-5 relevant tags when creating new nodes
 
+ARCHIVED LIFECYCLE:
+Nodes and edges have an `archived` flag (default false) that is separate from deletion:
+- ARCHIVE = hide by default while keeping the item (and its history) in the graph.
+  Reversible. Use archive_nodes / archive_edges to archive, and
+  unarchive_nodes / unarchive_edges to restore.
+- DELETE = permanent removal. Use delete_nodes / delete_edges only when the user
+  truly wants the data gone.
+- When a user asks to "remove", "hide", "retire", "put away" or "arkivera" something
+  but does not clearly want permanent deletion, PREFER archiving and say so.
+- search_graph and get_related_nodes EXCLUDE archived nodes and edges by default.
+  To see or work with archived items, pass include_archived=true. So if a user asks
+  "what have I archived?" or wants to restore something, search with
+  include_archived=true first to find it, then unarchive it.
+- Archived items still exist: an archived node is not deleted, just hidden from the
+  default views.
+
 CORE PRINCIPLES:
 1. ALWAYS use MCP tools (search_graph, get_related_nodes, etc.) to interact with the graph
 2. NEVER fabricate or assume data - always query the graph using tools
@@ -178,24 +233,35 @@ SECURITY RULES:
 3. Show affected connections before deletion
 4. Filter results appropriately based on the user's query
 
-CRITICAL - "LAGG TILL" vs "VISA" DISTINCTION:
-These are TWO DIFFERENT operations - understand the user's intent:
+CRITICAL - ADD vs REPLACE vs CLEAR (visualization intent):
+The default is ADDITIVE. Only clear or replace the current view when the user
+EXPLICITLY asks for it. When in doubt, add — never silently clear the canvas.
 
-1. "LAGG TILL X" / "ADD X (to visualization)" / "inkludera X":
-   -> User wants to ADD nodes to what's ALREADY displayed
+1. ADDITIVE (the default) — "LAGG TILL X" / "ADD X" / "inkludera X", and any
+   plain request to bring nodes into the view that does NOT say replace/clear:
+   -> User wants to ADD nodes to what's ALREADY displayed, keeping current content
    -> ALWAYS search for X first using search_graph()
-   -> Return results with "action": "add_to_visualization" in the tool response
-   -> Frontend will ADD these nodes to existing visualization (not replace)
-   -> Example: "lagg till SCB" -> search_graph(query="SCB") and add to current view
+   -> Pass action="add_to_visualization" (this is also the safe default if omitted)
+   -> Frontend ADDS these nodes to the existing visualization (does not replace)
+   -> NEVER call clear_visualization() for a plain additive request
+   -> Examples:
+      "lagg till SCB" -> search_graph(query="SCB", action="add_to_visualization")
+      "add all actor nodes in the view" ->
+        search_graph(node_types=["Actor"], action="add_to_visualization")
 
-2. "VISA X" / "SHOW X" / "display X":
-   -> User wants to SEE X (replace current view with new results)
-   -> Use search_graph() and return normally (no special action)
-   -> Frontend will REPLACE current visualization with results
-   -> Example: "visa alla aktorer" -> search_graph(node_types=["Actor"]) replaces view
+2. REPLACE — the user EXPLICITLY asks to replace the view, or to show something
+   INSTEAD of what is there ("VISA X" / "SHOW X", "replace the view with X",
+   "byt ut vyn mot X", "visa istallet X"):
+   -> Use search_graph() with action="replace_visualization"
+   -> Frontend REPLACES the current visualization with the results
+   -> Example: "visa alla aktorer" ->
+        search_graph(node_types=["Actor"], action="replace_visualization")
 
-3. "TÖM" / "RENSA" / "CLEAR" / "EMPTY" (visualization):
-   -> User wants to CLEAR/EMPTY the current visualization
+3. CLEAR-AND-ADD — the user EXPLICITLY asks to clear/empty first, then show:
+   ("clear the view and show all actors in sector X", "rensa och visa X")
+   -> Use search_graph() with action="replace_visualization" (clears then shows)
+
+4. CLEAR ONLY — "TÖM" / "RENSA" / "CLEAR" / "EMPTY" with nothing to show after:
    -> Use clear_visualization() tool
    -> This removes all nodes from the canvas (does NOT delete from database)
    -> Swedish phrases: "töm visualiseringen", "rensa grafen", "ta bort allt"
@@ -317,19 +383,24 @@ VISUALIZATION DISPLAY BEHAVIOR:
    - Any edges connecting new nodes to existing nodes are automatically included
    - The new nodes will be highlighted for visibility
 
-3. IMPORTANT - "VISA" / "SHOW" COMMANDS ALWAYS UPDATE VISUALIZATION:
+3. IMPORTANT - "VISA" / "SHOW" COMMANDS UPDATE THE VISUALIZATION:
    When the user says "visa X", "show X", "display X", or similar commands:
    - ALWAYS use search_graph() to find and return matching nodes
-   - The frontend AUTOMATICALLY displays the returned nodes in the visualization
+   - "visa/show X" means show X INSTEAD of the current content, so pass
+     action="replace_visualization"
    - You do NOT need the user to explicitly say "in the visualization"
-   - Example: "visa SCB" -> search_graph(query="SCB") -> nodes displayed automatically
-   - Example: "visa alla aktorer" -> search_graph(node_types=["Actor"]) -> actors displayed
-   - Example: "show AI projects" -> search_graph(query="AI", node_types=["Initiative"]) -> displayed
+   - Example: "visa SCB" -> search_graph(query="SCB", action="replace_visualization")
+   - Example: "visa alla aktorer" ->
+       search_graph(node_types=["Actor"], action="replace_visualization")
+   - Example: "show AI projects" ->
+       search_graph(query="AI", node_types=["Initiative"], action="replace_visualization")
 
 4. Important distinction:
    - "Show/load saved view X" = REPLACE current visualization with saved view content
-   - "Visa/Show X" (without "saved view") = SEARCH for X and display results
-   - "Add nodes" / "Show related nodes" = ADD to current visualization
+   - "Visa/Show X" (without "saved view") = REPLACE current view with the results
+     (action="replace_visualization")
+   - "Add X" / "Show related nodes" = ADD to current visualization
+     (action="add_to_visualization" — the default; never clears the view)
 
 AGENT NODES:
 The graph contains Agent nodes (type "Agent") that represent AI agents configured to process events.
@@ -399,22 +470,30 @@ User: "Vilka initiativ har vi kring AI?"
 -> Use search_graph(query="AI", node_types=["Initiative"]) and present results in ONE response
 
 User: "Visa SCB" or "Show SCB" (REPLACE current visualization)
--> Use search_graph(query="SCB") - nodes REPLACE current visualization
--> If no results for "SCB", try search_graph(query="Statistiska centralbyran")
+-> Use search_graph(query="SCB", action="replace_visualization")
+-> If no results for "SCB", try search_graph(query="Statistiska centralbyran", action="replace_visualization")
 -> Respond with found nodes summary
 
 User: "Lagg till SCB" or "Add SCB to visualization" (ADD to current)
--> Use search_graph(query="SCB") with action: "add_to_visualization"
+-> Use search_graph(query="SCB", action="add_to_visualization")
 -> If no results, try "Statistiska centralbyran"
--> Nodes are ADDED to existing visualization (not replaced)
+-> Nodes are ADDED to existing visualization (current content is kept)
 
-User: "Visa alla aktorer" or "Show all actors"
--> Use search_graph(node_types=["Actor"]) - nodes displayed automatically
+User: "Add all actor nodes in the view" (ADD to current - additive)
+-> Use search_graph(node_types=["Actor"], action="add_to_visualization")
+-> Actors are ADDED to the existing visualization; nothing is cleared
+
+User: "Visa alla aktorer" or "Show all actors" (REPLACE current visualization)
+-> Use search_graph(node_types=["Actor"], action="replace_visualization")
 -> Respond with found actors
 
-User: "Visa relaterade noder for NIS2"
--> First search_graph(query="NIS2", node_types=["Legislation"])
--> Then get_related_nodes(node_id=<found_id>, depth=1)
+User: "Replace the view with all actors" / "clear the view and show all actors"
+-> Use search_graph(node_types=["Actor"], action="replace_visualization")
+-> The current view is replaced with the actors
+
+User: "Visa relaterade noder for NIS2" (ADD related nodes to current)
+-> First search_graph(query="NIS2", node_types=["Legislation"], action="replace_visualization")
+-> Then get_related_nodes(node_id=<found_id>, depth=1) — related nodes are ADDED
 -> Present both results together
 
 User: "Lagg till ett nytt projekt om cybersakerhet" (CREATE new node)
@@ -525,7 +604,12 @@ class ChatProcessor:
                         "action": {
                             "type": "string",
                             "enum": ["add_to_visualization", "replace_visualization"],
-                            "description": "Optional: 'add_to_visualization' to ADD results to current view (for 'lagg till X'), or 'replace_visualization' (default) to REPLACE current view (for 'visa X')",
+                            "description": "How results affect the current view. 'add_to_visualization' ADDS results to the current view, keeping existing content (for 'lagg till X' and any plain additive request). 'replace_visualization' REPLACES the current view (only when the user EXPLICITLY asks to replace/clear-and-show, e.g. 'visa X', 'replace the view with X'). When omitted the default is ADDITIVE — a plain request never clears the view.",
+                        },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "When false (default) archived nodes and edges are excluded. Set true to include archived items (e.g. to find something the user wants to restore).",
+                            "default": False,
                         },
                     },
                     "required": ["query"],
@@ -550,6 +634,11 @@ class ChatProcessor:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Optional: Filter by relationship types",
+                        },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "When false (default) archived edges are not traversed and archived neighbour nodes are excluded. Set true to include them.",
+                            "default": False,
                         },
                     },
                     "required": ["node_id"],
@@ -746,6 +835,66 @@ class ChatProcessor:
                             "type": "boolean",
                             "description": "Must be True to execute deletion",
                             "default": False,
+                        },
+                    },
+                    "required": ["edge_ids"],
+                },
+            },
+            {
+                "name": "archive_nodes",
+                "description": "Archive nodes: hide them from search/traversal by default without deleting. Reversible via unarchive_nodes. Prefer this over delete_nodes when the user wants to hide/retire a node rather than permanently remove it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of node IDs to archive",
+                        },
+                    },
+                    "required": ["node_ids"],
+                },
+            },
+            {
+                "name": "unarchive_nodes",
+                "description": "Unarchive nodes: make previously archived nodes visible again. Find archived nodes first with search_graph(include_archived=true).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "node_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of node IDs to unarchive",
+                        },
+                    },
+                    "required": ["node_ids"],
+                },
+            },
+            {
+                "name": "archive_edges",
+                "description": "Archive edges: hide them from search/traversal by default without deleting. Reversible via unarchive_edges.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of edge IDs to archive",
+                        },
+                    },
+                    "required": ["edge_ids"],
+                },
+            },
+            {
+                "name": "unarchive_edges",
+                "description": "Unarchive edges: make previously archived edges visible again.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "edge_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of edge IDs to unarchive",
                         },
                     },
                     "required": ["edge_ids"],
@@ -987,15 +1136,84 @@ class ChatProcessor:
             },
         ]
 
+    def _select_tool_definitions(
+        self, tool_allowlist: Optional[List[str]]
+    ) -> List[Dict]:
+        """
+        Return the tool definitions advertised to the LLM for this request.
+
+        Mirrors the AIAgent tool-permission model (backend/agents/governance/
+        gate.py): when ``tool_allowlist`` is unset/empty the full tool set is
+        offered (unrestricted); when it is a non-empty list only tools whose
+        name is in the list are advertised. This is the "hide from the LLM"
+        layer — execution is independently gated in _handle_tool_use so a
+        disallowed tool is blocked even if the model calls it anyway.
+        """
+        if not tool_allowlist:
+            return self.tool_definitions
+        allowed = set(tool_allowlist)
+        return [t for t in self.tool_definitions if t.get("name") in allowed]
+
+    def _resolve_llm_provider(
+        self,
+        api_key: Optional[str],
+        provider: Optional[str],
+        model_profile_id: Optional[str],
+    ):
+        """
+        Resolve which LLMProvider instance to use for this request.
+
+        When model profiles are configured (backend/config/model_profiles.py),
+        profile resolution takes precedence over the legacy provider/api_key
+        params — once profiles are configured they are the source of truth.
+        Falls back unchanged to the legacy single-provider path when no
+        profiles are configured.
+
+        Returns:
+            (llm_provider, error_message) — exactly one of the two is set.
+        """
+        profiles = config_loader.get_model_profiles()
+        if profiles:
+            selection_enabled = config_loader.get_model_profile_selection_enabled()
+            effective_profile_id = model_profile_id if selection_enabled else None
+            resolution = resolve_profile_reference(profiles, effective_profile_id)
+            if resolution.profile is None:
+                return (
+                    None,
+                    f"❌ Error: {resolution.error or 'no model profile available'}",
+                )
+            try:
+                llm_provider = create_provider_from_profile(
+                    resolution.profile, api_key_override=api_key
+                )
+            except Exception as e:
+                return None, f"❌ Error: {e}"
+            return llm_provider, None
+
+        # Legacy single-provider path
+        provider_to_use = provider if provider else self.provider_type
+        key_to_use = api_key if api_key else self.default_api_key
+
+        if not key_to_use:
+            provider_name = provider_to_use.upper()
+            return None, (
+                f"❌ Error: No API key available. Please set {provider_name}_API_KEY "
+                "environment variable or provide your own key in settings."
+            )
+
+        return create_provider(key_to_use, provider_to_use), None
+
     def process_message(
         self,
         messages: List[Dict],
         api_key: str = None,
         provider: str = None,
+        model_profile_id: str = None,
         extra_context: str = None,
         skills_override: str = None,
         tools_override: Dict[str, Callable] = None,
         visualization_context: str = None,
+        tool_allowlist: Optional[List[str]] = None,
     ) -> Dict:
         """
         Process a message history, call LLM, handle tools, return final response.
@@ -1003,7 +1221,11 @@ class ChatProcessor:
         Args:
             messages: Conversation history
             api_key: Optional API key to use instead of default
-            provider: Optional provider override ('claude' or 'openai')
+            provider: Optional provider override ('claude' or 'openai'). Ignored
+                when model profiles are configured — model_profile_id applies then.
+            model_profile_id: Optional explicit model profile id (see
+                backend/config/model_profiles.py). Only used when profiles are
+                configured; None inherits the application default profile.
             extra_context: Optional context prepended before the base system prompt
                 (expert agent persona — should be established before base instructions).
             tools_override: Optional dict of tool_name → callable that replaces entries
@@ -1013,24 +1235,18 @@ class ChatProcessor:
             visualization_context: Optional snapshot of the browser's current canvas state
                 (visible node IDs, selected nodes). Appended last so it is the freshest
                 context and helps the AI decide between add vs. replace actions.
+            tool_allowlist: Optional explicit list of tool names the assistant may
+                use for this request. Unset/empty means unrestricted (all tools).
+                When set, only listed tools are advertised to the LLM and executed;
+                any other tool is blocked server-side. Mirrors the AIAgent
+                tool-permission model (used by the collection kiosk).
         """
         try:
-            # Use provided provider or fall back to configured provider
-            provider_to_use = provider if provider else self.provider_type
-
-            # Use provided API key or fall back to default
-            key_to_use = api_key if api_key else self.default_api_key
-
-            if not key_to_use:
-                provider_name = provider_to_use.upper()
-                return {
-                    "content": f"❌ Error: No API key available. Please set {provider_name}_API_KEY environment variable or provide your own key in settings.",
-                    "toolUsed": None,
-                    "toolResult": None,
-                }
-
-            # Create provider with the appropriate key
-            llm_provider = create_provider(key_to_use, provider_to_use)
+            llm_provider, error = self._resolve_llm_provider(
+                api_key, provider, model_profile_id
+            )
+            if error:
+                return {"content": error, "toolUsed": None, "toolResult": None}
 
             # Build per-request system prompt:
             # 1. expert persona (extra_context) comes first — establishes who the model is
@@ -1049,11 +1265,16 @@ class ChatProcessor:
                     f"{active_system_prompt}\n\n{visualization_context}"
                 )
 
+            # Tools advertised to the LLM: filtered by the per-request allowlist
+            # (unrestricted when the allowlist is unset). Execution is gated
+            # independently in _handle_tool_use.
+            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
+
             # First call to LLM
             response = llm_provider.create_completion(
                 messages=messages,
                 system_prompt=active_system_prompt,
-                tools=self.tool_definitions,
+                tools=active_tool_definitions,
                 max_tokens=4096,
             )
 
@@ -1065,14 +1286,17 @@ class ChatProcessor:
                     llm_provider,
                     system_prompt=active_system_prompt,
                     tools_override=tools_override,
+                    tool_allowlist=tool_allowlist,
+                    active_tool_definitions=active_tool_definitions,
                 )
 
             # Just text response
             # Extract text from content blocks
-            text_content = ""
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_content += block.get("text", "")
+            text_content = "".join(
+                block.get("text", "")
+                for block in response.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
 
             return {
                 "content": text_content if text_content else "No text response from AI",
@@ -1104,6 +1328,9 @@ class ChatProcessor:
         tools_override: Dict[str, Callable] = None,
         pending_form=None,
         pending_extra_actions=None,
+        visualization_action=None,
+        tool_allowlist: Optional[List[str]] = None,
+        active_tool_definitions: List[Dict] = None,
     ) -> Dict:
         """Handle tool use with support for tool chaining and result aggregation.
 
@@ -1115,6 +1342,14 @@ class ChatProcessor:
         clear_visualization, start_guide, save_view) that co-occur with present_form
         in the same turn.  They are emitted as toolResult.extra_actions so the
         frontend can execute them without losing the form.
+
+        visualization_action carries the most recent explicit view-content action
+        (add/replace/load/clear) a tool requested, across node/edge accumulation
+        and tool-chaining recursion. When the assistant accumulates nodes/edges
+        into the single final tool result the per-tool ``action`` would otherwise
+        be dropped, silently turning an additive "add X" request into a full-view
+        replace. Preserving it — and defaulting to additive when unset — is what
+        keeps a plain additive request from clearing the current view.
         """
         if accumulated_nodes is None:
             accumulated_nodes = []
@@ -1125,6 +1360,8 @@ class ChatProcessor:
         active_system_prompt = (
             system_prompt if system_prompt is not None else self.system_prompt
         )
+        if active_tool_definitions is None:
+            active_tool_definitions = self._select_tool_definitions(tool_allowlist)
         effective_tools = {**self.tools_map, **(tools_override or {})}
 
         # Find ALL tool_use blocks (LLM can request multiple tools in parallel)
@@ -1146,6 +1383,15 @@ class ChatProcessor:
         tool_results = []
         last_tool_name = None
 
+        # Track existing IDs for accumulated nodes and edges to avoid duplicates.
+        # Initializing sets here instead of inside the loop avoids O(N^2) complexity.
+        existing_node_ids = {
+            n.get("id") for n in accumulated_nodes if isinstance(n, dict) and "id" in n
+        }
+        existing_edge_ids = {
+            e.get("id") for e in accumulated_edges if isinstance(e, dict) and "id" in e
+        }
+
         for tool_use in tool_uses:
             tool_name = tool_use.get("name")
             tool_input = tool_use.get("input")
@@ -1153,6 +1399,25 @@ class ChatProcessor:
             last_tool_name = tool_name
 
             logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+
+            # Server-side allowlist gate — mirrors AIAgent AutonomyGate.wrap
+            # (backend/agents/governance/gate.py). A tool outside the request's
+            # allowlist is blocked before any execution, including the pure-action
+            # special cases below, so enforcement never depends on the LLM only
+            # seeing the filtered tool list.
+            if tool_allowlist is not None and tool_name not in tool_allowlist:
+                tool_results.append(
+                    {
+                        "tool_use_id": tool_id,
+                        "result": {
+                            "error": (
+                                f"Tool '{tool_name}' is not in this collection's "
+                                f"tool allowlist and was blocked."
+                            )
+                        },
+                    }
+                )
+                continue
 
             # Execute the tool
             tool_result = None
@@ -1214,26 +1479,16 @@ class ChatProcessor:
             if tool_result and isinstance(tool_result, dict):
                 if "nodes" in tool_result and isinstance(tool_result["nodes"], list):
                     # Add unique nodes (avoid duplicates by ID)
-                    existing_ids = {
-                        n.get("id")
-                        for n in accumulated_nodes
-                        if isinstance(n, dict) and "id" in n
-                    }
                     for node in tool_result["nodes"]:
                         if (
                             isinstance(node, dict)
-                            and node.get("id") not in existing_ids
+                            and node.get("id") not in existing_node_ids
                         ):
                             accumulated_nodes.append(node)
-                            existing_ids.add(node.get("id"))
+                            existing_node_ids.add(node.get("id"))
 
                 if "edges" in tool_result and isinstance(tool_result["edges"], list):
                     # Add unique edges (avoid duplicates by ID)
-                    existing_edge_ids = {
-                        e.get("id")
-                        for e in accumulated_edges
-                        if isinstance(e, dict) and "id" in e
-                    }
                     for edge in tool_result["edges"]:
                         if (
                             isinstance(edge, dict)
@@ -1241,6 +1496,16 @@ class ChatProcessor:
                         ):
                             accumulated_edges.append(edge)
                             existing_edge_ids.add(edge.get("id"))
+
+            # Remember the explicit view-content action a tool requested so it
+            # survives node/edge accumulation into the single final tool result.
+            # The last such action in the turn wins (e.g. clear then search =
+            # clear-and-add); pure overlays like mark_nodes are excluded.
+            if (
+                isinstance(tool_result, dict)
+                and tool_result.get("action") in _VIEW_CONTENT_ACTIONS
+            ):
+                visualization_action = tool_result["action"]
 
             # Preserve a present_form action so a later node/edge-returning tool in
             # the same turn (or a subsequent chained tool) cannot drop the form spec.
@@ -1285,7 +1550,7 @@ class ChatProcessor:
         final_response = provider.create_completion(
             messages=messages,
             system_prompt=active_system_prompt,
-            tools=self.tool_definitions,
+            tools=active_tool_definitions,
             max_tokens=4096,
         )
 
@@ -1302,13 +1567,17 @@ class ChatProcessor:
                 tools_override=tools_override,
                 pending_form=pending_form,
                 pending_extra_actions=pending_extra_actions,
+                visualization_action=visualization_action,
+                tool_allowlist=tool_allowlist,
+                active_tool_definitions=active_tool_definitions,
             )
 
         # Extract text from response (handle multiple text blocks)
-        final_text = ""
-        for block in final_response.content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                final_text += block.get("text", "")
+        final_text = "".join(
+            block.get("text", "")
+            for block in final_response.content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
 
         # Prepare final tool result with accumulated data
         final_tool_result = {}
@@ -1318,6 +1587,14 @@ class ChatProcessor:
             final_tool_result["nodes"] = accumulated_nodes
         if accumulated_edges:
             final_tool_result["edges"] = accumulated_edges
+
+        # Preserve the visualization intent across node/edge accumulation. The
+        # per-tool ``action`` is otherwise dropped here, which silently turns an
+        # additive request into a full-view replace on the frontend. Honour an
+        # explicit action when the model set one; otherwise default to additive
+        # so a plain "add X" only adds and never clears the current view.
+        if final_tool_result:
+            final_tool_result["action"] = visualization_action or "add_to_visualization"
 
         # If no accumulated data but we have tool results, use the last one
         if not final_tool_result and tool_results:

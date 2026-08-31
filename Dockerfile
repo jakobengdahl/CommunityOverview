@@ -19,8 +19,12 @@ COPY package.json package-lock.json ./
 COPY packages ./packages
 COPY frontend ./frontend
 
-# Install dependencies
-RUN npm ci --ignore-scripts
+# Install dependencies. Scoped to the two workspaces this stage actually
+# builds (plus their local "packages/*" dependency, which npm workspaces
+# resolves automatically): frontend/xr is a WebXR spike workspace whose
+# ~120 MB of deps (three, @react-three/*, the @iwer/* emulator) never reach
+# the runtime image, so installing them here is pure build-time waste.
+RUN npm ci --ignore-scripts --workspace @community-graph/web --workspace @community-graph/widget --include-workspace-root
 
 # Build web and widget
 RUN npm run build:web && npm run build:widget

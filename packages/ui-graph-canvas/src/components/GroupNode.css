@@ -88,7 +88,11 @@
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  border: 2px solid transparent;
+  /* A resting border, not just transparent, so a dark swatch stays
+     distinguishable against this menu's own dark background (#2a2a2a above)
+     instead of nearly disappearing until hovered — matches
+     .graph-annotation-context-menu .color-button (NoteNode.css). */
+  border: 2px solid rgba(255, 255, 255, 0.3);
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -98,24 +102,41 @@
   border-color: white;
 }
 
-.graph-group-context-menu .context-menu-action {
-  width: 100%;
-  background: transparent;
-  border: 1px solid #666;
-  color: #ccc;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-  text-align: left;
-  transition: all 0.2s;
-  margin-bottom: 6px;
+/* Marks which swatch is the group's current colour, mirroring
+   .graph-annotation-context-menu .color-button.active (NoteNode.css). */
+.graph-group-context-menu .color-button.active {
+  border-color: white;
 }
 
-.graph-group-context-menu .context-menu-action:hover {
-  background: #444;
-  color: white;
-  border-color: #888;
+/* Group backgrounds relative to each other only
+   (dec-annotation-group-background-layering). Mirrors
+   .graph-annotation-context-menu .context-menu-layer/.layer-button
+   (NoteNode.css) — the generic bring-to-front/send-to-back row every other
+   annotation menu shares — but this menu has its own class prefix, so the
+   rule cannot simply be shared, the same reason .context-menu-unlock above
+   is redefined here rather than reused. */
+.graph-group-context-menu .context-menu-layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.graph-group-context-menu .layer-button {
+  flex: 1;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e6edf3;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .layer-button:hover {
+  border-color: #666;
+  background: #333;
 }
 
 .graph-group-context-menu .context-menu-delete {
@@ -132,6 +153,25 @@
 
 .graph-group-context-menu .context-menu-delete:hover {
   background: #ef4444;
+  color: white;
+}
+
+/* Matches the overlay menus' unlock button (NoteNode.css); the group menu has
+   its own class prefix, so the rule cannot simply be shared. */
+.graph-group-context-menu .context-menu-unlock {
+  width: 100%;
+  background: transparent;
+  border: 1px solid #60a5fa;
+  color: #60a5fa;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.graph-group-context-menu .context-menu-unlock:hover {
+  background: #60a5fa;
   color: white;
 }
 

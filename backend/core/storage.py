@@ -34,6 +34,7 @@ from .models import (
     AddNodesResult,
     DeleteNodesResult,
     DeleteEdgesResult,
+    _parse_datetime,
 )
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
 from .vector_store import VectorStore
@@ -49,6 +50,45 @@ if TYPE_CHECKING:
     from .events.delivery import DeliveryWorker
     from .events.models import Event
     from .history_store import GraphHistoryStore
+
+
+class StaleUpdateError(Exception):
+    """Raised when an optimistic-concurrency guard on update_node fails.
+
+    The caller passed ``expected_updated_at`` but the node's live
+    ``updated_at`` no longer matches it, meaning the node changed since the
+    caller read it. The write is rejected instead of silently clobbering the
+    concurrent change. ``current_updated_at`` carries the live value so the
+    caller can re-read and retry.
+    """
+
+    def __init__(self, node_id: str, expected: Any, current: datetime):
+        self.node_id = node_id
+        self.expected = expected
+        self.current_updated_at = current
+        super().__init__(
+            f"Node '{node_id}' was modified since expected_updated_at="
+            f"{expected!r}; current updated_at is {current.isoformat()!r}"
+        )
+
+
+def _apply_metadata_patch(
+    base: Dict[str, Any], patch: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge ``patch`` onto ``base`` at the top level (JSON-Merge-Patch style).
+
+    Each key in ``patch`` replaces that key in ``base``; a key whose patch value
+    is ``None`` is removed from the result (RFC 7386 null-means-delete). Keys not
+    mentioned in ``patch`` are preserved. Nested objects are replaced wholesale,
+    not merged recursively — the merge is intentionally top-level only.
+    """
+    result = dict(base)
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    return result
 
 
 class GraphStorage:
@@ -494,7 +534,12 @@ class GraphStorage:
         )
 
     def search_nodes(
-        self, query: str, node_types: Optional[List[NodeType]] = None, limit: int = 50
+        self,
+        query: str,
+        node_types: Optional[List[NodeType]] = None,
+        limit: int = 50,
+        include_archived: bool = False,
+        match_mode: str = storage_search.MATCH_MODE_SUBSTRING,
     ) -> List[Node]:
         """Search nodes based on text query.  Delegates to storage_search."""
         return storage_search.search_nodes(
@@ -504,6 +549,31 @@ class GraphStorage:
             query,
             node_types,
             limit,
+            include_archived=include_archived,
+            match_mode=match_mode,
+        )
+
+    def semantic_search_nodes(
+        self,
+        query: str,
+        node_types: Optional[List[NodeType]] = None,
+        limit: int = 50,
+        threshold: float = storage_search.DEFAULT_SEMANTIC_THRESHOLD,
+        include_archived: bool = False,
+    ) -> List[Node]:
+        """Embedding-ranked search over nodes.  Delegates to storage_search.
+
+        Reuses the vector-store path shared with find_similar_nodes; returns
+        an empty list when embeddings are unavailable (ML-free install).
+        """
+        return storage_search.semantic_search_nodes(
+            self.nodes,
+            self.vector_store,
+            query,
+            node_types,
+            limit,
+            threshold,
+            include_archived=include_archived,
         )
 
     def get_node(self, node_id: str) -> Optional[Node]:
@@ -518,15 +588,71 @@ class GraphStorage:
         """Get all edges in the graph"""
         return list(self.edges.values())
 
+    def _validate_edge_applicability(self, edge: Edge) -> None:
+        source_node = self.nodes.get(edge.source)
+        target_node = self.nodes.get(edge.target)
+        if source_node is None or target_node is None:
+            return
+
+        from backend.config import config_loader
+
+        decision = config_loader.relationship_type_allows_node_types(
+            edge.type_str, source_node.type_str, target_node.type_str
+        )
+        if not decision.get("allowed"):
+            raise ValueError(decision.get("message") or "Relationship type not allowed")
+
+    def audit_relationship_applicability(self) -> List[Dict[str, Any]]:
+        """Return existing edges that violate configured relationship applicability."""
+        violations = []
+        for edge in self.edges.values():
+            source_node = self.nodes.get(edge.source)
+            target_node = self.nodes.get(edge.target)
+            if source_node is None or target_node is None:
+                violations.append(
+                    {
+                        "edge_id": edge.id,
+                        "type": edge.type_str,
+                        "source": edge.source,
+                        "target": edge.target,
+                        "source_type": source_node.type_str if source_node else None,
+                        "target_type": target_node.type_str if target_node else None,
+                        "message": "Edge references a missing source or target node.",
+                    }
+                )
+                continue
+            try:
+                self._validate_edge_applicability(edge)
+            except ValueError as exc:
+                violations.append(
+                    {
+                        "edge_id": edge.id,
+                        "type": edge.type_str,
+                        "source": edge.source,
+                        "target": edge.target,
+                        "source_type": source_node.type_str,
+                        "target_type": target_node.type_str,
+                        "message": str(exc),
+                    }
+                )
+        return violations
+
     def get_related_nodes(
         self,
         node_id: str,
         relationship_types: Optional[List[RelationshipType]] = None,
         depth: int = 1,
+        include_archived: bool = False,
     ) -> Dict[str, Any]:
         """Get nodes connected to the given node.  Delegates to storage_search."""
         return storage_search.get_related_nodes(
-            self.nodes, self.edges, self.graph, node_id, relationship_types, depth
+            self.nodes,
+            self.edges,
+            self.graph,
+            node_id,
+            relationship_types,
+            depth,
+            include_archived=include_archived,
         )
 
     def find_similar_nodes(
@@ -648,6 +774,8 @@ class GraphStorage:
                             message=f"Edge with ID {edge.id} already exists",
                         )
 
+                    self._validate_edge_applicability(edge)
+
                     self.edges[edge.id] = edge
                     self.graph.add_edge(
                         edge.source, edge.target, key=edge.id, data=edge
@@ -715,6 +843,9 @@ class GraphStorage:
         node_id: str,
         updates: Dict,
         event_context: Optional[EventContext] = None,
+        *,
+        metadata_merge: bool = False,
+        expected_updated_at: Optional[Any] = None,
     ) -> Optional[Node]:
         """
         Update an existing node.
@@ -725,12 +856,46 @@ class GraphStorage:
             node_id: ID of the node to update
             updates: Dict with fields to update
             event_context: Optional context for event tracking and loop prevention
+            metadata_merge: When True, ``metadata`` (and any schema-defined extra
+                fields folded into metadata) is deep-merged at the top level onto
+                the node's existing metadata instead of replacing it wholesale.
+                A key whose value is ``None`` deletes that key (RFC 7386
+                null-means-delete). Keys not mentioned are preserved. Default is
+                False, i.e. the legacy replace-whole-metadata behaviour.
+            expected_updated_at: Optional optimistic-concurrency guard. When set
+                (an ISO 8601 string — as returned in a node's ``updated_at`` — or
+                a timezone-aware datetime), the update only proceeds if the node's
+                current ``updated_at`` still equals this value; a mismatch raises
+                :class:`StaleUpdateError` instead of clobbering a concurrent write.
+                Note ``updated_at`` is a UTC wall-clock timestamp used as the
+                version token: two writes within the same microsecond tick would
+                share a timestamp, so this guards against realistic interleaving,
+                not adversarial same-tick races.
+
+        Raises:
+            StaleUpdateError: if ``expected_updated_at`` no longer matches the
+                node's live ``updated_at``.
+            ValueError: if the resulting node fails model validation.
         """
         with self._lock:
             if node_id not in self.nodes:
                 return None
 
             node = self.nodes[node_id]
+
+            # Optimistic-concurrency guard: reject the write if the node changed
+            # since the caller read it. Checked inside the lock so the compare and
+            # the subsequent mutation are atomic with respect to other writers.
+            if expected_updated_at is not None:
+                expected = (
+                    _parse_datetime(expected_updated_at)
+                    if isinstance(expected_updated_at, str)
+                    else expected_updated_at
+                )
+                if node.updated_at != expected:
+                    raise StaleUpdateError(
+                        node_id, expected_updated_at, node.updated_at
+                    )
 
             # Capture before state for events
             before_state = node.to_dict()
@@ -745,20 +910,72 @@ class GraphStorage:
                 "aliases",
                 "metadata",
             }
-            reserved_fields = {"id", "type", "embedding", "created_at", "updated_at"}
+            # "archived" is reserved so a generic update can neither set it directly
+            # nor fold it into metadata — archiving goes through set_nodes_archived.
+            reserved_fields = {
+                "id",
+                "type",
+                "embedding",
+                "created_at",
+                "updated_at",
+                "archived",
+            }
+
+            # Build the candidate state and validate it through the model BEFORE
+            # mutating the live node. setattr on a pydantic model does not re-run
+            # field validators, so without this an over-limit field (e.g. a
+            # description longer than 2000 chars, or oversized tags/aliases) would
+            # silently bypass the model's limits on write and only fail at the next
+            # graph load — bricking startup. Validating a candidate first means an
+            # invalid update is rejected here, atomically, with the live node untouched.
+            candidate = node.to_dict()
             for key, value in updates.items():
-                if key in allowed_fields:
-                    setattr(node, key, value)
-            # Fold schema-defined extra fields (anything outside the base model) into metadata
+                if key in allowed_fields and key != "metadata":
+                    candidate[key] = value
+
+            # Schema-defined extra fields (anything outside the base model) fold
+            # into metadata, same as an explicit `metadata` update.
             extra = {
                 k: v
                 for k, v in updates.items()
                 if k not in allowed_fields and k not in reserved_fields
             }
-            if extra:
-                meta = dict(node.metadata or {})
-                meta.update(extra)
-                node.metadata = meta
+
+            if metadata_merge:
+                # Opt-in field-level merge: patch existing metadata top-level.
+                merged = dict(candidate.get("metadata") or {})
+                if "metadata" in updates:
+                    meta_update = updates["metadata"] or {}
+                    if not isinstance(meta_update, dict):
+                        raise ValueError(
+                            "metadata must be an object when metadata_merge is set"
+                        )
+                    merged = _apply_metadata_patch(merged, meta_update)
+                if extra:
+                    merged = _apply_metadata_patch(merged, extra)
+                candidate["metadata"] = merged
+            else:
+                # Legacy/default: an explicit `metadata` replaces it wholesale.
+                # Assign the value as-is (no None->{} coercion) so a bad
+                # metadata=None with no extra fields is rejected by model
+                # validation below, exactly as before merge mode existed. When an
+                # extra field is present the fold step normalizes None to {},
+                # also matching the prior behaviour.
+                if "metadata" in updates:
+                    candidate["metadata"] = updates["metadata"]
+                if extra:
+                    meta = dict(candidate.get("metadata") or {})
+                    meta.update(extra)
+                    candidate["metadata"] = meta
+
+            try:
+                validated = Node.from_dict(candidate)
+            except Exception as exc:
+                raise ValueError(f"Invalid node update: {exc}") from exc
+
+            # Apply the validated field values to the live node.
+            for key in allowed_fields:
+                setattr(node, key, getattr(validated, key))
 
             node.updated_at = datetime.now(timezone.utc)
 
@@ -796,6 +1013,57 @@ class GraphStorage:
             )
 
             return node
+
+    def set_nodes_archived(
+        self,
+        node_ids: List[str],
+        archived: bool,
+        event_context: Optional[EventContext] = None,
+    ) -> List[Node]:
+        """Set the ``archived`` flag on the given nodes.
+
+        Archiving hides a node from search/traversal by default while keeping it
+        (and its edges) in the graph, unlike deletion which is permanent. Returns
+        every node that was found (whether or not its state changed) so callers
+        get an idempotent view; only nodes whose flag actually changed emit an
+        update event, and the graph is saved once if anything changed.
+
+        Thread-safe: protected by _lock for the entire operation.
+        """
+        with self._lock:
+            found: List[Node] = []
+            changed = False
+            for node_id in node_ids:
+                node = self.nodes.get(node_id)
+                if node is None:
+                    continue
+                found.append(node)
+                if node.archived == archived:
+                    continue
+
+                before_state = node.to_dict()
+                node.archived = archived
+                node.updated_at = datetime.now(timezone.utc)
+                self.graph.nodes[node_id]["data"] = node
+                changed = True
+
+                node_type = (
+                    node.type.value if hasattr(node.type, "value") else str(node.type)
+                )
+                self._emit_event(
+                    event_type=EventType.NODE_UPDATE,
+                    entity_kind=EntityKind.NODE,
+                    entity_id=node_id,
+                    entity_type=node_type,
+                    before=before_state,
+                    after=node.to_dict(),
+                    context=event_context,
+                )
+
+            if changed:
+                self.save()
+
+            return found
 
     def delete_nodes(
         self,
@@ -916,6 +1184,11 @@ class GraphStorage:
                     message=f"Error during deletion: {str(e)}",
                 )
 
+    def get_node_count(self) -> int:
+        """Total node count, for callers that only need a count and should not
+        pay for building the full per-type breakdown get_stats() computes."""
+        return len(self.nodes)
+
     def get_stats(self) -> GraphStats:
         """Get statistics for the graph"""
         # Count nodes per type
@@ -926,10 +1199,19 @@ class GraphStorage:
             )
             nodes_by_type[type_name] = nodes_by_type.get(type_name, 0) + 1
 
+        # Count edges per type, for the metamodel explorer's relationship counts.
+        edges_by_type = {}
+        for edge in self.edges.values():
+            type_name = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
+            edges_by_type[type_name] = edges_by_type.get(type_name, 0) + 1
+
         return GraphStats(
             total_nodes=len(self.nodes),
             total_edges=len(self.edges),
             nodes_by_type=nodes_by_type,
+            edges_by_type=edges_by_type,
             last_updated=datetime.now(timezone.utc),
         )
 
@@ -999,11 +1281,18 @@ class GraphStorage:
 
             # Update allowed fields
             allowed_fields = {"type", "label", "metadata"}
+            candidate = edge.to_dict()
             for key, value in updates.items():
                 if key in allowed_fields:
                     if key == "type" and (value is None or value == ""):
                         value = "RELATES_TO"
-                    setattr(edge, key, value)
+                    candidate[key] = value
+
+            validated_edge = Edge.from_dict(candidate)
+            self._validate_edge_applicability(validated_edge)
+
+            for key in allowed_fields:
+                setattr(edge, key, getattr(validated_edge, key))
 
             # Save
             self.save()
@@ -1023,6 +1312,54 @@ class GraphStorage:
             )
 
             return edge
+
+    def set_edges_archived(
+        self,
+        edge_ids: List[str],
+        archived: bool,
+        event_context: Optional[EventContext] = None,
+    ) -> List[Edge]:
+        """Set the ``archived`` flag on the given edges.
+
+        Mirrors :meth:`set_nodes_archived`: archived edges are hidden from
+        search/traversal by default but remain in the graph. Returns every edge
+        that was found; only edges whose flag changed emit an update event, and
+        the graph is saved once if anything changed.
+
+        Thread-safe: protected by _lock for the entire operation.
+        """
+        with self._lock:
+            found: List[Edge] = []
+            changed = False
+            for edge_id in edge_ids:
+                edge = self.edges.get(edge_id)
+                if edge is None:
+                    continue
+                found.append(edge)
+                if edge.archived == archived:
+                    continue
+
+                before_state = edge.to_dict()
+                edge.archived = archived
+                changed = True
+
+                edge_type = (
+                    edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+                )
+                self._emit_event(
+                    event_type=EventType.EDGE_UPDATE,
+                    entity_kind=EntityKind.EDGE,
+                    entity_id=edge_id,
+                    entity_type=edge_type,
+                    before=before_state,
+                    after=edge.to_dict(),
+                    context=event_context,
+                )
+
+            if changed:
+                self.save()
+
+            return found
 
     def delete_edge(
         self,
@@ -1165,6 +1502,8 @@ class GraphStorage:
 
             if edge.id in self.edges:
                 return None
+
+            self._validate_edge_applicability(edge)
 
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)

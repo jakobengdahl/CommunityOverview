@@ -14,10 +14,19 @@ export function useSyncConnection(sessionId) {
   const syncRef = useRef(null);
   const syncHandlersRef = useRef({});
   const [remotePositions, setRemotePositions] = useState(null);
+  // A single MCP-initiated batch layout to animate (contract §9–§10), kept apart
+  // from remotePositions so an agent's arrange tweens while ordinary remote drags
+  // still apply instantly.
+  const [animatedLayout, setAnimatedLayout] = useState(null);
   const [remoteAnnotationOps, setRemoteAnnotationOps] = useState(null);
   // Presence roster + remote selection markers for the active session (step 7).
   const [roster, setRoster] = useState([]);
   const [remoteSelections, setRemoteSelections] = useState({});
+  // Remote edit-lease markers (task-annotation-exclusive-edit-leases) — kept
+  // apart from remoteSelections above: selection stays a purely cosmetic
+  // presence marker, this is the exclusive one GraphCanvas actually gates
+  // editing on.
+  const [remoteLeases, setRemoteLeases] = useState({});
   // Whether the op-protocol stream has connected at least once for the active
   // session (first snapshot delivered). Once true, MCP commands arrive via the
   // op stream's broadcast `command` events, so the single-consumer legacy push
@@ -28,9 +37,11 @@ export function useSyncConnection(sessionId) {
   // remote positions from the previous session never bleed into the next one.
   const resetConnectionState = useCallback(() => {
     setRemotePositions(null);
+    setAnimatedLayout(null);
     setRemoteAnnotationOps(null);
     setRoster([]);
     setRemoteSelections({});
+    setRemoteLeases({});
     setOpStreamReady(false);
   }, []);
 
@@ -51,7 +62,13 @@ export function useSyncConnection(sessionId) {
         existing.close();
         resetConnectionState();
       }
-      const client = new SessionSyncClient({
+      let client = null;
+      const isCurrentClient = () => syncRef.current === client;
+      const callIfCurrent = (handlerName, ...args) => {
+        if (!isCurrentClient()) return;
+        syncHandlersRef.current[handlerName]?.(...args);
+      };
+      client = new SessionSyncClient({
         sessionId: targetId,
         clientId: api.getClientId(),
         displayName: api.getDisplayName(),
@@ -59,17 +76,19 @@ export function useSyncConnection(sessionId) {
         opsUrl: api.getSessionOpsUrl(targetId),
         handlers: {
           onReady: (...a) => {
+            if (!isCurrentClient()) return;
             setOpStreamReady(true);
             syncHandlersRef.current.onReady?.(...a);
           },
-          onResync: (...a) => syncHandlersRef.current.onResync?.(...a),
-          onRemoteOps: (...a) => syncHandlersRef.current.onRemoteOps?.(...a),
-          onPresence: (...a) => syncHandlersRef.current.onPresence?.(...a),
-          onSelections: (...a) => syncHandlersRef.current.onSelections?.(...a),
-          onSessionRenamed: (...a) => syncHandlersRef.current.onSessionRenamed?.(...a),
-          onSessionDeleted: (...a) => syncHandlersRef.current.onSessionDeleted?.(...a),
-          onCommand: (...a) => syncHandlersRef.current.onCommand?.(...a),
-          onDropped: (...a) => syncHandlersRef.current.onDropped?.(...a),
+          onResync: (...a) => callIfCurrent('onResync', ...a),
+          onRemoteOps: (...a) => callIfCurrent('onRemoteOps', ...a),
+          onPresence: (...a) => callIfCurrent('onPresence', ...a),
+          onSelections: (...a) => callIfCurrent('onSelections', ...a),
+          onLeases: (...a) => callIfCurrent('onLeases', ...a),
+          onSessionRenamed: (...a) => callIfCurrent('onSessionRenamed', ...a),
+          onSessionDeleted: (...a) => callIfCurrent('onSessionDeleted', ...a),
+          onCommand: (...a) => callIfCurrent('onCommand', ...a),
+          onDropped: (...a) => callIfCurrent('onDropped', ...a),
         },
       });
       // Connect before installing: if connect() throws (e.g. new EventSource on a
@@ -112,12 +131,16 @@ export function useSyncConnection(sessionId) {
     ensureSyncConnected,
     remotePositions,
     setRemotePositions,
+    animatedLayout,
+    setAnimatedLayout,
     remoteAnnotationOps,
     setRemoteAnnotationOps,
     roster,
     setRoster,
     remoteSelections,
     setRemoteSelections,
+    remoteLeases,
+    setRemoteLeases,
     opStreamReady,
     setOpStreamReady,
   };

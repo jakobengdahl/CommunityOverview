@@ -10,7 +10,9 @@ from backend.agents.config import (
     AgentConfig,
     AgentsSettings,
     MCPTransport,
+    REDACTED_ENV_VALUE,
 )
+from backend.agents.secrets import SECRET_REF_PREFIX
 
 
 class TestMCPIntegration:
@@ -62,6 +64,25 @@ class TestMCPIntegration:
         assert result["transport"] == "http"
         assert result["url"] == "http://example.com/mcp"
         assert result["description"] == "Web tools"
+
+    def test_to_dict_redacts_literal_env_secret(self):
+        """A literal env value is never serialized; secret:// refs survive."""
+        integration = MCPIntegration(
+            id="SEARCH",
+            name="Brave Search",
+            transport=MCPTransport.STDIO,
+            command=["npx", "-y", "@anthropic/brave-search-mcp"],
+            env={
+                "BRAVE_API_KEY": "sk-literal-plaintext-secret",
+                "REF_KEY": f"{SECRET_REF_PREFIX}BRAVE_API_KEY",
+            },
+        )
+
+        result = integration.to_dict()
+
+        assert "sk-literal-plaintext-secret" not in str(result)
+        assert result["env"]["BRAVE_API_KEY"] == REDACTED_ENV_VALUE
+        assert result["env"]["REF_KEY"] == f"{SECRET_REF_PREFIX}BRAVE_API_KEY"
 
 
 class TestAgentConfig:
@@ -140,6 +161,41 @@ class TestAgentsSettings:
             settings = AgentsSettings.from_env()
 
             assert settings.enabled is False
+
+    def test_from_env_loads_model_profiles_from_schema_config(self, tmp_path):
+        """Agent settings should use schema-configured model profiles."""
+        import json
+        from backend.config import config_loader
+
+        config_file = tmp_path / "schema_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "schema": {"node_types": {}, "relationship_types": {}},
+                    "model_profiles": {
+                        "profiles": [
+                            {
+                                "id": "agent-fast",
+                                "name": "Agent Fast",
+                                "provider": "openai",
+                                "model": "gpt-4o-mini",
+                                "default": True,
+                                "credential_ref": "OPENAI_API_KEY",
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"SCHEMA_FILE": str(config_file)}, clear=True):
+            config_loader.reset_loader()
+            settings = AgentsSettings.from_env()
+
+        assert [profile.id for profile in settings.model_profiles] == ["agent-fast"]
+        assert settings.resolve_model_profile(None).profile.id == "agent-fast"
+        config_loader.reset_loader()
 
     def test_from_env_with_mcp_integrations_json(self):
         """Test loading MCP integrations from JSON environment variable."""

@@ -1,0 +1,470 @@
+.mme-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2100;
+}
+
+.mme-dialog {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 12px;
+  width: 920px;
+  max-width: 95vw;
+  height: 82vh;
+  max-height: 820px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  outline: none;
+}
+
+.mme-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #444;
+  flex-shrink: 0;
+}
+
+.mme-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+.mme-close {
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.mme-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.mme-readonly-note {
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 0.76rem;
+  color: #999;
+  border-bottom: 1px solid #363636;
+  flex-shrink: 0;
+}
+
+.mme-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #363636;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.mme-tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.mme-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #999;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.mme-tab.active {
+  background: #646cff;
+  color: #fff;
+}
+
+.mme-filter-input {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #444;
+  border-radius: 6px;
+  outline: none;
+}
+
+.mme-filter-input:focus {
+  border-color: #646cff;
+}
+
+.mme-system-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mme-network-view {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.mme-network-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid #363636;
+  overflow: hidden;
+}
+
+.mme-svg {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.mme-svg:active {
+  cursor: grabbing;
+}
+
+.mme-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.mme-node circle {
+  stroke: rgba(0, 0, 0, 0.3);
+  stroke-width: 1.5;
+}
+
+.mme-node:focus circle,
+.mme-node-selected circle {
+  stroke: #fff;
+  stroke-width: 2.5;
+}
+
+.mme-node-label {
+  fill: #ddd;
+  font-size: 11px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.mme-node-any circle.mme-any-circle {
+  fill: transparent;
+  stroke: #777;
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+
+.mme-edge-line {
+  stroke: #7a7fdb;
+  stroke-width: 1.4;
+  fill: none;
+}
+
+.mme-edge-line.mme-edge-any {
+  stroke: #666;
+  stroke-dasharray: 4 3;
+}
+
+.mme-edge-highlighted .mme-edge-line {
+  stroke: #fff;
+  stroke-width: 2.2;
+}
+
+.mme-arrowhead-path {
+  fill: #7a7fdb;
+}
+
+.mme-edge-label {
+  fill: #999;
+  font-size: 9px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.mme-edge-highlighted .mme-edge-label {
+  fill: #fff;
+}
+
+.mme-zoom-controls {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.mme-zoom-controls button {
+  background: transparent;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 4px;
+  display: flex;
+}
+
+.mme-zoom-controls button:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.mme-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: #aaa;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.mme-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mme-legend-line {
+  width: 16px;
+  height: 0;
+  border-top: 1.4px solid #7a7fdb;
+  display: inline-block;
+}
+
+.mme-legend-line-any {
+  border-top-style: dashed;
+  border-top-color: #777;
+}
+
+.mme-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.mme-detail-panel {
+  width: 260px;
+  flex-shrink: 0;
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.mme-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mme-detail-header h4 {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #fff;
+}
+
+.mme-detail-description {
+  color: #aaa;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  margin: 10px 0;
+}
+
+.mme-detail-meta {
+  margin: 0 0 10px;
+}
+
+.mme-detail-meta div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #363636;
+  font-size: 0.78rem;
+}
+
+.mme-detail-meta dt {
+  color: #888;
+}
+
+.mme-detail-meta dd {
+  margin: 0;
+  color: #ddd;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.mme-detail-section-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 10px 0 6px;
+}
+
+.mme-detail-relations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.78rem;
+  color: #ccc;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mme-detail-hint {
+  color: #777;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.mme-table-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.mme-table-scroll {
+  overflow-x: auto;
+}
+
+.mme-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.mme-table caption {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
+}
+
+.mme-table th,
+.mme-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #363636;
+  color: #ccc;
+  vertical-align: top;
+}
+
+.mme-table thead th {
+  color: #888;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mme-table tbody th {
+  font-weight: 500;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.mme-table-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.mme-unconstrained {
+  padding: 10px 16px;
+  border-top: 1px solid #363636;
+  flex-shrink: 0;
+  max-height: 110px;
+  overflow-y: auto;
+}
+
+.mme-unconstrained-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
+}
+
+.mme-unconstrained ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: #ccc;
+}
+
+@media (pointer: coarse) {
+  .mme-close {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+
+  .mme-tab {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 720px) {
+  .mme-network-view {
+    flex-direction: column;
+  }
+
+  .mme-network-canvas {
+    border-right: none;
+    border-bottom: 1px solid #363636;
+    min-height: 260px;
+  }
+
+  .mme-detail-panel {
+    width: auto;
+  }
+}

@@ -1,18 +1,186 @@
 """Auth and CORS middleware wiring for the api_host application."""
 
 import base64
+import html
 import logging
 import secrets
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 
 from .config import AppConfig
 from .diagnostics import PUBLIC_READINESS_PATH, PUBLIC_STARTUP_DIAGNOSTICS_PATH
+from .session_auth import request_has_valid_session
 
 logger = logging.getLogger(__name__)
+
+# Sign-in page shown to browsers on an unauthenticated navigation. It carries a
+# real credential form that POSTs to /auth/login and sets a session cookie, so
+# the login flow works identically in every browser. No 401 sends
+# WWW-Authenticate (see _unauthorized): that header would make the browser pop
+# the native Basic dialog instead of rendering this form, and that dialog cannot
+# drive the cookie login. __NEXT__ / __ERROR__ are substituted per request.
+_SIGNIN_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in required</title>
+  <link rel="icon" href="/favicon.svg" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+      background: #121212;
+      color: #eaeaea;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .auth-card {
+      background: rgba(26, 26, 26, 0.95);
+      border: 1px solid #333;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      padding: 32px 40px;
+      max-width: 420px;
+      width: 100%;
+      box-sizing: border-box;
+      text-align: center;
+    }
+    .auth-card h1 {
+      margin: 0 0 12px 0;
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    .auth-card p {
+      margin: 0 0 20px 0;
+      color: #bbb;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .auth-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      text-align: left;
+    }
+    .auth-form label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.8rem;
+      color: #bbb;
+    }
+    .auth-form input {
+      padding: 10px 12px;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #151515;
+      color: #eaeaea;
+      font-size: 0.95rem;
+    }
+    .auth-form input:focus {
+      outline: none;
+      border-color: #646cff;
+    }
+    .auth-form button {
+      margin-top: 4px;
+      padding: 10px 18px;
+      background: #646cff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .auth-form button:hover {
+      background: #535bf2;
+    }
+    .auth-error {
+      margin: 0 0 16px 0;
+      color: #ff8a8a;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="auth-card">
+    <h1>Sign in required</h1>
+    <p>This instance is protected. Enter your credentials to sign in.</p>
+    __ERROR__
+    <form class="auth-form" method="post" action="/auth/login">
+      <input type="hidden" name="next" value="__NEXT__" />
+      <label>Username
+        <input type="text" name="username" autocomplete="username" autofocus />
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_signin_page(next_path: str = "/web/", error: str = "") -> str:
+    """Render the sign-in page with a safe redirect target and optional error."""
+    error_block = f'<p class="auth-error">{html.escape(error)}</p>' if error else ""
+    return _SIGNIN_TEMPLATE.replace(
+        "__NEXT__", html.escape(next_path, quote=True)
+    ).replace("__ERROR__", error_block)
+
+
+def _client_accepts_html(request: Request) -> bool:
+    """True for a top-level browser navigation, which sends ``Accept: text/html``.
+
+    API / fetch / MCP clients send ``Accept: */*`` or ``application/json`` and
+    must keep receiving the JSON error body they parse; only browsers get the
+    HTML sign-in page.
+    """
+    return "text/html" in request.headers.get("Accept", "")
+
+
+def _requested_target(request: Request) -> str:
+    """The path (with query) the user was trying to reach, for post-login return."""
+    target = request.url.path
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return target
+
+
+def _unauthorized(request: Request, detail: str) -> Response:
+    """Build a 401, negotiated by Accept, without ever sending WWW-Authenticate.
+
+    Browser navigations (Accept: text/html) get the HTML sign-in form; everything
+    else (API / fetch / MCP / curl, and browser subresources like the favicon,
+    which send Accept: image/*) gets the JSON body. Neither carries a
+    WWW-Authenticate header: it would make Chromium pop the native Basic dialog —
+    on the main page OR on a subresource such as the favicon — and that dialog
+    cannot drive the form/cookie login (it just hangs). Authentication now runs
+    through /auth/login + the session cookie for humans, and programmatic clients
+    send Authorization proactively, so the challenge header is unnecessary.
+    """
+    if _client_accepts_html(request):
+        return HTMLResponse(
+            content=render_signin_page(next_path=_requested_target(request)),
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(status_code=401, content={"detail": detail})
 
 
 def compute_auth_active(config: AppConfig) -> bool:
@@ -57,8 +225,17 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
             "/healthz/secrets",
             "/info",
             PUBLIC_STARTUP_DIAGNOSTICS_PATH,
+            "/auth/login",
             "/auth/logout",
             "/logged-out",
+            # Favicons are non-sensitive and are fetched as subresources by the
+            # sign-in / logged-out pages (and automatically as /favicon.ico).
+            # Guarding them would 401 a browser subresource — the surest way to
+            # trigger the native Basic dialog on an otherwise unauthenticated page.
+            "/favicon.ico",
+            "/favicon.svg",
+            "/favicon.png",
+            "/graph-icon.svg",
         ]:
             return await call_next(request)
 
@@ -84,22 +261,34 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # Unset (None) → MCP follows auth_enabled (backwards compatible).
         if config.mcp_auth_enabled is False:
             path = request.url.path
-            if path.startswith("/mcp") or path.startswith("/execute_tool"):
+            if (
+                path == "/mcp"
+                or path.startswith("/mcp/")
+                or path == "/execute_tool"
+                or path.startswith("/execute_tool/")
+            ):
                 return await call_next(request)
 
         # In MCP-only mode, only require auth for MCP and execute_tool paths
         if config.mcp_basic_auth and not config.auth_enabled:
             path = request.url.path
-            if not (path.startswith("/mcp") or path.startswith("/execute_tool")):
+            if not (
+                path == "/mcp"
+                or path.startswith("/mcp/")
+                or path == "/execute_tool"
+                or path.startswith("/execute_tool/")
+            ):
                 return await call_next(request)
+
+        # A valid signed session cookie (issued by POST /auth/login after a
+        # successful form login) authenticates the request without the native
+        # Basic dialog — the browser-independent path, used by Edge.
+        if request_has_valid_session(request, config):
+            return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
         if not auth_header:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required"},
-                headers={"WWW-Authenticate": 'Basic realm="Community Knowledge Graph"'},
-            )
+            return _unauthorized(request, "Authentication required")
 
         try:
             scheme, credentials = auth_header.split(" ", 1)
@@ -123,11 +312,7 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
                 raise ValueError(f"unsupported scheme: {scheme}")
 
         except Exception:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid credentials"},
-                headers={"WWW-Authenticate": 'Basic realm="Community Knowledge Graph"'},
-            )
+            return _unauthorized(request, "Invalid credentials")
 
         return await call_next(request)
 

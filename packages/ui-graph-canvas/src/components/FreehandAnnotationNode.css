@@ -1,0 +1,19 @@
+.graph-freehand-node {
+  cursor: move;
+}
+
+.graph-freehand-node.locked {
+  cursor: default;
+}
+
+/* The selected-state halo is applied inline (FreehandAnnotationNode.jsx) on
+   the `.graph-freehand-stroke` group rather than here, because the visible
+   stroke is either one path or several pressure-width segments, and
+   `:last-of-type` can only ever pick out one of several sibling segments. */
+
+/* The property editor's colour swatch grid (`.graph-annotation-context-menu
+   .color-button`) is shared by every annotation kind's colour row — this
+   editor was first to mark the current colour with `.active`, and the shared
+   rule for it now lives with the rest of `.color-button` in NoteNode.css,
+   alongside ArrowNode/LabelNode/NoteNode/GenericAnnotationNode which all
+   apply the same class. */

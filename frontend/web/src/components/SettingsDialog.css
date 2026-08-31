@@ -149,6 +149,10 @@
   border-color: #666;
 }
 
+.settings-dialog-reset-btn {
+  margin: 2px 0 4px 10px;
+}
+
 .settings-dialog-type-row {
   display: flex;
   align-items: center;
@@ -275,4 +279,31 @@
   font-size: 0.72rem;
   color: #888;
   line-height: 1.3;
+}
+
+/* Touch targets: the close button and per-row toggle buttons grow via
+   min-width/min-height; the decorative .settings-dialog-toggle switch
+   itself is not the click target (its parent menu-item row is) so it is
+   left at its native visual size. */
+@media (pointer: coarse) {
+  .settings-dialog-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .settings-dialog-type-details-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .settings-dialog-menu-item {
+    min-height: 44px;
+  }
+
+  .settings-dialog-field-input {
+    min-height: 44px;
+  }
 }

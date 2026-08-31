@@ -1,4 +1,4 @@
-<!-- PR target is always `dev` (hotfixes excepted — see CLAUDE.md). -->
+<!-- PR target is always `main` (hotfixes excepted — see CLAUDE.md). -->
 
 ## Summary
 

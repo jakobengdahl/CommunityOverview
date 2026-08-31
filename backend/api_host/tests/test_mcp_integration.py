@@ -382,3 +382,21 @@ class TestMountRelativePath:
         from backend.api_host.mcp_mount import _mount_relative_path
 
         assert _mount_relative_path({"path": "/sse"}) == "/sse"
+
+    def test_only_strips_the_mount_prefix_on_a_real_subpath(self):
+        """A sibling path that merely starts with the mount prefix keeps its path.
+
+        Stripping on a bare ``startswith`` would rewrite ``/mcp-bypass`` to
+        ``-bypass`` and ``/mcpadmin/keys`` to ``admin/keys``, letting a
+        non-subpath request be routed as if it belonged to the MCP mount.
+        """
+        from backend.api_host.mcp_mount import _mount_relative_path
+
+        assert (
+            _mount_relative_path({"path": "/mcp-bypass", "root_path": "/mcp"})
+            == "/mcp-bypass"
+        )
+        assert (
+            _mount_relative_path({"path": "/mcpadmin/keys", "root_path": "/mcp"})
+            == "/mcpadmin/keys"
+        )

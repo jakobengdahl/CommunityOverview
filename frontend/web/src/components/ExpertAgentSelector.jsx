@@ -45,7 +45,12 @@ function ExpertAgentSelector() {
         <div className="expert-selector-panel">
           <div className="expert-selector-header">
             <span className="expert-selector-title">{t('experts.title')}</span>
-            <button className="expert-selector-close" onClick={() => setIsOpen(false)}>
+            <button
+              className="expert-selector-close"
+              onClick={() => setIsOpen(false)}
+              aria-label={t('experts.close')}
+              title={t('experts.close')}
+            >
               <XLg size={12} />
             </button>
           </div>

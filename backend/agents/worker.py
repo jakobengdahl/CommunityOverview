@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .config import AgentConfig, AgentsSettings
 from .prompts import build_agent_system_prompt, build_event_user_message
-from .llm_client import LLMClient
+from .llm_client import LLMClient, create_llm_client_from_settings
 from .mcp_loader import MCPLoader
 from backend.skills.loader import (
     SkillDefinition,
@@ -75,6 +75,8 @@ class AgentWorker:
         on_result: Optional[Callable[[ProcessingResult], None]] = None,
         skills_config: Optional[SkillsConfig] = None,
         graph_storage: Optional[Any] = None,
+        run_recorder: Optional[Any] = None,
+        proposal_store: Optional[Any] = None,
     ):
         """
         Initialize the agent worker.
@@ -87,6 +89,8 @@ class AgentWorker:
             on_result: Optional callback for processing results
             skills_config: SkillsConfig for the skills loader
             graph_storage: GraphStorage for reading linked Skill nodes
+            run_recorder: Optional AgentRunRecorder for durable run history
+            proposal_store: Optional ProposalStore backing agent governance
         """
         self.config = config
         self.settings = settings
@@ -95,6 +99,8 @@ class AgentWorker:
         self.on_result = on_result
         self._skills_config = skills_config or SkillsConfig()
         self._graph_storage = graph_storage
+        self._run_recorder = run_recorder
+        self._proposal_store = proposal_store
 
         # Event queue
         self._queue: queue.Queue[Optional[EventItem]] = queue.Queue()
@@ -347,6 +353,12 @@ class AgentWorker:
             f"(type: {event_payload.get('event_type', 'unknown')})"
         )
 
+        run_id = None
+        if self._run_recorder is not None:
+            run_id = self._run_recorder.record_start(
+                self.agent_id, self.config.name, event_payload
+            )
+
         try:
             # Ensure LLM client is ready
             if not self._llm_client:
@@ -356,6 +368,24 @@ class AgentWorker:
             tool_definitions = self.mcp_loader.get_tool_definitions(
                 integration_ids=self.config.mcp_integration_ids
             )
+
+            # Pre-filter the definitions handed to the LLM to those the autonomy
+            # gate would actually let through, so a read-only or allowlist-
+            # restricted agent does not waste turns attempting tools it can never
+            # use. This is purely an efficiency reduction: the gate applied below
+            # remains the authoritative enforcement. Only pre-filter when the gate
+            # is active (a proposal store is wired), and reuse the gate's own
+            # autonomy level and allowlist so the two never diverge.
+            if self._proposal_store is not None:
+                from .governance import coerce_autonomy, filter_tool_definitions
+
+                tool_definitions = filter_tool_definitions(
+                    tool_definitions,
+                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                    tool_allowlist=self.config.tool_allowlist,
+                    mcp_loader=self.mcp_loader,
+                )
+
             tool_names = [t["name"] for t in tool_definitions]
 
             # Get schema context from graph service (if available)
@@ -383,11 +413,28 @@ class AgentWorker:
             # Build user message with event
             user_message = build_event_user_message(event_payload)
 
-            # Create tool executor
+            # Create tool executor, gated by the agent's autonomy level and tool
+            # allowlist. Mutating tools under an approval-gated level become
+            # durable proposals instead of executing.
             tool_executor = self.mcp_loader.create_tool_executor(
                 graph_service=self.graph_service,
                 agent_id=self.agent_id,
             )
+            if self._proposal_store is not None:
+                from .governance import AutonomyGate, coerce_autonomy
+
+                origin = event_payload.get("origin") or {}
+                gate = AutonomyGate(
+                    autonomy_level=coerce_autonomy(self.config.autonomy_level),
+                    tool_allowlist=self.config.tool_allowlist,
+                    mcp_loader=self.mcp_loader,
+                    proposal_store=self._proposal_store,
+                    agent_id=self.agent_id,
+                    agent_name=self.config.name,
+                    run_id=run_id,
+                    correlation_id=origin.get("event_correlation_id"),
+                )
+                tool_executor = gate.wrap(tool_executor)
 
             # Execute with tools
             result = self._llm_client.execute_with_tools(
@@ -431,6 +478,26 @@ class AgentWorker:
                 error=str(e),
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
+
+        # Record the terminal outcome in durable run history.
+        if self._run_recorder is not None and run_id is not None:
+            if processing_result.success:
+                self._run_recorder.record_success(
+                    run_id,
+                    result={
+                        "handled": processing_result.handled,
+                        "summary": (processing_result.summary or "")[:500],
+                        "actions": len(processing_result.actions),
+                        "turns": processing_result.turns_used,
+                    },
+                )
+            else:
+                self._run_recorder.record_failure(
+                    run_id,
+                    processing_result.error
+                    or processing_result.summary
+                    or "processing failed",
+                )
 
         # Notify callback if set
         if self.on_result:
@@ -476,12 +543,9 @@ class AgentWorker:
             )
 
     def _create_llm_client(self) -> LLMClient:
-        """Create the LLM client."""
-        return LLMClient(
-            provider=self.settings.llm_provider,
-            model=self.settings.llm_model,
-            openai_api_key=self.settings.openai_api_key,
-            anthropic_api_key=self.settings.anthropic_api_key,
+        """Create the LLM client, resolving the agent's model profile if configured."""
+        return create_llm_client_from_settings(
+            self.settings, self.config.model_profile_id
         )
 
     def _parse_agent_response(

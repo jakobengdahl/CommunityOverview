@@ -14,9 +14,34 @@ Three concerns:
   rather than blocking the whole session.
 * ``PresenceRegistry`` — the roster of connected clients with server-assigned
   colours. Ephemeral, keyed by ``(session_id, client_id)``.
-* ``ClaimMap`` — advisory selection soft-locks with a 30 s TTL (D3). Expiry is
+* ``ClaimMap`` — advisory *selection* presence with a 30 s TTL (D3). Expiry is
   lazy (pruned on every read/write) so no background task is needed and a
-  departed user never freezes an element.
+  departed user never freezes an element. Purely a "who has this selected"
+  cosmetic marker for collaborators: ``claim()`` always takes over an
+  existing claim (LWW) and never refuses, and — since
+  ``dec-mcp-agent-ops-vs-annotation-claimmap`` (2026-08-30,
+  ``task-annotation-exclusive-edit-leases``) — selection claims no longer
+  gate any write. Nothing reads this map to decide whether a mutation is
+  allowed; see ``LeaseMap`` for that.
+* ``LeaseMap`` — first-actual-editor-wins **edit leases** with the same 30 s
+  TTL. Acquired only when real editing starts (a text field opens, a
+  geometry gesture begins, a property editor opens, a bulk mutation or undo
+  is about to touch the annotation) — never on mere selection. Unlike
+  ``ClaimMap``, ``acquire()`` refuses an id already held live by a different
+  client rather than taking it over: the first client to acquire keeps the
+  lease until it releases, lets it expire, or disconnects. The browser write
+  paths read a snapshot of it and reject (``LeaseConflict``) an op that would
+  mutate an annotation another client currently holds the lease on:
+  ``session_manager.SessionManager.apply_ops`` (the REST ``/ops`` endpoint,
+  which also handles ``edit_lease_acquired``/``edit_lease_released`` op
+  acquisition itself), ``undo_last_action`` (``/undo``, which replays a
+  stored inverse op), and the image-ingest endpoint, which replaces an
+  annotation outside ``apply_ops`` and so checks the same snapshot itself.
+  The synchronous MCP write path (``upsert_annotation`` /
+  ``update_annotation`` / ``delete_annotation``, all keyed to the shared
+  ``mcp-agent`` client id) does not acquire or check leases in v1 — see
+  ``dec-mcp-agent-ops-vs-annotation-claimmap``; that is
+  ``task-mcp-annotation-human-edit-guard``'s scope, not this module's.
 """
 
 from __future__ import annotations
@@ -25,7 +50,7 @@ import asyncio
 import itertools
 import threading
 import time
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 # Distinct, high-contrast marker colours assigned round-robin to joiners.
 _PRESENCE_COLORS = [
@@ -42,6 +67,7 @@ _PRESENCE_COLORS = [
 ]
 
 _CLAIM_TTL_SECONDS = 30.0
+_LEASE_TTL_SECONDS = 30.0
 _DEFAULT_SUBSCRIBER_QUEUE_MAX = 1000
 
 
@@ -298,4 +324,92 @@ class ClaimMap:
         self._prune(session_id)
         return {
             eid: c["client_id"] for eid, c in self._claims.get(session_id, {}).items()
+        }
+
+
+class LeaseMap:
+    """First-actual-editor-wins edit leases with a 30 s TTL and disconnect release.
+
+    Same TTL/prune shape as ``ClaimMap``, but ``acquire()`` refuses an id
+    already held live by a *different* client instead of taking it over —
+    the exclusivity ``ClaimMap`` never provided (see this module's docstring).
+    Acquiring an id already held by the *same* client renews its TTL, which
+    is how a caller keeps a lease alive for the duration of an active edit.
+    """
+
+    def __init__(
+        self, ttl: float = _LEASE_TTL_SECONDS, *, time_fn=time.monotonic
+    ) -> None:
+        self._ttl = ttl
+        self._time = time_fn
+        # session_id -> element_id -> {client_id, expires_at}
+        self._leases: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    def _prune(self, session_id: str) -> None:
+        now = self._time()
+        leases = self._leases.get(session_id)
+        if not leases:
+            return
+        expired = [eid for eid, c in leases.items() if c["expires_at"] <= now]
+        for eid in expired:
+            del leases[eid]
+        if not leases:
+            self._leases.pop(session_id, None)
+
+    def acquire(
+        self, session_id: str, client_id: str, element_ids: List[str]
+    ) -> Tuple[List[str], Dict[str, str]]:
+        """Acquire or renew ``element_ids`` for ``client_id``.
+
+        Returns ``(granted, denied)``: ``granted`` is the ids now held by
+        ``client_id`` (freshly acquired or renewed); ``denied`` maps each id
+        still held live by a *different* client to that client's id — those
+        ids are left untouched, so the existing holder's lease and its
+        expiry are unaffected by a refused acquisition attempt.
+        """
+        self._prune(session_id)
+        leases = self._leases.setdefault(session_id, {})
+        expires_at = self._time() + self._ttl
+        granted: List[str] = []
+        denied: Dict[str, str] = {}
+        for eid in element_ids:
+            held = leases.get(eid)
+            if held is not None and held["client_id"] != client_id:
+                denied[eid] = held["client_id"]
+                continue
+            leases[eid] = {"client_id": client_id, "expires_at": expires_at}
+            granted.append(eid)
+        if not leases:
+            self._leases.pop(session_id, None)
+        return granted, denied
+
+    def release(
+        self, session_id: str, client_id: str, element_ids: List[str]
+    ) -> List[str]:
+        self._prune(session_id)
+        leases = self._leases.get(session_id, {})
+        released = []
+        for eid in element_ids:
+            held = leases.get(eid)
+            if held and held["client_id"] == client_id:
+                del leases[eid]
+                released.append(eid)
+        if not leases:
+            self._leases.pop(session_id, None)
+        return released
+
+    def release_all(self, session_id: str, client_id: str) -> List[str]:
+        leases = self._leases.get(session_id, {})
+        released = [eid for eid, c in leases.items() if c["client_id"] == client_id]
+        for eid in released:
+            del leases[eid]
+        if not leases:
+            self._leases.pop(session_id, None)
+        return released
+
+    def snapshot(self, session_id: str) -> Dict[str, str]:
+        """Return ``element_id -> client_id`` for all live (non-expired) leases."""
+        self._prune(session_id)
+        return {
+            eid: c["client_id"] for eid, c in self._leases.get(session_id, {}).items()
         }

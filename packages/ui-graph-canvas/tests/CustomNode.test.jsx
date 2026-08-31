@@ -49,6 +49,24 @@ describe('CustomNode tooltip', () => {
     expect(tooltip.style.zIndex).toBe('99999');
   });
 
+  it('does not render the tooltip when the preview is disabled', () => {
+    render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Node 1',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          description: 'Tooltip body',
+          previewEnabled: false,
+        }}
+      />
+    );
+    fireEvent.mouseEnter(screen.getByText('Node 1').closest('.graph-custom-node'));
+    expect(screen.queryByText('Tooltip body')).toBeNull();
+  });
+
   it('renders a remote-selection outline and name badge in the collaborator colour', () => {
     render(
       <CustomNode
@@ -81,5 +99,55 @@ describe('CustomNode tooltip', () => {
     const node = screen.getByText('Node 1').closest('.graph-custom-node');
     expect(node.className).not.toContain('remote-selected');
     expect(node.style.outline).toBe('');
+  });
+});
+
+describe('CustomNode pulse overlay', () => {
+  it('renders a pulse overlay with the requested style and colour', () => {
+    const { container } = render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Node 1',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          pulse: { style: 'grow', color: '#ff8800', seq: 1 },
+        }}
+      />
+    );
+    const overlay = container.querySelector('.graph-node-pulse');
+    expect(overlay).not.toBeNull();
+    expect(overlay.className).toContain('graph-node-pulse-grow');
+    expect(overlay.style.getPropertyValue('--pulse-color')).toBe('#ff8800');
+  });
+
+  it('falls back to glow for an unknown style and to the node colour', () => {
+    const { container } = render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{
+          label: 'Node 1',
+          nodeType: 'Actor',
+          color: '#3B82F6',
+          pulse: { style: 'explode', seq: 2 },
+        }}
+      />
+    );
+    const overlay = container.querySelector('.graph-node-pulse');
+    expect(overlay.className).toContain('graph-node-pulse-glow');
+    expect(overlay.style.getPropertyValue('--pulse-color')).toBe('#3B82F6');
+  });
+
+  it('renders no overlay when pulse is absent', () => {
+    const { container } = render(
+      <CustomNode
+        id="node-1"
+        selected={false}
+        data={{ label: 'Node 1', nodeType: 'Actor', color: '#3B82F6' }}
+      />
+    );
+    expect(container.querySelector('.graph-node-pulse')).toBeNull();
   });
 });

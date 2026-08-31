@@ -125,3 +125,11 @@
   color: #666;
   cursor: not-allowed;
 }
+
+/* .input-dialog-input already clears 44px (12px padding + line-height);
+   only the action buttons need the floor. */
+@media (pointer: coarse) {
+  .input-dialog-button {
+    min-height: 44px;
+  }
+}

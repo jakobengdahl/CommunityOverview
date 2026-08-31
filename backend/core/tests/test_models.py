@@ -148,6 +148,23 @@ class TestNode:
         assert node.tags == ["tag1", "tag2"]
         assert node.metadata == {"key": "value"}
 
+    def test_node_archived_defaults_false(self):
+        """A freshly created node is not archived by default."""
+        node = Node(type=NodeType.ACTOR, name="Test Actor")
+        assert node.archived is False
+        assert node.to_dict()["archived"] is False
+
+    def test_node_from_dict_legacy_without_archived(self):
+        """Legacy graph data predates the archived flag → absent means not archived."""
+        node = Node.from_dict({"id": "legacy", "type": "Actor", "name": "Legacy Actor"})
+        assert node.archived is False
+
+    def test_node_archived_round_trips(self):
+        """The archived flag survives a to_dict/from_dict round trip."""
+        node = Node(type=NodeType.ACTOR, name="Test Actor", archived=True)
+        restored = Node.from_dict(node.to_dict())
+        assert restored.archived is True
+
     def test_node_to_dict(self):
         """Test converting node to dictionary"""
         node = Node(type=NodeType.ACTOR, name="Test Actor", tags=["governance"])
@@ -157,6 +174,7 @@ class TestNode:
         assert data["name"] == "Test Actor"
         assert data["type"] == "Actor"
         assert data["tags"] == ["governance"]
+        assert data["archived"] is False
         assert isinstance(data["created_at"], str)  # ISO format string
 
     def test_node_from_dict(self):
@@ -310,6 +328,23 @@ class TestEdge:
         assert edge.id == "edge-1"
         assert edge.type == RelationshipType.RELATES_TO
 
+    def test_edge_archived_defaults_false(self):
+        """A freshly created edge is not archived by default."""
+        edge = Edge(source="node-1", target="node-2")
+        assert edge.archived is False
+        assert edge.to_dict()["archived"] is False
+
+    def test_edge_from_dict_legacy_without_archived(self):
+        """Legacy edge data predates the archived flag → absent means not archived."""
+        edge = Edge.from_dict({"id": "legacy", "source": "node-1", "target": "node-2"})
+        assert edge.archived is False
+
+    def test_edge_archived_round_trips(self):
+        """The archived flag survives a to_dict/from_dict round trip."""
+        edge = Edge(source="node-1", target="node-2", archived=True)
+        restored = Edge.from_dict(edge.to_dict())
+        assert restored.archived is True
+
     def test_edge_from_dict_accepts_zulu_timestamp(self):
         """Test creating edge from dictionary with UTC Z suffix timestamp."""
         data = {
@@ -366,6 +401,17 @@ class TestGraphStats:
         assert stats.total_edges == 150
         assert stats.nodes_by_type["Actor"] == 50
 
+    def test_edges_by_type_defaults_to_empty_dict(self):
+        """edges_by_type is additive — omitting it must not break existing callers."""
+        stats = GraphStats(
+            total_nodes=1,
+            total_edges=0,
+            nodes_by_type={"Actor": 1},
+            last_updated=datetime.now(timezone.utc),
+        )
+
+        assert stats.edges_by_type == {}
+
 
 class TestAddNodesResult:
     """Tests for AddNodesResult model"""
@@ -411,3 +457,45 @@ class TestDeleteNodesResult:
         assert result.success is True
         assert len(result.deleted_node_ids) == 1
         assert len(result.affected_edge_ids) == 2
+
+
+class TestFieldLimits:
+    """Text-field length limits must be enforced on construction (and thus on write)."""
+
+    def test_description_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="n", description="x" * 2001)
+
+    def test_description_at_limit_ok(self):
+        node = Node(type=NodeType.ACTOR, name="n", description="x" * 2000)
+        assert len(node.description) == 2000
+
+    def test_name_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="x" * 201)
+
+    def test_summary_over_limit_rejected(self):
+        with pytest.raises(Exception):
+            Node(type=NodeType.ACTOR, name="n", summary="x" * 301)
+
+    def test_tags_total_over_limit_rejected(self):
+        # many small tags summing past the total limit
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", tags=["x" * 100] * 25)
+
+    def test_tag_item_over_limit_rejected(self):
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", tags=["x" * 201])
+
+    def test_aliases_total_over_limit_rejected(self):
+        with pytest.raises(ValueError):
+            Node(type=NodeType.ACTOR, name="n", aliases=["x" * 100] * 25)
+
+    def test_reasonable_tags_and_aliases_ok(self):
+        node = Node(
+            type=NodeType.ACTOR,
+            name="n",
+            tags=["infra", "saas", "m2-s1"],
+            aliases=["alt name", "synonym"],
+        )
+        assert node.tags == ["infra", "saas", "m2-s1"]
