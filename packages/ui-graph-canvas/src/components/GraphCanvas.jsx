@@ -3962,7 +3962,10 @@ function GraphCanvasInner({
       }
     };
     const handleMouseMove = () => {
-      if (primaryButtonDownRef.current && document.body.classList.contains('graph-suppress-selection')) {
+      if (
+        primaryButtonDownRef.current &&
+        document.body.classList.contains('graph-suppress-selection')
+      ) {
         clearStraySelection();
       }
     };
