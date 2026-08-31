@@ -264,6 +264,79 @@ describe('GraphCanvas', () => {
     expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
   });
 
+  it('suppresses text selection for a modifier-drag that starts outside the canvas wrapper, e.g. a floating overlay', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+
+    // A press on document.body itself stands in for a press that lands on
+    // FloatingSearch/FloatingToolbar, which render as siblings of the canvas
+    // wrapper (see App.jsx/DesktopShell.jsx) rather than inside it — a
+    // listener scoped to the wrapper would never see this mousedown at all.
+    fireEvent.mouseDown(document.body, { button: 0, ctrlKey: true });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(true);
+
+    fireEvent.mouseUp(document);
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
+  it('suppresses text selection once the modifier is pressed after the drag has already started', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const wrapper = screen.getByTestId('react-flow').parentElement;
+
+    // Button goes down first with no modifier — no suppression yet.
+    fireEvent.mouseDown(wrapper, { button: 0 });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+
+    // Ctrl is pressed mid-drag, while the button is still held.
+    fireEvent.keyDown(document, { key: 'Control' });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(true);
+
+    fireEvent.mouseUp(document);
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
+  it('does not suppress on a bare keydown when no mouse button is held', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+
+    fireEvent.keyDown(document, { key: 'Control' });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
+  it('lifts suppression on window blur, covering the pointer-released-outside-the-window escape path', () => {
+    render(<GraphCanvas nodes={sampleNodes} edges={sampleEdges} />);
+    const wrapper = screen.getByTestId('react-flow').parentElement;
+
+    fireEvent.mouseDown(wrapper, { button: 0, ctrlKey: true });
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(true);
+
+    // No mouseup ever reaches the page when the button is released outside
+    // the browser window — window 'blur' is the only signal available.
+    fireEvent(window, new Event('blur'));
+    expect(document.body.classList.contains('graph-suppress-selection')).toBe(false);
+  });
+
+  it('collapses an active <input>/<textarea> selection during a modifier-drag, not just window.getSelection()', () => {
+    render(
+      <div>
+        <input defaultValue="Search graph..." data-testid="search-input" />
+        <GraphCanvas nodes={sampleNodes} edges={sampleEdges} />
+      </div>
+    );
+    const wrapper = screen.getByTestId('react-flow').parentElement;
+    const input = screen.getByTestId('search-input');
+
+    // Simulate the browser having selected text inside the input's value —
+    // this lives in selectionStart/selectionEnd, not in document.Selection,
+    // so window.getSelection().removeAllRanges() alone cannot clear it.
+    input.focus();
+    input.setSelectionRange(0, 6);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(6);
+
+    fireEvent.mouseDown(wrapper, { button: 0, ctrlKey: true });
+
+    expect(input.selectionStart).toBe(input.selectionEnd);
+  });
+
   it('calls onFederationDepthChange when level is clicked', () => {
     const onFederationDepthChange = vi.fn();
 

@@ -780,6 +780,10 @@ function GraphCanvasInner({
   }
   const rightDragStart = useRef({ x: 0, y: 0, time: null });
   const mouseDownPos = useRef(null);
+  // Tracks whether the primary mouse button is currently held, independent of
+  // where the press started — the document-level selection-suppression effect
+  // below needs this to react to a modifier key pressed mid-drag.
+  const primaryButtonDownRef = useRef(false);
   // Two-step "organize" keyboard chord: Ctrl/Cmd+O arms it, then c/h/v/t picks
   // the arrangement. Held in refs so arming doesn't re-render or re-bind keys.
   const organizePendingRef = useRef(false);
@@ -3862,6 +3866,8 @@ function GraphCanvasInner({
   // Left-click on empty space clears selection (handles cases where onPaneClick doesn't fire,
   // e.g. when ReactFlow's selection overlay intercepts the click).
   // Track mousedown position to distinguish genuine clicks from drag-selects.
+  // (Text-selection suppression for the modifier-drag gesture lives in its own
+  // document-scoped effect below, not here — see that effect's comment for why.)
   useEffect(() => {
     const wrapper = reactFlowWrapper.current;
     if (!wrapper) return;
@@ -3869,20 +3875,6 @@ function GraphCanvasInner({
       if (e.button === 0) {
         mouseDownPos.current = { x: e.clientX, y: e.clientY };
       }
-      // When shift/ctrl/meta-clicking nodes to multi-select, the browser would
-      // otherwise extend a text selection into surrounding UI (session id,
-      // search terms, labels), highlighting them blue. Suppress text selection
-      // for the duration of the interaction and clear any stray selection.
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        document.body.classList.add('graph-suppress-selection');
-        const selection = window.getSelection?.();
-        if (selection && selection.rangeCount > 0) {
-          selection.removeAllRanges();
-        }
-      }
-    };
-    const handleMouseUp = () => {
-      document.body.classList.remove('graph-suppress-selection');
     };
     const handleClick = (e) => {
       if (e.button !== 0) return;
@@ -3913,16 +3905,94 @@ function GraphCanvasInner({
     };
     wrapper.addEventListener('mousedown', handleMouseDown);
     wrapper.addEventListener('click', handleClick);
-    // Listen for mouseup on the document so the suppression is lifted even when
-    // the pointer is released outside the canvas wrapper.
-    document.addEventListener('mouseup', handleMouseUp);
     return () => {
       wrapper.removeEventListener('mousedown', handleMouseDown);
       wrapper.removeEventListener('click', handleClick);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.classList.remove('graph-suppress-selection');
     };
   }, [clearSelection, closeAllMenus]);
+
+  // Suppress accidental text selection during a shift/ctrl/meta-drag (the
+  // marquee multi-select gesture) anywhere in the app chrome — not just over
+  // the canvas. The gesture can start or pass over the floating search box or
+  // toolbar, which render as siblings of the canvas wrapper (see App.jsx /
+  // DesktopShell.jsx), so a listener bound to reactFlowWrapper never sees a
+  // press that begins there. This is a document-level, capture-phase effect
+  // for that reason: it has to see the gesture regardless of where it starts.
+  //
+  // Three things beyond "clear the selection on mousedown" turned out to be
+  // needed for the highlight to reliably not survive the gesture:
+  //  - Text selected mid-drag (not just at mousedown) needs clearing too, so
+  //    this also clears on every mousemove while suppression is active.
+  //  - The modifier can be pressed *after* the drag has already started, so a
+  //    keydown handler re-checks it while the primary button is held.
+  //  - A selection made inside an <input>/<textarea>'s value (e.g. the search
+  //    field) lives in that element's own selectionStart/selectionEnd, not in
+  //    the document's Selection object — window.getSelection().removeAllRanges()
+  //    does not touch it, so it is collapsed explicitly.
+  useEffect(() => {
+    const clearStraySelection = () => {
+      const selection = window.getSelection?.();
+      if (selection && selection.rangeCount > 0) {
+        selection.removeAllRanges();
+      }
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+        try {
+          const pos = active.selectionEnd ?? active.value?.length ?? 0;
+          active.setSelectionRange(pos, pos);
+        } catch {
+          // Some input types (number, email, ...) don't support
+          // setSelectionRange and never expose a value selection either.
+        }
+      }
+    };
+    const suppress = () => {
+      document.body.classList.add('graph-suppress-selection');
+      clearStraySelection();
+    };
+    const unsuppress = () => {
+      primaryButtonDownRef.current = false;
+      document.body.classList.remove('graph-suppress-selection');
+    };
+    const handleMouseDown = (e) => {
+      if (e.button !== 0) return;
+      primaryButtonDownRef.current = true;
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        suppress();
+      }
+    };
+    const handleMouseMove = () => {
+      if (
+        primaryButtonDownRef.current &&
+        document.body.classList.contains('graph-suppress-selection')
+      ) {
+        clearStraySelection();
+      }
+    };
+    const handleKeyDown = (e) => {
+      if (!primaryButtonDownRef.current) return;
+      if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta') {
+        suppress();
+      }
+    };
+    document.addEventListener('mousedown', handleMouseDown, true);
+    document.addEventListener('mousemove', handleMouseMove, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    // Capture-phase mouseup/blur so the suppression lifts even if the pointer
+    // is released outside the canvas wrapper, over a floating overlay, or
+    // outside the browser window entirely (window 'blur' covers that last case
+    // — no mouseup reaches the page when the button is released off-window).
+    document.addEventListener('mouseup', unsuppress, true);
+    window.addEventListener('blur', unsuppress);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown, true);
+      document.removeEventListener('mousemove', handleMouseMove, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+      document.removeEventListener('mouseup', unsuppress, true);
+      window.removeEventListener('blur', unsuppress);
+      document.body.classList.remove('graph-suppress-selection');
+    };
+  }, []);
 
   // Handle external drag-and-drop (from toolbar)
   const onDragOver = useCallback((event) => {
