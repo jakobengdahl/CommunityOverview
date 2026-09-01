@@ -10,3 +10,7 @@
 **Vulnerability:** API endpoints returned `str(e)` in 500 error responses, potentially leaking sensitive internal information (for example file paths, database schemas, or stack traces).
 **Learning:** Passing the raw exception string directly to the `HTTPException` detail parameter is a common CWE-209 pattern.
 **Prevention:** Use `logger.exception()` to log the full traceback server-side, and return a generic message such as `Internal server error` to the client for unexpected 500 responses.
+## 2026-08-31 - Fix Authentication Bypass in Middleware Substring Matching
+**Vulnerability:** In `backend/api_host/middleware.py`, authentication exclusion for the `/api/sessions/{id}/stream` endpoint was implemented using `"/api/sessions/" in request.url.path`. This allowed an attacker to bypass authentication for an unrelated endpoint by including the substring anywhere in the URL (e.g., `/admin/api/sessions/stream`).
+**Learning:** Using substring matching (`in`) for authentication and authorization logic on URL paths is a critical vulnerability that allows attackers to craft paths that bypass security controls while still routing to sensitive handlers.
+**Prevention:** Always use strict prefix matching (e.g. `.startswith()`) and/or exact matching, anchored to the configured base URL paths (like `config.api_prefix`), when writing security middleware rules.
