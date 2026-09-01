@@ -250,9 +250,8 @@ def add_auth_middleware(app: FastAPI, config: AppConfig) -> None:
         # protected by the unguessable session id — the same rationale as the
         # legacy bypass above (design §3.9, alternative A). Only the stream is
         # bypassed; the CRUD/ops endpoints are reached by fetch and stay guarded.
-        if (
-            request.url.path.endswith("/stream")
-            and request.url.path.startswith(f"{config.api_prefix}/sessions/")
+        if request.url.path.endswith("/stream") and request.url.path.startswith(
+            f"{config.api_prefix}/sessions/"
         ):
             return await call_next(request)
 

@@ -72,6 +72,28 @@ class TestSessionCrud:
         assert test_app.get("/api/sessions/not-valid").status_code == 400
 
 
+class TestSessionStreamAuthBypass:
+    def test_shared_session_stream_bypass_is_anchored_to_api_prefix(
+        self, temp_graph_file, temp_static_dirs, tmp_path
+    ):
+        from backend.api_host import AppConfig, create_app
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
+            auth_enabled=True,
+            auth_password="password",
+        )
+        client = TestClient(create_app(config))
+
+        response = client.get("/admin/api/sessions/1234-5678/stream")
+
+        assert response.status_code == 401
+
+
 class TestSessionLookupRateLimit:
     """The auth-bypassed lookup endpoints throttle id-guessing brute force."""
 
