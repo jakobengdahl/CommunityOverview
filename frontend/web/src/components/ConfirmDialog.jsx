@@ -34,12 +34,15 @@ function ConfirmDialog({
       <div
         ref={dialogRef}
         className="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
         tabIndex={-1}
       >
         <div className="confirm-dialog-header">
-          <h3>{title}</h3>
+          <h3 id="confirm-dialog-title">{title}</h3>
         </div>
 
         <div className="confirm-dialog-content">
