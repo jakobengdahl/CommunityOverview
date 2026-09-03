@@ -1242,19 +1242,31 @@ class GraphStorage:
     def get_edges_between_nodes(self, node_ids: List[str]) -> List[Edge]:
         """Get all edges where both source and target are in the given node IDs"""
         node_id_set = set(node_ids)
-        return [
-            edge
-            for edge in self.edges.values()
-            if edge.source in node_id_set and edge.target in node_id_set
-        ]
+        valid_nodes = [nid for nid in node_id_set if nid in self.graph]
+        subgraph = self.graph.subgraph(valid_nodes)
+        return [data["data"] for _, _, data in subgraph.edges(data=True)]
 
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
-        return [
-            edge
-            for edge in self.edges.values()
-            if edge.source == node_id or edge.target == node_id
-        ]
+        if node_id not in self.graph:
+            return []
+
+        collected_edges = {}
+        # Outgoing edges
+        for _, _, _, edge_data in self.graph.out_edges(
+            node_id, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
+
+        # Incoming edges
+        for _, _, _, edge_data in self.graph.in_edges(
+            node_id, keys=True, data=True
+        ):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
+
+        return list(collected_edges.values())
 
     def update_edge(
         self,
