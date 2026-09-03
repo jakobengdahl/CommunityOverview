@@ -602,10 +602,11 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
    id/name). Note items explicitly **not** addressed.
 4. **Review loop:** run it as described in step 8, reading the reviewer count off
-   the same property step 8 does — does this batch change executable code. A fix
-   plus its regression test does, so it takes two reviewers; a batch drained from
-   the residue node, or one of stale comments and dead code, does not, and there
-   one correctness pass is the round. Because these are small, isolated fixes the
+   the same property step 8 does — does this batch change executable code. Where
+   it does, a round is two reviewers; where it does not, because the batch only
+   edits docs, tests or fixtures, one correctness pass is the round. Read the
+   batch, do not assume from its origin: a dead-code removal is wrong precisely
+   when the code was not dead, which is what the second reviewer probes. Because these are small, isolated fixes the
    loop typically converges in one round — but run it to step 8's termination
    criterion, same as any other PR.
 5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
