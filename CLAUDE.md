@@ -309,10 +309,16 @@ The PR body follows `.github/pull_request_template.md`:
 
 ### 8. Review Loop
 
-After the PR is open, spawn a subagent with the full diff from main:
+**Write the guarantees first.** G1…Gn, one line each: what this change must
+hold true, in terms a reviewer can test. They go into both reviewer prompts
+below, every round. Without them a reviewer has no contract to classify
+findings against, and the loop has nothing to terminate on.
+
+**A round is two reviewers, not one.** Both, every round, on the full diff from
+main:
 
 ```
-Agent(
+Agent(   # 1. correctness — its findings decide whether the loop continues
   prompt="""Review the diff below from branch <name> in /path/to/repo.
             Full diff vs main: run `git diff origin/main...HEAD` in the repo.
 
@@ -333,10 +339,37 @@ Agent(
 
             Report file:line references. Flag only real issues."""
 )
+
+Agent(   # 2. mutation — its survivors are residue, not blockers
+  prompt="""In /path/to/repo on branch <name>: edit the CHANGED PRODUCTION
+            code to try to violate one of the guarantees below, and report
+            which edits the test suite lets through.
+
+            Guarantees this change must hold: <G1…Gn, one line each>.
+
+            A mutation counts ONLY if it violates a named guarantee. Harness
+            identity (can the code tell it is under test) is out of scope.
+            Label each survivor test-durability or unfalsifiable, and say
+            what would close it. Revert every edit before reporting."""
+)
 ```
 
-Address every finding labelled `production-defect`. Then spawn another review
-subagent (briefing it on what changed between rounds).
+Run both. A loop with only the correctness reviewer terminates at the first
+round it finds nothing and never asks the second question; one with only the
+mutation reviewer is the runaway this section exists to stop. Where a change is
+too small to mutate meaningfully, say so in the round report rather than
+silently dropping the reviewer.
+
+**What "production code" means here.** The code this change ships to a running
+system — the module, script or config the PR edits — as opposed to the tests and
+fixtures that exercise it. A change with no such half, such as a docs-only or
+`CLAUDE.md` change, has its **text** as its production code: a rule that is
+wrong, unactionable, or contradicted elsewhere in the file is a
+`production-defect`. Without that reading such a change would terminate at round
+one by vacuity.
+
+Address every finding labelled `production-defect`. Then run another round
+(briefing both reviewers on what changed between rounds).
 
 **The loop ends at the first round with no `production-defect` — not the first
 round with no findings.** A reviewer briefed to find something always can, so
@@ -346,18 +379,31 @@ than the change. Only `production-defect` blocks: log **both** other classes —
 every surviving `test-durability` and `unfalsifiable` finding — as **one**
 `small-fix`-tagged Task node in the Corp planning graph, one node for the whole
 residue, and merge. A "meaningful gap" in the tests is a `test-durability`
-finding and goes to that node, not into this loop. A mutation counts only if it
-violates a named guarantee of this change; fixture-constant survivors are
-logged, not fixed in the loop. A round that comes back with its findings
-unlabelled is not a completed round — ask the reviewer for the labels rather
-than guessing them. If a label is disputed and the loop runs on anyway, three
-consecutive rounds with no `production-defect` end it whatever else they found.
+finding and goes to that node, not into this loop. A round that comes back with
+its findings unlabelled is not a completed round — ask the reviewers for the
+labels rather than guessing them — but it counts toward the five-round backstop
+all the same, and two unlabelled rounds in a row are themselves a stop-and-ask.
+Otherwise "ask again" is an unbounded loop inside the bounded one. If a label is
+disputed and the loop runs on anyway, three consecutive rounds with no
+`production-defect` end it whatever else they found.
 
 **Backstops — stop and ask Jakob, never continue silently and never merge on
-one:** five review rounds on one change, a test diff more than 10× the
-production diff, or — where the work came from a planning-graph node carrying an
-`effort` — spend above 3× that budget. Tripping one does not mean the loop was
-wrong; it means the cost should be visible while it is being paid.
+one.** **Termination wins:** a round with no `production-defect` ends the loop
+and the merge proceeds, even if it is the fifth round or the one that crosses a
+threshold. Check the backstops only when the round just read left a
+`production-defect`, or came back unlabelled. Then stop and ask when:
+
+- **five review rounds** on one change — unlabelled rounds included; or
+- a **test diff more than 10× the production diff**. On a change with no
+  test/production split — a docs-only change, or a test-only one such as a
+  regression test or a test-durability follow-up — this one does not apply; or
+- **cost above 3× what the change was budgeted**, where that is readable: the
+  planning graph's `effort` is a size class, not a spend, so this trips only
+  where a real cost figure is available. Where none is, say so in the round
+  report and let the other two carry it.
+
+Tripping one does not mean the loop was wrong; it means the cost should be
+visible while it is being paid.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -458,10 +504,10 @@ Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
-- [ ] Review loop has reached its termination criterion (last subagent round
-      raised no `production-defect`; any test-durability residue is logged as one
-      follow-up node), and the LAST round reviewed the fixes rather than only the
-      original change
+- [ ] Review loop has reached its termination criterion (last round raised no
+      `production-defect`; **both** residue classes — test-durability and
+      unfalsifiable — logged as one follow-up node), and the LAST round reviewed
+      the fixes rather than only the original change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
