@@ -316,10 +316,17 @@ Agent(
   prompt="""Review the diff below from branch <name> in /path/to/repo.
             Full diff vs main: run `git diff origin/main...HEAD` in the repo.
 
+            Guarantees this change must hold: <G1…Gn, one line each>.
+
             Look for: correctness bugs, edge cases, test gaps, consistency
             between related files (e.g. local vs. federation paths doing
             the same thing differently), dead code, pre-filter/scorer
             mismatches.
+
+            Label every finding production-defect (a defect in the changed
+            production code), test-durability (the tests would not catch a
+            future regression) or unfalsifiable (harness identity, or a
+            hatch that is only open because the fixture opens it).
 
             Context from previous round (if any): <summarise what was
             fixed since the last review>.
@@ -328,9 +335,23 @@ Agent(
 )
 ```
 
-Address every finding that is a real bug or a meaningful gap. Then spawn another
-review subagent (briefing it on what changed between rounds). Repeat until the
-review comes back with no actionable findings.
+Address every finding labelled `production-defect`, and every other finding that
+is a real bug or a meaningful gap. Then spawn another review subagent (briefing
+it on what changed between rounds).
+
+**The loop ends at the first round with no `production-defect` — not the first
+round with no findings.** A reviewer briefed to find something always can, so
+"repeat until clean" has no fixed point: one such loop ran 22 rounds on a
+40-line change, and every round past the tenth was about test durability rather
+than the change. Log the surviving `test-durability` findings as **one**
+`small-fix`-tagged Task node in the Corp planning graph — one node for the whole
+residue — and merge. A mutation counts only if it violates a named guarantee of
+this change; fixture-constant survivors are logged, not fixed in the loop.
+
+**Backstops — stop and ask Jakob, never continue silently and never merge on
+one:** five review rounds on one change, spend above 3× its estimated effort, or
+a test diff more than 10× the production diff. Tripping one does not mean the
+loop was wrong; it means the cost should be visible while it is being paid.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -430,8 +451,10 @@ Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
-- [ ] Review loop is clean (last subagent round raised no actionable findings),
-      and the LAST round reviewed the fixes rather than only the original change
+- [ ] Review loop has reached its termination criterion (last subagent round
+      raised no `production-defect`; any test-durability residue is logged as one
+      follow-up node), and the LAST round reviewed the fixes rather than only the
+      original change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
@@ -492,7 +515,7 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    id/name). Note items explicitly **not** addressed.
 4. **Review loop:** spawn the review subagent as described in step 8. Because
    these are small, isolated fixes the loop typically converges in one round —
-   but repeat until clean, same as any other PR.
+   but run it to step 8's termination criterion, same as any other PR.
 5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
    Corp planning graph (record the PR/commit on each node per the MCP-first
    planning rules).
