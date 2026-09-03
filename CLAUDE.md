@@ -166,7 +166,7 @@ Follow this process for every feature or bug fix, regardless of size.
 
 **Default session ownership (end-to-end).** Unless the task says otherwise, a
 Claude session owns the whole cycle for the chosen task: solve it, open a PR
-targeting `main`, run the review loop with a subagent, update any documentation
+targeting `main`, run the review loop per step 8, update any documentation
 the change affects, and — once every `production-defect` is resolved and the
 definition-of-done checklist in step 10 passes — merge the PR to `main` itself.
 Do not stop at "PR opened" and wait for the owner to merge; merging a green
@@ -372,25 +372,29 @@ did not count.
 
 **What "production code" means here.** The code this change ships to a running
 system — the module, script or config the PR edits — as opposed to the tests and
-fixtures that exercise it. Two kinds of artifact are not that and still carry
-defects, so each has a stand-in, or a change made only of them would terminate at
-round one by vacuity:
+fixtures that exercise it. Two other kinds of artifact carry defects that must
+block, so each stands in for production code, **each under its own condition**:
 
-- **Text** — a docs-only or `CLAUDE.md` change. Its text is its production code:
-  a rule that is wrong, unactionable, or contradicted elsewhere in the file is a
-  `production-defect`.
-- **Tests** — a change whose only artifact is tests, such as a regression test
-  added on its own or a test-durability follow-up. Its tests are its production
-  code: an assertion that is wrong, that passes against the bug it claims to
-  catch, or that does not exercise what its name says is a `production-defect`.
-  This repo produces that class deliberately, so it must not merge unreviewed as
-  residue.
+- **Text** — documentation, `CLAUDE.md`, any normative prose the PR edits. It
+  stands in **always, alongside any code in the same PR**: a rule or a documented
+  fact that is wrong, unactionable, or contradicted elsewhere in the file is a
+  `production-defect`. So a PR that edits `rest_api.py` and the endpoint table in
+  `backend/DEVELOPMENT.md` — the shape this file requires, not an unusual one —
+  has the module judged as production code *and* the table judged as its own. A
+  wrong row there is a defect, not residue: wrong docs are worse than no docs.
+- **Tests and fixtures** — they stand in **only where they are the whole
+  change**: a regression test added on its own, a test-durability follow-up, a
+  new fixture or golden file. Then an assertion that is wrong, that passes
+  against the bug it claims to catch, or that does not exercise what its name
+  says is a `production-defect`. This repo produces that class deliberately, so
+  it must not merge unreviewed. Where a PR also changes code, its tests are
+  tests again — a gap in them is `test-durability`, and it goes to the residue
+  node rather than into this loop.
 
-**The stand-ins attach per artifact, not per change.** A PR that edits
-`rest_api.py` and the endpoint table in `backend/DEVELOPMENT.md` — the shape this
-file requires, not an unusual one — has its module judged as production code and
-its doc text judged as its own. A wrong row in that table is a
-`production-defect`, not residue: wrong docs are worse than no docs.
+**The mutation reviewer works on the executable half only** — the module, script
+or config — never on prose or on the tests themselves, because no suite covers
+those and every such mutation would survive by construction. For the same reason
+the 10× backstop counts only that half as the production diff.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
@@ -593,9 +597,10 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    planning graph as a `small-fix`-tagged Task node and do not fix it here.
 3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
    id/name). Note items explicitly **not** addressed.
-4. **Review loop:** spawn the review subagent as described in step 8. Because
-   these are small, isolated fixes the loop typically converges in one round —
-   but run it to step 8's termination criterion, same as any other PR.
+4. **Review loop:** run it as described in step 8 — a fix plus its regression
+   test has both halves, so that is two reviewers per round. Because these are
+   small, isolated fixes the loop typically converges in one round — but run it
+   to step 8's termination criterion, same as any other PR.
 5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
    Corp planning graph (record the PR/commit on each node per the MCP-first
    planning rules).
