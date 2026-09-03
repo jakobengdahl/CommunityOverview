@@ -354,22 +354,27 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 )
 ```
 
-Run both **where the change has a test suite to mutate**. A loop with only the
+**Run both where the change has two distinguishable halves** — production code,
+and a test suite whose job is to catch a break in it. Then the mutation reviewer
+edits the first and reports what the second let through. A loop with only the
 correctness reviewer on such a change terminates at the first round it finds
 nothing and never asks the second question; one with only the mutation reviewer
-is the runaway this section exists to stop. Where a change has a suite but is too
-small to mutate meaningfully, say so in the round report rather than silently
-dropping the reviewer.
+is the runaway this section exists to stop. Where such a change is too small to
+mutate meaningfully, say so in the round report rather than silently dropping the
+reviewer.
 
-**Where there is no suite to mutate — a docs-only or `CLAUDE.md` change — one
-correctness pass per round is the round.** The mutation reviewer's report would
-have no referent, so do not improvise one, and do not treat its absence as a
-round that did not count.
+**Where it has only one half, one correctness pass per round is the round.** That
+covers a docs-only or `CLAUDE.md` change (text, no suite) and a test-only change
+(a suite with nothing separate to break) alike: in both, the mutation reviewer
+would be editing the very artifact it then asks the suite about, a question with
+no referent. Do not improvise one, and do not treat its absence as a round that
+did not count.
 
 **What "production code" means here.** The code this change ships to a running
 system — the module, script or config the PR edits — as opposed to the tests and
-fixtures that exercise it. Two kinds of change have no such half, and each has a
-stand-in, or it would terminate at round one by vacuity:
+fixtures that exercise it. Two kinds of artifact are not that and still carry
+defects, so each has a stand-in, or a change made only of them would terminate at
+round one by vacuity:
 
 - **Text** — a docs-only or `CLAUDE.md` change. Its text is its production code:
   a rule that is wrong, unactionable, or contradicted elsewhere in the file is a
@@ -380,6 +385,12 @@ stand-in, or it would terminate at round one by vacuity:
   catch, or that does not exercise what its name says is a `production-defect`.
   This repo produces that class deliberately, so it must not merge unreviewed as
   residue.
+
+**The stand-ins attach per artifact, not per change.** A PR that edits
+`rest_api.py` and the endpoint table in `backend/DEVELOPMENT.md` — the shape this
+file requires, not an unusual one — has its module judged as production code and
+its doc text judged as its own. A wrong row in that table is a
+`production-defect`, not residue: wrong docs are worse than no docs.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
@@ -407,9 +418,12 @@ threshold. Check the backstops only when the round just read left a
 `production-defect`, or came back unlabelled. Then stop and ask when:
 
 - **five review rounds** on one change — unlabelled rounds included; or
-- a **test diff more than 10× the production diff**. On a change with no
-  test/production split — a docs-only change, or a test-only one such as a
-  regression test or a test-durability follow-up — this one does not apply; or
+- a **test diff both more than 10× the production diff and above 500 lines**.
+  The ratio alone means nothing on a small change: the three-line fix plus the
+  regression test this file requires routinely exceeds 10×, while the runaway
+  behind the threshold was 5054 test lines against 40 of shell. On a change with
+  only one half — docs-only, or test-only such as a regression test or a
+  test-durability follow-up — it does not apply at all; or
 - **cost above 3× what the change was budgeted**, where that is readable: the
   planning graph's `effort` is a size class, not a spend, so this trips only
   where a real cost figure is available. Where none is, say so in the round
