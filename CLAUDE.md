@@ -354,19 +354,32 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 )
 ```
 
-Run both. A loop with only the correctness reviewer terminates at the first
-round it finds nothing and never asks the second question; one with only the
-mutation reviewer is the runaway this section exists to stop. Where a change is
-too small to mutate meaningfully, say so in the round report rather than
-silently dropping the reviewer.
+Run both **where the change has a test suite to mutate**. A loop with only the
+correctness reviewer on such a change terminates at the first round it finds
+nothing and never asks the second question; one with only the mutation reviewer
+is the runaway this section exists to stop. Where a change has a suite but is too
+small to mutate meaningfully, say so in the round report rather than silently
+dropping the reviewer.
+
+**Where there is no suite to mutate — a docs-only or `CLAUDE.md` change — one
+correctness pass per round is the round.** The mutation reviewer's report would
+have no referent, so do not improvise one, and do not treat its absence as a
+round that did not count.
 
 **What "production code" means here.** The code this change ships to a running
 system — the module, script or config the PR edits — as opposed to the tests and
-fixtures that exercise it. A change with no such half, such as a docs-only or
-`CLAUDE.md` change, has its **text** as its production code: a rule that is
-wrong, unactionable, or contradicted elsewhere in the file is a
-`production-defect`. Without that reading such a change would terminate at round
-one by vacuity.
+fixtures that exercise it. Two kinds of change have no such half, and each has a
+stand-in, or it would terminate at round one by vacuity:
+
+- **Text** — a docs-only or `CLAUDE.md` change. Its text is its production code:
+  a rule that is wrong, unactionable, or contradicted elsewhere in the file is a
+  `production-defect`.
+- **Tests** — a change whose only artifact is tests, such as a regression test
+  added on its own or a test-durability follow-up. Its tests are its production
+  code: an assertion that is wrong, that passes against the bug it claims to
+  catch, or that does not exercise what its name says is a `production-defect`.
+  This repo produces that class deliberately, so it must not merge unreviewed as
+  residue.
 
 Address every finding labelled `production-defect`. Then run another round
 (briefing both reviewers on what changed between rounds).
