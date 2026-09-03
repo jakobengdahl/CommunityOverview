@@ -167,10 +167,10 @@ Follow this process for every feature or bug fix, regardless of size.
 **Default session ownership (end-to-end).** Unless the task says otherwise, a
 Claude session owns the whole cycle for the chosen task: solve it, open a PR
 targeting `main`, run the review loop with a subagent, update any documentation
-the change affects, and — once every review point is resolved and the
+the change affects, and — once every `production-defect` is resolved and the
 definition-of-done checklist in step 10 passes — merge the PR to `main` itself.
-Do not stop at "PR opened" and wait for the owner to merge; merging a clean,
-green `main` PR is part of the job. The only branches Claude never merges on its
+Do not stop at "PR opened" and wait for the owner to merge; merging a green
+`main` PR whose loop has reached that criterion is part of the job. The only branches Claude never merges on its
 own initiative are `preview` and `prod` (see the branch strategy above). If the
 tooling can't delete the feature branch after merge, leave it — the owner
 removes it manually.
@@ -335,23 +335,29 @@ Agent(
 )
 ```
 
-Address every finding labelled `production-defect`, and every other finding that
-is a real bug or a meaningful gap. Then spawn another review subagent (briefing
-it on what changed between rounds).
+Address every finding labelled `production-defect`. Then spawn another review
+subagent (briefing it on what changed between rounds).
 
 **The loop ends at the first round with no `production-defect` — not the first
 round with no findings.** A reviewer briefed to find something always can, so
 "repeat until clean" has no fixed point: one such loop ran 22 rounds on a
 40-line change, and every round past the tenth was about test durability rather
-than the change. Log the surviving `test-durability` findings as **one**
-`small-fix`-tagged Task node in the Corp planning graph — one node for the whole
-residue — and merge. A mutation counts only if it violates a named guarantee of
-this change; fixture-constant survivors are logged, not fixed in the loop.
+than the change. Only `production-defect` blocks: log **both** other classes —
+every surviving `test-durability` and `unfalsifiable` finding — as **one**
+`small-fix`-tagged Task node in the Corp planning graph, one node for the whole
+residue, and merge. A "meaningful gap" in the tests is a `test-durability`
+finding and goes to that node, not into this loop. A mutation counts only if it
+violates a named guarantee of this change; fixture-constant survivors are
+logged, not fixed in the loop. A round that comes back with its findings
+unlabelled is not a completed round — ask the reviewer for the labels rather
+than guessing them. If a label is disputed and the loop runs on anyway, three
+consecutive rounds with no `production-defect` end it whatever else they found.
 
 **Backstops — stop and ask Jakob, never continue silently and never merge on
-one:** five review rounds on one change, spend above 3× its estimated effort, or
-a test diff more than 10× the production diff. Tripping one does not mean the
-loop was wrong; it means the cost should be visible while it is being paid.
+one:** five review rounds on one change, a test diff more than 10× the
+production diff, or — where the work came from a planning-graph node carrying an
+`effort` — spend above 3× that budget. Tripping one does not mean the loop was
+wrong; it means the cost should be visible while it is being paid.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -396,7 +402,8 @@ or all-outgoing changes.
 
 ### 10. Merge to main — definition of done
 
-When the review loop is clean, merge the PR to `main` autonomously:
+When the review loop has reached its termination criterion (step 8), merge the
+PR to `main` autonomously:
 
 ```bash
 gh pr merge <number> \
