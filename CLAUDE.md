@@ -354,21 +354,23 @@ Agent(   # 2. mutation — its survivors are residue, not blockers
 )
 ```
 
-**Run both where the change has two distinguishable halves** — production code,
-and a test suite whose job is to catch a break in it. Then the mutation reviewer
-edits the first and reports what the second let through. A loop with only the
+**Run both where the change has two distinguishable halves** — an executable
+half (module, script, config: what actually runs), and a test suite whose job is
+to catch a break in it. Then the mutation reviewer edits the first and reports
+what the second let through. A loop with only the
 correctness reviewer on such a change terminates at the first round it finds
 nothing and never asks the second question; one with only the mutation reviewer
 is the runaway this section exists to stop. Where such a change is too small to
 mutate meaningfully, say so in the round report rather than silently dropping the
 reviewer.
 
-**Where it has only one half, one correctness pass per round is the round.** That
-covers a docs-only or `CLAUDE.md` change (text, no suite) and a test-only change
-(a suite with nothing separate to break) alike: in both, the mutation reviewer
-would be editing the very artifact it then asks the suite about, a question with
-no referent. Do not improvise one, and do not treat its absence as a round that
-did not count.
+**Where the PR changes no executable code, one correctness pass per round is the
+round** — a docs-only change, a test-only one, a fixture, or any mix of those.
+The mutation reviewer would be editing the very artifact it then asks the suite
+about, a question with no referent. Do not improvise one, and do not treat its
+absence as a round that did not count. Read the whole rule off that one fact:
+whether there is an executable half decides the reviewer count here, what stands
+in for production code below, and whether the 10× backstop applies at all.
 
 **What "production code" means here.** The code this change ships to a running
 system — the module, script or config the PR edits — as opposed to the tests and
@@ -382,14 +384,16 @@ block, so each stands in for production code, **each under its own condition**:
   `backend/DEVELOPMENT.md` — the shape this file requires, not an unusual one —
   has the module judged as production code *and* the table judged as its own. A
   wrong row there is a defect, not residue: wrong docs are worse than no docs.
-- **Tests and fixtures** — they stand in **only where they are the whole
-  change**: a regression test added on its own, a test-durability follow-up, a
-  new fixture or golden file. Then an assertion that is wrong, that passes
-  against the bug it claims to catch, or that does not exercise what its name
-  says is a `production-defect`. This repo produces that class deliberately, so
-  it must not merge unreviewed. Where a PR also changes code, its tests are
-  tests again — a gap in them is `test-durability`, and it goes to the residue
-  node rather than into this loop.
+- **Tests and fixtures** — they stand in **wherever the PR changes no executable
+  code**: a regression test added on its own, a test-durability follow-up, a new
+  fixture or golden file, or any of those alongside a doc change. Then an
+  assertion that is wrong, that passes against the bug it claims to catch, or
+  that does not exercise what its name says is a `production-defect`. This repo
+  produces that class deliberately — and step 10 pushes a doc update into the
+  same PR — so a doc line riding along must not turn a wrong assertion into
+  residue. Where the PR **does** change executable code, its tests are tests
+  again: a gap in them is `test-durability` and goes to the residue node rather
+  than into this loop.
 
 **The mutation reviewer works on the executable half only** — the module, script
 or config — never on prose or on the tests themselves, because no suite covers
@@ -425,9 +429,9 @@ threshold. Check the backstops only when the round just read left a
 - a **test diff both more than 10× the production diff and above 500 lines**.
   The ratio alone means nothing on a small change: the three-line fix plus the
   regression test this file requires routinely exceeds 10×, while the runaway
-  behind the threshold was 5054 test lines against 40 of shell. On a change with
-  only one half — docs-only, or test-only such as a regression test or a
-  test-durability follow-up — it does not apply at all; or
+  behind the threshold was 5054 test lines against 40 of shell. Where the PR
+  changes no executable code the denominator is zero, so it does not apply at
+  all; or
 - **cost above 3× what the change was budgeted**, where that is readable: the
   planning graph's `effort` is a size class, not a spend, so this trips only
   where a real cost figure is available. Where none is, say so in the round
