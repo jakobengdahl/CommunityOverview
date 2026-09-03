@@ -601,10 +601,13 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    planning graph as a `small-fix`-tagged Task node and do not fix it here.
 3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
    id/name). Note items explicitly **not** addressed.
-4. **Review loop:** run it as described in step 8 — a fix plus its regression
-   test has both halves, so that is two reviewers per round. Because these are
-   small, isolated fixes the loop typically converges in one round — but run it
-   to step 8's termination criterion, same as any other PR.
+4. **Review loop:** run it as described in step 8, reading the reviewer count off
+   the same property step 8 does — does this batch change executable code. A fix
+   plus its regression test does, so it takes two reviewers; a batch drained from
+   the residue node, or one of stale comments and dead code, does not, and there
+   one correctness pass is the round. Because these are small, isolated fixes the
+   loop typically converges in one round — but run it to step 8's termination
+   criterion, same as any other PR.
 5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
    Corp planning graph (record the PR/commit on each node per the MCP-first
    planning rules).
