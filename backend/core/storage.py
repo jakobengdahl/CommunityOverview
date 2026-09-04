@@ -1253,16 +1253,12 @@ class GraphStorage:
 
         collected_edges = {}
         # Outgoing edges
-        for _, _, _, edge_data in self.graph.out_edges(
-            node_id, keys=True, data=True
-        ):
+        for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
             edge = edge_data["data"]
             collected_edges[edge.id] = edge
 
         # Incoming edges
-        for _, _, _, edge_data in self.graph.in_edges(
-            node_id, keys=True, data=True
-        ):
+        for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
             edge = edge_data["data"]
             collected_edges[edge.id] = edge
 
