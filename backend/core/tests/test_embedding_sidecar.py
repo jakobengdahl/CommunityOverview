@@ -7,6 +7,7 @@ everything else — never a partial or silently wrong read.
 """
 
 import json
+import random
 import struct
 import tempfile
 from pathlib import Path
@@ -190,3 +191,97 @@ def test_a_payload_longer_than_the_header_promises_is_rejected(tmp_path):
 
     with pytest.raises(EmbeddingSidecarError):
         sidecar.load()
+
+
+def _valid_blob() -> bytes:
+    header = json.dumps(
+        {"dtype": "float32", "rows": 2, "dim": 3, "ids": ["a", "b"]}
+    ).encode("utf-8")
+    payload = np.ones(6, dtype="<f4").tobytes()
+    return MAGIC + struct.pack("<I", len(header)) + header + payload
+
+
+def _load_raises_only_its_own_error(path: Path, blob: bytes) -> None:
+    """load() may succeed or raise EmbeddingSidecarError. Anything else is the
+    defect: GraphStorage catches only EmbeddingSidecarError, so a stray
+    ValueError, TypeError or struct.error turns a damaged derived file into a
+    failed graph load."""
+    path.write_bytes(blob)
+    try:
+        FileEmbeddingSidecar(path).load()
+    except EmbeddingSidecarError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - the point of the test
+        raise AssertionError(
+            f"load() raised {type(exc).__name__}({exc}) for {blob[:64]!r}...; "
+            f"only EmbeddingSidecarError may escape"
+        ) from exc
+
+
+def test_no_truncation_of_a_valid_sidecar_escapes_as_another_error(tmp_path):
+    """Every prefix, not a chosen few. Enumerating shapes one at a time is how
+    three separate escapes reached the graph loader across as many reviews."""
+    blob = _valid_blob()
+    path = tmp_path / "graph.embeddings.bin"
+
+    for cut in range(len(blob) + 1):
+        _load_raises_only_its_own_error(path, blob[:cut])
+
+
+def test_no_extension_of_a_valid_sidecar_escapes_as_another_error(tmp_path):
+    blob = _valid_blob()
+    path = tmp_path / "graph.embeddings.bin"
+
+    for extra in range(1, 40):
+        _load_raises_only_its_own_error(path, blob + b"\xff" * extra)
+
+
+def test_no_single_byte_corruption_escapes_as_another_error(tmp_path):
+    blob = _valid_blob()
+    path = tmp_path / "graph.embeddings.bin"
+
+    for offset in range(len(blob)):
+        for value in (0x00, 0x01, 0x7F, 0xFF):
+            corrupted = bytearray(blob)
+            corrupted[offset] = value
+            _load_raises_only_its_own_error(path, bytes(corrupted))
+
+
+def test_no_header_type_confusion_escapes_as_another_error(tmp_path):
+    """JSON has types Python's isinstance checks do not separate on their own —
+    bool is a subclass of int, and True == 1, so `rows: true` satisfies a
+    length check of rows*dim*4 against a 4-byte payload."""
+    path = tmp_path / "graph.embeddings.bin"
+    # Each payload is sized to what the header CLAIMS, so the length check
+    # cannot mask the type confusion by rejecting it first for another reason.
+    # rows=True, dim=1 promises True*1*4 == 4 bytes, and gets exactly 4.
+    cases = [
+        ({"dtype": "float32", "rows": True, "dim": 1, "ids": ["a"]}, 4),
+        ({"dtype": "float32", "rows": 1, "dim": True, "ids": ["a"]}, 4),
+        ({"dtype": "float32", "rows": True, "dim": True, "ids": ["a"]}, 4),
+        ({"dtype": "float32", "rows": False, "dim": False, "ids": []}, 0),
+        ({"dtype": "float32", "rows": 1.0, "dim": 4.0, "ids": ["a"]}, 16),
+        ({"dtype": "float32", "rows": 1, "dim": 4, "ids": "not-a-list"}, 16),
+        ({"dtype": "float32", "rows": None, "dim": None, "ids": []}, 0),
+        ({"dtype": "float32", "rows": 1, "dim": 4, "ids": [None]}, 16),
+        ({"dtype": "float32", "rows": 1, "dim": 4}, 16),
+        ({"rows": 1, "dim": 4, "ids": ["a"]}, 16),
+        ([], 0),
+        ("a string header", 0),
+    ]
+    for header, payload_len in cases:
+        encoded = json.dumps(header).encode("utf-8")
+        blob = MAGIC + struct.pack("<I", len(encoded)) + encoded + b"\x00" * payload_len
+        _load_raises_only_its_own_error(path, blob)
+
+
+def test_random_bytes_behind_a_valid_magic_never_escape(tmp_path):
+    """The magic is the cheap gate; everything after it is attacker- or
+    corruption-controlled. Seeded, so a failure is reproducible."""
+    rng = random.Random(20260904)
+    path = tmp_path / "graph.embeddings.bin"
+
+    for _ in range(400):
+        length = rng.randrange(0, 96)
+        body = bytes(rng.randrange(256) for _ in range(length))
+        _load_raises_only_its_own_error(path, MAGIC + body)

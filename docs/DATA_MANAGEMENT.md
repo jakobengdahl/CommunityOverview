@@ -202,7 +202,7 @@ What this means in practice:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
-| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see below) |
+| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see *Embedding Sidecar* above) |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 

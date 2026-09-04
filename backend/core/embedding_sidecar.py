@@ -110,8 +110,16 @@ class FileEmbeddingSidecar:
         ids = header.get("ids")
         rows = header.get("rows")
         dim = header.get("dim")
+        # bool is a subclass of int, and True == 1, so a header carrying
+        # `true` for rows and dim satisfies every check below — including the
+        # exact payload length, since True * True * 4 is 4. It then reaches
+        # reshape(), which raises TypeError rather than anything this module
+        # declares, and a caller that only catches EmbeddingSidecarError loses
+        # the whole graph load to a damaged derived file.
         if (
             not isinstance(ids, list)
+            or isinstance(rows, bool)
+            or isinstance(dim, bool)
             or not isinstance(rows, int)
             or not isinstance(dim, int)
             or rows < 0
