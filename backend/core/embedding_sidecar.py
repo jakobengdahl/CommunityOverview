@@ -176,6 +176,30 @@ class FileEmbeddingSidecar:
         """
         np = _ensure_numpy()
 
+        # Never replace a file that holds something else. EMBEDDINGS_FILE was
+        # inert before this format existed and the old .env.example named a
+        # legacy embeddings.pkl for it, so an upgraded deployment can point
+        # this straight at that pickle — whose vectors are then the only copy
+        # anywhere, and which the migration script still needs to read. The
+        # script already refuses that collision; the app reaches it first.
+        #
+        # An empty file is a failed write, not data, so it is replaceable.
+        if self.path.exists() and self.path.stat().st_size > 0:
+            try:
+                with open(self.path, "rb") as existing:
+                    head = existing.read(len(MAGIC))
+            except OSError as exc:
+                raise EmbeddingSidecarError(
+                    f"cannot inspect {self.path} before writing it: {exc}"
+                ) from exc
+            if head != MAGIC:
+                raise EmbeddingSidecarError(
+                    f"refusing to overwrite {self.path}: it already exists and "
+                    f"is not an embedding sidecar. Point EMBEDDINGS_FILE at a "
+                    f"path of its own; a legacy embeddings.pkl belongs to "
+                    f"scripts/migrate_embeddings.py, not here"
+                )
+
         ids: List[str] = list(vectors.keys())
         if ids:
             rows_list = [np.asarray(vectors[i], dtype=np.float32).ravel() for i in ids]

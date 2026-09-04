@@ -345,3 +345,35 @@ def test_the_documented_layout_matches_the_actual_magic():
     documented = re.search(r"magic\s+(\d+) bytes", module.__doc__)
     assert documented, "the layout table no longer states the magic length"
     assert int(documented.group(1)) == len(MAGIC)
+
+
+def test_save_refuses_to_overwrite_a_file_that_is_not_a_sidecar(tmp_path):
+    """EMBEDDINGS_FILE was inert before this format existed, and the .env.example
+    that shipped with it named a legacy embeddings.pkl. An upgraded deployment
+    can therefore point this straight at that pickle — whose vectors are the
+    only copy anywhere, and which the migration script still has to read.
+    migrate_embeddings already refuses the collision; the app reaches it first."""
+    path = tmp_path / "embeddings.pkl"
+    original = b"\x80\x04\x95 a pickle, not a sidecar"
+    path.write_bytes(original)
+
+    with pytest.raises(EmbeddingSidecarError, match="refusing to overwrite"):
+        FileEmbeddingSidecar(path).save({"n1": np.ones(4, dtype=np.float32)})
+
+    assert path.read_bytes() == original
+
+
+def test_save_replaces_an_empty_file_and_a_real_sidecar(tmp_path):
+    """A zero-byte file is a failed write, not data. And the guard must not
+    stop the ordinary case: a sidecar rewriting itself."""
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    FileEmbeddingSidecar(empty).save({"n1": np.ones(4, dtype=np.float32)})
+    assert set(FileEmbeddingSidecar(empty).load()) == {"n1"}
+
+    sidecar = FileEmbeddingSidecar(tmp_path / "graph.embeddings.bin")
+    sidecar.save({"n1": np.ones(4, dtype=np.float32)})
+    sidecar.save(
+        {"n1": np.ones(4, dtype=np.float32), "n2": np.zeros(4, dtype=np.float32)}
+    )
+    assert set(sidecar.load()) == {"n1", "n2"}

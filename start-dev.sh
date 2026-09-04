@@ -169,10 +169,20 @@ mkdir -p "$DATA_DIR/examples"
 # Call this only AFTER the replacement is actually in place - a failed download
 # or a mistyped path must leave the existing pair intact.
 drop_stale_embeddings() {
-    if [ -f "$ACTIVE_DATA_EMBEDDINGS" ]; then
-        rm -f "$ACTIVE_DATA_EMBEDDINGS"
-        echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
+    if [ ! -f "$ACTIVE_DATA_EMBEDDINGS" ]; then
+        return
     fi
+    # Only ever delete a sidecar. EMBEDDINGS_FILE can be pointed at something
+    # else - the old .env.example named a legacy embeddings.pkl for it - and
+    # that file is not derived data we can regenerate.
+    if [ -s "$ACTIVE_DATA_EMBEDDINGS" ] && \
+       ! head -c 7 "$ACTIVE_DATA_EMBEDDINGS" | cmp -s - <(printf 'CKGEMB\001'); then
+        echo -e "${YELLOW}Not removing $ACTIVE_DATA_EMBEDDINGS: it is not an embedding sidecar.${NC}"
+        echo -e "${YELLOW}Point EMBEDDINGS_FILE at a path of its own.${NC}"
+        return
+    fi
+    rm -f "$ACTIVE_DATA_EMBEDDINGS"
+    echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
 }
 
 if [ -n "$DATA_SOURCE" ]; then

@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# What start-dev.sh checks for before deleting anything at the sidecar path.
+SIDECAR_BYTES = b"CKGEMB\x01" + b"a stand-in for a real matrix"
 START_DEV = REPO_ROOT / "start-dev.sh"
 
 
@@ -113,7 +115,9 @@ def workspace():
         graph = {"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
         (root / "data" / "active" / "graph.json").write_text(json.dumps(graph))
         (root / "data" / "examples" / "default.json").write_text(json.dumps(graph))
-        (root / "data" / "active" / "graph.embeddings.bin").write_bytes(b"vectors")
+        # Must carry the format's magic: the cleanup refuses to delete a file
+        # that is not a sidecar, so a stand-in without it tests the wrong path.
+        (root / "data" / "active" / "graph.embeddings.bin").write_bytes(SIDECAR_BYTES)
         (root / "replacement.json").write_text(json.dumps(graph))
         yield root
 
@@ -127,7 +131,7 @@ def test_an_ordinary_start_keeps_the_sidecar(data_setup_block, workspace):
     _run(data_setup_block, workspace)
 
     assert _sidecar(workspace).exists()
-    assert _sidecar(workspace).read_bytes() == b"vectors"
+    assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
 
 
 def test_replacing_the_graph_drops_the_sidecar(data_setup_block, workspace):
@@ -145,7 +149,7 @@ def test_a_missing_data_source_leaves_the_sidecar_alone(data_setup_block, worksp
 
     assert "Data file not found" in output
     assert _sidecar(workspace).exists()
-    assert _sidecar(workspace).read_bytes() == b"vectors"
+    assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
 
 
 def test_seeding_a_missing_graph_from_the_example_drops_the_sidecar(
@@ -165,7 +169,7 @@ def test_an_absolute_configured_sidecar_is_the_one_removed(
     """EMBEDDINGS_FILE moves the sidecar; the cleanup has to follow it, or it
     deletes nothing and the stale vectors survive the graph replacement."""
     configured = workspace / "elsewhere.bin"
-    configured.write_bytes(b"vectors")
+    configured.write_bytes(SIDECAR_BYTES)
 
     _run(
         data_setup_block,
@@ -185,7 +189,7 @@ def test_a_relative_configured_sidecar_resolves_beside_the_graph(
     """A relative EMBEDDINGS_FILE belongs next to the graph file, the same way
     AppConfig resolves it — not in whatever directory the script was run from."""
     configured = workspace / "data" / "active" / "custom.bin"
-    configured.write_bytes(b"vectors")
+    configured.write_bytes(SIDECAR_BYTES)
 
     _run(
         data_setup_block,
@@ -304,7 +308,7 @@ def test_a_failed_download_leaves_the_sidecar_alone(data_setup_block, workspace)
     )
 
     assert _sidecar(workspace).exists(), output
-    assert _sidecar(workspace).read_bytes() == b"vectors"
+    assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
 
 
 @pytest.fixture
@@ -348,6 +352,30 @@ def test_an_http_error_response_leaves_the_sidecar_alone(
     assert _sidecar(workspace).exists(), (
         "an HTTP error was treated as a successful download and the sidecar was dropped"
     )
-    assert _sidecar(workspace).read_bytes() == b"vectors"
+    assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
     graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
     assert graph["nodes"] == [], "the 404 body was written over the graph"
+
+
+def test_the_cleanup_refuses_to_delete_a_file_that_is_not_a_sidecar(
+    data_setup_block, resolution_block, workspace
+):
+    """EMBEDDINGS_FILE may point at a legacy embeddings.pkl — the value the
+    previous .env.example suggested. That file is not derived data and cannot
+    be regenerated, so the cleanup must leave it where it is rather than
+    treating the path as its own."""
+    foreign = workspace / "embeddings.pkl"
+    original = b"\x80\x04\x95 a pickle, not a sidecar"
+    foreign.write_bytes(original)
+
+    output = _run(
+        data_setup_block,
+        workspace,
+        data_source=str(workspace / "replacement.json"),
+        env={"EMBEDDINGS_FILE": str(foreign)},
+        resolution=resolution_block,
+    )
+
+    assert foreign.exists(), output
+    assert foreign.read_bytes() == original
+    assert "not an embedding sidecar" in output
