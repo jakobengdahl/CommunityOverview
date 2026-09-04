@@ -540,18 +540,32 @@ def test_update_record_renders_a_name_not_a_raw_id(storage):
     assert _rendered_entity_name(update) != update["entity_id"]
 
 
-@pytest.mark.parametrize("payload_key", ["before", "after", "patch"])
-def test_no_history_record_carries_an_embedding(storage, payload_key):
+@pytest.mark.parametrize(
+    "payload_key,expected_present",
+    # Of the three records (create, update, delete): a create has no `before`,
+    # a delete no `after`, and only the update carries a `patch`.
+    [("before", 2), ("after", 2), ("patch", 1)],
+)
+def test_no_history_record_carries_an_embedding(storage, payload_key, expected_present):
     storage.add_nodes([_node_with_bulk(embedding=[0.25] * 8)], [])
     storage.update_node("actor-1", {"description": "new desc"})
     storage.delete_nodes(["actor-1"], confirmed=True)
 
     records = storage.get_node_history("actor-1")
     assert len(records) == 3
+
+    # A create has no `before` and a delete no `after`, so those combinations
+    # have nothing to inspect. Count the ones that do, and require that the
+    # parametrisation actually looked at something.
+    inspected = 0
     for record in records:
         payload = record.get(payload_key)
-        if isinstance(payload, dict):
-            assert "embedding" not in payload
+        if payload is None:
+            continue
+        assert isinstance(payload, dict)
+        assert "embedding" not in payload
+        inspected += 1
+    assert inspected == expected_present
 
 
 def _update_event(before, after, patch):
@@ -634,14 +648,20 @@ def test_edge_update_keeps_full_snapshots_so_its_diff_still_works(storage):
         target="actor-2",
         type=RelationshipType.RELATES_TO,
         label="first",
+        # Bulk the trim would drop if edges were ever projected. Without it the
+        # fixture has nothing outside the display key and would pass either way.
+        metadata={"note": BULK},
     )
     storage.add_nodes([], [edge])
     storage.update_edge("e1", {"label": "second"})
 
     update = storage.get_edge_history("e1")[0]
 
-    # Edge updates carry no patch, so a reader diffs the snapshots instead.
+    # Edge updates carry no patch, so a reader diffs the snapshots instead --
+    # which needs both sides whole, bulk included.
     assert not update["patch"]
+    assert update["before"]["metadata"] == {"note": BULK}
+    assert update["after"]["metadata"] == {"note": BULK}
     assert _rendered_diff(update) == [("label", "first", "second")]
 
 
@@ -698,3 +718,55 @@ def test_a_patched_entity_keeps_the_label_a_reader_falls_back_to():
     assert _rendered_entity_name(record) == "the edge"
     assert _rendered_entity_name(record) != record["entity_id"]
     assert _rendered_diff(record) == [("weight", 1, 2)]
+
+
+def test_building_a_record_does_not_alter_the_event_itself():
+    """History trims its own copy; subscribers still get the whole event.
+
+    `append_event` builds the trimmed record while `dispatch(event)` hands the
+    same Event to webhook subscribers and system listeners. `_without_excluded`
+    returns the caller's own dict when there is nothing to strip, so an
+    "optimisation" to pop the key in place would quietly strip it from the live
+    event too, and every other test here would still pass.
+    """
+    before = {"name": "A", "summary": "s", "embedding": [0.25] * 8}
+    after = {"name": "A", "summary": "s", "embedding": [0.5] * 8}
+    patch = {"embedding": [0.5] * 8}
+    event = _update_event(before=before, after=after, patch=patch)
+
+    record = event_to_history_record(event)
+
+    assert "embedding" not in record["after"]
+    # The event the dispatcher will send is untouched.
+    assert event.entity.before == before
+    assert event.entity.after == after
+    assert event.entity.patch == patch
+    assert event.entity.after["embedding"] == [0.5] * 8
+    sent = event.to_webhook_payload()["entity"]["data"]
+    assert sent["after"]["embedding"] == [0.5] * 8
+    assert sent["before"]["embedding"] == [0.25] * 8
+    assert sent["patch"] == patch
+
+
+def test_an_empty_patch_is_no_patch_and_keeps_both_snapshots_whole():
+    """`{}` means nothing changed, not "everything was dropped".
+
+    Storage cannot currently produce it — a node update always bumps
+    `updated_at` — so this is asserted against the record builder, where the
+    distinction is made.
+    """
+    whole = {"name": "A", "weight": 1, "summary": BULK}
+
+    record = event_to_history_record(_update_event(before=whole, after=whole, patch={}))
+
+    assert record["before"] == whole
+    assert record["after"] == whole
+
+
+def test_an_absent_snapshot_stays_absent_when_a_patch_is_present():
+    record = event_to_history_record(
+        _update_event(before=None, after={"name": "A", "x": 1}, patch={"x": 1})
+    )
+
+    assert record["before"] is None
+    assert record["after"] == {"name": "A", "x": 1}
