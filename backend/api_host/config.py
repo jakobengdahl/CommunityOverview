@@ -36,7 +36,7 @@ class AppConfig:
     # than X" is a retention policy an operator has to choose, not one to
     # inherit from a default.
     history_max_events: int = field(
-        default_factory=lambda: int(os.getenv("HISTORY_MAX_EVENTS", "100000"))
+        default_factory=lambda: int(os.getenv("HISTORY_MAX_EVENTS") or "100000")
     )
     history_max_age_days: Optional[float] = field(
         default_factory=lambda: (

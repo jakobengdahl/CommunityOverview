@@ -79,3 +79,28 @@ def test_zero_keeps_every_record():
             assert storage._history_store.max_events is None
         finally:
             storage.flush()
+
+
+def test_an_empty_env_var_falls_back_to_the_default(monkeypatch):
+    """A set-but-empty variable is a routine compose/k8s artifact. Passed
+    straight to int() it raises at app construction; the age field two lines
+    below already tolerates it, so the pair must agree."""
+    monkeypatch.setenv("HISTORY_MAX_EVENTS", "")
+    monkeypatch.setenv("HISTORY_MAX_AGE_DAYS", "")
+
+    config = AppConfig()
+
+    assert config.history_max_events == 100_000
+    assert config.history_max_age_days is None
+
+
+def test_an_empty_env_var_does_not_break_app_construction(monkeypatch):
+    monkeypatch.setenv("HISTORY_MAX_EVENTS", "")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app = create_app(AppConfig(graph_file=os.path.join(tmpdir, "graph.json")))
+        storage = app.state.graph_storage
+        try:
+            assert storage._history_store.max_events == 100_000
+        finally:
+            storage.flush()

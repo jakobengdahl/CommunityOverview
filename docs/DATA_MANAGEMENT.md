@@ -167,7 +167,10 @@ newest records last, one self-contained JSON record per line.
 newest N, atomically. `HISTORY_MAX_AGE_DAYS` additionally drops records older than
 a given age; it is unset by default, because "delete records older than X" is a
 retention policy an operator should choose rather than inherit. Setting
-`HISTORY_MAX_EVENTS=0` keeps every record and disables trimming.
+`HISTORY_MAX_EVENTS=0` removes the count cap; trimming then stops altogether
+unless `HISTORY_MAX_AGE_DAYS` is also set, in which case age-based trimming
+still runs. To keep every record, leave both unset (or `HISTORY_MAX_EVENTS=0`
+with no age set).
 
 The default is deliberately generous: high enough that upgrading an existing
 deployment does not retroactively delete anyone's audit trail, while still bounding
@@ -187,7 +190,7 @@ truncated or discarded on its own; the graph does not depend on it.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
-| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see below); `0` keeps every record |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see *Mutation History* above); `0` removes the count cap |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Age-based history retention, opt-in |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |

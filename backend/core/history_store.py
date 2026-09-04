@@ -16,6 +16,7 @@ so concurrent writers never interleave a single record.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -211,7 +212,8 @@ class GraphHistoryStore:
     def get_recent(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """Return recent history records, newest first."""
         with self._lock:
-            return self._take_page(self._iter_records_reverse(), limit, offset)
+            with contextlib.closing(self._iter_records_reverse()) as stream:
+                return self._take_page(stream, limit, offset)
 
     def get_entity_history(
         self,
@@ -226,13 +228,14 @@ class GraphHistoryStore:
         node and an edge that happen to share an id do not collide.
         """
         with self._lock:
-            matches = (
-                record
-                for record in self._iter_records_reverse()
-                if record.get("entity_id") == entity_id
-                and (kind is None or record.get("entity_kind") == kind)
-            )
-            return self._take_page(matches, limit, offset)
+            with contextlib.closing(self._iter_records_reverse()) as stream:
+                matches = (
+                    record
+                    for record in stream
+                    if record.get("entity_id") == entity_id
+                    and (kind is None or record.get("entity_kind") == kind)
+                )
+                return self._take_page(matches, limit, offset)
 
     def _iter_records_reverse(self) -> Iterator[Dict[str, Any]]:
         """Yield records newest-first, reading the file backwards.
@@ -299,20 +302,27 @@ class GraphHistoryStore:
             yield record
 
     def _iter_lines_forward(self) -> Iterator[tuple]:
-        """Yield ``(raw_line, record)`` oldest-first, skipping malformed lines."""
+        """Yield ``(raw_line, record)`` oldest-first, skipping malformed lines.
+
+        Read as bytes and decoded per line: a line torn mid-character — what a
+        crash during an append leaves behind — would otherwise raise
+        UnicodeDecodeError out of compaction, where append_record swallows it
+        and retries every interval, silently disabling retention for good.
+        """
         if not self.history_path.exists():
             return
 
-        with open(self.history_path, "r", encoding="utf-8") as f:
+        with open(self.history_path, "rb") as f:
             _lock_file(f, exclusive=False)
             try:
-                for line in f:
-                    stripped = line.strip()
+                for raw in f:
+                    stripped = raw.strip()
                     if not stripped:
                         continue
                     try:
-                        yield stripped, json.loads(stripped)
-                    except json.JSONDecodeError:
+                        line = stripped.decode("utf-8")
+                        yield line, json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
             finally:
                 _unlock_file(f)
@@ -328,7 +338,6 @@ class GraphHistoryStore:
         temp_fd, temp_path = tempfile.mkstemp(
             suffix=".ndjson",
             prefix="graph_history_",
-            dir=self.history_path.parent,
         )
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as out:

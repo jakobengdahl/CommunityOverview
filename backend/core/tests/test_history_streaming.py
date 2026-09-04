@@ -49,12 +49,25 @@ class TestReverseLineReader:
     mid-character is the whole risk here, so drive it at a chunk size of one."""
 
     @staticmethod
-    def _reverse(raw: bytes, chunk: int = 64 * 1024, monkeypatch=None):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "f"
-            path.write_bytes(raw)
-            with open(path, "rb") as f:
-                return list(_iter_lines_reverse(f))
+    def _reverse(raw: bytes, chunk: int = 64 * 1024):
+        """Read `raw` backwards at the given chunk size.
+
+        The chunk size is applied here rather than left to the caller: a helper
+        that accepts the argument and ignores it makes every boundary case
+        silently run at the default and pass regardless.
+        """
+        import backend.core.history_store as hs
+
+        original = hs._REVERSE_CHUNK_BYTES
+        hs._REVERSE_CHUNK_BYTES = chunk
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "f"
+                path.write_bytes(raw)
+                with open(path, "rb") as f:
+                    return list(_iter_lines_reverse(f))
+        finally:
+            hs._REVERSE_CHUNK_BYTES = original
 
     def test_matches_reading_forwards_and_reversing(self):
         raw = b"first\nsecond\nthird\n"
@@ -74,30 +87,53 @@ class TestReverseLineReader:
         assert self._reverse(b"") == []
 
     @pytest.mark.parametrize("chunk", [1, 2, 3, 7, 64])
-    def test_every_chunk_boundary_gives_the_same_answer(self, chunk, monkeypatch):
+    def test_every_chunk_boundary_gives_the_same_answer(self, chunk):
         """A line split across chunks must be reassembled, not truncated."""
-        import backend.core.history_store as hs
-
-        monkeypatch.setattr(hs, "_REVERSE_CHUNK_BYTES", chunk)
         raw = b"alpha\nbeta\ngamma\ndelta\n"
 
-        assert [line for line in self._reverse(raw) if line] == [
+        assert [line for line in self._reverse(raw, chunk) if line] == [
             b"delta",
             b"gamma",
             b"beta",
             b"alpha",
         ]
 
-    def test_multibyte_characters_split_across_chunks_survive(self, monkeypatch):
+    @pytest.mark.parametrize("chunk", [1, 3, 64])
+    def test_a_missing_trailing_newline_at_any_chunk_size(self, chunk):
+        raw = b"first\nsecond\nthird"
+
+        assert [line for line in self._reverse(raw, chunk) if line] == [
+            b"third",
+            b"second",
+            b"first",
+        ]
+
+    @pytest.mark.parametrize("chunk", [1, 2, 3, 7])
+    def test_multibyte_characters_split_across_chunks_survive(self, chunk):
         """Holding back the leading fragment is what keeps a UTF-8 sequence
         whole; decoding a half character would raise instead."""
-        import backend.core.history_store as hs
-
-        monkeypatch.setattr(hs, "_REVERSE_CHUNK_BYTES", 3)
         raw = "Åland\nGöteborg\nMalmö\n".encode("utf-8")
 
-        decoded = [line.decode("utf-8") for line in self._reverse(raw) if line]
+        decoded = [line.decode("utf-8") for line in self._reverse(raw, chunk) if line]
         assert decoded == ["Malmö", "Göteborg", "Åland"]
+
+    @pytest.mark.parametrize("chunk", [1, 64])
+    def test_a_single_byte_file(self, chunk):
+        assert [line for line in self._reverse(b"x", chunk) if line] == [b"x"]
+
+    @pytest.mark.parametrize("chunk", [1, 2, 64])
+    def test_a_file_of_only_newlines_yields_no_content(self, chunk):
+        assert [line for line in self._reverse(b"\n\n\n", chunk) if line] == []
+
+    @pytest.mark.parametrize("chunk", [1, 2, 3, 5, 64])
+    def test_agrees_with_reading_forwards_and_reversing(self, chunk):
+        """The property the whole change rests on, stated directly."""
+        raw = b"a\nbb\nccc\n\ndddd\neeeee"
+        forwards = [line for line in raw.split(b"\n") if line]
+
+        backwards = [line for line in self._reverse(raw, chunk) if line]
+
+        assert backwards == list(reversed(forwards))
 
 
 class TestQueriesReadOnlyWhatTheyReturn:
@@ -195,7 +231,10 @@ class TestMemoryIsBoundedByThePageNotTheFile:
             tracemalloc.stop()
 
         assert len(page) == 50
-        assert peak < file_size / 4, (
+        # Honest bound: one 64 KB chunk plus 50 records of ~1 kB, with room for
+        # interpreter overhead. A quarter of the file would also catch a full
+        # reload, but would let a few-hundred-kB regression through.
+        assert peak < 400_000, (
             f"peak allocation {peak} is not bounded by the page: the query is "
             f"still sized by the {file_size}-byte file"
         )
@@ -213,7 +252,7 @@ class TestMemoryIsBoundedByThePageNotTheFile:
             tracemalloc.stop()
 
         assert len(store.get_recent(limit=1000)) == 100
-        assert peak < file_size / 4, (
+        assert peak < 400_000, (
             f"peak allocation {peak} is not bounded: compaction still loads the "
             f"{file_size}-byte file"
         )
@@ -309,3 +348,129 @@ class TestCompactionKeepsWhatRetentionSays:
             if name.startswith("graph_history_")
         ]
         assert leftovers == []
+
+
+class TestTornBytesDoNotDisableRetention:
+    """A crash during an append leaves a line cut mid-character. If that raises
+    out of compaction, append_record swallows it and retries every interval, so
+    retention silently stops running and the sidecar grows without bound — the
+    exact condition retention exists to prevent."""
+
+    @staticmethod
+    def _with_torn_line(path: Path, records) -> None:
+        with open(path, "wb") as f:
+            # A UTF-8 sequence cut in half, as an interrupted write leaves it:
+            # 0xC3 is the lead byte of "ö" with its continuation byte missing.
+            # Truncating after a complete character would still be valid UTF-8
+            # and would prove nothing.
+            torn = "Gö".encode("utf-8")[:-1]
+            assert torn.decode("utf-8", errors="ignore") != torn.decode(
+                "utf-8", errors="replace"
+            ), "fixture is not actually invalid UTF-8"
+            f.write(torn + b"\n")
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n")
+
+    def test_compaction_survives_a_torn_line(self, store_path):
+        self._with_torn_line(store_path, [_record(f"n{i}") for i in range(5)])
+        store = GraphHistoryStore(store_path, max_events=2, compaction_interval=1000)
+
+        store.compact()
+
+        assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["n4", "n3"]
+
+    def test_retention_keeps_running_after_a_torn_line(self, store_path):
+        """append_record swallows a compaction failure, so a raise here shows up
+        only as a sidecar that never gets trimmed again."""
+        self._with_torn_line(store_path, [])
+        store = GraphHistoryStore(store_path, max_events=2, compaction_interval=1)
+
+        for i in range(6):
+            store.append_record(_record(f"n{i}"))
+
+        surviving = [
+            line for line in store_path.read_text(errors="replace").splitlines() if line
+        ]
+        assert len(surviving) == 2, "retention stopped running"
+
+    def test_queries_survive_a_torn_line(self, store_path):
+        self._with_torn_line(store_path, [_record("good")])
+        store = GraphHistoryStore(store_path)
+
+        assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["good"]
+        assert [r["entity_id"] for r in store.get_entity_history("good")] == ["good"]
+
+
+class TestLockOrdering:
+    """The module documents 'an exclusive OS file lock plus an in-process lock'.
+    A page walk stops mid-stream, so the reader has to be closed explicitly:
+    left to refcounting, the file lock outlives the in-process lock, and an
+    exception during the walk can strand it entirely."""
+
+    @staticmethod
+    def _record_order(store, call, monkeypatch):
+        import backend.core.history_store as hs
+
+        order = []
+        real_unlock = hs._unlock_file
+        monkeypatch.setattr(
+            hs,
+            "_unlock_file",
+            lambda f: (order.append("file_unlock"), real_unlock(f))[1],
+        )
+
+        real_lock = store._lock
+
+        class _Recording:
+            def __enter__(self):
+                return real_lock.__enter__()
+
+            def __exit__(self, *exc):
+                order.append("self_lock_release")
+                return real_lock.__exit__(*exc)
+
+        store._lock = _Recording()
+        call()
+        return order
+
+    def test_the_file_lock_is_released_inside_the_in_process_lock(
+        self, store_path, monkeypatch
+    ):
+        _write(store_path, [_record(f"n{i}") for i in range(20)])
+        store = GraphHistoryStore(store_path)
+
+        order = self._record_order(
+            store, lambda: store.get_recent(limit=2), monkeypatch
+        )
+
+        assert order == ["file_unlock", "self_lock_release"]
+
+    def test_entity_history_releases_in_the_same_order(self, store_path, monkeypatch):
+        """The generator expression here outlives the lock block unless the
+        underlying stream is closed explicitly, which inverted the order."""
+        _write(store_path, [_record("target") for _ in range(20)])
+        store = GraphHistoryStore(store_path)
+
+        order = self._record_order(
+            store, lambda: store.get_entity_history("target", limit=2), monkeypatch
+        )
+
+        assert order == ["file_unlock", "self_lock_release"]
+
+
+def test_a_naive_timestamp_does_not_break_age_retention(store_path):
+    """Records written before timestamps carried a timezone are still on disk.
+    Comparing one against an aware cutoff raises, and that raise would escape
+    compaction the same way a torn line does."""
+    _write(
+        store_path,
+        [
+            _record("naive", "2026-01-01T00:00:00"),
+            _record("recent", datetime.now(timezone.utc).isoformat()),
+        ],
+    )
+    store = GraphHistoryStore(store_path, max_age_days=30, compaction_interval=1000)
+
+    store.compact()
+
+    assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["recent"]

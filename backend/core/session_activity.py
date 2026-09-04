@@ -107,7 +107,7 @@ def prune_activity_log(
     """Return ``records`` (chronological order) trimmed to the retention policy.
 
     Age filtering runs first, then the max-records cap keeps the newest N —
-    mirroring ``GraphHistoryStore._apply_retention``. A record whose timestamp
+    mirroring the retention pass in ``GraphHistoryStore._compact_locked``. A record whose timestamp
     cannot be parsed is kept rather than dropped on a parse failure.
     """
     kept = records
