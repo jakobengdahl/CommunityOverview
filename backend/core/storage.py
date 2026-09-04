@@ -532,21 +532,6 @@ class GraphStorage:
         Thread-safe: Uses lock for reading in-memory data.
         """
         with self._lock:
-            data = {
-                "nodes": self._serialize_nodes(),
-                "edges": [edge.to_dict() for edge in self.edges.values()],
-                "metadata": {
-                    **(self.graph_metadata or {}),
-                    "version": (self.graph_metadata or {}).get("version", "1.0"),
-                    "graph_name": (self.graph_metadata or {}).get(
-                        "graph_name", self._default_graph_name()
-                    ),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            node_count = len(self.nodes)
-            edge_count = len(self.edges)
-
             # Only snapshot the vectors when they have actually moved since the
             # last successful sidecar write; an ordinary metadata edit changes
             # no vector and must not rewrite the matrix.
@@ -565,6 +550,48 @@ class GraphStorage:
                 # whichever vectors are the more numerous, i.e. the stale ones.
                 vectors = self.vector_store.export_vectors()
                 self._snapshotted_vector_revision = vector_revision
+
+                if self._pending_migration_ids:
+                    # Migration is the one case where what the node payload may
+                    # contain depends on whether the sidecar write has landed:
+                    # those ids keep their inline copy until it has, because
+                    # graph.json is still their only durable home. Landing it
+                    # here — before serialising, rather than on the background
+                    # thread afterwards — is what lets THIS save drop them.
+                    #
+                    # Deferring it costs a whole extra save, which a long-lived
+                    # app eventually makes but a one-shot caller never does:
+                    # both maintenance scripts save once and exit, so they
+                    # reported a successful migration while leaving every
+                    # vector in graph.json and the file the size it always was.
+                    #
+                    # The lock is held across this write. That is a real cost,
+                    # accepted because it is bounded to the one-time migration
+                    # and cannot be handed to the I/O thread: an RLock plus
+                    # load()'s save().result() means a background thread that
+                    # takes this lock deadlocks against its own waiter.
+                    #
+                    # Either outcome ends this save's sidecar attempt, so the
+                    # background write must not repeat it. A failure has already
+                    # cleared the snapshot marker, and that is what leaves the
+                    # retry open for the next save.
+                    self._persist_vectors(vectors, vector_revision)
+                    vectors = None
+
+            data = {
+                "nodes": self._serialize_nodes(),
+                "edges": [edge.to_dict() for edge in self.edges.values()],
+                "metadata": {
+                    **(self.graph_metadata or {}),
+                    "version": (self.graph_metadata or {}).get("version", "1.0"),
+                    "graph_name": (self.graph_metadata or {}).get(
+                        "graph_name", self._default_graph_name()
+                    ),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+            node_count = len(self.nodes)
+            edge_count = len(self.edges)
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
@@ -673,7 +700,20 @@ class GraphStorage:
         # odd ones out. The sidecar decides which dimension that is whenever it
         # has one: it is the authoritative source, and a graph file full of
         # stale inline vectors must not outvote it.
-        dimension = dominant_dimension(stored) or dominant_dimension(migrated)
+        #
+        # Only the entries that SURVIVED pruning get that vote. A sidecar
+        # sharing no live node id with the graph contributes nothing to merged,
+        # and letting it still dictate the width would drop every inline vector
+        # for disagreeing with a file whose contents are all orphans — taking
+        # the graph.json copy with it and then writing an empty sidecar over
+        # the old one. That is the shape of restoring a graph.json from another
+        # dataset, or from before a model change, onto an existing sidecar.
+        live_stored = {
+            node_id: vector
+            for node_id, vector in stored.items()
+            if node_id in self.nodes
+        }
+        dimension = dominant_dimension(live_stored) or dominant_dimension(migrated)
         vectors = matching_dimension(merged, dimension)
         dropped = len(merged) - len(vectors)
         if dropped:
@@ -693,6 +733,23 @@ class GraphStorage:
 
         print(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
 
+    def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
+        """Write the vector matrix to the sidecar. Returns whether it landed.
+
+        A failure is deliberately not fatal to the graph save, so it leaves the
+        persisted revision behind and clears the snapshot marker — otherwise the
+        retry it opens would be skipped by the next save as "already in flight".
+        """
+        try:
+            self._embedding_sidecar.save(vectors)
+        except Exception as e:
+            self._snapshotted_vector_revision = None
+            print(f"Warning: could not save embedding sidecar: {e}")
+            return False
+        self._persisted_vector_revision = vector_revision
+        self._pending_migration_ids -= set(vectors)
+        return True
+
     def _do_save_to_disk(
         self,
         data: Dict[str, Any],
@@ -711,17 +768,8 @@ class GraphStorage:
         """
         if vectors is not None:
             # Written first: an orphaned vector is harmless, a node whose vector
-            # never landed is a silent gap in semantic search. A failure here
-            # leaves the persisted revision behind, so the next save retries.
-            try:
-                self._embedding_sidecar.save(vectors)
-                self._persisted_vector_revision = vector_revision
-                self._pending_migration_ids -= set(vectors)
-            except Exception as e:
-                # Clear the snapshot marker too, or the retry this leaves open
-                # would be skipped by the next save as "already in flight".
-                self._snapshotted_vector_revision = None
-                print(f"Warning: could not save embedding sidecar: {e}")
+            # never landed is a silent gap in semantic search.
+            self._persist_vectors(vectors, vector_revision)
 
         try:
             self._persistence_backend.save_graph_data(data)

@@ -212,17 +212,13 @@ def test_legacy_inline_vectors_load_and_migrate_on_first_save(tmpdir_path):
 
         storage.save().result()
 
-        # The sidecar now has it. graph.json still does too: the payload is
-        # captured before the sidecar write can succeed, so the only copy is
-        # never removed on the strength of a write that has not landed yet.
+        # One save does both: the sidecar write lands before the node payloads
+        # are serialised, so the inline copy is dropped in the same save rather
+        # than surviving until some later one.
         np.testing.assert_allclose(
             FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()["n1"],
             np.float32(legacy_vector),
         )
-        assert _graph_json(tmpdir_path)["nodes"][0]["embedding"] is not None
-
-        # The next save knows the sidecar holds it, and drops it.
-        storage.save().result()
         assert "embedding" not in _graph_json(tmpdir_path)["nodes"][0]
     finally:
         storage.flush()
@@ -963,3 +959,176 @@ def test_reopening_a_migrated_graph_does_not_put_the_vectors_back_inline(
         "n2",
         "n3",
     }
+
+
+def test_a_sidecar_of_pure_orphans_does_not_veto_the_live_inline_vectors(tmpdir_path):
+    """The sidecar decides the dimension because it is authoritative — but only
+    over vectors it actually contributes. One whose ids have all gone from the
+    graph contributes nothing, and letting it still set the width drops every
+    live inline vector for disagreeing with a file made entirely of orphans:
+    graph.json is stripped and an empty sidecar lands on top of the old one, so
+    both durable copies go in a single save. This is what restoring a graph.json
+    from another dataset onto an existing sidecar looks like."""
+    legacy = [0.5] * DIM
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": legacy}
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    # Wider, and belonging to no node the graph still has.
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"departed": np.ones(DIM * 2, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"n1", "n2", "n3"}, (
+            "an all-orphan sidecar outvoted the live vectors on dimension"
+        )
+        storage.save().result()
+
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+            "n1",
+            "n2",
+            "n3",
+        }, "the surviving vectors were not written; the sidecar was emptied"
+    finally:
+        storage.flush()
+
+
+def test_one_save_both_writes_the_sidecar_and_clears_graph_json(tmpdir_path):
+    """Both maintenance scripts save exactly once and exit. If migration needed
+    a second save to drop the inline copies, they would report success while
+    leaving every vector in graph.json and the file the size it always was —
+    the whole point of the split, silently not delivered."""
+    legacy = [0.5] * DIM
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": legacy}
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        storage.save().result()
+
+        assert storage.vectors_persisted
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+            "n1",
+            "n2",
+            "n3",
+        }
+        for payload in _graph_json(tmpdir_path)["nodes"]:
+            assert "embedding" not in payload, (
+                f"{payload['id']} still carries its vector after the one save a "
+                f"maintenance script performs"
+            )
+    finally:
+        storage.flush()
+
+
+def test_a_second_save_under_a_failing_sidecar_still_keeps_the_inline_copy(
+    tmpdir_path,
+):
+    """The retention set is narrowed only by a write that landed. Narrowing it
+    on the attempt instead is invisible on the first save and fatal on the
+    second: graph.json would be rewritten without the vector while the sidecar
+    still does not exist, destroying the only durable copy."""
+    legacy = [0.5] * DIM
+    graph = {
+        "nodes": [{"id": "n1", "type": "Actor", "name": "Legacy", "embedding": legacy}],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+
+        def failing_save(vectors):
+            raise OSError("no space left on device")
+
+        storage._embedding_sidecar.save = failing_save
+        storage.save().result()
+        storage.save().result()
+
+        assert not _sidecar_path(tmpdir_path).exists()
+        np.testing.assert_allclose(
+            np.float32(_graph_json(tmpdir_path)["nodes"][0]["embedding"]),
+            np.float32(legacy),
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_failed_graph_write_does_not_cost_the_vectors_their_only_copy(tmpdir_path):
+    """The sidecar is written before the graph, never after. Going second, one
+    transient graph-write failure would skip it — and save() has already
+    stamped the snapshot marker, so every later save treats that revision as
+    already in flight and the vectors this process generated never reach disk
+    at all. Nothing recovers them: they are absent from graph.json by design
+    and were never in the migration retention set."""
+    storage = _make_storage(tmpdir_path)
+    try:
+        original = storage._persistence_backend.save_graph_data
+        failures = {"left": 1}
+
+        def flaky(data):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise OSError("transient graph write failure")
+            return original(data)
+
+        storage._persistence_backend.save_graph_data = flaky
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert _sidecar_path(tmpdir_path).exists(), (
+            "the failed graph write took the vectors with it, and no later "
+            "save will write them either"
+        )
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+            "n1",
+            "n2",
+            "n3",
+        }
+    finally:
+        storage.flush()
+
+
+def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
+    storage, tmpdir_path
+):
+    """save() hands the vectors to a background thread. Passing the live dict
+    lets that thread iterate it while the main thread mutates it — a
+    RuntimeError swallowed as a sidecar failure, or a half-written matrix.
+    The race is not reproducible on demand, so pin the property that prevents
+    it: what is handed over is not the object the store keeps mutating."""
+    # add_nodes saves twice — once for the nodes, once for the edges — and only
+    # the first carries a matrix, so keep every call rather than the last.
+    captured = []
+    original = storage._do_save_to_disk
+
+    def capture(data, node_count, edge_count, vectors=None, vector_revision=None):
+        captured.append(vectors)
+        return original(data, node_count, edge_count, vectors, vector_revision)
+
+    storage._do_save_to_disk = capture
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    handed_over = [vectors for vectors in captured if vectors is not None]
+    assert handed_over, "no matrix reached the writer at all"
+    for vectors in handed_over:
+        assert vectors is not storage.vector_store.embeddings
