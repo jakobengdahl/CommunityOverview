@@ -305,3 +305,49 @@ def test_a_failed_download_leaves_the_sidecar_alone(data_setup_block, workspace)
 
     assert _sidecar(workspace).exists(), output
     assert _sidecar(workspace).read_bytes() == b"vectors"
+
+
+@pytest.fixture
+def http_404_url():
+    """A URL that answers 404 with a body — the shape a mistyped URL takes."""
+    import http.server
+    import socketserver
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"<html><body>404 Not Found</body></html>")
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/missing.json"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl required")
+def test_an_http_error_response_leaves_the_sidecar_alone(
+    data_setup_block, workspace, http_404_url
+):
+    """The likeliest way to reach this branch is a mistyped URL, and curl
+    without -f exits 0 on a 404: it writes the error page over the graph, the
+    script reports success, and the cleanup then deletes the vectors of the
+    graph that was there. A connection refusal is not the same test — that one
+    fails the transport, so set -e stops the script before the cleanup."""
+    _run(data_setup_block, workspace, data_source=http_404_url)
+
+    assert _sidecar(workspace).exists(), (
+        "an HTTP error was treated as a successful download and the sidecar was dropped"
+    )
+    assert _sidecar(workspace).read_bytes() == b"vectors"
+    graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
+    assert graph["nodes"] == [], "the 404 body was written over the graph"

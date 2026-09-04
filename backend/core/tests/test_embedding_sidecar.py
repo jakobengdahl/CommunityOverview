@@ -331,3 +331,17 @@ def test_an_unforeseen_failure_inside_load_is_converted_not_propagated(
 
     with pytest.raises(EmbeddingSidecarError):
         FileEmbeddingSidecar(path).load()
+
+
+def test_the_documented_layout_matches_the_actual_magic():
+    """The module docstring is the only description of this binary format, and
+    a recovery script or an external reader is written from it. It claimed 8
+    bytes of magic against an actual 7 for ten review rounds, because prose
+    cannot be contradicted by a suite unless something reads it."""
+    import re
+
+    import backend.core.embedding_sidecar as module
+
+    documented = re.search(r"magic\s+(\d+) bytes", module.__doc__)
+    assert documented, "the layout table no longer states the magic length"
+    assert int(documented.group(1)) == len(MAGIC)

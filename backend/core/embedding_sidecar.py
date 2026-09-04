@@ -8,7 +8,7 @@ file instead, written only when a vector actually changes.
 
 File layout, little-endian throughout:
 
-    magic    8 bytes   b"CKGEMB\\x01"
+    magic    7 bytes   b"CKGEMB\\x01"
     hdr_len  4 bytes   uint32, byte length of the JSON header
     header   hdr_len   {"dtype": "float32", "rows": N, "dim": D, "ids": [...]}
     payload  N*D*4     float32 matrix, row i belonging to ids[i]

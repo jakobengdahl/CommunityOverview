@@ -180,7 +180,10 @@ if [ -n "$DATA_SOURCE" ]; then
     if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
         echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
         if command -v curl &> /dev/null; then
-            curl -sL "$DATA_SOURCE" -o "$ACTIVE_DATA"
+            # -f so an HTTP error is a failure: without it curl exits 0 on a
+            # 404, writes the error page over the graph, and the cleanup
+            # below then deletes the sidecar of the graph that was there.
+            curl -fsL "$DATA_SOURCE" -o "$ACTIVE_DATA"
         elif command -v wget &> /dev/null; then
             wget -q "$DATA_SOURCE" -O "$ACTIVE_DATA"
         else
