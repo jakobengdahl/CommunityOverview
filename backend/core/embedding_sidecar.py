@@ -45,6 +45,27 @@ def _ensure_numpy():
     return np
 
 
+def resolve_sidecar_path(
+    graph_path: str | Path, embeddings_file: str | None = None
+) -> Path | None:
+    """Where the sidecar for this graph lives, honouring EMBEDDINGS_FILE.
+
+    Returns None to mean "let GraphStorage derive it from the graph path".
+    The maintenance scripts call this so they act on the same file the running
+    app reads; without it a deployment that sets EMBEDDINGS_FILE would have
+    them write to a sidecar nothing ever loads.
+    """
+    value = (
+        embeddings_file if embeddings_file is not None else os.getenv("EMBEDDINGS_FILE")
+    )
+    if not value:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path(graph_path).parent / path
+
+
 class FileEmbeddingSidecar:
     """Reads and writes the embedding matrix for a file-backed graph."""
 

@@ -110,8 +110,10 @@ class VectorStore:
         """Rebuild the search index from vectors carried on the node objects.
 
         Only pre-split graphs carry them there; GraphStorage loads from the
-        sidecar via load_vectors() instead. Kept for callers that hold nodes
-        with inline vectors (the pickle migration script, tests).
+        sidecar via load_vectors() and takes the vectors off the node objects
+        itself, so nothing in the application calls this any more. It stays as
+        the public way for an embedder outside this package to build an index
+        from nodes it already holds.
         """
         np = _ensure_numpy()
         self.embeddings = {}

@@ -45,5 +45,5 @@ def test_configured_path_reaches_the_graph_storage():
         app = create_app(config)
         storage = app.state.graph_storage
 
-        assert storage._embedding_sidecar.path == Path(sidecar)
+        assert storage.embeddings_path == Path(sidecar)
         storage.flush()

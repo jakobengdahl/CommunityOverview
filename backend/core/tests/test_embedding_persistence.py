@@ -17,7 +17,7 @@ from typing import Any, Dict
 import numpy as np
 import pytest
 
-from backend.core import GraphStorage, Node, NodeType
+from backend.core import Edge, GraphStorage, Node, NodeType, RelationshipType
 from backend.core.embedding_sidecar import MAGIC, FileEmbeddingSidecar
 
 DIM = 8
@@ -387,6 +387,13 @@ def test_an_inline_vector_of_another_dimension_does_not_fail_the_load(tmpdir_pat
     try:
         assert set(storage.vector_store.export_vectors()) == {"n1", "n2"}
         assert len(storage.nodes) == 3
+
+        # The drop is persisted, not just applied in memory.
+        storage.save().result()
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+            "n1",
+            "n2",
+        }
     finally:
         storage.flush()
 
@@ -478,3 +485,186 @@ def test_generated_vectors_are_not_left_on_the_node_objects(storage, tmpdir_path
     storage.flush()
 
     assert storage.nodes["n1"].embedding is None
+
+
+def test_every_inline_vector_is_adopted_not_just_the_first(tmpdir_path):
+    """The migration is a loop; a single-node fixture would never exercise it."""
+    graph = {
+        "nodes": [
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": f"Legacy {i}",
+                "embedding": [float(i)] * DIM,
+            }
+            for i in range(4)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"n0", "n1", "n2", "n3"}
+        for node in storage.nodes.values():
+            assert node.embedding is None
+
+        storage.save().result()
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+            "n0",
+            "n1",
+            "n2",
+            "n3",
+        }
+    finally:
+        storage.flush()
+
+
+def test_a_supplied_vector_does_not_evict_the_vectors_already_indexed(
+    storage, tmpdir_path
+):
+    """Adoption merges into the existing index; it must never replace it."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    storage.vector_store.model = None
+    node = Node(id="supplied", type=NodeType.ACTOR, name="Given a vector")
+    node.embedding = [0.25] * DIM
+    storage.add_nodes([node], [])
+    storage.flush()
+
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+        "supplied",
+    }
+
+
+def test_a_supplied_vector_of_another_dimension_is_refused_not_honoured(
+    storage, tmpdir_path
+):
+    """The index in memory anchors the dimension. A caller passing a wider
+    vector — or several — must not evict the vectors that are already right."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+    before = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+
+    storage.vector_store.model = None
+    odd = []
+    for i in range(3):
+        node = Node(id=f"odd{i}", type=NodeType.ACTOR, name=f"Odd {i}")
+        node.embedding = [0.5] * (DIM + 4)
+        odd.append(node)
+
+    result = storage.add_nodes(odd, [])
+    storage.flush()
+
+    assert result.success
+    assert set(storage.vector_store.export_vectors()) == set(before)
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == set(before)
+    # The nodes themselves are still added; only their vectors are refused.
+    assert len(storage.nodes) == 6
+
+
+def test_a_stale_graph_file_cannot_outvote_the_sidecar_on_dimension(tmpdir_path):
+    """The sidecar is authoritative. A graph file carrying MORE inline vectors
+    of another dimension must not evict the sidecar's."""
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save({"n0": [1.0] * DIM})
+    graph = {
+        "nodes": [{"id": "n0", "type": "Actor", "name": "Covered"}]
+        + [
+            {
+                "id": f"stale{i}",
+                "type": "Actor",
+                "name": f"Stale {i}",
+                "embedding": [0.5] * (DIM + 4),
+            }
+            for i in range(5)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"n0"}
+    finally:
+        storage.flush()
+
+
+def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
+    """add_nodes saves twice — once for the nodes, once for the edges — and the
+    edge save changes no vector, so it must not resnapshot the same matrix."""
+    calls = []
+    real_save = storage._embedding_sidecar.save
+
+    def counting_save(vectors):
+        calls.append(sorted(vectors))
+        return real_save(vectors)
+
+    storage._embedding_sidecar.save = counting_save
+    storage.add_nodes(
+        _sample_nodes(),
+        [Edge(id="e1", source="n1", target="n2", type=RelationshipType.RELATES_TO)],
+    )
+    storage.flush()
+
+    assert len(calls) == 1, f"sidecar rewritten {len(calls)} times: {calls}"
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+    }
+
+
+def test_a_zero_length_inline_vector_does_not_empty_the_whole_sidecar(tmpdir_path):
+    """dim 0 would make the sidecar read back as no vectors at all.
+
+    The empty one is listed FIRST on purpose: dimensions are counted in
+    insertion order, so this is the ordering where a zero-length vector would
+    win the tie and take every real vector down with it.
+    """
+    graph = {
+        "nodes": [
+            {"id": "empty", "type": "Actor", "name": "Empty", "embedding": []},
+            {"id": "good", "type": "Actor", "name": "Good", "embedding": [1.0] * DIM},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"good"}
+        assert storage.nodes["empty"].embedding is None
+        storage.save().result()
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {"good"}
+    finally:
+        storage.flush()
+
+
+def test_a_non_file_backend_with_mixed_inline_dimensions_still_loads(tmpdir_path):
+    backend = _MemoryBackend()
+    backend.data = {
+        "nodes": [
+            {"id": "a", "type": "Actor", "name": "A", "embedding": [1.0] * DIM},
+            {"id": "b", "type": "Actor", "name": "B", "embedding": [1.0] * DIM},
+            {"id": "c", "type": "Actor", "name": "C", "embedding": [1.0] * (DIM + 4)},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "memory"},
+    }
+
+    storage = GraphStorage(persistence_backend=backend)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"a", "b"}
+        assert len(storage.nodes) == 3
+    finally:
+        storage.flush()

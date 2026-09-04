@@ -31,12 +31,17 @@ class RestrictedUnpickler(pickle.Unpickler):
 sys.path.append(os.getcwd())
 
 from backend.core import GraphStorage  # noqa: E402
+from backend.core.storage import (  # noqa: E402
+    _dominant_dimension,
+    _matching_dimension,
+)
+from backend.core.embedding_sidecar import resolve_sidecar_path  # noqa: E402
 
 DEFAULT_GRAPH_PATH = "data/active/graph.json"
 
 
-def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
-    print(f"Migrating embeddings from pickle to {graph_path}...")
+def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
+    print("Migrating embeddings from pickle into the embedding sidecar...")
 
     graph_path = Path(graph_path)
     embeddings_path = graph_path.parent / "embeddings.pkl"
@@ -55,8 +60,12 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
         print(f"Error loading pickle: {e}")
         return
 
-    # embeddings_path=None keeps the default sidecar location next to the graph.
-    storage = GraphStorage(json_path=str(graph_path), embeddings_path=None)
+    sidecar_path = resolve_sidecar_path(graph_path, embeddings_file)
+    storage = GraphStorage(
+        json_path=str(graph_path),
+        embeddings_path=str(sidecar_path) if sidecar_path else None,
+    )
+    print(f"Target sidecar: {storage.embeddings_path}")
 
     updated_count = 0
     for node_id, embedding in embeddings.items():
@@ -76,15 +85,27 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
     # Merge rather than rebuild: the graph may already have a sidecar, and
     # rebuild_index would drop every vector in it that the pickle does not
     # also carry. save() then persists the merged set into the sidecar.
-    merged = storage.vector_store.export_vectors()
+    existing = storage.vector_store.export_vectors()
+    merged = dict(existing)
     for node in storage.nodes.values():
         if node.embedding is not None:
             merged[node.id] = node.embedding
             node.embedding = None
-    storage.vector_store.load_vectors(merged)
+
+    # The pickle can carry a different dimension than the sidecar already has
+    # - a model change between the two. Stacking those raises out of numpy, so
+    # the sidecar's own dimension wins and the rest is reported, not crashed on.
+    dimension = _dominant_dimension(existing) or _dominant_dimension(merged)
+    accepted = _matching_dimension(merged, dimension)
+    if len(accepted) != len(merged):
+        print(
+            f"Skipped {len(merged) - len(accepted)} embedding(s) whose dimension "
+            f"is not {dimension}."
+        )
+    storage.vector_store.load_vectors(accepted)
 
     storage.save().result()
-    print("Graph saved; embeddings written to the sidecar.")
+    print(f"Embeddings written to {storage.embeddings_path}.")
 
     # Rename old pickle to indicate it's deprecated/backup
     backup_path = embeddings_path.with_suffix(".pkl.bak")
@@ -101,5 +122,11 @@ if __name__ == "__main__":
         default=DEFAULT_GRAPH_PATH,
         help=f"Path to the graph JSON file (default: {DEFAULT_GRAPH_PATH})",
     )
+    parser.add_argument(
+        "--embeddings-file",
+        default=None,
+        help="Path to the embedding sidecar (default: EMBEDDINGS_FILE, else "
+        "derived from the graph file)",
+    )
     args = parser.parse_args()
-    migrate_embeddings(args.graph_file)
+    migrate_embeddings(args.graph_file, args.embeddings_file)

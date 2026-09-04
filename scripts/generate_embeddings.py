@@ -6,14 +6,18 @@ import argparse
 sys.path.append(os.getcwd())
 
 from backend.core import GraphStorage
+from backend.core.embedding_sidecar import resolve_sidecar_path
 
 DEFAULT_GRAPH_PATH = "data/active/graph.json"
 
 
-def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
+def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
     print(f"Loading graph from {graph_path}...")
-    # Initialize without specifying embeddings path to use in-memory/json storage
-    storage = GraphStorage(json_path=graph_path)
+    sidecar_path = resolve_sidecar_path(graph_path, embeddings_file)
+    storage = GraphStorage(
+        json_path=graph_path,
+        embeddings_path=str(sidecar_path) if sidecar_path else None,
+    )
 
     nodes = list(storage.nodes.values())
     node_count = len(nodes)
@@ -30,7 +34,7 @@ def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
         # save() persists them through the embedding sidecar; wait for it so the
         # success line below is not printed before the write lands.
         storage.save().result()
-        print(f"Success! Embeddings generated and saved to {graph_path}.")
+        print(f"Success! Embeddings written to {storage.embeddings_path}.")
         print(f"Total embeddings: {storage.vector_store.get_embedding_count()}")
     except Exception as e:
         print(f"Error generating embeddings: {e}")
@@ -45,5 +49,11 @@ if __name__ == "__main__":
         default=DEFAULT_GRAPH_PATH,
         help=f"Path to the graph JSON file (default: {DEFAULT_GRAPH_PATH})",
     )
+    parser.add_argument(
+        "--embeddings-file",
+        default=None,
+        help="Path to the embedding sidecar (default: EMBEDDINGS_FILE, else "
+        "derived from the graph file)",
+    )
     args = parser.parse_args()
-    generate_embeddings(args.graph_file)
+    generate_embeddings(args.graph_file, args.embeddings_file)

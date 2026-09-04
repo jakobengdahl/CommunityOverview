@@ -149,16 +149,20 @@ echo -e "\n${YELLOW}[0/5] Setting up graph data...${NC}"
 mkdir -p "$DATA_DIR/active"
 mkdir -p "$DATA_DIR/examples"
 
-if [ -n "$DATA_SOURCE" ]; then
-    # Replacing the graph invalidates the embedding sidecar beside it: node ids
-    # shared between the old and new datasets would keep the OLD dataset's
-    # vectors, and nothing regenerates a vector for a node that is merely
-    # loaded. Vectors are derived data, so drop it and let it be rebuilt.
+# A sidecar belongs to the graph it was built from: node ids shared between the
+# old and the new dataset would otherwise keep the OLD dataset's vectors, and
+# nothing regenerates a vector for a node that is merely loaded. Vectors are
+# derived data, so drop the sidecar whenever the graph beneath it is replaced.
+# Call this only AFTER the replacement is actually in place - a failed download
+# or a mistyped path must leave the existing pair intact.
+drop_stale_embeddings() {
     if [ -f "$ACTIVE_DATA_EMBEDDINGS" ]; then
         rm -f "$ACTIVE_DATA_EMBEDDINGS"
         echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
     fi
+}
 
+if [ -n "$DATA_SOURCE" ]; then
     # Data source specified - load from path or URL
     if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
         echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
@@ -171,6 +175,7 @@ if [ -n "$DATA_SOURCE" ]; then
             exit 1
         fi
         echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"
+        drop_stale_embeddings
     else
         # Resolve relative paths
         if [[ ! "$DATA_SOURCE" = /* ]]; then
@@ -183,6 +188,7 @@ if [ -n "$DATA_SOURCE" ]; then
         echo -e "Copying graph data from: ${BLUE}$DATA_SOURCE${NC}"
         cp "$DATA_SOURCE" "$ACTIVE_DATA"
         echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
+        drop_stale_embeddings
     fi
 elif [ ! -f "$ACTIVE_DATA" ]; then
     # No active data and no source specified - try profile graph.json, then default example
@@ -191,13 +197,16 @@ elif [ ! -f "$ACTIVE_DATA" ]; then
         echo -e "Loading graph data from profile: ${BLUE}$PROFILE_GRAPH${NC}"
         cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
         echo -e "${GREEN}Profile graph data loaded.${NC}"
+        drop_stale_embeddings
     elif [ -f "$DEFAULT_EXAMPLE" ]; then
         echo -e "No active graph data found. Copying default example data..."
         cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
         echo -e "${GREEN}Default example data loaded.${NC}"
+        drop_stale_embeddings
     else
         echo -e "${YELLOW}No example data found. Starting with empty graph.${NC}"
         echo '{"nodes": [], "edges": [], "metadata": {"version": "1.0"}}' > "$ACTIVE_DATA"
+        drop_stale_embeddings
     fi
 else
     echo -e "${GREEN}Using existing active graph data.${NC}"

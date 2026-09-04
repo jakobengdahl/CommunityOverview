@@ -179,7 +179,10 @@ What this means in practice:
   that cannot be read is ignored with a warning for the same reason — the graph
   never fails to load because of it. Regenerate with
   `python scripts/generate_embeddings.py`, which needs the optional ML extras
-  (`pip install -r backend/requirements-ml.txt`).
+  (`pip install -r backend/requirements-ml.txt`). That script and
+  `scripts/migrate_embeddings.py` both honour `EMBEDDINGS_FILE`, and take
+  `--embeddings-file` to override it, so they act on the same sidecar the
+  running app reads.
 - **Migration.** A `graph.json` written before the split still carries its
   vectors inline. Those are read on load and moved into the sidecar on the next
   save; nothing needs to be run by hand.

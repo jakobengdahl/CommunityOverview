@@ -92,25 +92,38 @@ def _apply_metadata_patch(
     return result
 
 
-def _uniform_dimension(vectors: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep only the vectors sharing the most common dimension.
+def _dominant_dimension(vectors: Dict[str, Any]) -> Optional[int]:
+    """The dimension most of these vectors share, or None if there are none.
 
-    numpy cannot stack rows of differing width, so a single odd vector would
-    raise out of the index rebuild and fail the whole graph load. Vectors are
-    derived data, so dropping the minority is always recoverable.
+    A tie resolves to the dimension seen first: max() keeps the first maximal
+    key and the dict is insertion-ordered. Deciding a tie by width instead
+    would let one stray wide vector outrank an equally-common correct one.
     """
     if not vectors:
-        return vectors
+        return None
 
     counts: Dict[int, int] = {}
     for vector in vectors.values():
         counts[len(vector)] = counts.get(len(vector), 0) + 1
-    if len(counts) == 1:
-        return vectors
+    return max(counts, key=counts.get)
 
-    keep = max(counts, key=lambda dim: (counts[dim], dim))
+
+def _matching_dimension(
+    vectors: Dict[str, Any], dimension: Optional[int]
+) -> Dict[str, Any]:
+    """Keep only the vectors of the given dimension.
+
+    numpy cannot stack rows of differing width, so one odd vector would raise
+    out of the index rebuild and fail the whole load. The caller decides which
+    dimension is authoritative rather than letting a vote decide it — a
+    majority of stale vectors must never evict the current ones.
+    """
+    if dimension is None:
+        return {}
     return {
-        node_id: vector for node_id, vector in vectors.items() if len(vector) == keep
+        node_id: vector
+        for node_id, vector in vectors.items()
+        if len(vector) == dimension
     }
 
 
@@ -169,6 +182,11 @@ class GraphStorage:
         # they were before the split, so no backend silently loses them.
         self._embedding_sidecar = self._init_embedding_sidecar(embeddings_path)
         self._persisted_vector_revision: Optional[int] = None
+        # Set when a save has already captured a revision for writing but the
+        # background write has not landed yet. Without it a second save in the
+        # same operation — add_nodes saves once for the nodes and again for the
+        # edges — snapshots and rewrites the identical matrix.
+        self._snapshotted_vector_revision: Optional[int] = None
 
         # Durable append-only mutation history sidecar. Only enabled for the
         # file-backed standalone backend, which owns a concrete json_path next
@@ -234,6 +252,13 @@ class GraphStorage:
             else self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
         )
         return FileEmbeddingSidecar(path)
+
+    @property
+    def embeddings_path(self) -> Optional[Path]:
+        """Where node vectors are persisted, or None for a backend with no sidecar."""
+        if self._embedding_sidecar is None:
+            return None
+        return self._embedding_sidecar.path
 
     def _init_history_store(self) -> Optional["GraphHistoryStore"]:
         """Create the append-only history sidecar for file-backed standalone mode."""
@@ -530,12 +555,14 @@ class GraphStorage:
             # last successful sidecar write; an ordinary metadata edit changes
             # no vector and must not rewrite the matrix.
             vector_revision = self.vector_store.revision
-            vectors = (
-                self.vector_store.export_vectors()
-                if self._embedding_sidecar is not None
+            needs_write = (
+                self._embedding_sidecar is not None
                 and vector_revision != self._persisted_vector_revision
-                else None
+                and vector_revision != self._snapshotted_vector_revision
             )
+            vectors = self.vector_store.export_vectors() if needs_write else None
+            if needs_write:
+                self._snapshotted_vector_revision = vector_revision
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
@@ -576,9 +603,13 @@ class GraphStorage:
         """
         taken = {}
         for node in nodes:
-            if node.embedding is not None:
+            if node.embedding is None:
+                continue
+            # A zero-length vector is not a usable vector, and carrying one
+            # through would make the whole sidecar read back empty (dim 0).
+            if len(node.embedding) > 0:
                 taken[node.id] = node.embedding
-                node.embedding = None
+            node.embedding = None
         return taken
 
     def _load_embeddings(self) -> None:
@@ -593,7 +624,9 @@ class GraphStorage:
         inline = self._take_inline_vectors(self.nodes.values())
 
         if self._embedding_sidecar is None:
-            self.vector_store.load_vectors(_uniform_dimension(inline))
+            self.vector_store.load_vectors(
+                _matching_dimension(inline, _dominant_dimension(inline))
+            )
             self._persisted_vector_revision = self.vector_store.revision
             return
 
@@ -619,8 +652,11 @@ class GraphStorage:
         # The two sources can disagree on dimension — a sidecar written by one
         # embedding model merged with inline vectors from another. Stacking
         # those raises in numpy and would take the whole load down, so drop the
-        # odd ones out instead.
-        vectors = _uniform_dimension(merged)
+        # odd ones out. The sidecar decides which dimension that is whenever it
+        # has one: it is the authoritative source, and a graph file full of
+        # stale inline vectors must not outvote it.
+        dimension = _dominant_dimension(stored) or _dominant_dimension(migrated)
+        vectors = _matching_dimension(merged, dimension)
         dropped = len(merged) - len(vectors)
         if dropped:
             print(
@@ -662,6 +698,9 @@ class GraphStorage:
                 self._embedding_sidecar.save(vectors)
                 self._persisted_vector_revision = vector_revision
             except Exception as e:
+                # Clear the snapshot marker too, or the retry this leaves open
+                # would be skipped by the next save as "already in flight".
+                self._snapshotted_vector_revision = None
                 print(f"Warning: could not save embedding sidecar: {e}")
 
         try:
@@ -901,11 +940,21 @@ class GraphStorage:
                 # below still wins when the ML stack is available, as before.
                 supplied = self._take_inline_vectors(nodes_to_embed)
                 if supplied:
-                    self.vector_store.load_vectors(
-                        _uniform_dimension(
-                            {**self.vector_store.export_vectors(), **supplied}
-                        )
+                    # The index already in memory anchors the dimension; a
+                    # caller passing vectors of some other width must never
+                    # evict the vectors that are already correct.
+                    existing = self.vector_store.export_vectors()
+                    dimension = _dominant_dimension(existing) or _dominant_dimension(
+                        supplied
                     )
+                    accepted = _matching_dimension(supplied, dimension)
+                    if len(accepted) != len(supplied):
+                        print(
+                            f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+                            f"embedding(s) whose dimension is not {dimension}"
+                        )
+                    if accepted:
+                        self.vector_store.load_vectors({**existing, **accepted})
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
