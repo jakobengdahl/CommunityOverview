@@ -629,7 +629,7 @@ class GraphStorage:
         for node in self.nodes.values():
             payload = node.to_dict()
             if no_sidecar:
-                payload["embedding"] = self.vector_store.get_vector_list(node.id)
+                payload["embedding"] = self._vector_for_payload(node.id)
                 payloads.append(payload)
                 continue
 
@@ -639,23 +639,33 @@ class GraphStorage:
             # there graph.json is the only durable copy, and the sidecar write
             # is allowed to fail without failing the graph write, so removing it
             # would destroy the vector with nothing written in its place.
-            vector = None
-            if node.id in self._inline_fallback:
-                # The live vector when the index still holds one - it is the
-                # same vector, adopted - and otherwise the raw copy this node
-                # was loaded with, because the index refusing it (a width it
-                # does not hold) or evicting it (a model change) does not make
-                # graph.json any less its only home.
-                vector = self.vector_store.get_vector_list(node.id)
-                if vector is None:
-                    raw = self._inline_fallback[node.id]
-                    vector = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+            vector = (
+                self._vector_for_payload(node.id)
+                if node.id in self._inline_fallback
+                else None
+            )
             if vector is None:
                 payload.pop("embedding", None)
             else:
                 payload["embedding"] = vector
             payloads.append(payload)
         return payloads
+
+    def _vector_for_payload(self, node_id: str) -> Optional[List[float]]:
+        """The vector to write into a node's payload, or None.
+
+        The live index vector whenever there is one — it is what the node means
+        now — and otherwise the raw copy the node was loaded with. The index
+        refusing a vector for its width, or evicting it when the model width
+        changes, does not make the file it came from any less its only home.
+        """
+        vector = self.vector_store.get_vector_list(node_id)
+        if vector is not None:
+            return vector
+        raw = self._inline_fallback.get(node_id)
+        if raw is None:
+            return None
+        return raw.tolist() if hasattr(raw, "tolist") else list(raw)
 
     def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
         """Move any vector carried on a node object into a plain dict.
@@ -688,9 +698,18 @@ class GraphStorage:
         inline = self._take_inline_vectors(self.nodes.values())
 
         if self._embedding_sidecar is None:
-            self.vector_store.load_vectors(
-                matching_dimension(inline, dominant_dimension(inline))
-            )
+            accepted = matching_dimension(inline, dominant_dimension(inline))
+            self.vector_store.load_vectors(accepted)
+            # Same reason as the sidecar path below: a vector the index refuses
+            # for its width is still the node's only durable copy, and here
+            # there is no sidecar it could ever move to. Without this the next
+            # ordinary save writes None over it, silently — the drop happens in
+            # matching_dimension, so not even load_vectors' warning fires.
+            self._inline_fallback = {
+                node_id: vector
+                for node_id, vector in inline.items()
+                if node_id not in accepted
+            }
             self._persisted_vector_revision = self.vector_store.revision
             return
 

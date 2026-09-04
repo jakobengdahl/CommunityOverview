@@ -1511,3 +1511,43 @@ def test_a_backend_without_a_sidecar_reports_its_vectors_persisted(tmpdir_path):
         assert storage.vectors_persisted is True
     finally:
         storage.flush()
+
+
+def test_a_backend_without_a_sidecar_keeps_a_vector_the_index_refused(tmpdir_path):
+    """Such a backend has no sidecar for a refused vector to move to, so its
+    payload is the only durable copy there will ever be. Writing None over it
+    destroys it, and silently: the drop happens in matching_dimension, so not
+    even the index's own warning fires. The file-backed path treats exactly
+    this as a defect; the parallel path must not differ."""
+    backend = _MemoryBackend()
+    backend.data = {
+        "nodes": [
+            {"id": "a", "type": "Actor", "name": "A", "embedding": [0.5] * DIM},
+            {"id": "b", "type": "Actor", "name": "B", "embedding": [0.5] * DIM},
+            {"id": "c", "type": "Actor", "name": "C", "embedding": [0.5] * (DIM * 2)},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "memory"},
+    }
+    storage = GraphStorage(
+        json_path=os.path.join(tmpdir_path, "unused.json"),
+        persistence_backend=backend,
+    )
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"a", "b"}, (
+            "fixture no longer has the index refuse c"
+        )
+        storage.save().result()
+        storage.flush()
+
+        payloads = {n["id"]: n for n in backend.data["nodes"]}
+        assert payloads["c"]["embedding"] is not None, (
+            "the vector the index refused was written away as None, and this "
+            "backend has no sidecar holding a copy of it"
+        )
+        np.testing.assert_allclose(
+            np.float32(payloads["c"]["embedding"]), np.float32([0.5] * (DIM * 2))
+        )
+    finally:
+        storage.flush()

@@ -82,6 +82,25 @@ class FileEmbeddingSidecar:
             EmbeddingSidecarError: the file is not a readable sidecar. Callers
                 treat that as "no vectors" — never as a fatal load error.
         """
+        # The checks in _read below name what is wrong, which is what an
+        # operator needs. This wrapper is what makes the promise above true
+        # whatever they miss: three separate malformed shapes have each reached
+        # a caller as some other exception type — a truncated payload as
+        # ValueError from reshape, a bool row count as TypeError, a deeply
+        # nested header as RecursionError out of the JSON parser — and each
+        # took down a whole graph load, because the callers catch this class
+        # and nothing else. Enumerating the ways a parser can fail is a losing
+        # game; converting them is not.
+        try:
+            return self._read()
+        except EmbeddingSidecarError:
+            raise
+        except Exception as exc:
+            raise EmbeddingSidecarError(
+                f"{self.path} could not be read as a sidecar: {exc!r}"
+            ) from exc
+
+    def _read(self) -> Dict[str, Any]:
         np = _ensure_numpy()
 
         try:

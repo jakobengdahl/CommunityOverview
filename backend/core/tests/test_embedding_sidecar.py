@@ -299,3 +299,35 @@ def test_a_zero_width_header_reads_back_as_no_vectors(tmp_path):
     path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header)
 
     assert FileEmbeddingSidecar(path).load() == {}
+
+
+def test_a_deeply_nested_header_degrades_instead_of_escaping(tmp_path):
+    """json.loads raises RecursionError, not ValueError, on deep nesting — a
+    type the checks never named. About 2 kB of brackets is enough, and the
+    callers catch EmbeddingSidecarError and nothing else, so it took the whole
+    graph load down."""
+    header = (b"[" * 1000) + (b"]" * 1000)
+    path = tmp_path / "graph.embeddings.bin"
+    path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header)
+
+    with pytest.raises(EmbeddingSidecarError):
+        FileEmbeddingSidecar(path).load()
+
+
+def test_an_unforeseen_failure_inside_load_is_converted_not_propagated(
+    tmp_path, monkeypatch
+):
+    """The guards name what is wrong; this is what makes the contract hold when
+    they miss something. Three malformed shapes have each reached a caller as a
+    different exception type, so the property is enforced by conversion rather
+    than by enumerating parser failures."""
+    path = tmp_path / "graph.embeddings.bin"
+    FileEmbeddingSidecar(path).save({"n1": np.ones(4, dtype=np.float32)})
+
+    def explode(self):
+        raise MemoryError("something no guard anticipated")
+
+    monkeypatch.setattr(FileEmbeddingSidecar, "_read", explode)
+
+    with pytest.raises(EmbeddingSidecarError):
+        FileEmbeddingSidecar(path).load()
