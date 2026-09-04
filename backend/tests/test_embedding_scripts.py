@@ -186,6 +186,23 @@ class TestMigrateEmbeddings:
         assert not (tmpdir / "graph.embeddings.bin").exists()
         assert set(FileEmbeddingSidecar(configured).load()) == {"n1"}
 
+    def test_an_explicit_argument_overrides_the_environment(
+        self, workspace, monkeypatch
+    ):
+        """generate_embeddings has this test; the migration did not, so it could
+        stop forwarding its own --embeddings-file and still look correct — the
+        env var it falls back to is what every other test sets."""
+        tmpdir, graph_path = workspace
+        monkeypatch.setenv("EMBEDDINGS_FILE", str(tmpdir / "from-env.bin"))
+        explicit = tmpdir / "explicit.bin"
+        _write_pickle(tmpdir, {"n1": np.arange(DIM, dtype=np.float32)})
+
+        migrate_embeddings(str(graph_path), str(explicit))
+
+        assert explicit.exists()
+        assert not (tmpdir / "from-env.bin").exists()
+        assert set(FileEmbeddingSidecar(explicit).load()) == {"n1"}
+
     def test_a_missing_pickle_is_a_no_op(self, workspace, monkeypatch):
         tmpdir, graph_path = workspace
         monkeypatch.delenv("EMBEDDINGS_FILE", raising=False)

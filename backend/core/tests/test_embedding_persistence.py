@@ -1551,3 +1551,25 @@ def test_a_backend_without_a_sidecar_keeps_a_vector_the_index_refused(tmpdir_pat
         )
     finally:
         storage.flush()
+
+
+def test_a_complete_sidecar_reports_its_vectors_persisted_before_any_save(
+    tmpdir_path,
+):
+    """Nothing needs migrating or pruning, so the vectors on disk already are
+    the vectors in the index. Answering from the in-flight snapshot marker
+    instead of the persisted one reports False here, and both maintenance
+    scripts exit non-zero on that — migrate would print FAILED and refuse to
+    rename the pickle after a perfectly good run."""
+    storage = _make_storage(tmpdir_path)
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    reopened = _make_storage(tmpdir_path)
+    try:
+        assert set(reopened.vector_store.export_vectors()) == {"n1", "n2", "n3"}
+        assert reopened._inline_fallback == {}, "fixture has something to migrate"
+        assert reopened.vectors_persisted is True
+    finally:
+        reopened.flush()
+        storage.flush()
