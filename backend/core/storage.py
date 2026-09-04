@@ -154,6 +154,10 @@ class GraphStorage:
         # graph.json, so it needs no such protection and is dropped at once -
         # which is what keeps the file small from the first save.
         self._pending_migration_ids: set = set()
+        # Inline vectors the index would not take (a width it does not hold).
+        # graph.json is their only home and no sidecar write covers them, so
+        # they are re-emitted into the payload verbatim rather than dropped.
+        self._held_inline_vectors: Dict[str, Any] = {}
         # Set when a save has already captured a revision for writing but the
         # background write has not landed yet. Without it a second save in the
         # same operation — add_nodes saves once for the nodes and again for the
@@ -551,31 +555,38 @@ class GraphStorage:
                 vectors = self.vector_store.export_vectors()
                 self._snapshotted_vector_revision = vector_revision
 
-                if self._pending_migration_ids:
-                    # Migration is the one case where what the node payload may
-                    # contain depends on whether the sidecar write has landed:
-                    # those ids keep their inline copy until it has, because
-                    # graph.json is still their only durable home. Landing it
-                    # here — before serialising, rather than on the background
-                    # thread afterwards — is what lets THIS save drop them.
-                    #
-                    # Deferring it costs a whole extra save, which a long-lived
-                    # app eventually makes but a one-shot caller never does:
-                    # both maintenance scripts save once and exit, so they
-                    # reported a successful migration while leaving every
-                    # vector in graph.json and the file the size it always was.
-                    #
-                    # The lock is held across this write. That is a real cost,
-                    # accepted because it is bounded to the one-time migration
-                    # and cannot be handed to the I/O thread: an RLock plus
-                    # load()'s save().result() means a background thread that
-                    # takes this lock deadlocks against its own waiter.
-                    #
+                # Migration is the one case where what the node payload may
+                # contain depends on whether the sidecar write has landed:
+                # those ids keep their inline copy until it has, because
+                # graph.json is still their only durable home. Landing it
+                # here — before serialising, rather than on the background
+                # thread afterwards — is what lets THIS save drop them.
+                #
+                # Deferring it costs a whole extra save, which a long-lived app
+                # eventually makes but a one-shot caller never does: both
+                # maintenance scripts save once and exit, so they reported a
+                # successful migration while leaving every vector in graph.json
+                # and the file the size it always was.
+                #
+                # Only ids this write actually covers count. _pending_migration_ids
+                # is not self-pruning — an id that leaves the index (a deleted
+                # node) can never appear in a later matrix, so it would sit in
+                # the set forever and route EVERY subsequent save down this
+                # path, turning a one-time migration into permanent blocking
+                # I/O on the caller's thread.
+                if self._pending_migration_ids & vectors.keys():
+                    # Ordered through the same single-worker queue as every
+                    # other write, so a save already in flight cannot land on
+                    # top of this one — waiting on the result is what keeps it
+                    # before _serialize_nodes. Safe to wait while holding the
+                    # lock: the queued work never takes it.
+                    self._io_executor.submit(
+                        self._persist_vectors, vectors, vector_revision
+                    ).result()
                     # Either outcome ends this save's sidecar attempt, so the
                     # background write must not repeat it. A failure has already
                     # cleared the snapshot marker, and that is what leaves the
                     # retry open for the next save.
-                    self._persist_vectors(vectors, vector_revision)
                     vectors = None
 
             data = {
@@ -626,11 +637,19 @@ class GraphStorage:
             # there graph.json is the only durable copy, and the sidecar write
             # is allowed to fail without failing the graph write, so removing it
             # would destroy the vector with nothing written in its place.
-            vector = (
-                self.vector_store.get_vector_list(node.id)
-                if node.id in self._pending_migration_ids
-                else None
-            )
+            vector = None
+            if node.id in self._pending_migration_ids:
+                vector = self.vector_store.get_vector_list(node.id)
+            elif (
+                node.id in self._held_inline_vectors
+                and self.vector_store.get_vector_list(node.id) is None
+            ):
+                # Only while the index still has nothing for this node. Once it
+                # does, that vector is the live one and the sidecar is where it
+                # belongs; re-emitting the held copy would pin a stale vector in
+                # graph.json that no longer matches what search uses.
+                held = self._held_inline_vectors[node.id]
+                vector = held.tolist() if hasattr(held, "tolist") else list(held)
             if vector is None:
                 payload.pop("embedding", None)
             else:
@@ -724,6 +743,18 @@ class GraphStorage:
 
         self.vector_store.load_vectors(vectors)
         self._pending_migration_ids = set(migrated) & set(vectors)
+        # An inline vector the index refused — dropped just above for having the
+        # wrong width — is the worst case of all: graph.json is its only durable
+        # copy AND no sidecar write will ever carry it, because it is not in the
+        # index to be written. Stripping it would destroy it outright, so its
+        # raw value is held here and re-emitted verbatim until something
+        # re-embeds the node. Anchoring the dimension on live sidecar entries
+        # narrowed this to a partial-overlap sidecar; it did not remove it.
+        self._held_inline_vectors = {
+            node_id: vector
+            for node_id, vector in migrated.items()
+            if node_id not in vectors
+        }
         if migrated or orphaned or dropped:
             # Leave the persisted revision behind the live one so the next save
             # writes the migrated or pruned matrix out.
@@ -748,6 +779,12 @@ class GraphStorage:
             return False
         self._persisted_vector_revision = vector_revision
         self._pending_migration_ids -= set(vectors)
+        # Memory hygiene, not correctness: _serialize_nodes already ignores a
+        # held copy once the index has a live vector for that node. Without
+        # this the dict would keep every superseded copy for the life of the
+        # process.
+        for node_id in vectors:
+            self._held_inline_vectors.pop(node_id, None)
         return True
 
     def _do_save_to_disk(

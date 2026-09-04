@@ -9,6 +9,7 @@ without the optional ML stack.
 import json
 import os
 import struct
+import threading
 import tempfile
 import zlib
 from pathlib import Path
@@ -1132,3 +1133,221 @@ def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
     assert handed_over, "no matrix reached the writer at all"
     for vectors in handed_over:
         assert vectors is not storage.vector_store.embeddings
+
+
+def test_an_inline_vector_the_index_refused_keeps_its_place_in_graph_json(tmpdir_path):
+    """The worst case for a pre-split vector: dropped for having a width the
+    index does not hold, so graph.json is its only durable copy AND no sidecar
+    write will ever carry it, because it is not in the index to be written.
+    Stripping it destroys it outright. One live sidecar entry is enough to set
+    the width, so anchoring the dimension on live entries narrowed this case
+    without removing it."""
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": [0.5] * DIM}
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    # Shares exactly one live id, at a width the inline vectors do not have.
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": np.ones(DIM * 2, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        storage.save().result()
+
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" not in payloads["n1"], (
+            "n1 is durably in the sidecar, so its inline copy is redundant"
+        )
+        for node_id in ("n2", "n3"):
+            assert "embedding" in payloads[node_id], (
+                f"{node_id} was refused by the index for its width and stripped "
+                f"from graph.json, so its only durable copy is gone"
+            )
+            np.testing.assert_allclose(
+                np.float32(payloads[node_id]["embedding"]), np.float32([0.5] * DIM)
+            )
+    finally:
+        storage.flush()
+
+
+def test_a_migrating_save_writes_the_sidecar_off_the_caller_thread(tmpdir_path):
+    """The migrating save waits for the sidecar write, but it must still go
+    through the one worker every other write uses. Called directly instead, it
+    jumps the queue — a save already in flight then lands on top of it with an
+    older matrix, and because the snapshot marker stays latched at the live
+    revision no later save ever rewrites it."""
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": [0.5] * DIM}
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert storage._pending_migration_ids, "fixture does not migrate anything"
+        threads = []
+        real_save = storage._embedding_sidecar.save
+
+        def spy(vectors):
+            threads.append(threading.current_thread().name)
+            return real_save(vectors)
+
+        storage._embedding_sidecar.save = spy
+        storage.save().result()
+        storage.flush()
+
+        assert threads, "no sidecar write happened at all"
+        assert threading.main_thread().name not in threads, (
+            "the migrating write ran on the caller's thread, outside the queue "
+            "that orders it against saves already in flight"
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_save_with_nothing_to_migrate_does_not_wait_for_the_sidecar(tmpdir_path):
+    """The retention set does not prune itself: a deleted node's id can never
+    appear in a later matrix, so it sits there for the life of the process.
+    Gating the synchronous path on the set being non-empty — rather than on it
+    actually overlapping this write — would make every later save block on
+    sidecar I/O, which is exactly what the background executor exists to avoid."""
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": [0.5] * DIM}
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        storage.delete_nodes(["n2"], confirmed=True)
+        storage.flush()
+        assert "n2" in storage._pending_migration_ids, (
+            "fixture no longer leaves an id stuck in the retention set"
+        )
+
+        gate = threading.Event()
+        real_save = storage._embedding_sidecar.save
+
+        def blocking(vectors):
+            gate.wait(timeout=10)
+            return real_save(vectors)
+
+        storage._embedding_sidecar.save = blocking
+
+        returned = threading.Event()
+
+        def do_save():
+            # Has to move a vector: a save that writes no sidecar at all cannot
+            # tell the two gates apart.
+            storage.update_node("n1", {"name": "Renamed"})
+            returned.set()
+
+        worker = threading.Thread(target=do_save)
+        worker.start()
+        try:
+            assert returned.wait(timeout=5), (
+                "save() blocked on the sidecar write although this write covers "
+                "nothing the retention set is holding an inline copy for"
+            )
+        finally:
+            gate.set()
+            worker.join(timeout=10)
+    finally:
+        gate.set()
+        storage.flush()
+
+
+def test_a_re_embedded_node_stops_being_written_inline(tmpdir_path):
+    """A held-back vector is a bridge, not a permanent fixture. Once the node is
+    re-embedded at the index's width its vector reaches the sidecar, and the
+    stale inline copy must go — otherwise graph.json keeps a vector that no
+    longer matches the one search actually uses, for good."""
+    graph = {
+        "nodes": [
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": f"N{i}",
+                "embedding": [0.5] * (DIM * 2),
+            }
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    # Live, and at the width the encoder produces — so it sets the index width
+    # and the wider inline vectors are the ones held back.
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": np.ones(DIM, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        storage.save().result()
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" in payloads["n2"], "fixture does not hold n2 back"
+
+        storage.update_node("n2", {"name": "Re-embedded"})
+        storage.flush()
+
+        assert "n2" in FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" not in payloads["n2"], (
+            "n2 is in the sidecar now, but graph.json still carries the stale "
+            "inline vector it was held back with"
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_migrating_save_attempts_the_sidecar_exactly_once(tmpdir_path):
+    """The synchronous attempt ends this save's sidecar write, success or
+    failure. Letting the background path repeat it would write the same matrix
+    twice on the happy path and retry a failing device inside the same save."""
+    graph = {
+        "nodes": [
+            {"id": "n1", "type": "Actor", "name": "Legacy", "embedding": [0.5] * DIM}
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        attempts = []
+        real_save = storage._embedding_sidecar.save
+
+        def counting(vectors):
+            attempts.append(set(vectors))
+            return real_save(vectors)
+
+        storage._embedding_sidecar.save = counting
+        storage.save().result()
+        storage.flush()
+
+        assert len(attempts) == 1, (
+            f"a migrating save made {len(attempts)} sidecar attempts, not one"
+        )
+    finally:
+        storage.flush()
