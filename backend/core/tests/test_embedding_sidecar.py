@@ -499,6 +499,11 @@ def test_a_damaged_file_at_a_name_we_were_given_is_still_refused(tmp_path):
         pytest.param(b"CKGEMB\x02rest", id="shares-six-of-seven"),
         pytest.param(b"lock", id="shorter-than-the-magic"),
         pytest.param(b"\x00", id="one-null-byte"),
+        # Proper prefixes of the magic: these defeat a comparison that only
+        # checks the bytes actually present, which the samples above do not,
+        # because every one of them differs at byte 0.
+        pytest.param(b"CKG", id="a-truncated-magic"),
+        pytest.param(b"CKGEMB", id="the-magic-without-its-version-byte"),
     ],
 )
 def test_the_guard_discriminates_on_the_whole_magic_not_a_prefix(tmp_path, foreign):

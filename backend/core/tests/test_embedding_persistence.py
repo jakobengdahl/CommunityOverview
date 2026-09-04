@@ -1765,3 +1765,58 @@ def test_an_unconfigured_deployment_also_heals_its_own_sidecar(tmpdir_path):
         assert derived.with_name(derived.name + ".corrupt").exists()
     finally:
         storage.flush()
+
+
+@pytest.mark.parametrize("spelling", ["dotdot", "relative", "symlink"])
+def test_a_path_that_only_resolves_to_the_graph_file_is_still_refused(
+    tmpdir_path, spelling
+):
+    """The collision has to be judged on the file, not the spelling. Comparing
+    the paths as written passes when the same string is handed in twice, which
+    is the only case the first version of this test covered — while a hop
+    through a directory, a relative spelling, or a symlink all reach the graph
+    file and destroy the vector while reporting success."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+
+    if spelling == "dotdot":
+        os.mkdir(os.path.join(tmpdir_path, "sub"))
+        configured = os.path.join(tmpdir_path, "sub", "..", "graph.json")
+    elif spelling == "relative":
+        configured = os.path.relpath(graph_path, os.getcwd())
+    else:
+        configured = os.path.join(tmpdir_path, "link.json")
+        os.symlink(graph_path, configured)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=configured)
+    try:
+        assert storage.embeddings_path is not None
+        assert storage.embeddings_path.resolve() != Path(graph_path).resolve(), (
+            f"a {spelling} spelling of the graph file was accepted as its sidecar"
+        )
+    finally:
+        storage.flush()
+
+
+def test_the_fallback_after_a_collision_is_ours_to_heal(tmpdir_path):
+    """Falling back to the derived name is only half the answer: that name is
+    one we chose, so a damaged file sitting there must be rebuilt rather than
+    refused, exactly as it is when nothing was configured at all."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    derived = _sidecar_path(tmpdir_path)
+    derived.write_bytes(b"corrupted beyond recognition")
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=graph_path)
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert storage._embedding_sidecar.owns_path is True
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted
+        assert set(FileEmbeddingSidecar(derived).load()) == {"n1", "n2", "n3"}
+    finally:
+        storage.flush()
