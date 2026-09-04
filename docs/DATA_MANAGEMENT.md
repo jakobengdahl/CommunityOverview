@@ -182,16 +182,18 @@ the record count rather than the bytes directly.
 
 **When trimming runs.** A compaction pass reads and rewrites the whole sidecar
 while holding the store lock, so it is throttled rather than run on every append:
-once per tenth of the records the previous pass kept. Deriving it from the file
-rather than from the cap keeps the work per mutation roughly constant at any
-size, including under age-based retention where there is no count cap to derive
-it from. The cost is a bounded overshoot — between passes the sidecar holds what
+once per tenth of the records the previous pass left on disk. Deriving it from
+the file rather than from the cap keeps the work per mutation roughly constant at
+any size — on the order of twenty records read per append, since a pass makes two
+forward passes plus the rewrite — including under age-based retention, where
+there is no count cap to derive it from. The cost is a bounded overshoot — between passes the sidecar holds what
 retention keeps plus at most one interval, about 110%.
 
-One consequence worth knowing if you rely on `HISTORY_MAX_AGE_DAYS`: age is
-enforced when a pass runs, not continuously, so a record older than the cutoff
-survives until the next pass — up to a tenth of the history's worth of
-mutations. Age retention bounds how long records are kept, not to the minute.
+One consequence worth knowing if you rely on `HISTORY_MAX_AGE_DAYS`: passes are
+counted in mutations, never in time. A record past the cutoff survives until the
+next pass — up to a tenth of the history's worth of appends — so on a quiet
+instance aged-out records stay on disk indefinitely. Age retention bounds records
+in mutations, not in wall-clock time; it is not a deletion deadline.
 
 **Reads.** History queries return a page at a time and read the file backwards, so
 answering one costs memory proportional to the page rather than to the file. That

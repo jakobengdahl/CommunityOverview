@@ -40,9 +40,11 @@ _AI_ACTOR_TYPES = ("agent", "ai")
 
 logger = logging.getLogger(__name__)
 
-# When retention is enabled but no explicit throttle is given, check at most
-# this often so compaction never runs on every single append.
-_DEFAULT_COMPACTION_INTERVAL = 256
+# Stand-in for "how many records the last pass kept" before any pass has run
+# and there is no count cap to borrow from. A tenth of it is the resulting
+# interval, so this is 256 appends' worth of grace on a sidecar whose size is
+# not yet known.
+_UNMEASURED_BASIS_RECORDS = 2560
 
 # Size of the window used to walk the sidecar backwards. Large enough that a
 # page of history is usually one read, small enough that memory stays flat
@@ -176,10 +178,12 @@ class GraphHistoryStore:
 
         A pass reads and rewrites the whole sidecar while holding the lock, so
         the interval has to grow with the file or the work per mutation grows
-        instead. A tenth of what the last pass kept amortises it to roughly ten
-        records per append at any size, and bounds the overshoot: between passes
-        the sidecar holds what retention keeps plus at most one interval, i.e.
-        about 110%.
+        instead. A tenth of what the last pass left on disk amortises it to about
+        twenty records read per append at any size (a pass makes two forward
+        passes plus the rewrite), and bounds the overshoot: between passes the
+        sidecar holds what retention keeps plus at most one interval, i.e. about
+        110%. A small enough basis gives an interval of 1, which trims on every
+        append - cheap, because the file is then small.
 
         Before the first pass there is nothing measured to go on, so it falls
         back to the count cap, and to a constant when there is not one.
@@ -192,7 +196,7 @@ class GraphHistoryStore:
             basis = (
                 self.max_events
                 if self.max_events is not None
-                else _DEFAULT_COMPACTION_INTERVAL * 10
+                else _UNMEASURED_BASIS_RECORDS
             )
         return max(1, basis // 10)
 
@@ -305,9 +309,15 @@ class GraphHistoryStore:
         if self.max_age_days is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(days=self.max_age_days)
 
+        lines_on_disk = 0
         total = 0
         surviving = 0
-        for record in self._iter_records_forward():
+        for raw in self._iter_raw_lines():
+            lines_on_disk += 1
+            try:
+                record = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
             total += 1
             if cutoff is None or self._within_age(record, cutoff):
                 surviving += 1
@@ -316,28 +326,28 @@ class GraphHistoryStore:
         if self.max_events is not None and surviving > self.max_events:
             skip = surviving - self.max_events
 
-        # What this pass leaves behind is what the next interval is sized from.
-        # Recorded even on the no-op path: an age-only policy has no count cap
-        # to fall back on, and its file size is exactly what needs measuring.
-        self._records_after_last_pass = surviving - skip
-
         if skip == 0 and surviving == total:
+            # Nothing to drop. The next pass still has to read every line that
+            # is there, including any unparseable ones this pass counted but
+            # would not have kept - so the basis is the file, not the records.
+            self._records_after_last_pass = lines_on_disk
             return
 
         self._rewrite_streaming(cutoff, skip)
 
-    def _iter_records_forward(self) -> Iterator[Dict[str, Any]]:
-        """Yield records oldest-first without holding them all. Caller holds the lock."""
-        for _, record in self._iter_lines_forward():
-            yield record
+        # Only now is this true of the file. Recorded before the rewrite it is
+        # a claim about a write that may not have happened: a rewrite that
+        # keeps failing (ENOSPC, EROFS, EACCES, EXDEV) would leave the throttle
+        # sized from a file that never existed, collapsing the interval to 1 and
+        # running a full compaction on every single mutation.
+        self._records_after_last_pass = surviving - skip
 
-    def _iter_lines_forward(self) -> Iterator[tuple]:
-        """Yield ``(raw_line, record)`` oldest-first, skipping malformed lines.
+    def _iter_raw_lines(self) -> Iterator[bytes]:
+        """Yield every non-blank line as bytes, malformed ones included.
 
-        Read as bytes and decoded per line: a line torn mid-character — what a
-        crash during an append leaves behind — would otherwise raise
-        UnicodeDecodeError out of compaction, where append_record swallows it
-        and retries every interval, silently disabling retention for good.
+        The count pass needs to see the lines a rewrite would drop: they are
+        still bytes the next pass has to read, so they belong in the number the
+        throttle is sized from.
         """
         if not self.history_path.exists():
             return
@@ -347,15 +357,25 @@ class GraphHistoryStore:
             try:
                 for raw in f:
                     stripped = raw.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        line = stripped.decode("utf-8")
-                        yield line, json.loads(line)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
+                    if stripped:
+                        yield stripped
             finally:
                 _unlock_file(f)
+
+    def _iter_lines_forward(self) -> Iterator[tuple]:
+        """Yield ``(raw_line, record)`` oldest-first, skipping malformed lines.
+
+        Read as bytes and decoded per line: a line torn mid-character — what a
+        crash during an append leaves behind — would otherwise raise
+        UnicodeDecodeError out of compaction, where append_record swallows it
+        and retries every interval, silently disabling retention for good.
+        """
+        for raw in self._iter_raw_lines():
+            try:
+                line = raw.decode("utf-8")
+                yield line, json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
 
     def _rewrite_streaming(self, cutoff: Optional[datetime], skip: int) -> None:
         """Copy the records retention keeps into a fresh sidecar, atomically.

@@ -627,10 +627,12 @@ class TestCompactionRunsAsOftenAsTheThrottleSays:
         assert store._appends_since_compaction < store._compaction_interval
 
     def test_the_file_never_exceeds_the_cap_plus_one_interval(self, store_path):
-        """Sampled after every append against a literal bound. A bound computed
-        from the store's own interval passes for any interval the code picks,
-        including one that disables compaction altogether."""
-        store = GraphHistoryStore(store_path, max_events=50, compaction_interval=10)
+        """Sampled after every append against a literal bound, with the interval
+        DERIVED rather than supplied — otherwise this substantiates the
+        documented 110% only for a number the test itself chose. A bound
+        computed from the store's own interval passes for any interval the code
+        picks, including one that disables compaction altogether."""
+        store = GraphHistoryStore(store_path, max_events=50)
 
         peak = 0
         for i in range(300):
@@ -638,5 +640,114 @@ class TestCompactionRunsAsOftenAsTheThrottleSays:
             lines = [ln for ln in store_path.read_text().splitlines() if ln]
             peak = max(peak, len(lines))
 
-        assert peak <= 60, f"sidecar reached {peak} records against a cap of 50 + 10"
+        assert peak <= 55, f"sidecar reached {peak} records against a cap of 50 + 5"
         assert peak > 50, "compaction never ran, so the bound proves nothing"
+
+
+class TestTheThrottleIsSizedFromTheFileThatExists:
+    """The interval is a tenth of what the last pass left on disk. Sizing it
+    from what a pass *intended* to leave is the same number only when nothing
+    was dropped — which is never true of a pass that actually trims, and is a
+    lie after a rewrite that failed."""
+
+    def test_a_trimming_pass_sizes_the_interval_from_what_it_kept(self, store_path):
+        """5000 records trimmed to 50 must give an interval of 5, not 500."""
+        _write(store_path, [_record(f"n{i}") for i in range(5000)])
+        store = GraphHistoryStore(store_path, max_events=50)
+
+        store.compact()
+
+        assert store._compaction_interval == 5, (
+            "interval was sized from the file before the trim, or from the cap, "
+            "rather than from what the pass actually left behind"
+        )
+
+    def test_an_age_pass_sizes_the_interval_from_the_survivors(self, store_path):
+        """total >> surviving: sizing from `total` would inflate the interval by
+        the number of records the pass deleted."""
+        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        recent = datetime.now(timezone.utc).isoformat()
+        _write(
+            store_path,
+            [_record(f"old{i}", old) for i in range(3000)]
+            + [_record(f"new{i}", recent) for i in range(200)],
+        )
+        store = GraphHistoryStore(store_path, max_age_days=30)
+
+        store.compact()
+
+        assert store._compaction_interval == 20, (
+            "interval reflects the records the pass deleted, not the ones it kept"
+        )
+
+    def test_a_failed_rewrite_does_not_shrink_the_interval(
+        self, store_path, monkeypatch
+    ):
+        """The blocker this class exists for. A rewrite that keeps failing must
+        not leave the throttle sized from a file that was never written — that
+        collapses the interval to 1 and runs a full compaction on every single
+        mutation, silently, because append_record swallows the failure."""
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        recent = datetime.now(timezone.utc).isoformat()
+        _write(
+            store_path,
+            [_record(f"old{i}", old_ts) for i in range(3000)]
+            + [_record(f"new{i}", recent) for i in range(4)],
+        )
+        # Age-only: the pre-pass interval is large (256), so a collapse is
+        # visible. With a small count cap it would already be tiny and the
+        # assertion below could not tell the two apart.
+        store = GraphHistoryStore(store_path, max_age_days=30)
+        before = store._compaction_interval
+        assert before == 256, "fixture no longer starts from a large interval"
+
+        import backend.core.history_store as hs
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(hs.os, "rename", boom)
+        monkeypatch.setattr(hs.os, "replace", boom)
+
+        with pytest.raises(OSError):
+            store.compact()
+
+        assert len(store_path.read_text().splitlines()) == 3004, "file changed"
+        assert store._compaction_interval >= before, (
+            f"interval fell from {before} to {store._compaction_interval} after a "
+            f"rewrite that never landed; every later append would recompact the "
+            f"whole 3004-record file"
+        )
+
+    def test_unparseable_lines_still_count_toward_the_basis(self, store_path):
+        """A no-op pass leaves the malformed lines on disk, so the next pass
+        reads them. Counting only parseable records would size the interval from
+        3 records for a file of thousands."""
+        with open(store_path, "wb") as f:
+            for i in range(2000):
+                f.write(b"{ not json at all\n")
+            for i in range(3):
+                f.write(json.dumps(_record(f"n{i}")).encode() + b"\n")
+        store = GraphHistoryStore(store_path, max_events=100_000)
+
+        store.compact()
+
+        assert store._compaction_interval == 200, (
+            f"interval {store._compaction_interval} is not a tenth of the 2003 "
+            f"lines on disk: sized from the 3 parseable records, or from the cap"
+        )
+
+    def test_a_file_well_under_the_cap_is_sized_from_the_file(self, store_path):
+        """The shipped default is a 100k cap, and most deployments sit far below
+        it. Falling back to the cap there would give a 10000-append interval for
+        a 500-record file — the documented 'tenth of what the previous pass
+        kept' being false for the default configuration."""
+        _write(store_path, [_record(f"n{i}") for i in range(500)])
+        store = GraphHistoryStore(store_path, max_events=100_000)
+
+        store.compact()
+
+        assert store._compaction_interval == 50, (
+            f"interval {store._compaction_interval} came from the cap, not from "
+            f"the 500 records actually on disk"
+        )
