@@ -156,11 +156,39 @@ All domain node types support an optional **subtypes** field for sub-classificat
 
 Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed. See [PROFILES.md](./PROFILES.md) for how to create custom profiles with different node types.
 
+## Mutation History
+
+Every graph mutation is appended to a history sidecar next to the graph file
+(`graph.history.ndjson` for the default layout). It is an audit trail: append-only,
+newest records last, one self-contained JSON record per line.
+
+**Retention.** The sidecar is capped at `HISTORY_MAX_EVENTS` records (default
+100000). When the cap is exceeded, a compaction pass rewrites the file keeping the
+newest N, atomically. `HISTORY_MAX_AGE_DAYS` additionally drops records older than
+a given age; it is unset by default, because "delete records older than X" is a
+retention policy an operator should choose rather than inherit. Setting
+`HISTORY_MAX_EVENTS=0` keeps every record and disables trimming.
+
+The default is deliberately generous: high enough that upgrading an existing
+deployment does not retroactively delete anyone's audit trail, while still bounding
+the file. Note that the resulting file size depends on the record size, so the cap
+bounds the record count rather than the bytes directly.
+
+**Reads.** History queries return a page at a time and read the file backwards, so
+answering one costs memory proportional to the page rather than to the file. That
+matters on a small container: the previous implementation parsed every record to
+return the newest 50.
+
+**Backup.** The sidecar is independent of `graph.json` and can be backed up,
+truncated or discarded on its own; the graph does not depend on it.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see below); `0` keeps every record |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Age-based history retention, opt-in |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 

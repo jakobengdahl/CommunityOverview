@@ -24,7 +24,7 @@ import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterator, List, Optional, TYPE_CHECKING
 
 from .storage_backends import _lock_file, _unlock_file
 
@@ -42,6 +42,36 @@ logger = logging.getLogger(__name__)
 # When retention is enabled but no explicit throttle is given, check at most
 # this often so compaction never runs on every single append.
 _DEFAULT_COMPACTION_INTERVAL = 256
+
+# Size of the window used to walk the sidecar backwards. Large enough that a
+# page of history is usually one read, small enough that memory stays flat
+# however large the file grows.
+_REVERSE_CHUNK_BYTES = 64 * 1024
+
+
+def _iter_lines_reverse(f) -> Iterator[bytes]:
+    """Yield a binary file's lines last-first, reading fixed-size chunks.
+
+    The leading fragment of each chunk is held back rather than yielded: bytes
+    earlier in the file may continue it. Only complete lines are ever handed
+    out, so a multi-byte character split across a chunk boundary is reassembled
+    before anyone tries to decode it.
+    """
+    f.seek(0, os.SEEK_END)
+    position = f.tell()
+    pending = b""
+
+    while position > 0:
+        read_size = min(_REVERSE_CHUNK_BYTES, position)
+        position -= read_size
+        f.seek(position)
+        parts = (f.read(read_size) + pending).split(b"\n")
+        pending = parts.pop(0)
+        for part in reversed(parts):
+            yield part
+
+    if pending:
+        yield pending
 
 
 def derive_is_ai_action(
@@ -180,9 +210,8 @@ class GraphHistoryStore:
 
     def get_recent(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """Return recent history records, newest first."""
-        records = self._read_all()
-        records.reverse()
-        return self._paginate(records, limit, offset)
+        with self._lock:
+            return self._take_page(self._iter_records_reverse(), limit, offset)
 
     def get_entity_history(
         self,
@@ -196,74 +225,136 @@ class GraphHistoryStore:
         ``kind`` optionally restricts matches to ``"node"`` or ``"edge"`` so a
         node and an edge that happen to share an id do not collide.
         """
-        matches = [
-            r
-            for r in self._read_all()
-            if r.get("entity_id") == entity_id
-            and (kind is None or r.get("entity_kind") == kind)
-        ]
-        matches.reverse()
-        return self._paginate(matches, limit, offset)
-
-    def _read_all(self) -> List[Dict[str, Any]]:
-        """Read all records in chronological (append) order."""
         with self._lock:
-            return self._read_all_unlocked()
+            matches = (
+                record
+                for record in self._iter_records_reverse()
+                if record.get("entity_id") == entity_id
+                and (kind is None or record.get("entity_kind") == kind)
+            )
+            return self._take_page(matches, limit, offset)
 
-    def _read_all_unlocked(self) -> List[Dict[str, Any]]:
-        """Read all records in chronological order without taking ``self._lock``.
+    def _iter_records_reverse(self) -> Iterator[Dict[str, Any]]:
+        """Yield records newest-first, reading the file backwards.
 
-        The caller must already hold ``self._lock``. Malformed lines are
-        skipped so a single bad write can never break the whole history query.
+        Memory stays bounded by the chunk size and by whatever the caller
+        keeps, however large the sidecar is. Malformed lines are skipped, as
+        on every other read path.
         """
         if not self.history_path.exists():
-            return []
+            return
 
-        records: List[Dict[str, Any]] = []
-        with open(self.history_path, "r", encoding="utf-8") as f:
+        with open(self.history_path, "rb") as f:
             _lock_file(f, exclusive=False)
             try:
-                for line in f:
-                    line = line.strip()
-                    if not line:
+                for raw in _iter_lines_reverse(f):
+                    if not raw.strip():
                         continue
                     try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
+                        yield json.loads(raw.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
             finally:
                 _unlock_file(f)
-        return records
 
     def _compact_locked(self) -> None:
         """Trim the sidecar to the retention policy. Caller holds ``self._lock``.
 
-        Compaction reads every record currently on disk (including any that
-        arrived since the last pass), so records are never lost across trims in
-        this process. The rewrite is atomic (temp file + rename), so a failure
-        leaves the existing sidecar untouched rather than truncated.
+        Two streaming passes rather than one in-memory list: the first counts
+        what survives the age filter, the second copies the tail of that
+        through to a temp file. Loading every record to trim them would put the
+        whole sidecar in memory at exactly the moment it has grown large enough
+        to need trimming. Every record on disk is considered, including any
+        that arrived since the last pass, so nothing is lost across trims. The
+        rewrite is atomic (temp file + rename), so a failure leaves the
+        existing sidecar untouched rather than truncated.
         """
         self._appends_since_compaction = 0
-        records = self._read_all_unlocked()
-        kept = self._apply_retention(records)
-        if len(kept) == len(records):
+        if not self.history_path.exists():
             return
-        self._rewrite_atomic(kept)
 
-    def _apply_retention(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Return the records to keep, in chronological order.
-
-        Age filtering runs first, then the max-events cap keeps the newest N.
-        Records whose timestamp cannot be parsed are kept (never dropped on a
-        parse failure).
-        """
-        kept = records
+        cutoff = None
         if self.max_age_days is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(days=self.max_age_days)
-            kept = [r for r in kept if self._within_age(r, cutoff)]
-        if self.max_events is not None and len(kept) > self.max_events:
-            kept = kept[-self.max_events :]
-        return kept
+
+        total = 0
+        surviving = 0
+        for record in self._iter_records_forward():
+            total += 1
+            if cutoff is None or self._within_age(record, cutoff):
+                surviving += 1
+
+        skip = 0
+        if self.max_events is not None and surviving > self.max_events:
+            skip = surviving - self.max_events
+
+        if skip == 0 and surviving == total:
+            return
+
+        self._rewrite_streaming(cutoff, skip)
+
+    def _iter_records_forward(self) -> Iterator[Dict[str, Any]]:
+        """Yield records oldest-first without holding them all. Caller holds the lock."""
+        for _, record in self._iter_lines_forward():
+            yield record
+
+    def _iter_lines_forward(self) -> Iterator[tuple]:
+        """Yield ``(raw_line, record)`` oldest-first, skipping malformed lines."""
+        if not self.history_path.exists():
+            return
+
+        with open(self.history_path, "r", encoding="utf-8") as f:
+            _lock_file(f, exclusive=False)
+            try:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        yield stripped, json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+            finally:
+                _unlock_file(f)
+
+    def _rewrite_streaming(self, cutoff: Optional[datetime], skip: int) -> None:
+        """Copy the records retention keeps into a fresh sidecar, atomically.
+
+        The original line is written through byte-for-byte rather than
+        re-serialised, so a trim cannot quietly alter a record it is only
+        supposed to keep or drop.
+        """
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix=".ndjson",
+            prefix="graph_history_",
+            dir=self.history_path.parent,
+        )
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as out:
+                _lock_file(out, exclusive=True)
+                try:
+                    skipped = 0
+                    for raw, record in self._iter_lines_forward():
+                        if cutoff is not None and not self._within_age(record, cutoff):
+                            continue
+                        if skipped < skip:
+                            skipped += 1
+                            continue
+                        out.write(raw + "\n")
+                    out.flush()
+                    os.fsync(out.fileno())
+                finally:
+                    _unlock_file(out)
+
+            if sys.platform == "win32" and self.history_path.exists():
+                os.replace(temp_path, self.history_path)
+            else:
+                os.rename(temp_path, self.history_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
 
     @staticmethod
     def _within_age(record: Dict[str, Any], cutoff: datetime) -> bool:
@@ -278,40 +369,27 @@ class GraphHistoryStore:
             ts = ts.replace(tzinfo=timezone.utc)
         return ts >= cutoff
 
-    def _rewrite_atomic(self, records: List[Dict[str, Any]]) -> None:
-        """Rewrite the sidecar with exactly ``records`` via temp file + rename."""
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_path = tempfile.mkstemp(
-            suffix=".ndjson",
-            prefix="graph_history_",
-            dir=self.history_path.parent,
-        )
-        try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-                _lock_file(f, exclusive=True)
-                try:
-                    for record in records:
-                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                finally:
-                    _unlock_file(f)
-
-            if sys.platform == "win32" and self.history_path.exists():
-                os.replace(temp_path, self.history_path)
-            else:
-                os.rename(temp_path, self.history_path)
-        except Exception:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise
-
     @staticmethod
-    def _paginate(
-        records: List[Dict[str, Any]], limit: int, offset: int
+    def _take_page(
+        records: Iterator[Dict[str, Any]], limit: int, offset: int
     ) -> List[Dict[str, Any]]:
+        """Consume just enough of a newest-first stream to answer one page.
+
+        Stopping at offset+limit is what keeps a query's cost proportional to
+        the page rather than to the history.
+        """
         if offset < 0:
             offset = 0
         if limit < 0:
             limit = 0
-        return records[offset : offset + limit]
+        if limit == 0:
+            return []
+
+        page: List[Dict[str, Any]] = []
+        for index, record in enumerate(records):
+            if index < offset:
+                continue
+            page.append(record)
+            if len(page) >= limit:
+                break
+        return page

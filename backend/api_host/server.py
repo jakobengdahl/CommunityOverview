@@ -105,7 +105,11 @@ def create_app(
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
-        graph_storage = GraphStorage(str(graph_path))
+        graph_storage = GraphStorage(
+            str(graph_path),
+            history_max_events=config.history_max_events,
+            history_max_age_days=config.history_max_age_days,
+        )
 
     def _on_federated_node_event(operation, before_node, after_node):
         graph_storage.emit_federated_node_event(
