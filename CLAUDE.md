@@ -166,11 +166,11 @@ Follow this process for every feature or bug fix, regardless of size.
 
 **Default session ownership (end-to-end).** Unless the task says otherwise, a
 Claude session owns the whole cycle for the chosen task: solve it, open a PR
-targeting `main`, run the review loop with a subagent, update any documentation
-the change affects, and — once every review point is resolved and the
+targeting `main`, run the review loop per step 8, update any documentation
+the change affects, and — once every `production-defect` is resolved and the
 definition-of-done checklist in step 10 passes — merge the PR to `main` itself.
-Do not stop at "PR opened" and wait for the owner to merge; merging a clean,
-green `main` PR is part of the job. The only branches Claude never merges on its
+Do not stop at "PR opened" and wait for the owner to merge; merging a green
+`main` PR whose loop has reached that criterion is part of the job. The only branches Claude never merges on its
 own initiative are `preview` and `prod` (see the branch strategy above). If the
 tooling can't delete the feature branch after merge, leave it — the owner
 removes it manually.
@@ -309,28 +309,136 @@ The PR body follows `.github/pull_request_template.md`:
 
 ### 8. Review Loop
 
-After the PR is open, spawn a subagent with the full diff from main:
+**Write the guarantees first.** G1…Gn, one line each: what this change must
+hold true, in terms a reviewer can test. They go into both reviewer prompts
+below, every round. Without them a reviewer has no contract to classify
+findings against, and the loop has nothing to terminate on.
+
+**A round is two reviewers, not one.** Both, every round, on the full diff from
+main:
 
 ```
-Agent(
+Agent(   # 1. correctness — its findings decide whether the loop continues
   prompt="""Review the diff below from branch <name> in /path/to/repo.
             Full diff vs main: run `git diff origin/main...HEAD` in the repo.
+
+            Guarantees this change must hold: <G1…Gn, one line each>.
 
             Look for: correctness bugs, edge cases, test gaps, consistency
             between related files (e.g. local vs. federation paths doing
             the same thing differently), dead code, pre-filter/scorer
             mismatches.
 
+            Label every finding production-defect (a defect in the changed
+            production code), test-durability (the tests would not catch a
+            future regression) or unfalsifiable (harness identity, or a
+            hatch that is only open because the fixture opens it).
+
             Context from previous round (if any): <summarise what was
             fixed since the last review>.
 
             Report file:line references. Flag only real issues."""
 )
+
+Agent(   # 2. mutation — its survivors are residue, not blockers
+  prompt="""In /path/to/repo on branch <name>: edit the CHANGED PRODUCTION
+            code to try to violate one of the guarantees below, and report
+            which edits the test suite lets through.
+
+            Guarantees this change must hold: <G1…Gn, one line each>.
+
+            A mutation counts ONLY if it violates a named guarantee. Harness
+            identity (can the code tell it is under test) is out of scope.
+            Label each survivor test-durability or unfalsifiable, and say
+            what would close it. Revert every edit before reporting."""
+)
 ```
 
-Address every finding that is a real bug or a meaningful gap. Then spawn another
-review subagent (briefing it on what changed between rounds). Repeat until the
-review comes back with no actionable findings.
+**Run both where the change has two distinguishable halves** — an executable
+half (module, script, config: what actually runs), and a test suite whose job is
+to catch a break in it. Then the mutation reviewer edits the first and reports
+what the second let through. A loop with only the
+correctness reviewer on such a change terminates at the first round it finds
+nothing and never asks the second question; one with only the mutation reviewer
+is the runaway this section exists to stop. Where such a change is too small to
+mutate meaningfully, say so in the round report rather than silently dropping the
+reviewer.
+
+**Where the PR changes no executable code, one correctness pass per round is the
+round** — a docs-only change, a test-only one, a fixture, or any mix of those.
+The mutation reviewer would be editing the very artifact it then asks the suite
+about, a question with no referent. Do not improvise one, and do not treat its
+absence as a round that did not count. Read the whole rule off that one fact:
+whether there is an executable half decides the reviewer count here, what stands
+in for production code below, and whether the 10× backstop applies at all.
+
+**What "production code" means here.** The code this change ships to a running
+system — the module, script or config the PR edits — as opposed to the tests and
+fixtures that exercise it. Two other kinds of artifact carry defects that must
+block, so each stands in for production code, **each under its own condition**:
+
+- **Text** — documentation, `CLAUDE.md`, any normative prose the PR edits. It
+  stands in **always, alongside any code in the same PR**: a rule or a documented
+  fact that is wrong, unactionable, or contradicted elsewhere in the file is a
+  `production-defect`. So a PR that edits `rest_api.py` and the endpoint table in
+  `backend/DEVELOPMENT.md` — the shape this file requires, not an unusual one —
+  has the module judged as production code *and* the table judged as its own. A
+  wrong row there is a defect, not residue: wrong docs are worse than no docs.
+- **Tests and fixtures** — they stand in **wherever the PR changes no executable
+  code**: a regression test added on its own, a test-durability follow-up, a new
+  fixture or golden file, or any of those alongside a doc change. Then an
+  assertion that is wrong, that passes against the bug it claims to catch, or
+  that does not exercise what its name says is a `production-defect`. This repo
+  produces that class deliberately — and step 10 pushes a doc update into the
+  same PR — so a doc line riding along must not turn a wrong assertion into
+  residue. Where the PR **does** change executable code, its tests are tests
+  again: a gap in them is `test-durability` and goes to the residue node rather
+  than into this loop.
+
+**The mutation reviewer works on the executable half only** — the module, script
+or config — never on prose or on the tests themselves, because no suite covers
+those and every such mutation would survive by construction. For the same reason
+the 10× backstop counts only that half as the production diff.
+
+Address every finding labelled `production-defect`. Then run another round
+(briefing both reviewers on what changed between rounds).
+
+**The loop ends at the first round with no `production-defect` — not the first
+round with no findings.** A reviewer briefed to find something always can, so
+"repeat until clean" has no fixed point: one such loop ran 22 rounds on a
+40-line change, and every round past the tenth was about test durability rather
+than the change. Only `production-defect` blocks: log **both** other classes —
+every surviving `test-durability` and `unfalsifiable` finding — as **one**
+`small-fix`-tagged Task node in the Corp planning graph, one node for the whole
+residue, and merge. A "meaningful gap" in the tests is a `test-durability`
+finding and goes to that node, not into this loop. A round that comes back with
+its findings unlabelled is not a completed round — ask the reviewers for the
+labels rather than guessing them — but it counts toward the five-round backstop
+all the same, and two unlabelled rounds in a row are themselves a stop-and-ask.
+Otherwise "ask again" is an unbounded loop inside the bounded one. If a label is
+disputed and the loop runs on anyway, three consecutive rounds with no
+`production-defect` end it whatever else they found.
+
+**Backstops — stop and ask Jakob, never continue silently and never merge on
+one.** **Termination wins:** a round with no `production-defect` ends the loop
+and the merge proceeds, even if it is the fifth round or the one that crosses a
+threshold. Check the backstops only when the round just read left a
+`production-defect`, or came back unlabelled. Then stop and ask when:
+
+- **five review rounds** on one change — unlabelled rounds included; or
+- a **test diff both more than 10× the production diff and above 500 lines**.
+  The ratio alone means nothing on a small change: the three-line fix plus the
+  regression test this file requires routinely exceeds 10×, while the runaway
+  behind the threshold was 5054 test lines against 40 of shell. Where the PR
+  changes no executable code the denominator is zero, so it does not apply at
+  all; or
+- **cost above 3× what the change was budgeted**, where that is readable: the
+  planning graph's `effort` is a size class, not a spend, so this trips only
+  where a real cost figure is available. Where none is, say so in the round
+  report and let the other two carry it.
+
+Tripping one does not mean the loop was wrong; it means the cost should be
+visible while it is being paid.
 
 **Review the fixes, not just the original change.** A round that only fixes what
 the previous round found is not reviewed. Fixes are written under time pressure
@@ -375,7 +483,8 @@ or all-outgoing changes.
 
 ### 10. Merge to main — definition of done
 
-When the review loop is clean, merge the PR to `main` autonomously:
+When the review loop has reached its termination criterion (step 8), merge the
+PR to `main` autonomously:
 
 ```bash
 gh pr merge <number> \
@@ -430,8 +539,10 @@ Merge only when **all** of the following are true:
 
 - [ ] All tests pass locally (`pytest backend/ -q`)
 - [ ] CI is green on the PR (not red, not pending)
-- [ ] Review loop is clean (last subagent round raised no actionable findings),
-      and the LAST round reviewed the fixes rather than only the original change
+- [ ] Review loop has reached its termination criterion (last round raised no
+      `production-defect`; **both** residue classes — test-durability and
+      unfalsifiable — logged as one follow-up node), and the LAST round reviewed
+      the fixes rather than only the original change
 - [ ] Documentation affected by the change is updated in the same PR (see the
       Documentation section for which files map to which changes)
 - [ ] No debug artifacts in the diff (`print`, `pdb`, hardcoded credentials)
@@ -490,9 +601,14 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    planning graph as a `small-fix`-tagged Task node and do not fix it here.
 3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
    id/name). Note items explicitly **not** addressed.
-4. **Review loop:** spawn the review subagent as described in step 8. Because
-   these are small, isolated fixes the loop typically converges in one round —
-   but repeat until clean, same as any other PR.
+4. **Review loop:** run it as described in step 8, reading the reviewer count off
+   the same property step 8 does — does this batch change executable code. Where
+   it does, a round is two reviewers; where it does not, because the batch only
+   edits docs, tests or fixtures, one correctness pass is the round. Read the
+   batch, do not assume from its origin: a dead-code removal is wrong precisely
+   when the code was not dead, which is what the second reviewer probes. Because these are small, isolated fixes the
+   loop typically converges in one round — but run it to step 8's termination
+   criterion, same as any other PR.
 5. **After merge:** mark the resolved `small-fix`-tagged Task nodes done in the
    Corp planning graph (record the PR/commit on each node per the MCP-first
    planning rules).
