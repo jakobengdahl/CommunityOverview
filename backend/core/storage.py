@@ -147,17 +147,19 @@ class GraphStorage:
         # they were before the split, so no backend silently loses them.
         self._embedding_sidecar = self._init_embedding_sidecar(embeddings_path)
         self._persisted_vector_revision: Optional[int] = None
-        # Ids whose vector came out of graph.json and is not yet in the
-        # sidecar. For those, graph.json is still the ONLY durable copy, so the
-        # vector stays in the node payload until a sidecar write has actually
-        # landed. A vector this process generated was never durable in
-        # graph.json, so it needs no such protection and is dropped at once -
-        # which is what keeps the file small from the first save.
-        self._pending_migration_ids: set = set()
-        # Inline vectors the index would not take (a width it does not hold).
-        # graph.json is their only home and no sidecar write covers them, so
-        # they are re-emitted into the payload verbatim rather than dropped.
-        self._held_inline_vectors: Dict[str, Any] = {}
+        # Raw vectors read out of graph.json that no sidecar write has covered
+        # yet, keyed by node id. While an id is in here graph.json is its ONLY
+        # durable copy, so the payload keeps carrying it. A vector this process
+        # generated was never durable in graph.json, so it never enters this
+        # map and is dropped from the first save - which is what keeps the file
+        # small immediately.
+        #
+        # One map rather than "ids the index took" plus "values it refused":
+        # those were mutually exclusive branches, so a vector that moved from
+        # the first group to the second - evicted when a model width change
+        # reset the index - belonged to neither and was deleted from graph.json
+        # with nothing written in its place.
+        self._inline_fallback: Dict[str, Any] = {}
         # Set when a save has already captured a revision for writing but the
         # background write has not landed yet. Without it a second save in the
         # same operation — add_nodes saves once for the nodes and again for the
@@ -568,13 +570,13 @@ class GraphStorage:
                 # successful migration while leaving every vector in graph.json
                 # and the file the size it always was.
                 #
-                # Only ids this write actually covers count. _pending_migration_ids
-                # is not self-pruning — an id that leaves the index (a deleted
-                # node) can never appear in a later matrix, so it would sit in
-                # the set forever and route EVERY subsequent save down this
-                # path, turning a one-time migration into permanent blocking
-                # I/O on the caller's thread.
-                if self._pending_migration_ids & vectors.keys():
+                # Only ids this write actually covers count. A vector the
+                # index refused, or a deleted node's, can never appear in a
+                # later matrix, so gating on the map being non-empty would
+                # route EVERY subsequent save down this path and turn a
+                # one-time migration into permanent blocking I/O on the
+                # caller's thread.
+                if self._inline_fallback.keys() & vectors.keys():
                     # Ordered through the same single-worker queue as every
                     # other write, so a save already in flight cannot land on
                     # top of this one — waiting on the result is what keeps it
@@ -638,18 +640,16 @@ class GraphStorage:
             # is allowed to fail without failing the graph write, so removing it
             # would destroy the vector with nothing written in its place.
             vector = None
-            if node.id in self._pending_migration_ids:
+            if node.id in self._inline_fallback:
+                # The live vector when the index still holds one - it is the
+                # same vector, adopted - and otherwise the raw copy this node
+                # was loaded with, because the index refusing it (a width it
+                # does not hold) or evicting it (a model change) does not make
+                # graph.json any less its only home.
                 vector = self.vector_store.get_vector_list(node.id)
-            elif (
-                node.id in self._held_inline_vectors
-                and self.vector_store.get_vector_list(node.id) is None
-            ):
-                # Only while the index still has nothing for this node. Once it
-                # does, that vector is the live one and the sidecar is where it
-                # belongs; re-emitting the held copy would pin a stale vector in
-                # graph.json that no longer matches what search uses.
-                held = self._held_inline_vectors[node.id]
-                vector = held.tolist() if hasattr(held, "tolist") else list(held)
+                if vector is None:
+                    raw = self._inline_fallback[node.id]
+                    vector = raw.tolist() if hasattr(raw, "tolist") else list(raw)
             if vector is None:
                 payload.pop("embedding", None)
             else:
@@ -742,19 +742,12 @@ class GraphStorage:
             )
 
         self.vector_store.load_vectors(vectors)
-        self._pending_migration_ids = set(migrated) & set(vectors)
-        # An inline vector the index refused — dropped just above for having the
-        # wrong width — is the worst case of all: graph.json is its only durable
-        # copy AND no sidecar write will ever carry it, because it is not in the
-        # index to be written. Stripping it would destroy it outright, so its
-        # raw value is held here and re-emitted verbatim until something
-        # re-embeds the node. Anchoring the dimension on live sidecar entries
-        # narrowed this to a partial-overlap sidecar; it did not remove it.
-        self._held_inline_vectors = {
-            node_id: vector
-            for node_id, vector in migrated.items()
-            if node_id not in vectors
-        }
+        # Every vector that came out of graph.json, whether or not the index
+        # took it. One the index refused for its width will never be carried by
+        # a sidecar write at all, since it is not in the index to be written;
+        # one the index took can still be evicted later by a model change. Both
+        # keep graph.json as their only durable copy, so both are held.
+        self._inline_fallback = dict(migrated)
         if migrated or orphaned or dropped:
             # Leave the persisted revision behind the live one so the next save
             # writes the migrated or pruned matrix out.
@@ -778,13 +771,10 @@ class GraphStorage:
             print(f"Warning: could not save embedding sidecar: {e}")
             return False
         self._persisted_vector_revision = vector_revision
-        self._pending_migration_ids -= set(vectors)
-        # Memory hygiene, not correctness: _serialize_nodes already ignores a
-        # held copy once the index has a live vector for that node. Without
-        # this the dict would keep every superseded copy for the life of the
-        # process.
+        # The sidecar is now these vectors' durable home, so graph.json stops
+        # having to carry them. This is what ends the migration.
         for node_id in vectors:
-            self._held_inline_vectors.pop(node_id, None)
+            self._inline_fallback.pop(node_id, None)
         return True
 
     def _do_save_to_disk(
@@ -1478,6 +1468,10 @@ class GraphStorage:
 
                 # Remove embeddings
                 self.vector_store.remove_nodes_embeddings(deleted_node_ids)
+                # And the graph.json fallback copies, or an id created again
+                # later would inherit the departed node's vector.
+                for node_id in deleted_node_ids:
+                    self._inline_fallback.pop(node_id, None)
 
                 # Save
                 self.save()

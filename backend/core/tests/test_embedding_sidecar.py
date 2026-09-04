@@ -174,3 +174,19 @@ def test_load_rejects_non_string_node_ids(sidecar):
 
     with pytest.raises(EmbeddingSidecarError, match="non-string node id"):
         sidecar.load()
+
+
+def test_a_payload_longer_than_the_header_promises_is_rejected(tmp_path):
+    """Trailing bytes — a partially overwritten or appended-to file — must be
+    caught here. Letting them through reaches np.frombuffer/reshape, which
+    raises a bare ValueError that GraphStorage does not catch, so a damaged
+    sidecar fails the whole graph load instead of degrading to no vectors."""
+    path = tmp_path / "graph.embeddings.bin"
+    sidecar = FileEmbeddingSidecar(path)
+    sidecar.save({"n1": np.ones(4, dtype=np.float32)})
+
+    with open(path, "ab") as f:
+        f.write(b"trailing junk")
+
+    with pytest.raises(EmbeddingSidecarError):
+        sidecar.load()

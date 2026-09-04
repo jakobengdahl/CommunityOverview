@@ -940,7 +940,7 @@ def test_reopening_a_migrated_graph_does_not_put_the_vectors_back_inline(
 
     reopened = _make_storage(tmpdir_path)
     try:
-        assert reopened._pending_migration_ids == set(), (
+        assert reopened._inline_fallback == {}, (
             "nothing was migrated out of graph.json, so nothing is owed a copy there"
         )
         # metadata-only, so no vector moves and no sidecar write follows to
@@ -1196,7 +1196,7 @@ def test_a_migrating_save_writes_the_sidecar_off_the_caller_thread(tmpdir_path):
 
     storage = _make_storage(tmpdir_path)
     try:
-        assert storage._pending_migration_ids, "fixture does not migrate anything"
+        assert storage._inline_fallback, "fixture does not migrate anything"
         threads = []
         real_save = storage._embedding_sidecar.save
 
@@ -1218,14 +1218,19 @@ def test_a_migrating_save_writes_the_sidecar_off_the_caller_thread(tmpdir_path):
 
 
 def test_a_save_with_nothing_to_migrate_does_not_wait_for_the_sidecar(tmpdir_path):
-    """The retention set does not prune itself: a deleted node's id can never
-    appear in a later matrix, so it sits there for the life of the process.
-    Gating the synchronous path on the set being non-empty — rather than on it
-    actually overlapping this write — would make every later save block on
-    sidecar I/O, which is exactly what the background executor exists to avoid."""
+    """A fallback entry the index refused for its width is never in any matrix,
+    so it can never be cleared by a write. Gating the synchronous path on the
+    map being non-empty — rather than on it actually overlapping this write —
+    would therefore make every later save block on sidecar I/O for the life of
+    the process, which is what the background executor exists to avoid."""
     graph = {
         "nodes": [
-            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": [0.5] * DIM}
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": f"N{i}",
+                "embedding": [0.5] * (DIM * 2),
+            }
             for i in (1, 2, 3)
         ],
         "edges": [],
@@ -1233,13 +1238,16 @@ def test_a_save_with_nothing_to_migrate_does_not_wait_for_the_sidecar(tmpdir_pat
     }
     with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
         json.dump(graph, f)
+    # Live and at the encoder's width, so it sets the index width and the three
+    # wider inline vectors are the ones the index refuses.
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": np.ones(DIM, dtype=np.float32)}
+    )
 
     storage = _make_storage(tmpdir_path)
     try:
-        storage.delete_nodes(["n2"], confirmed=True)
-        storage.flush()
-        assert "n2" in storage._pending_migration_ids, (
-            "fixture no longer leaves an id stuck in the retention set"
+        assert storage._inline_fallback, (
+            "fixture no longer leaves a refused vector in the fallback map"
         )
 
         gate = threading.Event()
@@ -1348,6 +1356,103 @@ def test_a_migrating_save_attempts_the_sidecar_exactly_once(tmpdir_path):
 
         assert len(attempts) == 1, (
             f"a migrating save made {len(attempts)} sidecar attempts, not one"
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_model_width_change_does_not_delete_the_vectors_it_evicts(tmpdir_path):
+    """A width change resets the whole index, so vectors loaded out of a
+    pre-split graph.json are evicted while their nodes stay. graph.json is
+    still their only durable copy and no sidecar write ever carried them, so
+    stripping them on the next save destroys them — and nothing re-embeds a
+    node that is never touched again. This is a durability regression against
+    the pre-split model, where the vector lived on the node object and survived
+    whatever the index did."""
+    graph = {
+        "nodes": [
+            {"id": f"n{i}", "type": "Actor", "name": f"N{i}", "embedding": [0.5] * DIM}
+            for i in (1, 2)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage._inline_fallback) == {"n1", "n2"}
+
+        class _WiderEncoder:
+            def encode(self, text):
+                if isinstance(text, str):
+                    return np.ones(DIM * 2, dtype=np.float32)
+                return np.vstack([np.ones(DIM * 2, dtype=np.float32) for _ in text])
+
+        storage.vector_store.model = _WiderEncoder()
+        # Re-embedding n2 at the new width resets the index, evicting n1.
+        storage.update_node("n2", {"name": "Re-embedded wider"})
+        storage.flush()
+
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" in payloads["n1"], (
+            "n1 was evicted from the index by the width change and then deleted "
+            "from graph.json, so its vector is gone for good"
+        )
+        np.testing.assert_allclose(
+            np.float32(payloads["n1"]["embedding"]), np.float32([0.5] * DIM)
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_reused_node_id_does_not_inherit_the_deleted_node_s_vector(tmpdir_path):
+    """The fallback map is keyed by node id, so a departed node's entry would
+    be handed to whatever is created with that id next — writing one node's
+    vector into an unrelated node's payload, and adopting it into the index on
+    the following load, so semantic search returns the new node for queries
+    matching text it never had."""
+    graph = {
+        "nodes": [
+            {
+                "id": "n1",
+                "type": "Actor",
+                "name": "Old node",
+                "embedding": [1.0] * (DIM * 2),
+            },
+            {"id": "n2", "type": "Actor", "name": "Other"},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n2": np.ones(DIM, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    # No encoder: the default install cannot embed, which is what leaves the
+    # new node with no live vector of its own to take precedence.
+    storage.vector_store.model = None
+    try:
+        assert "n1" in storage._inline_fallback, "fixture does not hold n1 back"
+
+        storage.delete_nodes(["n1"], confirmed=True)
+        storage.flush()
+        assert "n1" not in storage._inline_fallback, (
+            "the deleted node's vector is still held under its id"
+        )
+
+        storage.add_nodes(
+            [Node(id="n1", type=NodeType.ACTOR, name="Brand new unrelated node")], []
+        )
+        storage.flush()
+
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" not in payloads["n1"], (
+            "a brand new node inherited the deleted node's vector"
         )
     finally:
         storage.flush()
