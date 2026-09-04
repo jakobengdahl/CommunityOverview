@@ -36,8 +36,9 @@ from .models import (
     DeleteEdgesResult,
     _parse_datetime,
 )
+from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
-from .vector_store import VectorStore
+from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
 from . import storage_events
@@ -116,8 +117,10 @@ class GraphStorage:
         Args:
             json_path: Path to the JSON file for graph persistence when using the
                 default file-backed persistence backend.
-            embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
-                           New implementation stores embeddings in graph.json directly.
+            embeddings_path: Path to the binary embedding sidecar holding the
+                node vectors. Defaults to "<graph stem>.embeddings.bin" next to
+                the graph file. Only honoured by the file-backed backend; other
+                backends keep vectors inline in the node payload.
             persistence_backend: Optional persistence backend adapter. Defaults to
                 the file-backed JSON backend to preserve standalone behavior.
             history_max_events: Optional cap on retained history records. When set
@@ -137,6 +140,32 @@ class GraphStorage:
             self._persistence_backend, "json_path", Path(json_path)
         )
 
+        # Node vectors live in their own binary file rather than in the node
+        # payload, so a mutation that changes no vector rewrites none of them.
+        # Only the file-backed backend owns a concrete path to put it next to;
+        # for any other backend vectors stay inline in the serialized node, as
+        # they were before the split, so no backend silently loses them.
+        self._embedding_sidecar = self._init_embedding_sidecar(embeddings_path)
+        self._persisted_vector_revision: Optional[int] = None
+        # Raw vectors read out of graph.json that no sidecar write has covered
+        # yet, keyed by node id. While an id is in here graph.json is its ONLY
+        # durable copy, so the payload keeps carrying it. A vector this process
+        # generated was never durable in graph.json, so it never enters this
+        # map and is dropped from the first save - which is what keeps the file
+        # small immediately.
+        #
+        # One map rather than "ids the index took" plus "values it refused":
+        # those were mutually exclusive branches, so a vector that moved from
+        # the first group to the second - evicted when a model width change
+        # reset the index - belonged to neither and was deleted from graph.json
+        # with nothing written in its place.
+        self._inline_fallback: Dict[str, Any] = {}
+        # Set when a save has already captured a revision for writing but the
+        # background write has not landed yet. Without it a second save in the
+        # same operation — add_nodes saves once for the nodes and again for the
+        # edges — snapshots and rewrites the identical matrix.
+        self._snapshotted_vector_revision: Optional[int] = None
+
         # Durable append-only mutation history sidecar. Only enabled for the
         # file-backed standalone backend, which owns a concrete json_path next
         # to which the history NDJSON lives. Non-file backends own their own
@@ -154,8 +183,8 @@ class GraphStorage:
         # Using max_workers=1 to ensure sequential writes
         self._io_executor = ThreadPoolExecutor(max_workers=1)
 
-        # We initialize VectorStore without a storage path as it now holds state in memory
-        # and relies on GraphStorage for persistence via graph.json
+        # The VectorStore owns the vectors in memory; GraphStorage persists them
+        # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
         self.vector_store = VectorStore()
         self.vector_store.preload_model()  # Start loading embedding model in background
 
@@ -188,6 +217,57 @@ class GraphStorage:
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
+
+    def _init_embedding_sidecar(
+        self, embeddings_path: Optional[str]
+    ) -> Optional[FileEmbeddingSidecar]:
+        """Create the vector sidecar for file-backed standalone mode."""
+        if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return None
+        derived = self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
+        if not embeddings_path:
+            return FileEmbeddingSidecar(derived, owns_path=True)
+
+        path = Path(embeddings_path)
+        # The graph file is the one collision the refusal in save() cannot
+        # catch, because the sidecar is written first and the graph write then
+        # lands on top of it — and on the bootstrap path, where the graph file
+        # is momentarily absent, the sidecar write finds nothing to refuse.
+        # The migration script rejects the same shape outright for the same
+        # reason: the second write silently destroys the first.
+        if path.resolve() == self.json_path.resolve():
+            print(
+                f"Warning: EMBEDDINGS_FILE names the graph file itself "
+                f"({path}); using {derived} instead"
+            )
+            return FileEmbeddingSidecar(derived, owns_path=True)
+        # Ownership is a property of the NAME, not of whether anyone passed one.
+        # start-dev.sh exports EMBEDDINGS_FILE on every run, set to exactly this
+        # derived path, and .env.example documents the same pairing - so asking
+        # "was a value supplied" put the app's own file in the mode meant for an
+        # operator's, and the self-heal never fired where it actually matters.
+        # Comparing resolved paths also covers a relative value and a symlink
+        # that land on the same file.
+        return FileEmbeddingSidecar(path, owns_path=path.resolve() == derived.resolve())
+
+    @property
+    def vectors_persisted(self) -> bool:
+        """Whether the vector index as it stands has been written to disk.
+
+        A sidecar write failure is deliberately not fatal to a graph save, so
+        callers that report success to an operator — or act on it, like the
+        pickle migration renaming its source — must ask rather than assume.
+        """
+        if self._embedding_sidecar is None:
+            return True
+        return self._persisted_vector_revision == self.vector_store.revision
+
+    @property
+    def embeddings_path(self) -> Optional[Path]:
+        """Where node vectors are persisted, or None for a backend with no sidecar."""
+        if self._embedding_sidecar is None:
+            return None
+        return self._embedding_sidecar.path
 
     def _init_history_store(self) -> Optional["GraphHistoryStore"]:
         """Create the append-only history sidecar for file-backed standalone mode."""
@@ -383,6 +463,25 @@ class GraphStorage:
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
+                # An empty index has nothing to contribute, and marking it
+                # persisted is what keeps this bootstrap write from putting an
+                # EMPTY sidecar over a real one — a graph file that is merely
+                # missing for now (wrong GRAPH_FILE, a restore in progress) must
+                # not destroy the only copy of the vectors.
+                #
+                # A populated index is the opposite case. load() is also the body
+                # of reload(), which re-saves the in-memory graph; if the sidecar
+                # has gone too, those vectors are now the only copy anywhere and
+                # this save is the one chance to write them. The revision alone
+                # cannot tell: it still matches the last successful write, of a
+                # file that no longer exists. Both markers have to go — the
+                # snapshot one records that this revision was already handed to
+                # a save, and on its own it keeps needs_write false forever.
+                if self.vector_store.embeddings:
+                    self._persisted_vector_revision = None
+                    self._snapshotted_vector_revision = None
+                else:
+                    self._persisted_vector_revision = self.vector_store.revision
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
@@ -436,8 +535,7 @@ class GraphStorage:
                         edge.source, edge.target, key=edge.id, data=edge
                     )
 
-                # Rebuild vector store index from loaded nodes
-                self.vector_store.rebuild_index(list(self.nodes.values()))
+                self._load_embeddings()
 
                 print(
                     f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
@@ -459,8 +557,61 @@ class GraphStorage:
         Thread-safe: Uses lock for reading in-memory data.
         """
         with self._lock:
+            # Only snapshot the vectors when they have actually moved since the
+            # last successful sidecar write; an ordinary metadata edit changes
+            # no vector and must not rewrite the matrix.
+            vector_revision = self.vector_store.revision
+            needs_write = (
+                self._embedding_sidecar is not None
+                and vector_revision != self._persisted_vector_revision
+                and vector_revision != self._snapshotted_vector_revision
+            )
+            vectors = None
+            if needs_write:
+                # No filtering here: VectorStore keeps the index uniform, so
+                # what it exports is always a matrix the sidecar accepts. An
+                # extra vote at this boundary would only re-decide the
+                # dimension, and it decided it by raw count — which favours
+                # whichever vectors are the more numerous, i.e. the stale ones.
+                vectors = self.vector_store.export_vectors()
+                self._snapshotted_vector_revision = vector_revision
+
+                # Migration is the one case where what the node payload may
+                # contain depends on whether the sidecar write has landed:
+                # those ids keep their inline copy until it has, because
+                # graph.json is still their only durable home. Landing it
+                # here — before serialising, rather than on the background
+                # thread afterwards — is what lets THIS save drop them.
+                #
+                # Deferring it costs a whole extra save, which a long-lived app
+                # eventually makes but a one-shot caller never does: both
+                # maintenance scripts save once and exit, so they reported a
+                # successful migration while leaving every vector in graph.json
+                # and the file the size it always was.
+                #
+                # Only ids this write actually covers count. A vector the
+                # index refused, or a deleted node's, can never appear in a
+                # later matrix, so gating on the map being non-empty would
+                # route EVERY subsequent save down this path and turn a
+                # one-time migration into permanent blocking I/O on the
+                # caller's thread.
+                if self._inline_fallback.keys() & vectors.keys():
+                    # Ordered through the same single-worker queue as every
+                    # other write, so a save already in flight cannot land on
+                    # top of this one — waiting on the result is what keeps it
+                    # before _serialize_nodes. Safe to wait while holding the
+                    # lock: the queued work never takes it.
+                    self._io_executor.submit(
+                        self._persist_vectors, vectors, vector_revision
+                    ).result()
+                    # Either outcome ends this save's sidecar attempt, so the
+                    # background write must not repeat it. A failure has already
+                    # cleared the snapshot marker, and that is what leaves the
+                    # retry open for the next save.
+                    vectors = None
+
             data = {
-                "nodes": [node.to_dict() for node in self.nodes.values()],
+                "nodes": self._serialize_nodes(),
                 "edges": [edge.to_dict() for edge in self.edges.values()],
                 "metadata": {
                     **(self.graph_metadata or {}),
@@ -477,11 +628,200 @@ class GraphStorage:
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
         return self._io_executor.submit(
-            self._do_save_to_disk, data, node_count, edge_count
+            self._do_save_to_disk,
+            data,
+            node_count,
+            edge_count,
+            vectors,
+            vector_revision,
         )
 
+    def _serialize_nodes(self) -> List[Dict[str, Any]]:
+        """Serialize nodes for persistence, routing vectors to the sidecar.
+
+        Callers must hold _lock. Backends without a sidecar keep the vector in
+        the node payload, exactly as every backend did before the split, so a
+        custom backend does not silently stop persisting them.
+        """
+        no_sidecar = self._embedding_sidecar is None
+        payloads = []
+        for node in self.nodes.values():
+            payload = node.to_dict()
+            if no_sidecar:
+                payload["embedding"] = self._vector_for_payload(node.id)
+                payloads.append(payload)
+                continue
+
+            # Dropping the vector is what makes graph.json small, and it is safe
+            # for every vector this process generated. It is NOT safe for one
+            # read out of a pre-split graph.json before the sidecar has it:
+            # there graph.json is the only durable copy, and the sidecar write
+            # is allowed to fail without failing the graph write, so removing it
+            # would destroy the vector with nothing written in its place.
+            vector = (
+                self._vector_for_payload(node.id)
+                if node.id in self._inline_fallback
+                else None
+            )
+            if vector is None:
+                payload.pop("embedding", None)
+            else:
+                payload["embedding"] = vector
+            payloads.append(payload)
+        return payloads
+
+    def _vector_for_payload(self, node_id: str) -> Optional[List[float]]:
+        """The vector to write into a node's payload, or None.
+
+        The live index vector whenever there is one — it is what the node means
+        now — and otherwise the raw copy the node was loaded with. The index
+        refusing a vector for its width, or evicting it when the model width
+        changes, does not make the file it came from any less its only home.
+        """
+        vector = self.vector_store.get_vector_list(node_id)
+        if vector is not None:
+            return vector
+        raw = self._inline_fallback.get(node_id)
+        if raw is None:
+            return None
+        return raw.tolist() if hasattr(raw, "tolist") else list(raw)
+
+    def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
+        """Move any vector carried on a node object into a plain dict.
+
+        A vector reaches a node object two ways: a graph file written before the
+        split, and a caller passing `embedding` to add_nodes. Both have to end
+        up in the vector store, because the serialized payload no longer carries
+        the field — otherwise the value is written nowhere at all.
+        """
+        taken = {}
+        for node in nodes:
+            if node.embedding is None:
+                continue
+            # A zero-length vector is not a usable vector, and carrying one
+            # through would make the whole sidecar read back empty (dim 0).
+            if len(node.embedding) > 0:
+                taken[node.id] = node.embedding
+            node.embedding = None
+        return taken
+
+    def _load_embeddings(self) -> None:
+        """Populate the vector index after nodes have been loaded.
+
+        The sidecar is authoritative. A graph written before the split still
+        carries vectors on its nodes; those are adopted for any node the sidecar
+        does not cover and the sidecar is marked for rewrite, which is what
+        migrates them on the next save. Vectors are never left on the node
+        objects — that inline copy is what made a node cost 51 kB resident.
+        """
+        inline = self._take_inline_vectors(self.nodes.values())
+
+        if self._embedding_sidecar is None:
+            accepted = matching_dimension(inline, dominant_dimension(inline))
+            self.vector_store.load_vectors(accepted)
+            # Same reason as the sidecar path below: a vector the index refuses
+            # for its width is still the node's only durable copy, and here
+            # there is no sidecar it could ever move to. Without this the next
+            # ordinary save writes None over it, silently — the drop happens in
+            # matching_dimension, so not even load_vectors' warning fires.
+            self._inline_fallback = {
+                node_id: vector
+                for node_id, vector in inline.items()
+                if node_id not in accepted
+            }
+            self._persisted_vector_revision = self.vector_store.revision
+            return
+
+        stored = {}
+        if self._embedding_sidecar.exists():
+            try:
+                stored = self._embedding_sidecar.load()
+            except EmbeddingSidecarError as exc:
+                # Vectors are derived data: a damaged sidecar costs semantic
+                # search until they are regenerated, never a failed load.
+                print(f"Warning: ignoring unreadable embedding sidecar: {exc}")
+
+        migrated = {
+            node_id: vector
+            for node_id, vector in inline.items()
+            if node_id not in stored
+        }
+        merged = {**stored, **migrated}
+        orphaned = [node_id for node_id in merged if node_id not in self.nodes]
+        for node_id in orphaned:
+            del merged[node_id]
+
+        # The two sources can disagree on dimension — a sidecar written by one
+        # embedding model merged with inline vectors from another. Stacking
+        # those raises in numpy and would take the whole load down, so drop the
+        # odd ones out. The sidecar decides which dimension that is whenever it
+        # has one: it is the authoritative source, and a graph file full of
+        # stale inline vectors must not outvote it.
+        #
+        # Only the entries that SURVIVED pruning get that vote. A sidecar
+        # sharing no live node id with the graph contributes nothing to merged,
+        # and letting it still dictate the width would drop every inline vector
+        # for disagreeing with a file whose contents are all orphans — taking
+        # the graph.json copy with it and then writing an empty sidecar over
+        # the old one. That is the shape of restoring a graph.json from another
+        # dataset, or from before a model change, onto an existing sidecar.
+        live_stored = {
+            node_id: vector
+            for node_id, vector in stored.items()
+            if node_id in self.nodes
+        }
+        dimension = dominant_dimension(live_stored) or dominant_dimension(migrated)
+        vectors = matching_dimension(merged, dimension)
+        dropped = len(merged) - len(vectors)
+        if dropped:
+            print(
+                f"Warning: dropped {dropped} embedding(s) whose dimension did not "
+                f"match the rest; they will be regenerated on next update"
+            )
+
+        self.vector_store.load_vectors(vectors)
+        # Every vector that came out of graph.json, whether or not the index
+        # took it. One the index refused for its width will never be carried by
+        # a sidecar write at all, since it is not in the index to be written;
+        # one the index took can still be evicted later by a model change. Both
+        # keep graph.json as their only durable copy, so both are held.
+        self._inline_fallback = dict(migrated)
+        if migrated or orphaned or dropped:
+            # Leave the persisted revision behind the live one so the next save
+            # writes the migrated or pruned matrix out.
+            self._persisted_vector_revision = None
+        else:
+            self._persisted_vector_revision = self.vector_store.revision
+
+        print(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
+
+    def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
+        """Write the vector matrix to the sidecar. Returns whether it landed.
+
+        A failure is deliberately not fatal to the graph save, so it leaves the
+        persisted revision behind and clears the snapshot marker — otherwise the
+        retry it opens would be skipped by the next save as "already in flight".
+        """
+        try:
+            self._embedding_sidecar.save(vectors)
+        except Exception as e:
+            self._snapshotted_vector_revision = None
+            print(f"Warning: could not save embedding sidecar: {e}")
+            return False
+        self._persisted_vector_revision = vector_revision
+        # The sidecar is now these vectors' durable home, so graph.json stops
+        # having to carry them. This is what ends the migration.
+        for node_id in vectors:
+            self._inline_fallback.pop(node_id, None)
+        return True
+
     def _do_save_to_disk(
-        self, data: Dict[str, Any], node_count: int, edge_count: int
+        self,
+        data: Dict[str, Any],
+        node_count: int,
+        edge_count: int,
+        vectors: Optional[Dict[str, Any]] = None,
+        vector_revision: Optional[int] = None,
     ) -> None:
         """
         Internal method: delegate serialized graph data to the persistence backend.
@@ -491,6 +831,11 @@ class GraphStorage:
         them in the returned Future. Callers that call .result() (e.g. load())
         will then receive the exception rather than a silent no-op.
         """
+        if vectors is not None:
+            # Written first: an orphaned vector is harmless, a node whose vector
+            # never landed is a silent gap in semantic search.
+            self._persist_vectors(vectors, vector_revision)
+
         try:
             self._persistence_backend.save_graph_data(data)
             print(
@@ -721,6 +1066,28 @@ class GraphStorage:
                     self._searchable_text_cache[node.id] = self._build_searchable_text(
                         node
                     )
+
+                # A caller may pass `embedding` on the node itself. The
+                # serialized payload no longer carries that field, so adopt it
+                # into the vector store or it is persisted nowhere. Generation
+                # below still wins when the ML stack is available, as before.
+                supplied = self._take_inline_vectors(nodes_to_embed)
+                if supplied:
+                    # The index already in memory anchors the dimension; a
+                    # caller passing vectors of some other width must never
+                    # evict the vectors that are already correct.
+                    existing = self.vector_store.export_vectors()
+                    dimension = dominant_dimension(existing) or dominant_dimension(
+                        supplied
+                    )
+                    accepted = matching_dimension(supplied, dimension)
+                    if len(accepted) != len(supplied):
+                        print(
+                            f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+                            f"embedding(s) whose dimension is not {dimension}"
+                        )
+                    if accepted:
+                        self.vector_store.load_vectors({**existing, **accepted})
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
@@ -1139,6 +1506,10 @@ class GraphStorage:
 
                 # Remove embeddings
                 self.vector_store.remove_nodes_embeddings(deleted_node_ids)
+                # And the graph.json fallback copies, or an id created again
+                # later would inherit the departed node's vector.
+                for node_id in deleted_node_ids:
+                    self._inline_fallback.pop(node_id, None)
 
                 # Save
                 self.save()

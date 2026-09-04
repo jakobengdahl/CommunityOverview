@@ -37,6 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 DATA_DIR="$SCRIPT_DIR/data"
 ACTIVE_DATA="$DATA_DIR/active/graph.json"
+DEFAULT_ACTIVE_DATA_EMBEDDINGS="$DATA_DIR/active/graph.embeddings.bin"
 DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 
 cd "$SCRIPT_DIR"
@@ -87,6 +88,19 @@ echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 
 # Source .env files with fallback chain: profile → default → root
 apply_profile_env "$PROFILE_NAME"
+
+# The profile/.env files may set EMBEDDINGS_FILE. Resolve it the same way the
+# backend does (relative values sit beside the graph file) so the sidecar this
+# script deletes on a graph replacement is the one the app will actually read;
+# otherwise the cleanup below silently misses it.
+if [ -n "${EMBEDDINGS_FILE:-}" ]; then
+    case "$EMBEDDINGS_FILE" in
+        /*) ACTIVE_DATA_EMBEDDINGS="$EMBEDDINGS_FILE" ;;
+        *)  ACTIVE_DATA_EMBEDDINGS="$(dirname "$ACTIVE_DATA")/$EMBEDDINGS_FILE" ;;
+    esac
+else
+    ACTIVE_DATA_EMBEDDINGS="$DEFAULT_ACTIVE_DATA_EMBEDDINGS"
+fi
 
 # Auto-detect LLM provider when not explicitly configured.
 # In SSPCloud (and similar environments), OPENAI_API_KEY + OPENAI_BASE_URL are
@@ -148,12 +162,38 @@ echo -e "\n${YELLOW}[0/5] Setting up graph data...${NC}"
 mkdir -p "$DATA_DIR/active"
 mkdir -p "$DATA_DIR/examples"
 
+# A sidecar belongs to the graph it was built from: node ids shared between the
+# old and the new dataset would otherwise keep the OLD dataset's vectors, and
+# nothing regenerates a vector for a node that is merely loaded. Vectors are
+# derived data, so drop the sidecar whenever the graph beneath it is replaced.
+# Call this only AFTER the replacement is actually in place - a failed download
+# or a mistyped path must leave the existing pair intact.
+drop_stale_embeddings() {
+    if [ ! -f "$ACTIVE_DATA_EMBEDDINGS" ]; then
+        return
+    fi
+    # Only ever delete a sidecar. EMBEDDINGS_FILE can be pointed at something
+    # else - the old .env.example named a legacy embeddings.pkl for it - and
+    # that file is not derived data we can regenerate.
+    if [ -s "$ACTIVE_DATA_EMBEDDINGS" ] && \
+       ! head -c 7 "$ACTIVE_DATA_EMBEDDINGS" | cmp -s - <(printf 'CKGEMB\001'); then
+        echo -e "${YELLOW}Not removing $ACTIVE_DATA_EMBEDDINGS: it is not an embedding sidecar.${NC}"
+        echo -e "${YELLOW}Point EMBEDDINGS_FILE at a path of its own.${NC}"
+        return
+    fi
+    rm -f "$ACTIVE_DATA_EMBEDDINGS"
+    echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
+}
+
 if [ -n "$DATA_SOURCE" ]; then
     # Data source specified - load from path or URL
     if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
         echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
         if command -v curl &> /dev/null; then
-            curl -sL "$DATA_SOURCE" -o "$ACTIVE_DATA"
+            # -f so an HTTP error is a failure: without it curl exits 0 on a
+            # 404, writes the error page over the graph, and the cleanup
+            # below then deletes the sidecar of the graph that was there.
+            curl -fsL "$DATA_SOURCE" -o "$ACTIVE_DATA"
         elif command -v wget &> /dev/null; then
             wget -q "$DATA_SOURCE" -O "$ACTIVE_DATA"
         else
@@ -161,6 +201,7 @@ if [ -n "$DATA_SOURCE" ]; then
             exit 1
         fi
         echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"
+        drop_stale_embeddings
     else
         # Resolve relative paths
         if [[ ! "$DATA_SOURCE" = /* ]]; then
@@ -173,6 +214,7 @@ if [ -n "$DATA_SOURCE" ]; then
         echo -e "Copying graph data from: ${BLUE}$DATA_SOURCE${NC}"
         cp "$DATA_SOURCE" "$ACTIVE_DATA"
         echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
+        drop_stale_embeddings
     fi
 elif [ ! -f "$ACTIVE_DATA" ]; then
     # No active data and no source specified - try profile graph.json, then default example
@@ -181,13 +223,16 @@ elif [ ! -f "$ACTIVE_DATA" ]; then
         echo -e "Loading graph data from profile: ${BLUE}$PROFILE_GRAPH${NC}"
         cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
         echo -e "${GREEN}Profile graph data loaded.${NC}"
+        drop_stale_embeddings
     elif [ -f "$DEFAULT_EXAMPLE" ]; then
         echo -e "No active graph data found. Copying default example data..."
         cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
         echo -e "${GREEN}Default example data loaded.${NC}"
+        drop_stale_embeddings
     else
         echo -e "${YELLOW}No example data found. Starting with empty graph.${NC}"
         echo '{"nodes": [], "edges": [], "metadata": {"version": "1.0"}}' > "$ACTIVE_DATA"
+        drop_stale_embeddings
     fi
 else
     echo -e "${GREEN}Using existing active graph data.${NC}"
@@ -195,6 +240,7 @@ fi
 
 # Set GRAPH_FILE to point to active data
 export GRAPH_FILE="$ACTIVE_DATA"
+export EMBEDDINGS_FILE="$ACTIVE_DATA_EMBEDDINGS"
 
 # =====================
 # Node.js Check / Auto-install

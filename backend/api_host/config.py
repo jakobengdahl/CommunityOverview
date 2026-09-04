@@ -19,6 +19,8 @@ class AppConfig:
     graph_file: str = field(
         default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json")
     )
+    # Binary sidecar holding the node embedding vectors. Unset means "next to
+    # the graph file", which is what a standalone deployment wants.
     embeddings_file: Optional[str] = field(
         default_factory=lambda: os.getenv("EMBEDDINGS_FILE")
     )
@@ -156,3 +158,16 @@ class AppConfig:
                 backend_dir = Path(__file__).parent.parent
                 graph_path = backend_dir / self.graph_file
         return graph_path
+
+    def get_embeddings_path(self) -> Optional[Path]:
+        """Resolved path to the embedding sidecar, or None to derive it.
+
+        A relative EMBEDDINGS_FILE is resolved against the graph file's
+        directory, so the pair stays together on a mounted data volume.
+        """
+        if not self.embeddings_file:
+            return None
+        path = Path(self.embeddings_file)
+        if path.is_absolute():
+            return path
+        return self.get_graph_path().parent / path

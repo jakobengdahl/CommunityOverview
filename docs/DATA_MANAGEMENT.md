@@ -9,7 +9,9 @@ data/
   examples/          # Example graph data files (tracked in git)
     default.json     # Default example dataset
   active/            # Active graph data used by the running app (git-ignored)
-    graph.json       # Currently active graph file
+    graph.json              # Currently active graph file
+    graph.embeddings.bin    # Embedding vectors for that graph (see below)
+    graph.history.ndjson    # Mutation history sidecar
 ```
 
 ## How It Works
@@ -156,6 +158,45 @@ All domain node types support an optional **subtypes** field for sub-classificat
 
 Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed. See [PROFILES.md](./PROFILES.md) for how to create custom profiles with different node types.
 
+## Embedding Sidecar
+
+Semantic search needs a vector per node. Those vectors are **not** part of the
+graph file — they live in a separate binary file next to it, by default
+`<graph stem>.embeddings.bin` (so `data/active/graph.embeddings.bin` for the
+default layout), overridable with `EMBEDDINGS_FILE`.
+
+They are kept out of `graph.json` because a 384-dimension vector costs about
+1.5 kB as float32 and roughly 7.5x that as JSON text. Written into the graph
+file, they dominated it, and every graph mutation rewrote all of them even when
+none had changed. The sidecar is rewritten only when a vector actually changes.
+
+What this means in practice:
+
+- **Backup.** Back up the sidecar alongside `graph.json`. It is the only copy
+  of the vectors.
+- **Restore.** A restore without the sidecar still works: the graph loads, and
+  semantic search returns nothing until the vectors are regenerated. A sidecar
+  that cannot be read is ignored with a warning for the same reason — the graph
+  never fails to load because of it. Regenerate with
+  `python scripts/generate_embeddings.py`, which needs the optional ML extras
+  (`pip install -r backend/requirements-ml.txt`). That script and
+  `scripts/migrate_embeddings.py` both honour `EMBEDDINGS_FILE`, and take
+  `--embeddings-file` to override it, so they act on the same sidecar the
+  running app reads.
+- **Migration.** A `graph.json` written before the split still carries its
+  vectors inline. Those are read on load and moved into the sidecar on the next
+  save; nothing needs to be run by hand.
+- **Portability.** Vectors are derived from node text, so a graph file moved
+  without its sidecar is complete data — only the search index is missing.
+- **Replacing the graph.** A sidecar belongs to the graph it was built from.
+  Swapping in a different dataset while leaving the old sidecar in place would
+  give any node id present in both the *old* dataset's vector, and nothing
+  regenerates a vector for a node that is only loaded. `start-dev.sh` deletes
+  the sidecar whenever it puts a different graph in place — `--data`, or seeding
+  a missing `graph.json` from a profile or example — and follows
+  `EMBEDDINGS_FILE` when doing so. Do the same when replacing a graph file by
+  hand.
+
 ## Mutation History
 
 Every graph mutation is appended to a history sidecar next to the graph file
@@ -208,6 +249,7 @@ truncated or discarded on its own; the graph does not depend on it.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
+| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see *Embedding Sidecar* above) |
 | `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see *Mutation History* above); `0` removes the count cap |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Age-based history retention, opt-in |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
