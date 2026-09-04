@@ -1688,5 +1688,80 @@ def test_the_app_refuses_an_operator_path_holding_a_pickle(tmpdir_path):
         assert storage.vectors_persisted is False, (
             "the app reported the vectors persisted after refusing to write them"
         )
+        # Otherwise this passes just as well when no write was ever attempted.
+        assert storage.vector_store.export_vectors(), (
+            "no vectors were generated, so the refusal was never reached"
+        )
+        assert storage._embedding_sidecar.owns_path is False
+    finally:
+        storage.flush()
+
+
+def test_the_app_heals_a_damaged_sidecar_at_the_path_start_dev_exports(tmpdir_path):
+    """start-dev.sh exports EMBEDDINGS_FILE on every run, set to exactly the
+    path the app would have derived, and .env.example documents the same
+    pairing. Deciding ownership from whether a value was supplied therefore put
+    the app's own file in the mode meant for an operator's, so the self-heal
+    never ran on the path the project actually ships."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    derived = _sidecar_path(tmpdir_path)
+    derived.write_bytes(b"corrupted beyond recognition")
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=str(derived))
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted, (
+            "the app refused to rebuild its own sidecar, so semantic search "
+            "stays dark until someone deletes the file by hand"
+        )
+        assert set(FileEmbeddingSidecar(derived).load()) == {"n1", "n2", "n3"}
+        assert derived.with_name(derived.name + ".corrupt").exists()
+    finally:
+        storage.flush()
+
+
+def test_a_relative_configured_path_naming_our_own_sidecar_is_still_ours(
+    tmpdir_path,
+):
+    """The same name spelled relatively resolves to the same file, so it must
+    land on the same side of the distinction."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+
+    storage = GraphStorage(
+        json_path=graph_path,
+        embeddings_path=os.path.join(tmpdir_path, "sub", "..", "graph.embeddings.bin"),
+    )
+    try:
+        assert storage._embedding_sidecar.owns_path is True
+    finally:
+        storage.flush()
+
+
+def test_an_unconfigured_deployment_also_heals_its_own_sidecar(tmpdir_path):
+    """The other branch of the same rule. With EMBEDDINGS_FILE unset the path
+    is derived outright, and that file is no less ours than one an operator
+    happens to have named identically."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    derived = _sidecar_path(tmpdir_path)
+    derived.write_bytes(b"corrupted beyond recognition")
+
+    storage = _make_storage(tmpdir_path)  # no embeddings_path at all
+    try:
+        assert storage._embedding_sidecar.owns_path is True
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted
+        assert set(FileEmbeddingSidecar(derived).load()) == {"n1", "n2", "n3"}
+        assert derived.with_name(derived.name + ".corrupt").exists()
     finally:
         storage.flush()

@@ -241,7 +241,14 @@ class GraphStorage:
                 f"({path}); using {derived} instead"
             )
             return FileEmbeddingSidecar(derived, owns_path=True)
-        return FileEmbeddingSidecar(path, owns_path=False)
+        # Ownership is a property of the NAME, not of whether anyone passed one.
+        # start-dev.sh exports EMBEDDINGS_FILE on every run, set to exactly this
+        # derived path, and .env.example documents the same pairing - so asking
+        # "was a value supplied" put the app's own file in the mode meant for an
+        # operator's, and the self-heal never fired where it actually matters.
+        # Comparing resolved paths also covers a relative value and a symlink
+        # that land on the same file.
+        return FileEmbeddingSidecar(path, owns_path=path.resolve() == derived.resolve())
 
     @property
     def vectors_persisted(self) -> bool:

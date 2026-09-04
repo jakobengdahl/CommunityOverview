@@ -562,6 +562,13 @@ def test_a_two_dimensional_vector_round_trips_and_mixed_widths_still_raise(tmp_p
     assert set(sidecar.load()) == {"n1"}
     np.testing.assert_allclose(sidecar.load()["n1"], np.ones(4, dtype=np.float32))
 
+    # A single (1, d) row survives vstack unflattened, so it proves nothing on
+    # its own. A (2, d) input is what writes a file the loader then rejects.
+    sidecar.save({"n1": np.ones((2, 3), dtype=np.float32)})
+    reloaded = sidecar.load()
+    assert set(reloaded) == {"n1"}
+    np.testing.assert_allclose(reloaded["n1"], np.ones(6, dtype=np.float32))
+
     with pytest.raises(EmbeddingSidecarError, match="mixed dimensions"):
         sidecar.save(
             {

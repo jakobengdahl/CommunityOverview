@@ -74,6 +74,7 @@ data/active/sessions/
 # Embedding sidecar - derived data, written next to whichever graph file is in
 # use, so match it by name rather than by any one of those locations.
 *.embeddings.bin
+*.embeddings.bin.corrupt
 
 # Playwright e2e output: reports, traces, and the throwaway graph the
 # backend writes while the mobile smoke specs run.
