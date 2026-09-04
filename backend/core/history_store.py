@@ -51,6 +51,34 @@ _UNMEASURED_BASIS_RECORDS = 2560
 # however large the file grows.
 _REVERSE_CHUNK_BYTES = 64 * 1024
 
+# The fields the history views read off a snapshot rather than off the patch:
+# an entity's display name, which is `name` for a node and `label` for an edge.
+# Kept in a trimmed payload so a record still renders under its own name
+# instead of its raw id.
+_HISTORY_DISPLAY_KEYS = frozenset({"name", "label"})
+
+# Never durable in history, at any size. Vectors belong in the embedding
+# sidecar; a copy here would put them back into every mutation record.
+_HISTORY_EXCLUDED_KEYS = frozenset({"embedding"})
+
+
+def _without_excluded(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Drop the fields history never retains, leaving everything else."""
+    if not isinstance(payload, dict):
+        return payload
+    if _HISTORY_EXCLUDED_KEYS.isdisjoint(payload):
+        return payload
+    return {k: v for k, v in payload.items() if k not in _HISTORY_EXCLUDED_KEYS}
+
+
+def _project(
+    payload: Optional[Dict[str, Any]], keys: frozenset
+) -> Optional[Dict[str, Any]]:
+    """Narrow a payload to ``keys``, preserving None (absent) as None."""
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if k in keys}
+
 
 def _iter_lines_reverse(f) -> Iterator[bytes]:
     """Yield a binary file's lines last-first, reading fixed-size chunks.
@@ -109,6 +137,20 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
     origin = event.origin
     attribution = origin.attribution if origin else None
 
+    before = _without_excluded(event.entity.before)
+    after = _without_excluded(event.entity.after)
+    patch = _without_excluded(event.entity.patch)
+
+    # An update's patch already names every field that changed, and the history
+    # views read only those fields plus the display name off the snapshots. The
+    # rest of a full before/after pair is bulk no reader looks at, so keep the
+    # projection and drop it. Creates and deletes carry no patch and keep their
+    # whole snapshot: it is the only description of what appeared or vanished.
+    if patch:
+        retained = frozenset(patch) | _HISTORY_DISPLAY_KEYS
+        before = _project(before, retained)
+        after = _project(after, retained)
+
     return {
         "event_id": event.event_id,
         "event_type": event.event_type.value,
@@ -116,9 +158,9 @@ def event_to_history_record(event: "Event") -> Dict[str, Any]:
         "entity_kind": event.entity.kind.value,
         "entity_id": event.entity.id,
         "entity_type": event.entity.type,
-        "before": event.entity.before,
-        "after": event.entity.after,
-        "patch": event.entity.patch,
+        "before": before,
+        "after": after,
+        "patch": patch,
         "event_origin": origin.event_origin if origin else None,
         "event_session_id": origin.event_session_id if origin else None,
         "event_correlation_id": origin.event_correlation_id if origin else None,

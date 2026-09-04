@@ -241,6 +241,32 @@ answering one costs memory proportional to the page rather than to the file. Tha
 matters on a small container: the previous implementation parsed every record to
 return the newest 50.
 
+**What a record holds.** A **node** update record keeps the `patch` — the fields
+that actually changed — plus, in `before` and `after`, those same fields and the
+entity's display name. That is exactly what the history views read: the name to
+title the entry, and each patched field's before-value to render a
+`before → after` diff. Fields the mutation left alone are not repeated into the
+record, so a one-word edit to a large node costs a small record rather than two
+copies of the node.
+
+Every other record keeps both snapshots whole. Creates and deletes have no patch
+that could describe what appeared or vanished. Edge updates have no patch either
+— one is currently computed for node updates only — so the views fall back to
+diffing the pair, which needs both sides intact.
+
+An `embedding` is dropped from every payload of every record the current code
+writes. Vectors live in the embedding sidecar; a copy here would put them back
+into every mutation record. Note that this is not retroactive: an instance that
+ran history before the vectors moved to the sidecar wrote records with the vector
+inline, and those records are left as they are (see below).
+
+Older records — written before the trimming, or before the sidecar — keep their
+full snapshots and whatever they carried at the time. They are read exactly as
+they always were, since the record shape did not change, only how much of it is
+filled in. No migration is needed for correctness and none is offered; an
+operator who wants the old vectors out of the sidecar can truncate or discard the
+history file, which the graph does not depend on.
+
 **Backup.** The sidecar is independent of `graph.json` and can be backed up,
 truncated or discarded on its own; the graph does not depend on it.
 

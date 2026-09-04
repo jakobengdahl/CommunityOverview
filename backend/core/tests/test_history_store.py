@@ -9,6 +9,8 @@ Covers:
 - AI-action detection derived from origin/attribution
 """
 
+import copy
+import json
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -29,7 +31,8 @@ from backend.core.events import (
     EventAttribution,
     EventActorAttribution,
 )
-from backend.core.history_store import GraphHistoryStore
+from backend.core.events.models import EntityData, EntityKind, Event, EventType
+from backend.core.history_store import GraphHistoryStore, event_to_history_record
 
 
 @pytest.fixture
@@ -426,3 +429,387 @@ def test_history_disabled_for_non_file_backend():
         assert st.get_node_history("a") == []
     finally:
         st.flush()
+
+
+# --- Record trimming -------------------------------------------------------
+#
+# The history views read exactly two things off a record's snapshots: the
+# entity's display name, and the before-value of each field the patch names.
+# The helpers below mirror `frontend/web/src/utils/history.js` so the tests can
+# assert what a reader actually renders, rather than the field layout it
+# happens to render it from.
+
+
+def _rendered_entity_name(record):
+    """Mirror of entityName() in frontend/web/src/utils/history.js."""
+    state = record.get("after") or record.get("before") or {}
+    return state.get("name") or state.get("label") or record.get("entity_id") or ""
+
+
+def _rendered_diff(record):
+    """Mirror of computeDiff() in frontend/web/src/utils/history.js."""
+    before = record.get("before") or {}
+    patch = record.get("patch")
+    if isinstance(patch, dict) and patch:
+        return sorted(
+            (field, before.get(field), after) for field, after in patch.items()
+        )
+
+    after = record.get("after")
+    if record.get("before") and after:
+        fields = set(before) | set(after)
+        return sorted(
+            (f, before.get(f), after.get(f))
+            for f in fields
+            if before.get(f) != after.get(f)
+        )
+    return []
+
+
+BULK = "x" * 250  # under the 300-char cap on summary
+
+
+def _node_with_bulk(node_id="actor-1", **overrides):
+    fields = dict(
+        id=node_id,
+        type=NodeType.ACTOR,
+        name="Actor One",
+        description=BULK,
+        summary=BULK,
+        tags=["alpha", "beta"],
+        metadata={"note": BULK},
+    )
+    fields.update(overrides)
+    return Node(**fields)
+
+
+def test_update_record_keeps_only_patched_fields_and_the_display_name(storage):
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.update_node("actor-1", {"description": "new desc"})
+
+    update = storage.get_node_history("actor-1")[0]
+
+    # updated_at moves on every update, so it is genuinely part of the patch.
+    retained = {"description", "name", "updated_at"}
+    assert set(update["before"]) == retained
+    assert set(update["after"]) == retained
+    # The bulk that did not change is gone from both snapshots.
+    assert "summary" not in update["before"]
+    assert "metadata" not in update["before"]
+
+
+def test_trimming_does_not_change_what_a_reader_renders(storage):
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.update_node("actor-1", {"description": "new desc", "tags": ["gamma"]})
+
+    trimmed = storage.get_node_history("actor-1")[0]
+
+    # The same record as it would have been without the trim: everything the
+    # trim dropped, put back. Rendering must not be able to tell the difference.
+    dropped = {"summary": BULK, "metadata": {"note": BULK}, "archived": False}
+    untrimmed = dict(trimmed)
+    untrimmed["before"] = {**trimmed["before"], **dropped}
+    untrimmed["after"] = {**trimmed["after"], **dropped}
+
+    assert _rendered_entity_name(trimmed) == _rendered_entity_name(untrimmed)
+    assert _rendered_diff(trimmed) == _rendered_diff(untrimmed)
+
+    # And the diff is the real one, not an empty list agreeing with itself.
+    rendered = {
+        field: (before, after) for field, before, after in _rendered_diff(trimmed)
+    }
+    assert rendered["description"] == (BULK, "new desc")
+    assert rendered["tags"] == (["alpha", "beta"], ["gamma"])
+
+
+def test_renamed_node_still_renders_under_its_new_name(storage):
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.update_node("actor-1", {"name": "Actor Renamed"})
+
+    update = storage.get_node_history("actor-1")[0]
+
+    assert _rendered_entity_name(update) == "Actor Renamed"
+
+
+def test_update_record_renders_a_name_not_a_raw_id(storage):
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.update_node("actor-1", {"description": "new desc"})
+
+    update = storage.get_node_history("actor-1")[0]
+
+    assert _rendered_entity_name(update) == "Actor One"
+    assert _rendered_entity_name(update) != update["entity_id"]
+
+
+@pytest.mark.parametrize(
+    "payload_key,expected_present",
+    # Of the three records (create, update, delete): a create has no `before`,
+    # a delete no `after`, and only the update carries a `patch`.
+    [("before", 2), ("after", 2), ("patch", 1)],
+)
+def test_no_history_record_carries_an_embedding(storage, payload_key, expected_present):
+    storage.add_nodes([_node_with_bulk(embedding=[0.25] * 8)], [])
+    storage.update_node("actor-1", {"description": "new desc"})
+    storage.delete_nodes(["actor-1"], confirmed=True)
+
+    records = storage.get_node_history("actor-1")
+    assert len(records) == 3
+
+    # A create has no `before` and a delete no `after`, so those combinations
+    # have nothing to inspect. Count the ones that do, and require that the
+    # parametrisation actually looked at something.
+    inspected = 0
+    for record in records:
+        payload = record.get(payload_key)
+        if payload is None:
+            continue
+        assert isinstance(payload, dict)
+        assert "embedding" not in payload
+        inspected += 1
+    assert inspected == expected_present
+
+
+def _update_event(before, after, patch):
+    return Event(
+        event_type=EventType.NODE_UPDATE,
+        origin=EventContext(),
+        entity=EntityData(
+            kind=EntityKind.NODE,
+            id="actor-1",
+            type="Actor",
+            before=before,
+            after=after,
+            patch=patch,
+        ),
+    )
+
+
+def test_a_vector_in_the_patch_reaches_neither_the_patch_nor_the_snapshots():
+    """The retained-key union is patch keys plus display keys.
+
+    A union that did not exclude the embedding would pull a patched vector
+    straight back into both snapshots. Storage strips inline vectors off the
+    node before it builds the payloads, so this state cannot be reached through
+    add_nodes/update_node today — the guarantee is asserted here against the
+    record builder itself, which is where it is made.
+    """
+    vector = [0.5] * 8
+    record = event_to_history_record(
+        _update_event(
+            before={"name": "A", "summary": "s", "embedding": [0.25] * 8},
+            after={"name": "A", "summary": "s", "embedding": vector},
+            patch={"embedding": vector},
+        )
+    )
+
+    assert "embedding" not in record["before"]
+    assert "embedding" not in record["after"]
+    assert "embedding" not in record["patch"]
+    assert vector not in record["before"].values()
+    assert vector not in record["after"].values()
+
+
+def test_a_create_payload_loses_its_vector_but_keeps_everything_else():
+    record = event_to_history_record(
+        Event(
+            event_type=EventType.NODE_CREATE,
+            origin=EventContext(),
+            entity=EntityData(
+                kind=EntityKind.NODE,
+                id="actor-1",
+                type="Actor",
+                before=None,
+                after={"name": "A", "summary": "s", "embedding": [0.25] * 8},
+            ),
+        )
+    )
+
+    assert record["before"] is None
+    assert record["after"] == {"name": "A", "summary": "s"}
+
+
+def test_create_and_delete_keep_their_whole_snapshot(storage):
+    storage.add_nodes([_node_with_bulk()], [])
+    storage.delete_nodes(["actor-1"], confirmed=True)
+
+    records = storage.get_node_history("actor-1")
+    delete_entry, create_entry = records[0], records[-1]
+
+    assert create_entry["after"]["summary"] == BULK
+    assert create_entry["after"]["metadata"] == {"note": BULK}
+    assert delete_entry["before"]["summary"] == BULK
+    assert delete_entry["before"]["metadata"] == {"note": BULK}
+
+
+def test_edge_update_keeps_full_snapshots_so_its_diff_still_works(storage):
+    _seed_two_nodes(storage)
+    edge = Edge(
+        id="e1",
+        source="actor-1",
+        target="actor-2",
+        type=RelationshipType.RELATES_TO,
+        label="first",
+        # Bulk the trim would drop if edges were ever projected. Without it the
+        # fixture has nothing outside the display key and would pass either way.
+        metadata={"note": BULK},
+    )
+    storage.add_nodes([], [edge])
+    storage.update_edge("e1", {"label": "second"})
+
+    update = storage.get_edge_history("e1")[0]
+
+    # Edge updates carry no patch, so a reader diffs the snapshots instead --
+    # which needs both sides whole, bulk included.
+    assert not update["patch"]
+    assert update["before"]["metadata"] == {"note": BULK}
+    assert update["after"]["metadata"] == {"note": BULK}
+    assert _rendered_diff(update) == [("label", "first", "second")]
+
+
+def test_update_record_size_does_not_scale_with_unchanged_bulk(storage):
+    """The point of the trim: what a node carries but does not change is free.
+
+    Two nodes differing only in the size of fields the update leaves alone,
+    patched identically, must produce update records of the same size.
+    """
+    bulky = _node_with_bulk("actor-1")
+    lean = _node_with_bulk("actor-2", summary="s", metadata={}, description="d")
+    storage.add_nodes([bulky, lean], [])
+
+    storage.update_node("actor-1", {"name": "Renamed"})
+    storage.update_node("actor-2", {"name": "Renamed"})
+
+    bulky_update = json.dumps(storage.get_node_history("actor-1")[0])
+    lean_update = json.dumps(storage.get_node_history("actor-2")[0])
+
+    # The two creates differ by the bulk; the two updates must not.
+    bulky_create = json.dumps(storage.get_node_history("actor-1")[-1])
+    lean_create = json.dumps(storage.get_node_history("actor-2")[-1])
+    assert len(bulky_create) - len(lean_create) > 400
+
+    assert abs(len(bulky_update) - len(lean_update)) < 20
+
+
+def test_a_patched_entity_keeps_the_label_a_reader_falls_back_to():
+    """Display name is `name` for a node and `label` for an edge.
+
+    Edge updates carry no patch today, so this projection is only ever applied
+    to nodes — but the retained set describes what a reader uses as a display
+    name, and a reader falls back to `label`. Asserted at the record builder,
+    which is where the set is applied.
+    """
+    record = event_to_history_record(
+        Event(
+            event_type=EventType.EDGE_UPDATE,
+            origin=EventContext(),
+            entity=EntityData(
+                kind=EntityKind.EDGE,
+                id="e1",
+                type="RELATES_TO",
+                before={"label": "the edge", "weight": 1, "bulk": BULK},
+                after={"label": "the edge", "weight": 2, "bulk": BULK},
+                patch={"weight": 2},
+            ),
+        )
+    )
+
+    # The label is not what changed, so it survives only as a display key.
+    assert record["before"] == {"label": "the edge", "weight": 1}
+    assert record["after"] == {"label": "the edge", "weight": 2}
+    assert _rendered_entity_name(record) == "the edge"
+    assert _rendered_entity_name(record) != record["entity_id"]
+    assert _rendered_diff(record) == [("weight", 1, 2)]
+
+
+def _node_shaped_payload(**overrides):
+    """A payload the size and shape storage really emits (13 keys, embedding)."""
+    payload = _node_with_bulk().to_dict()
+    payload["embedding"] = [0.25] * 8
+    payload.update(overrides)
+    return payload
+
+
+def _event_payload_cases():
+    """Payload shapes that all reach the projection, for the G6 check.
+
+    Both matter, for different reasons:
+    - the node-shaped pair is what storage actually emits, and is large enough
+      that a size-conditional in-place strip would fire on it;
+    - the edge-shaped pair carries no `embedding` at all, which is the case
+      where `_without_excluded` hands back the caller's own dict, so a
+      `_project` that deleted in place would delete from the live event.
+    Both carry a field the patch does not name, so the projection has something
+    to drop, and neither patch is emptied by the embedding strip.
+    """
+    return [
+        pytest.param(
+            _node_shaped_payload(),
+            _node_shaped_payload(description="new desc", embedding=[0.5] * 8),
+            {"description": "new desc"},
+            id="node-shaped-with-vector",
+        ),
+        pytest.param(
+            {"label": "the edge", "weight": 1, "note": BULK},
+            {"label": "the edge", "weight": 2, "note": BULK},
+            {"weight": 2},
+            id="edge-shaped-no-embedding",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("before,after,patch", _event_payload_cases())
+def test_building_a_record_does_not_alter_the_event_itself(before, after, patch):
+    """History trims its own copy; subscribers still get the whole event.
+
+    `append_event` builds the trimmed record while `dispatch(event)` hands the
+    same Event to webhook subscribers and system listeners, so anything the
+    record builder does in place is visible to them. Two helpers can return the
+    caller's own dict rather than a copy, which is what makes an in-place strip
+    or an in-place narrowing easy to write and invisible from the record alone.
+
+    The payloads are parametrised to actually reach the projection: a patch that
+    the embedding strip empties would skip `_project` entirely and assert
+    nothing about it.
+    """
+    event = _update_event(before=before, after=after, patch=patch)
+    untouched = copy.deepcopy(event.entity)
+
+    record = event_to_history_record(event)
+
+    # The record is trimmed...
+    assert set(record["before"]) == frozenset(patch) | {"name", "label"} & set(before)
+    assert "embedding" not in record["after"]
+
+    # ...and the event the dispatcher will send is not.
+    assert event.entity.before == untouched.before
+    assert event.entity.after == untouched.after
+    assert event.entity.patch == untouched.patch
+
+    sent = event.to_webhook_payload()["entity"]["data"]
+    assert sent["before"] == untouched.before
+    assert sent["after"] == untouched.after
+    assert sent["patch"] == untouched.patch
+
+
+def test_an_empty_patch_is_no_patch_and_keeps_both_snapshots_whole():
+    """`{}` means nothing changed, not "everything was dropped".
+
+    Storage cannot currently produce it — a node update always bumps
+    `updated_at` — so this is asserted against the record builder, where the
+    distinction is made.
+    """
+    whole = {"name": "A", "weight": 1, "summary": BULK}
+
+    record = event_to_history_record(_update_event(before=whole, after=whole, patch={}))
+
+    assert record["before"] == whole
+    assert record["after"] == whole
+
+
+def test_an_absent_snapshot_stays_absent_when_a_patch_is_present():
+    record = event_to_history_record(
+        _update_event(before=None, after={"name": "A", "x": 1}, patch={"x": 1})
+    )
+
+    assert record["before"] is None
+    assert record["after"] == {"name": "A", "x": 1}
