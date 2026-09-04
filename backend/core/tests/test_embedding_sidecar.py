@@ -160,3 +160,17 @@ def test_load_rejects_a_header_that_is_valid_json_but_not_an_object(sidecar):
 
         with pytest.raises(EmbeddingSidecarError, match="header is not an object"):
             sidecar.load()
+
+
+def test_load_rejects_non_string_node_ids(sidecar):
+    """Ids reach a dict comprehension, so an unhashable one raises TypeError —
+    which is not EmbeddingSidecarError, so it escapes the caller's catch and
+    fails the whole graph load."""
+    header = json.dumps(
+        {"dtype": "float32", "rows": 1, "dim": 2, "ids": [[1, 2]]}
+    ).encode()
+    payload = np.float32([[1.0, 2.0]]).tobytes()
+    sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header + payload)
+
+    with pytest.raises(EmbeddingSidecarError, match="non-string node id"):
+        sidecar.load()

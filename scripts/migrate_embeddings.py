@@ -31,9 +31,9 @@ class RestrictedUnpickler(pickle.Unpickler):
 sys.path.append(os.getcwd())
 
 from backend.core import GraphStorage  # noqa: E402
-from backend.core.storage import (  # noqa: E402
-    _dominant_dimension,
-    _matching_dimension,
+from backend.core.vector_store import (  # noqa: E402
+    dominant_dimension,
+    matching_dimension,
 )
 from backend.core.embedding_sidecar import resolve_sidecar_path  # noqa: E402
 
@@ -61,6 +61,14 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
         return
 
     sidecar_path = resolve_sidecar_path(graph_path, embeddings_file)
+    if sidecar_path is not None and Path(sidecar_path) == embeddings_path:
+        print(
+            f"Refusing to run: the sidecar path and the legacy pickle are the same "
+            f"file ({embeddings_path}). The migration would rename away the "
+            f"sidecar it just wrote. Point EMBEDDINGS_FILE somewhere else."
+        )
+        return
+
     storage = GraphStorage(
         json_path=str(graph_path),
         embeddings_path=str(sidecar_path) if sidecar_path else None,
@@ -95,8 +103,8 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
     # The pickle can carry a different dimension than the sidecar already has
     # - a model change between the two. Stacking those raises out of numpy, so
     # the sidecar's own dimension wins and the rest is reported, not crashed on.
-    dimension = _dominant_dimension(existing) or _dominant_dimension(merged)
-    accepted = _matching_dimension(merged, dimension)
+    dimension = dominant_dimension(existing) or dominant_dimension(merged)
+    accepted = matching_dimension(merged, dimension)
     if len(accepted) != len(merged):
         print(
             f"Skipped {len(merged) - len(accepted)} embedding(s) whose dimension "
@@ -105,6 +113,17 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
     storage.vector_store.load_vectors(accepted)
 
     storage.save().result()
+
+    if not storage.vectors_persisted:
+        # The graph save swallows a sidecar write failure by design. Renaming
+        # the pickle on the strength of that would destroy the only remaining
+        # copy of the vectors, and a re-run would then find nothing to migrate.
+        print(
+            f"FAILED: the vectors were not written to {storage.embeddings_path}. "
+            f"{embeddings_path} has been left in place; fix the cause and re-run."
+        )
+        raise SystemExit(1)
+
     print(f"Embeddings written to {storage.embeddings_path}.")
 
     # Rename old pickle to indicate it's deprecated/backup

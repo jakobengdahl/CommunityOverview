@@ -761,12 +761,12 @@ def test_a_vector_added_while_a_write_is_in_flight_is_still_persisted(
     assert "late" in FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
 
 
-def test_a_mixed_dimension_index_does_not_freeze_the_sidecar(storage, tmpdir_path):
-    """A model change mixes widths in the index: update_nodes_embeddings inserts
-    the new vectors, _update_matrix raises on the stack, and add_nodes swallows
-    that as an optional-embedding failure. The dict is left mixed. An unfiltered
-    write would then be refused on every future save, freezing the sidecar and
-    discarding all later vector work."""
+def test_a_model_change_leaves_the_index_coherent_and_writable(storage, tmpdir_path):
+    """A change in the model's output width makes every stored vector
+    incomparable — with the new ones and with any query the new model embeds.
+    They are already dead, so they are discarded rather than kept alongside.
+    Keeping them mixed used to break the matrix, the sidecar write, search and
+    delete, each of which then had to guess a recovery."""
 
     class _WiderEncoder:
         def encode(self, text):
@@ -778,27 +778,74 @@ def test_a_mixed_dimension_index_does_not_freeze_the_sidecar(storage, tmpdir_pat
     storage.flush()
 
     storage.vector_store.model = _WiderEncoder()
-    storage.add_nodes(
+    result = storage.add_nodes(
         [Node(id="after-model-change", type=NodeType.ACTOR, name="Wider")], []
     )
     storage.flush()
 
-    widths = {len(v) for v in storage.vector_store.export_vectors().values()}
-    assert widths == {DIM, DIM + 4}, "the fixture no longer mixes dimensions"
+    assert result.success
 
-    # The majority dimension survives; the odd vector is dropped, not the write.
-    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
-        "n1",
-        "n2",
-        "n3",
-    }
+    # One width only, and the matrix agrees with the dict.
+    vectors = storage.vector_store.export_vectors()
+    assert {len(v) for v in vectors.values()} == {DIM + 4}
+    assert set(storage.vector_store.node_ids) == set(vectors)
+    assert storage.vector_store.embedding_matrix.shape == (len(vectors), DIM + 4)
 
-    # And the sidecar is not frozen: a later change to a good vector still lands.
-    storage.vector_store.model = _FakeEncoder()
-    storage.update_node("n2", {"name": "Still writable"})
+    # The sidecar reflects it rather than freezing at the previous state.
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == set(vectors)
+
+    # And the paths that a mixed index used to break all still work.
+    storage.vector_store.search(query_text="anything", limit=3)
+    assert storage.delete_nodes(["n2"], confirmed=True).success
+
+    storage.update_node("n3", {"name": "Still writable"})
     storage.flush()
-
     persisted = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
     np.testing.assert_allclose(
-        persisted["n2"], storage.vector_store.export_vectors()["n2"]
+        persisted["n3"], storage.vector_store.export_vectors()["n3"]
     )
+
+
+def test_a_wider_vector_never_reaches_the_sidecar_as_a_mixed_matrix(
+    storage, tmpdir_path
+):
+    """The sidecar refuses a mixed matrix and a refused write retries forever,
+    so a mixed index would freeze it. The invariant is what prevents that, so
+    pin it directly: whatever the index holds, the export is one width."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    storage.vector_store.load_vectors(
+        {
+            "n1": np.ones(DIM, dtype=np.float32),
+            "n2": np.ones(DIM, dtype=np.float32),
+            "wide": np.ones(DIM + 4, dtype=np.float32),
+        }
+    )
+    storage.save().result()
+
+    exported = storage.vector_store.export_vectors()
+    assert {len(v) for v in exported.values()} == {DIM}
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == set(exported)
+
+
+def test_a_sidecar_with_non_string_ids_degrades_instead_of_failing_the_load(
+    storage, tmpdir_path
+):
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    header = json.dumps(
+        {"dtype": "float32", "rows": 1, "dim": 2, "ids": [["not", "a", "string"]]}
+    ).encode()
+    payload = np.float32([[1.0, 2.0]]).tobytes()
+    _sidecar_path(tmpdir_path).write_bytes(
+        MAGIC + struct.pack("<I", len(header)) + header + payload
+    )
+
+    reloaded = _make_storage(tmpdir_path)
+    try:
+        assert reloaded.vector_store.get_embedding_count() == 0
+        assert len(reloaded.nodes) == 3
+    finally:
+        reloaded.flush()

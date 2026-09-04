@@ -154,8 +154,9 @@ class TestMigrateEmbeddings:
 
 class TestGenerateEmbeddings:
     def test_writes_to_the_configured_sidecar(self, workspace, monkeypatch):
-        """Calls the script itself. Only the encoder is stubbed, so the path
-        resolution and the save are the script's own code."""
+        """Calls the script itself. The embedding generation is stubbed — that
+        is the only part needing the ML extras — so the path resolution, the
+        save and the success reporting are all the script's own code."""
         tmpdir, graph_path = workspace
         configured = tmpdir / "configured.bin"
         monkeypatch.setenv("EMBEDDINGS_FILE", str(configured))
@@ -215,3 +216,73 @@ def test_scripts_and_app_agree_on_the_sidecar_location(workspace, monkeypatch):
     empty_config = AppConfig(graph_file=str(graph_path), embeddings_file="")
     assert resolve_sidecar_path(str(graph_path)) is None
     assert empty_config.get_embeddings_path() is None
+
+
+class TestFailedSidecarWrites:
+    """A sidecar write failure does not fail the graph save, by design. Both
+    scripts report to an operator, and one of them renames its own source on the
+    strength of that report, so neither may infer success from save() returning."""
+
+    @staticmethod
+    def _break_sidecar(monkeypatch):
+        from backend.core.embedding_sidecar import FileEmbeddingSidecar
+
+        def failing_save(self, vectors):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(FileEmbeddingSidecar, "save", failing_save)
+
+    @staticmethod
+    def _stub_encoder(monkeypatch):
+        from backend.core.vector_store import VectorStore
+
+        def fake_update(self, nodes):
+            self._absorb({node.id: np.zeros(DIM, dtype=np.float32) for node in nodes})
+
+        monkeypatch.setattr(VectorStore, "update_nodes_embeddings", fake_update)
+
+    def test_generate_embeddings_reports_failure(self, workspace, monkeypatch):
+        tmpdir, graph_path = workspace
+        monkeypatch.delenv("EMBEDDINGS_FILE", raising=False)
+        self._stub_encoder(monkeypatch)
+        self._break_sidecar(monkeypatch)
+
+        with pytest.raises(SystemExit) as exit_info:
+            generate_embeddings(str(graph_path))
+
+        assert exit_info.value.code == 1
+        assert not (tmpdir / "graph.embeddings.bin").exists()
+
+    def test_migrate_embeddings_keeps_the_pickle_when_the_write_fails(
+        self, workspace, monkeypatch
+    ):
+        """Renaming it away would destroy the last copy of the vectors, and a
+        re-run would then report there is nothing to migrate."""
+        tmpdir, graph_path = workspace
+        monkeypatch.delenv("EMBEDDINGS_FILE", raising=False)
+        _write_pickle(tmpdir, {"n1": np.arange(DIM, dtype=np.float32)})
+        self._break_sidecar(monkeypatch)
+
+        with pytest.raises(SystemExit) as exit_info:
+            migrate_embeddings(str(graph_path))
+
+        assert exit_info.value.code == 1
+        assert (tmpdir / "embeddings.pkl").exists()
+        assert not (tmpdir / "embeddings.pkl.bak").exists()
+
+
+def test_migration_refuses_to_write_the_sidecar_over_its_own_source(
+    workspace, monkeypatch
+):
+    """EMBEDDINGS_FILE resolving onto the legacy pickle would have the script
+    write the sidecar there and then rename it away as the 'old pickle'."""
+    tmpdir, graph_path = workspace
+    monkeypatch.setenv("EMBEDDINGS_FILE", str(tmpdir / "embeddings.pkl"))
+    _write_pickle(tmpdir, {"n1": np.arange(DIM, dtype=np.float32)})
+
+    migrate_embeddings(str(graph_path))
+
+    assert (tmpdir / "embeddings.pkl").exists()
+    assert not (tmpdir / "embeddings.pkl.bak").exists()
+    with open(tmpdir / "embeddings.pkl", "rb") as f:
+        assert f.read(2) != b"CK"

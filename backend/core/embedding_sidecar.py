@@ -119,6 +119,8 @@ class FileEmbeddingSidecar:
             or len(ids) != rows
         ):
             raise EmbeddingSidecarError(f"{self.path} has an inconsistent header")
+        if not all(isinstance(node_id, str) for node_id in ids):
+            raise EmbeddingSidecarError(f"{self.path} has a non-string node id")
         if header.get("dtype") != "float32":
             raise EmbeddingSidecarError(
                 f"{self.path} has unsupported dtype {header.get('dtype')!r}"

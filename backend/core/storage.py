@@ -38,7 +38,7 @@ from .models import (
 )
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
-from .vector_store import VectorStore
+from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
 from . import storage_events
@@ -90,41 +90,6 @@ def _apply_metadata_patch(
         else:
             result[key] = value
     return result
-
-
-def _dominant_dimension(vectors: Dict[str, Any]) -> Optional[int]:
-    """The dimension most of these vectors share, or None if there are none.
-
-    A tie resolves to the dimension seen first: max() keeps the first maximal
-    key and the dict is insertion-ordered. Deciding a tie by width instead
-    would let one stray wide vector outrank an equally-common correct one.
-    """
-    if not vectors:
-        return None
-
-    counts: Dict[int, int] = {}
-    for vector in vectors.values():
-        counts[len(vector)] = counts.get(len(vector), 0) + 1
-    return max(counts, key=counts.get)
-
-
-def _matching_dimension(
-    vectors: Dict[str, Any], dimension: Optional[int]
-) -> Dict[str, Any]:
-    """Keep only the vectors of the given dimension.
-
-    numpy cannot stack rows of differing width, so one odd vector would raise
-    out of the index rebuild and fail the whole load. The caller decides which
-    dimension is authoritative rather than letting a vote decide it — a
-    majority of stale vectors must never evict the current ones.
-    """
-    if dimension is None:
-        return {}
-    return {
-        node_id: vector
-        for node_id, vector in vectors.items()
-        if len(vector) == dimension
-    }
 
 
 class GraphStorage:
@@ -252,6 +217,18 @@ class GraphStorage:
             else self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
         )
         return FileEmbeddingSidecar(path)
+
+    @property
+    def vectors_persisted(self) -> bool:
+        """Whether the vector index as it stands has been written to disk.
+
+        A sidecar write failure is deliberately not fatal to a graph save, so
+        callers that report success to an operator — or act on it, like the
+        pickle migration renaming its source — must ask rather than assume.
+        """
+        if self._embedding_sidecar is None:
+            return True
+        return self._persisted_vector_revision == self.vector_store.revision
 
     @property
     def embeddings_path(self) -> Optional[Path]:
@@ -562,21 +539,12 @@ class GraphStorage:
             )
             vectors = None
             if needs_write:
-                exported = self.vector_store.export_vectors()
-                # The sidecar refuses a mixed-dimension matrix, and the only
-                # answer available at write time is to drop the write. Left
-                # unfiltered, one odd vector in the index — the generation path
-                # does not check widths — would make every future save fail and
-                # retry forever, freezing the sidecar and silently discarding
-                # all later vector work. Anchor here too, and lose the odd
-                # vectors rather than everything after them.
-                vectors = _matching_dimension(exported, _dominant_dimension(exported))
-                if len(vectors) != len(exported):
-                    print(
-                        f"Warning: {len(exported) - len(vectors)} embedding(s) of a "
-                        f"minority dimension were not persisted; regenerate them to "
-                        f"restore full semantic search coverage"
-                    )
+                # No filtering here: VectorStore keeps the index uniform, so
+                # what it exports is always a matrix the sidecar accepts. An
+                # extra vote at this boundary would only re-decide the
+                # dimension, and it decided it by raw count — which favours
+                # whichever vectors are the more numerous, i.e. the stale ones.
+                vectors = self.vector_store.export_vectors()
                 self._snapshotted_vector_revision = vector_revision
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
@@ -640,7 +608,7 @@ class GraphStorage:
 
         if self._embedding_sidecar is None:
             self.vector_store.load_vectors(
-                _matching_dimension(inline, _dominant_dimension(inline))
+                matching_dimension(inline, dominant_dimension(inline))
             )
             self._persisted_vector_revision = self.vector_store.revision
             return
@@ -670,8 +638,8 @@ class GraphStorage:
         # odd ones out. The sidecar decides which dimension that is whenever it
         # has one: it is the authoritative source, and a graph file full of
         # stale inline vectors must not outvote it.
-        dimension = _dominant_dimension(stored) or _dominant_dimension(migrated)
-        vectors = _matching_dimension(merged, dimension)
+        dimension = dominant_dimension(stored) or dominant_dimension(migrated)
+        vectors = matching_dimension(merged, dimension)
         dropped = len(merged) - len(vectors)
         if dropped:
             print(
@@ -959,10 +927,10 @@ class GraphStorage:
                     # caller passing vectors of some other width must never
                     # evict the vectors that are already correct.
                     existing = self.vector_store.export_vectors()
-                    dimension = _dominant_dimension(existing) or _dominant_dimension(
+                    dimension = dominant_dimension(existing) or dominant_dimension(
                         supplied
                     )
-                    accepted = _matching_dimension(supplied, dimension)
+                    accepted = matching_dimension(supplied, dimension)
                     if len(accepted) != len(supplied):
                         print(
                             f"Warning: ignored {len(supplied) - len(accepted)} supplied "

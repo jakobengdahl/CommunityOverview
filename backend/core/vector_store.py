@@ -43,6 +43,40 @@ def _ensure_sentence_transformers():
     return _SentenceTransformer
 
 
+def dominant_dimension(vectors: Dict[str, Any]) -> Optional[int]:
+    """The dimension most of these vectors share, or None if there are none.
+
+    A tie resolves to the dimension seen first: max() keeps the first maximal
+    key and the dict is insertion-ordered. Deciding a tie by width instead
+    would let one stray wide vector outrank an equally-common correct one.
+    """
+    if not vectors:
+        return None
+
+    counts: Dict[int, int] = {}
+    for vector in vectors.values():
+        counts[len(vector)] = counts.get(len(vector), 0) + 1
+    return max(counts, key=counts.get)
+
+
+def matching_dimension(
+    vectors: Dict[str, Any], dimension: Optional[int]
+) -> Dict[str, Any]:
+    """Keep only the vectors of the given dimension.
+
+    The caller decides which dimension is authoritative rather than letting a
+    vote decide it — a majority of stale vectors must never evict the current
+    ones.
+    """
+    if dimension is None:
+        return {}
+    return {
+        node_id: vector
+        for node_id, vector in vectors.items()
+        if len(vector) == dimension
+    }
+
+
 def _cosine_similarity_matrix(query, matrix):
     """Cosine similarity of a (1, d) query against an (n, d) matrix -> (n,).
 
@@ -69,6 +103,12 @@ class VectorStore:
     ``revision`` increments on every change to the index. GraphStorage compares
     it against the revision it last persisted to decide whether a save needs to
     rewrite the sidecar at all.
+
+    INVARIANT: every vector in the index has the same width. numpy cannot stack
+    rows of differing width, so a mixed index breaks the matrix rebuild, and
+    from there the sidecar write, semantic search and node deletion — each of
+    which then has to guess a recovery. The invariant is enforced here, at the
+    only places a vector can enter, so no consumer has to.
     """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
@@ -80,6 +120,13 @@ class VectorStore:
         ] = []  # ordered list of node ids corresponding to embeddings matrix
         self.embedding_matrix: Optional[Any] = None  # numpy array
         self.revision: int = 0
+
+    @property
+    def dimension(self) -> Optional[int]:
+        """Width of the vectors in the index, or None when it is empty."""
+        for vector in self.embeddings.values():
+            return len(vector)
+        return None
 
     def _load_model(self):
         """Lazy load the model"""
@@ -115,23 +162,63 @@ class VectorStore:
         the public way for an embedder outside this package to build an index
         from nodes it already holds.
         """
-        np = _ensure_numpy()
-        self.embeddings = {}
-
-        for node in nodes:
-            if node.embedding is not None:
-                self.embeddings[node.id] = np.asarray(node.embedding, dtype=np.float32)
-
-        self._update_matrix()
+        self.load_vectors(
+            {node.id: node.embedding for node in nodes if node.embedding is not None}
+        )
         print(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
 
     def load_vectors(self, vectors: Dict[str, Any]) -> None:
-        """Replace the index with vectors read back from persistence."""
+        """Replace the index with vectors read back from persistence.
+
+        Callers that know which source is authoritative select the dimension
+        before calling. This is the last-resort guard that keeps the invariant
+        true whatever they pass.
+        """
         np = _ensure_numpy()
+        kept = matching_dimension(vectors, dominant_dimension(vectors))
+        if len(kept) != len(vectors):
+            print(
+                f"Warning: dropped {len(vectors) - len(kept)} embedding(s) whose "
+                f"width did not match the rest of the index"
+            )
         self.embeddings = {
             node_id: np.asarray(vector, dtype=np.float32)
-            for node_id, vector in vectors.items()
+            for node_id, vector in kept.items()
         }
+        self._update_matrix()
+
+    def _absorb(self, vectors: Dict[str, Any]) -> None:
+        """Add freshly generated vectors, resetting the index if the model's
+        output width changed.
+
+        A width change means the embedding model changed. The vectors already
+        held cannot be compared with the new ones, nor with any query embedded
+        by the new model, so they are already dead — keeping them would only
+        break the index. Dropping them is what makes the change survivable;
+        they come back as each node is next embedded.
+        """
+        if not vectors:
+            return
+
+        np = _ensure_numpy()
+        widths = {len(vector) for vector in vectors.values()}
+        if len(widths) > 1:
+            raise ValueError(
+                f"one batch of generated embeddings has mixed widths {sorted(widths)}"
+            )
+
+        width = widths.pop()
+        current = self.dimension
+        if current is not None and current != width:
+            print(
+                f"Warning: embedding dimension changed from {current} to {width}; "
+                f"discarding {len(self.embeddings)} vector(s) that can no longer be "
+                f"compared. Re-run scripts/generate_embeddings.py to rebuild them."
+            )
+            self.embeddings = {}
+
+        for node_id, vector in vectors.items():
+            self.embeddings[node_id] = np.asarray(vector, dtype=np.float32)
         self._update_matrix()
 
     def export_vectors(self) -> Dict[str, Any]:
@@ -186,11 +273,7 @@ class VectorStore:
 
     def update_node_embedding(self, node: Node):
         """Generate and store the embedding for a node."""
-        np = _ensure_numpy()
-        self.embeddings[node.id] = np.asarray(
-            self.generate_embedding(node), dtype=np.float32
-        )
-        self._update_matrix()
+        self._absorb({node.id: self.generate_embedding(node)})
 
     def update_nodes_embeddings(self, nodes: List[Node]):
         """Update embeddings for multiple nodes in batch"""
@@ -201,11 +284,7 @@ class VectorStore:
         texts = [self._get_text_representation(node) for node in nodes]
         embeddings = self.model.encode(texts)
 
-        np = _ensure_numpy()
-        for node, embedding in zip(nodes, embeddings):
-            self.embeddings[node.id] = np.asarray(embedding, dtype=np.float32)
-
-        self._update_matrix()
+        self._absorb({node.id: embedding for node, embedding in zip(nodes, embeddings)})
 
     def remove_node_embedding(self, node_id: str):
         """Remove embedding for a node"""

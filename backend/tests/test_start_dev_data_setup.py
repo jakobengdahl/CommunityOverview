@@ -22,6 +22,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 START_DEV = REPO_ROOT / "start-dev.sh"
 
 
+def _extract(source: str, start_marker: str, end_marker: str) -> str:
+    """str.index raises rather than matching nothing, so a rename or a
+    restructure fails these tests loudly instead of voiding them silently."""
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    return source[start:end]
+
+
+def _extract_resolution_block() -> str:
+    """The EMBEDDINGS_FILE -> ACTIVE_DATA_EMBEDDINGS resolution, as shipped."""
+    source = START_DEV.read_text(encoding="utf-8")
+    return _extract(
+        source,
+        'if [ -n "${EMBEDDINGS_FILE:-}" ]; then',
+        "# =====",
+    )
+
+
 def _extract_data_setup_block() -> str:
     """Pull the sidecar-cleanup function and the data-setup branch out of the
     script, so the block under test is the shipped source rather than a copy."""
@@ -38,19 +56,42 @@ def data_setup_block() -> str:
     return _extract_data_setup_block()
 
 
-def _run(block: str, workdir: Path, data_source: str = "", env=None) -> str:
-    """Run the extracted block against a temp DATA_DIR."""
+@pytest.fixture(scope="module")
+def resolution_block() -> str:
+    return _extract_resolution_block()
+
+
+def _run(
+    block: str,
+    workdir: Path,
+    data_source: str = "",
+    env=None,
+    resolution: str = "",
+    profile_graph: str = "",
+) -> str:
+    """Run the extracted block against a temp DATA_DIR.
+
+    `resolution` is the script's own EMBEDDINGS_FILE block; passing it means the
+    path the cleanup targets is derived exactly as the shipped script derives
+    it, rather than by the harness deciding for it.
+    """
+    fallback = (
+        "" if resolution else 'ACTIVE_DATA_EMBEDDINGS="$DEFAULT_ACTIVE_DATA_EMBEDDINGS"'
+    )
     harness = f"""
 set -e
 RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
 SCRIPT_DIR="{workdir}"
 DATA_DIR="{workdir}/data"
 ACTIVE_DATA="$DATA_DIR/active/graph.json"
-ACTIVE_DATA_EMBEDDINGS="${{ACTIVE_DATA_EMBEDDINGS:-$DATA_DIR/active/graph.embeddings.bin}}"
+DEFAULT_ACTIVE_DATA_EMBEDDINGS="$DATA_DIR/active/graph.embeddings.bin"
 DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 PROFILE_NAME="default"
 DATA_SOURCE="{data_source}"
-resolve_config() {{ echo ""; }}
+resolve_config() {{ echo "{profile_graph}"; }}
+
+{resolution}
+{fallback}
 
 {block}
 """
@@ -118,9 +159,31 @@ def test_seeding_a_missing_graph_from_the_example_drops_the_sidecar(
     assert not _sidecar(workspace).exists()
 
 
-def test_a_configured_sidecar_path_is_the_one_removed(data_setup_block, workspace):
+def test_an_absolute_configured_sidecar_is_the_one_removed(
+    data_setup_block, resolution_block, workspace
+):
     """EMBEDDINGS_FILE moves the sidecar; the cleanup has to follow it, or it
     deletes nothing and the stale vectors survive the graph replacement."""
+    configured = workspace / "elsewhere.bin"
+    configured.write_bytes(b"vectors")
+
+    _run(
+        data_setup_block,
+        workspace,
+        data_source=str(workspace / "replacement.json"),
+        env={"EMBEDDINGS_FILE": str(configured)},
+        resolution=resolution_block,
+    )
+
+    assert not configured.exists()
+    assert _sidecar(workspace).exists()  # the default one was not the target
+
+
+def test_a_relative_configured_sidecar_resolves_beside_the_graph(
+    data_setup_block, resolution_block, workspace
+):
+    """A relative EMBEDDINGS_FILE belongs next to the graph file, the same way
+    AppConfig resolves it — not in whatever directory the script was run from."""
     configured = workspace / "data" / "active" / "custom.bin"
     configured.write_bytes(b"vectors")
 
@@ -128,10 +191,42 @@ def test_a_configured_sidecar_path_is_the_one_removed(data_setup_block, workspac
         data_setup_block,
         workspace,
         data_source=str(workspace / "replacement.json"),
-        env={"ACTIVE_DATA_EMBEDDINGS": str(configured)},
+        env={"EMBEDDINGS_FILE": "custom.bin"},
+        resolution=resolution_block,
     )
 
     assert not configured.exists()
+
+
+def test_an_unset_embeddings_file_falls_back_to_the_default(
+    data_setup_block, resolution_block, workspace
+):
+    _run(
+        data_setup_block,
+        workspace,
+        data_source=str(workspace / "replacement.json"),
+        resolution=resolution_block,
+    )
+
+    assert not _sidecar(workspace).exists()
+
+
+def test_seeding_from_a_profile_graph_drops_the_sidecar(
+    data_setup_block, resolution_block, workspace
+):
+    """The profile branch replaces the graph too, and had no coverage."""
+    profile_graph = workspace / "profile-graph.json"
+    profile_graph.write_text(json.dumps({"nodes": [], "edges": [], "metadata": {}}))
+    (workspace / "data" / "active" / "graph.json").unlink()
+
+    _run(
+        data_setup_block,
+        workspace,
+        resolution=resolution_block,
+        profile_graph=str(profile_graph),
+    )
+
+    assert not _sidecar(workspace).exists()
 
 
 def test_the_script_exports_the_sidecar_path_it_cleans_up():
@@ -146,7 +241,10 @@ def test_the_extraction_still_matches_the_script(data_setup_block):
     """Guards the harness itself: if the block is renamed or restructured, these
     tests must fail loudly rather than silently testing nothing."""
     assert "drop_stale_embeddings()" in data_setup_block
-    assert data_setup_block.count("drop_stale_embeddings") >= 5
+    # One definition plus one call per replacement path: the --data copy, the
+    # --data download, the profile graph, the example graph, the empty stub.
+    # An exact count means removing any single call fails here.
+    assert data_setup_block.count("drop_stale_embeddings") == 6
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")

@@ -31,11 +31,24 @@ def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
     try:
         # Vectors land in the vector store, not on the node objects.
         storage.vector_store.update_nodes_embeddings(nodes)
-        # save() persists them through the embedding sidecar; wait for it so the
-        # success line below is not printed before the write lands.
+        # save() persists them through the embedding sidecar. Waiting orders the
+        # write before the report; whether it succeeded is a separate question,
+        # asked below, because a sidecar failure does not fail the save.
         storage.save().result()
+
+        if not storage.vectors_persisted:
+            # A sidecar write failure is not fatal to the graph save, so it
+            # must be asked about rather than inferred from save() returning.
+            print(
+                f"FAILED: embeddings were generated but not written to "
+                f"{storage.embeddings_path}. See the warning above for the cause."
+            )
+            raise SystemExit(1)
+
         print(f"Success! Embeddings written to {storage.embeddings_path}.")
         print(f"Total embeddings: {storage.vector_store.get_embedding_count()}")
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Error generating embeddings: {e}")
 
