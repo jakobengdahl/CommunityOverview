@@ -65,9 +65,11 @@ def test_the_default_policy_reaches_the_history_store():
             storage.flush()
 
 
-def test_zero_keeps_every_record():
-    """A non-positive cap disables retention, which is how an operator opts out
-    of trimming entirely."""
+def test_zero_removes_the_count_cap():
+    """A non-positive cap removes the count cap. With no age cap configured
+    that keeps every record - but the name says what the setting does, not the
+    combined outcome, because "0 keeps every record" is the unqualified claim
+    this branch had to correct in three documentation sites."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config = AppConfig(
             graph_file=os.path.join(tmpdir, "graph.json"), history_max_events=0

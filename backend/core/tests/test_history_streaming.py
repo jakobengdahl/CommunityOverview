@@ -531,3 +531,49 @@ class TestTheRewriteStaysOnTheSidecarsFilesystem:
         store.compact()
 
         assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["n5", "n4"]
+
+
+class TestCompactionThrottleScalesWithTheCap:
+    """A compaction pass reads and rewrites the whole sidecar while holding the
+    store lock. A constant throttle makes that cost grow with the cap: clamped
+    at 256, the shipped 100k default meant a full rewrite every 0.26% of the
+    file — the same 'cost sized by the file, not by the work' this change exists
+    to remove, moved from the read path to the write path."""
+
+    @staticmethod
+    def _interval(**kwargs) -> int:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = GraphHistoryStore(Path(tmpdir) / "h.ndjson", **kwargs)
+            return store._compaction_interval
+
+    def test_a_large_cap_does_not_rewrite_every_few_hundred_appends(self):
+        assert self._interval(max_events=100_000) == 10_000
+
+    def test_the_work_per_append_stays_flat_as_the_cap_grows(self):
+        """records rewritten per append = cap / interval. Held roughly constant,
+        this is what keeps the write path from scaling with the cap."""
+        ratios = [
+            10_000 / self._interval(max_events=10_000),
+            100_000 / self._interval(max_events=100_000),
+            1_000_000 / self._interval(max_events=1_000_000),
+        ]
+
+        assert max(ratios) <= 11, f"per-append work grows with the cap: {ratios}"
+
+    def test_a_small_cap_still_trims_promptly(self):
+        """Scaling must not let a cap of 5 grow to 256 before trimming."""
+        assert self._interval(max_events=5) == 5
+        assert self._interval(max_events=100) == 100
+
+    def test_an_explicit_interval_still_wins(self):
+        assert self._interval(max_events=100_000, compaction_interval=7) == 7
+
+    def test_the_overshoot_is_bounded(self, store_path):
+        """Between passes the sidecar exceeds the cap by at most the interval."""
+        store = GraphHistoryStore(store_path, max_events=50)
+
+        for i in range(200):
+            store.append_record(_record(f"n{i}"))
+
+        on_disk = [line for line in store_path.read_text().splitlines() if line]
+        assert len(on_disk) <= 50 + store._compaction_interval

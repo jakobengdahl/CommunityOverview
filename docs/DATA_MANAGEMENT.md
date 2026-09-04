@@ -180,6 +180,13 @@ the upgrade. Set `HISTORY_MAX_EVENTS=0` before upgrading if that matters. Note
 also that the resulting file size depends on the record size, so the cap bounds
 the record count rather than the bytes directly.
 
+**When trimming runs.** A compaction pass reads and rewrites the whole sidecar
+while holding the store lock, so it is throttled rather than run on every append:
+by default once per tenth of `HISTORY_MAX_EVENTS` appends. That keeps the work
+per mutation roughly constant however large the cap is, at the cost of a bounded
+overshoot — between passes the sidecar can hold up to about 110% of the cap. Set
+the throttle explicitly if you need a tighter bound.
+
 **Reads.** History queries return a page at a time and read the file backwards, so
 answering one costs memory proportional to the page rather than to the file. That
 matters on a small container: the previous implementation parsed every record to

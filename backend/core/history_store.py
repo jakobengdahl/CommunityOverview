@@ -164,8 +164,21 @@ class GraphHistoryStore:
         if compaction_interval is not None:
             self._compaction_interval = max(1, compaction_interval)
         elif self.max_events is not None:
+            # Scale the throttle with the cap. A compaction pass reads the whole
+            # sidecar and rewrites it, holding the lock throughout, so a
+            # constant interval makes the per-mutation cost grow with the cap:
+            # clamped at 256, a 100k-record cap meant a full rewrite every
+            # 0.26% of the file. A tenth of the cap amortises that to roughly
+            # ten records of work per append whatever the cap is. The trade-off
+            # is overshoot - the sidecar can reach about 110% of the cap between
+            # passes - and the min() keeps small caps trimming promptly rather
+            # than letting a cap of 5 grow to 256.
             self._compaction_interval = max(
-                1, min(self.max_events, _DEFAULT_COMPACTION_INTERVAL)
+                1,
+                min(
+                    self.max_events,
+                    max(_DEFAULT_COMPACTION_INTERVAL, self.max_events // 10),
+                ),
             )
         else:
             self._compaction_interval = _DEFAULT_COMPACTION_INTERVAL
