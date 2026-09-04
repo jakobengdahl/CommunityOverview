@@ -450,3 +450,42 @@ def test_a_failure_inside_save_leaves_the_previous_sidecar_intact(
     assert set(FileEmbeddingSidecar(path).load()) == {"n1"}
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith("embeddings_")]
     assert leftovers == [], f"temp files left behind: {leftovers}"
+
+
+def test_a_damaged_sidecar_at_our_own_name_is_moved_aside_and_rebuilt(tmp_path):
+    """Nothing but this writer ever puts a file at the derived name, and the
+    writer is atomic, so unreadable content there is damage rather than
+    somebody's data. Refusing would strand the deployment: nothing else
+    rewrites the file, so semantic search stays dark until an operator deletes
+    it by hand — and the refusal message would be telling them to move a
+    variable they never set."""
+    path = tmp_path / "graph.embeddings.bin"
+    damaged = b"corrupted beyond recognition"
+    path.write_bytes(damaged)
+
+    FileEmbeddingSidecar(path, owns_path=True).save(
+        {"n1": np.ones(4, dtype=np.float32)}
+    )
+
+    assert set(FileEmbeddingSidecar(path).load()) == {"n1"}
+    kept = path.with_name(path.name + ".corrupt")
+    assert kept.read_bytes() == damaged, (
+        "the damaged bytes were destroyed; they are sometimes the only "
+        "evidence of what went wrong"
+    )
+
+
+def test_a_damaged_file_at_a_name_we_were_given_is_still_refused(tmp_path):
+    """The other half of the same rule. An operator's path may hold anything,
+    including a legacy pickle whose vectors are the only copy anywhere."""
+    path = tmp_path / "somewhere.bin"
+    original = b"\x80\x04\x95 not ours to move"
+    path.write_bytes(original)
+
+    with pytest.raises(EmbeddingSidecarError, match="refusing to overwrite"):
+        FileEmbeddingSidecar(path, owns_path=False).save(
+            {"n1": np.ones(4, dtype=np.float32)}
+        )
+
+    assert path.read_bytes() == original
+    assert not path.with_name(path.name + ".corrupt").exists()

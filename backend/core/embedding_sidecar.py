@@ -69,8 +69,22 @@ def resolve_sidecar_path(
 class FileEmbeddingSidecar:
     """Reads and writes the embedding matrix for a file-backed graph."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, owns_path: bool = False):
+        """
+        Args:
+            path: where the matrix lives.
+            owns_path: whether this name was derived by the application rather
+                than chosen by an operator. It decides what happens when the
+                file is there but is not a sidecar. At a derived name nothing
+                else ever writes, so foreign content is damage in a file we
+                own: it is moved aside and replaced, and semantic search
+                recovers by itself. At an operator's name it is somebody
+                else's data — a legacy embeddings.pkl, say — and the write is
+                refused instead. Defaults to refusing, so a caller that has
+                not thought about it cannot destroy anything.
+        """
         self.path = Path(path)
+        self.owns_path = owns_path
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -176,7 +190,7 @@ class FileEmbeddingSidecar:
         """
         np = _ensure_numpy()
 
-        # Never replace a file that holds something else. EMBEDDINGS_FILE was
+        # Never destroy a file that holds something else. EMBEDDINGS_FILE was
         # inert before this format existed and the old .env.example named a
         # legacy embeddings.pkl for it, so an upgraded deployment can point
         # this straight at that pickle — whose vectors are then the only copy
@@ -192,12 +206,26 @@ class FileEmbeddingSidecar:
                 raise EmbeddingSidecarError(
                     f"cannot inspect {self.path} before writing it: {exc}"
                 ) from exc
-            if head != MAGIC:
+            if head != MAGIC and not self.owns_path:
                 raise EmbeddingSidecarError(
                     f"refusing to overwrite {self.path}: it already exists and "
                     f"is not an embedding sidecar. Point EMBEDDINGS_FILE at a "
                     f"path of its own; a legacy embeddings.pkl belongs to "
                     f"scripts/migrate_embeddings.py, not here"
+                )
+            if head != MAGIC:
+                # Our own name, so this is a damaged sidecar rather than
+                # somebody's data. Refusing here would strand the deployment:
+                # nothing rewrites the file, so semantic search stays dark
+                # until an operator deletes it by hand — and the message above
+                # would be telling them to move a variable they never set.
+                # Keep the bytes anyway; a corrupt file is sometimes the only
+                # evidence of what went wrong.
+                spoiled = self.path.with_name(self.path.name + ".corrupt")
+                os.replace(self.path, spoiled)
+                print(
+                    f"Warning: {self.path} was not a readable sidecar; moved it "
+                    f"to {spoiled} and rebuilding it"
                 )
 
         ids: List[str] = list(vectors.keys())

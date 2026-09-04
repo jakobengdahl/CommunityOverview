@@ -1623,3 +1623,70 @@ def test_the_fallback_does_not_survive_a_reload_that_no_longer_carries_it(
         )
     finally:
         storage.flush()
+
+
+def test_the_graph_file_is_never_accepted_as_the_sidecar(tmpdir_path):
+    """The sidecar is written first and the graph write lands on top of it, so
+    pointing both at one path destroys the vectors and reports success. The
+    refusal in save() cannot catch it on the bootstrap path either: there the
+    graph file is momentarily absent, so the sidecar write finds nothing to
+    refuse. The migration script rejects the same shape outright."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    graph = {
+        "nodes": [
+            {"id": "n1", "type": "Actor", "name": "N1", "embedding": [0.5] * DIM}
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=graph_path)
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert storage.embeddings_path != Path(graph_path), (
+            "the graph file was accepted as its own sidecar"
+        )
+
+        os.unlink(graph_path)
+        storage.reload()
+        storage.flush()
+
+        assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {"n1"}
+        assert json.load(open(graph_path, encoding="utf-8")), (
+            "graph.json was left holding sidecar bytes"
+        )
+        assert storage.vectors_persisted
+    finally:
+        storage.flush()
+
+
+def test_the_app_refuses_an_operator_path_holding_a_pickle(tmpdir_path):
+    """The end-to-end claim the whole guard rests on: the migration script
+    refuses this collision, but the app starts first and reaches it first. Only
+    the unit level was pinned, so the wiring could start treating a configured
+    path as one of ours — moving the pickle aside instead of refusing — with
+    nothing failing."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    pickle_path = os.path.join(tmpdir_path, "embeddings.pkl")
+    original = b"\x80\x04\x95 a legacy pickle"
+    with open(pickle_path, "wb") as f:
+        f.write(original)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=pickle_path)
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        with open(pickle_path, "rb") as f:
+            assert f.read() == original, "the app moved the operator's pickle aside"
+        assert not os.path.exists(pickle_path + ".corrupt")
+        assert storage.vectors_persisted is False, (
+            "the app reported the vectors persisted after refusing to write them"
+        )
+    finally:
+        storage.flush()

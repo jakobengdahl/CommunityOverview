@@ -224,12 +224,24 @@ class GraphStorage:
         """Create the vector sidecar for file-backed standalone mode."""
         if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):
             return None
-        path = (
-            Path(embeddings_path)
-            if embeddings_path
-            else self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
-        )
-        return FileEmbeddingSidecar(path)
+        derived = self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
+        if not embeddings_path:
+            return FileEmbeddingSidecar(derived, owns_path=True)
+
+        path = Path(embeddings_path)
+        # The graph file is the one collision the refusal in save() cannot
+        # catch, because the sidecar is written first and the graph write then
+        # lands on top of it — and on the bootstrap path, where the graph file
+        # is momentarily absent, the sidecar write finds nothing to refuse.
+        # The migration script rejects the same shape outright for the same
+        # reason: the second write silently destroys the first.
+        if path.resolve() == self.json_path.resolve():
+            print(
+                f"Warning: EMBEDDINGS_FILE names the graph file itself "
+                f"({path}); using {derived} instead"
+            )
+            return FileEmbeddingSidecar(derived, owns_path=True)
+        return FileEmbeddingSidecar(path, owns_path=False)
 
     @property
     def vectors_persisted(self) -> bool:
