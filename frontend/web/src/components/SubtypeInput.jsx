@@ -119,6 +119,8 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
             <button
               type="button"
               className="subtype-chip-remove"
+              aria-label={`Remove ${subtype}`}
+              title={`Remove ${subtype}`}
               onClick={(e) => {
                 e.stopPropagation();
                 removeSubtype(index);
