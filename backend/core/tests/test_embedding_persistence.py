@@ -1456,3 +1456,58 @@ def test_a_reused_node_id_does_not_inherit_the_deleted_node_s_vector(tmpdir_path
         )
     finally:
         storage.flush()
+
+
+def test_a_re_embedded_vector_beats_the_copy_it_was_loaded_with(tmpdir_path):
+    """The fallback copy is what graph.json had; the index holds what the node
+    means now. If the stale copy won, a vector generated after the load would
+    have no durable copy anywhere the moment the sidecar write fails — the
+    payload would carry the old value and the sidecar would carry nothing."""
+    graph = {
+        "nodes": [
+            {"id": "n1", "type": "Actor", "name": "Legacy", "embedding": [0.25] * DIM}
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+
+        def failing_save(vectors):
+            raise OSError("no space left on device")
+
+        storage._embedding_sidecar.save = failing_save
+        storage.update_node("n1", {"name": "Renamed, and so re-embedded"})
+        storage.flush()
+
+        written = _graph_json(tmpdir_path)["nodes"][0]["embedding"]
+        live = storage.vector_store.export_vectors()["n1"]
+        np.testing.assert_allclose(np.float32(written), live)
+        assert not np.allclose(np.float32(written), np.float32([0.25] * DIM)), (
+            "graph.json kept the vector loaded from disk instead of the one the "
+            "node now has, so the newer vector exists nowhere durable"
+        )
+    finally:
+        storage.flush()
+
+
+def test_a_backend_without_a_sidecar_reports_its_vectors_persisted(tmpdir_path):
+    """Such a backend keeps vectors inline in the node payload, so a completed
+    save really has persisted them. Reporting otherwise makes both maintenance
+    scripts exit non-zero on a perfectly good run."""
+    storage = GraphStorage(
+        json_path=os.path.join(tmpdir_path, "graph.json"),
+        persistence_backend=_MemoryBackend(),
+    )
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.embeddings_path is None
+        assert storage.vectors_persisted is True
+    finally:
+        storage.flush()

@@ -266,6 +266,10 @@ def test_the_sidecar_is_dropped_only_after_a_graph_is_in_place(data_setup_block)
         'cp "$DATA_SOURCE" "$ACTIVE_DATA"',
         'cp "$PROFILE_GRAPH" "$ACTIVE_DATA"',
         'cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"',
+        # The download branch replaces the graph too, and a download is far
+        # likelier to fail than a local copy — an unreachable host must not
+        # cost the vectors of the graph still in place.
+        'echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"',
     ]
 
     for anchor in replacements:
@@ -287,3 +291,17 @@ def test_the_sidecar_is_dropped_only_after_a_graph_is_in_place(data_setup_block)
             f"sidecar cleanup runs BEFORE {anchor} in its own branch; a failed "
             f"copy would then destroy the vectors of the graph still in place"
         )
+
+
+def test_a_failed_download_leaves_the_sidecar_alone(data_setup_block, workspace):
+    """The graph was not replaced, so its vectors are still the right ones.
+    Dropping them before the transfer succeeds loses them for nothing — and a
+    download fails far more often than a local copy does."""
+    output = _run(
+        data_setup_block,
+        workspace,
+        data_source="http://127.0.0.1:1/does-not-exist.json",
+    )
+
+    assert _sidecar(workspace).exists(), output
+    assert _sidecar(workspace).read_bytes() == b"vectors"

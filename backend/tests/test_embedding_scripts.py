@@ -128,6 +128,49 @@ class TestMigrateEmbeddings:
 
         assert set(sidecar.load()) == {"n2"}
 
+    def test_a_larger_pickle_still_does_not_outvote_the_sidecar(
+        self, workspace, monkeypatch
+    ):
+        """One-against-one is a tie, and a tie resolves to the sidecar whether
+        the rule is 'the sidecar decides' or 'the majority decides'. Only a
+        pickle that OUTNUMBERS the sidecar separates them — and getting it wrong
+        evicts vectors whose only durable copy is the sidecar, immediately
+        before the pickle is renamed away."""
+        tmpdir, graph_path = workspace
+        monkeypatch.delenv("EMBEDDINGS_FILE", raising=False)
+        # A pickle vector only reaches the merge through a node that exists, so
+        # the graph needs a third node for the pickle to outnumber the sidecar.
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {"id": "n1", "type": "Actor", "name": "One"},
+                        {"id": "n2", "type": "Actor", "name": "Two"},
+                        {"id": "n3", "type": "Actor", "name": "Three"},
+                    ],
+                    "edges": [],
+                    "metadata": {"version": "1.0", "graph_name": "graph"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        sidecar = FileEmbeddingSidecar(tmpdir / "graph.embeddings.bin")
+        sidecar.save({"n3": np.full(DIM, 9.0, dtype=np.float32)})
+        _write_pickle(
+            tmpdir,
+            {
+                "n1": np.zeros(DIM + 4, dtype=np.float32),
+                "n2": np.ones(DIM + 4, dtype=np.float32),
+            },
+        )
+
+        migrate_embeddings(str(graph_path))
+
+        assert set(sidecar.load()) == {"n3"}, (
+            "the more numerous pickle rows outvoted the sidecar and destroyed "
+            "the vectors it was the only durable copy of"
+        )
+
     def test_writes_to_the_configured_sidecar_not_the_default_location(
         self, workspace, monkeypatch
     ):

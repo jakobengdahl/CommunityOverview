@@ -285,3 +285,17 @@ def test_random_bytes_behind_a_valid_magic_never_escape(tmp_path):
         length = rng.randrange(0, 96)
         body = bytes(rng.randrange(256) for _ in range(length))
         _load_raises_only_its_own_error(path, MAGIC + body)
+
+
+def test_a_zero_width_header_reads_back_as_no_vectors(tmp_path):
+    """rows without dim is still nothing. Returning three zero-width rows
+    instead puts them in the index, and a real query then raises out of numpy —
+    the load survives and semantic search does not, which is the failure this
+    format's degrade-never-fail contract exists to prevent."""
+    header = json.dumps(
+        {"dtype": "float32", "rows": 3, "dim": 0, "ids": ["a", "b", "c"]}
+    ).encode("utf-8")
+    path = tmp_path / "graph.embeddings.bin"
+    path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header)
+
+    assert FileEmbeddingSidecar(path).load() == {}

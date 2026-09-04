@@ -417,3 +417,21 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (require model loading)"
     )
+
+
+def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
+    """This raise is the single enforcement point of the one-width invariant the
+    whole sidecar split rests on: every consumer was allowed to drop its own
+    width guard because entry is guarded here. add_nodes swallows the exception,
+    so without it a mixed batch leaves the index permanently mixed and the
+    sidecar silently unwritable — with nothing failing at the time."""
+    store = VectorStore()
+    store.load_vectors({"a": np.ones(4, dtype=np.float32)})
+    before = store.export_vectors()
+
+    with pytest.raises(ValueError):
+        store._absorb({"b": [1.0, 2.0], "c": [1.0, 2.0, 3.0]})
+
+    after = store.export_vectors()
+    assert set(after) == set(before), "a refused batch still changed the index"
+    np.testing.assert_allclose(after["a"], before["a"])
