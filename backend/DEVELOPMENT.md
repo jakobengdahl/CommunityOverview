@@ -167,7 +167,7 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
-| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` keeps every record |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` removes the count cap (age trimming, if configured, still applies) |
 | `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days; unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |

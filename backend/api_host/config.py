@@ -27,10 +27,11 @@ class AppConfig:
     # unbounded, deliberately — an audit trail is not something a library should
     # silently truncate. The application picks the open-core policy here.
     #
-    # HISTORY_MAX_EVENTS bounds the sidecar so it cannot grow without limit; set
-    # it to 0 to keep every record. The default is generous on purpose: it is
-    # high enough that upgrading an existing deployment does not retroactively
-    # delete anyone's history, while still capping the file.
+    # HISTORY_MAX_EVENTS bounds the sidecar so it cannot grow without limit; 0
+    # removes the count cap, which keeps every record unless HISTORY_MAX_AGE_DAYS
+    # is also set. The default is generous so a typical deployment is not trimmed
+    # on upgrade, but it is a cap rather than a promise: a sidecar already holding
+    # more than this loses the excess on the first compaction.
     #
     # HISTORY_MAX_AGE_DAYS is opt-in and unset by default. "Delete records older
     # than X" is a retention policy an operator has to choose, not one to

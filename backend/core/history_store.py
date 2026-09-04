@@ -330,14 +330,23 @@ class GraphHistoryStore:
     def _rewrite_streaming(self, cutoff: Optional[datetime], skip: int) -> None:
         """Copy the records retention keeps into a fresh sidecar, atomically.
 
-        The original line is written through byte-for-byte rather than
-        re-serialised, so a trim cannot quietly alter a record it is only
-        supposed to keep or drop.
+        The line read from disk is written back as-is rather than being
+        re-serialised from the parsed record, so a trim cannot quietly alter a
+        record it is only supposed to keep or drop. (The text is decoded and
+        re-encoded as UTF-8 on the way through, which round-trips losslessly
+        for every line that survived the decode; only the line terminator is
+        normalised.)
         """
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
         temp_fd, temp_path = tempfile.mkstemp(
             suffix=".ndjson",
             prefix="graph_history_",
+            # Same directory as the sidecar, not TMPDIR: os.rename below is
+            # only atomic within a filesystem, and the graph directory is a
+            # mounted volume while TMPDIR is the container's own disk. Across
+            # them rename raises EXDEV, append_record swallows it, and
+            # retention stops running for good.
+            dir=self.history_path.parent,
         )
         try:
             with os.fdopen(temp_fd, "w", encoding="utf-8") as out:

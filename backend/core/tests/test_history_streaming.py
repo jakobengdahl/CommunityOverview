@@ -474,3 +474,60 @@ def test_a_naive_timestamp_does_not_break_age_retention(store_path):
     store.compact()
 
     assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["recent"]
+
+
+class TestTheRewriteStaysOnTheSidecarsFilesystem:
+    """os.rename is atomic only within a filesystem. The graph directory is a
+    mounted volume in both deployment shapes while TMPDIR is the container's own
+    disk, so a temp file created in TMPDIR makes every compaction raise EXDEV —
+    which append_record swallows, leaving retention permanently dead.
+
+    The existing "no temp files left behind" test cannot see this: it asserts
+    nothing named graph_history_* remains beside the sidecar, which is vacuously
+    true when none is ever created there."""
+
+    def test_the_temp_file_is_created_beside_the_sidecar(self, store_path, monkeypatch):
+        _write(store_path, [_record(f"n{i}") for i in range(5)])
+        store = GraphHistoryStore(store_path, max_events=2, compaction_interval=1000)
+
+        seen = []
+        real_mkstemp = tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            seen.append(path)
+            return fd, path
+
+        monkeypatch.setattr(tempfile, "mkstemp", spy)
+        store.compact()
+
+        assert seen, "compaction created no temp file"
+        assert os.path.dirname(seen[0]) == str(store_path.parent), (
+            f"temp file was created in {os.path.dirname(seen[0])}, not beside the "
+            f"sidecar in {store_path.parent}; os.rename across filesystems raises "
+            f"EXDEV and retention would stop running"
+        )
+
+    def test_compaction_survives_when_tmpdir_is_a_different_filesystem(
+        self, store_path, monkeypatch
+    ):
+        """Simulates the deployment shape directly: rename refuses to cross
+        between the temp directory and the graph volume."""
+        _write(store_path, [_record(f"n{i}") for i in range(6)])
+        store = GraphHistoryStore(store_path, max_events=2, compaction_interval=1000)
+
+        import backend.core.history_store as hs
+
+        real_rename = os.rename
+
+        def rename_refusing_to_cross(src, dst):
+            if os.path.dirname(src) != os.path.dirname(dst):
+                raise OSError(18, "Invalid cross-device link")
+            return real_rename(src, dst)
+
+        monkeypatch.setattr(hs.os, "rename", rename_refusing_to_cross)
+        monkeypatch.setattr(hs.os, "replace", rename_refusing_to_cross)
+
+        store.compact()
+
+        assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["n5", "n4"]

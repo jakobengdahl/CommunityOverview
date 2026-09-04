@@ -169,13 +169,16 @@ a given age; it is unset by default, because "delete records older than X" is a
 retention policy an operator should choose rather than inherit. Setting
 `HISTORY_MAX_EVENTS=0` removes the count cap; trimming then stops altogether
 unless `HISTORY_MAX_AGE_DAYS` is also set, in which case age-based trimming
-still runs. To keep every record, leave both unset (or `HISTORY_MAX_EVENTS=0`
-with no age set).
+still runs. **To keep every record you must set `HISTORY_MAX_EVENTS=0`
+explicitly and leave `HISTORY_MAX_AGE_DAYS` unset** — leaving both unset
+applies the default cap, it does not disable trimming.
 
-The default is deliberately generous: high enough that upgrading an existing
-deployment does not retroactively delete anyone's audit trail, while still bounding
-the file. Note that the resulting file size depends on the record size, so the cap
-bounds the record count rather than the bytes directly.
+The default is deliberately generous, so that upgrading a typical deployment does
+not trim anything. It is a cap, not a promise: a sidecar that already holds more
+than `HISTORY_MAX_EVENTS` records loses the excess on the first compaction after
+the upgrade. Set `HISTORY_MAX_EVENTS=0` before upgrading if that matters. Note
+also that the resulting file size depends on the record size, so the cap bounds
+the record count rather than the bytes directly.
 
 **Reads.** History queries return a page at a time and read the file backwards, so
 answering one costs memory proportional to the page rather than to the file. That
