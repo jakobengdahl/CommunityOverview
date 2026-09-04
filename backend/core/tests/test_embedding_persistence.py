@@ -1573,3 +1573,53 @@ def test_a_complete_sidecar_reports_its_vectors_persisted_before_any_save(
     finally:
         reopened.flush()
         storage.flush()
+
+
+def test_the_fallback_does_not_survive_a_reload_that_no_longer_carries_it(
+    tmpdir_path,
+):
+    """The map describes what the graph file currently holds, so it is replaced
+    wholesale on every load. Merging instead would keep an entry after the file
+    stopped carrying it — and the next save would write a previous dataset's
+    vector into the restored file, which is a vector appearing where the file
+    never had one."""
+    graph = {
+        "nodes": [
+            {"id": "a", "type": "Actor", "name": "A", "embedding": [0.5] * DIM},
+            {"id": "b", "type": "Actor", "name": "B", "embedding": [0.5] * (DIM * 2)},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    path = os.path.join(tmpdir_path, "graph.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert "b" in storage._inline_fallback, "fixture no longer holds b back"
+
+        # An operator restores a graph in which b carries no vector at all.
+        restored = {
+            "nodes": [
+                {"id": "a", "type": "Actor", "name": "A", "embedding": [0.5] * DIM},
+                {"id": "b", "type": "Actor", "name": "B"},
+            ],
+            "edges": [],
+            "metadata": {"version": "1.0", "graph_name": "graph"},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(restored, f)
+
+        storage.reload()
+        storage.flush()
+        storage.save().result()
+        storage.flush()
+
+        payloads = {n["id"]: n for n in _graph_json(tmpdir_path)["nodes"]}
+        assert "embedding" not in payloads["b"], (
+            "b was given a vector the restored file never carried, held over "
+            "from the dataset before it"
+        )
+    finally:
+        storage.flush()

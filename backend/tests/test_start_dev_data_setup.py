@@ -379,3 +379,57 @@ def test_the_cleanup_refuses_to_delete_a_file_that_is_not_a_sidecar(
     assert foreign.exists(), output
     assert foreign.read_bytes() == original
     assert "not an embedding sidecar" in output
+
+
+@pytest.fixture
+def http_graph_url(workspace):
+    """A URL that serves a real graph — the success path both other download
+    tests skip, since one refuses the connection and one answers 404."""
+    import http.server
+    import socketserver
+    import threading
+
+    body = json.dumps(
+        {
+            "nodes": [{"id": "downloaded", "type": "Actor", "name": "From the URL"}],
+            "edges": [],
+            "metadata": {"version": "1.0"},
+        }
+    ).encode("utf-8")
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/graph.json"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="curl required")
+def test_a_successful_download_replaces_the_graph_and_drops_the_sidecar(
+    data_setup_block, workspace, http_graph_url
+):
+    """Both other download tests are failure paths, so nothing checked that a
+    download which reports success actually put the graph where the cleanup
+    then assumes it is. A download landing somewhere else would still drop the
+    sidecar, leaving the old graph beside no vectors."""
+    _run(data_setup_block, workspace, data_source=http_graph_url)
+
+    graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
+    assert [n["id"] for n in graph["nodes"]] == ["downloaded"], (
+        "the download reported success but the graph was not replaced"
+    )
+    assert not _sidecar(workspace).exists()

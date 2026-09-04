@@ -7,6 +7,7 @@ everything else — never a partial or silently wrong read.
 """
 
 import json
+import os
 import random
 import struct
 import tempfile
@@ -17,6 +18,7 @@ import pytest
 
 from backend.core.embedding_sidecar import (
     MAGIC,
+    _HEADER_LEN_STRUCT,
     EmbeddingSidecarError,
     FileEmbeddingSidecar,
 )
@@ -333,18 +335,63 @@ def test_an_unforeseen_failure_inside_load_is_converted_not_propagated(
         FileEmbeddingSidecar(path).load()
 
 
-def test_the_documented_layout_matches_the_actual_magic():
+def test_the_documented_layout_matches_the_code():
     """The module docstring is the only description of this binary format, and
     a recovery script or an external reader is written from it. It claimed 8
     bytes of magic against an actual 7 for ten review rounds, because prose
-    cannot be contradicted by a suite unless something reads it."""
+    cannot be contradicted by a suite unless something reads it — so read every
+    row, not just the one that happened to be wrong."""
     import re
 
     import backend.core.embedding_sidecar as module
 
-    documented = re.search(r"magic\s+(\d+) bytes", module.__doc__)
-    assert documented, "the layout table no longer states the magic length"
-    assert int(documented.group(1)) == len(MAGIC)
+    doc = module.__doc__
+
+    magic = re.search(r"magic\s+(\d+) bytes", doc)
+    assert magic, "the layout table no longer states the magic length"
+    assert int(magic.group(1)) == len(MAGIC)
+
+    hdr = re.search(r"hdr_len\s+(\d+) bytes", doc)
+    assert hdr, "the layout table no longer states the header-length width"
+    assert int(hdr.group(1)) == _HEADER_LEN_STRUCT.size
+
+    payload = re.search(r"payload\s+N\*D\*(\d+)", doc)
+    assert payload, "the layout table no longer states the element size"
+    assert int(payload.group(1)) == np.dtype("<f4").itemsize
+
+    assert "float32" in doc, "the layout table no longer names the element type"
+    assert "row i belonging to ids[i]" in doc, (
+        "the table no longer states which id owns which row — the one thing an "
+        "external reader cannot infer from the bytes"
+    )
+
+
+def test_the_magic_is_the_value_every_released_sidecar_was_written_with():
+    """Pinned against a literal, not against itself. Every round-trip test
+    writes and reads through this same constant, so changing it passes the
+    whole suite — while in production every sidecar a previous release wrote
+    stops loading, and since graph.json no longer carries the vectors, the
+    deployment's vectors become unreachable."""
+    assert MAGIC == b"CKGEMB\x01"
+
+
+def test_a_sidecar_written_by_a_previous_release_still_loads(tmp_path):
+    """The bytes, not the constant. This file was produced by the shipped
+    writer and is checked in as literal content: if the format drifts, this is
+    what an upgraded deployment is holding."""
+    golden = (
+        b"CKGEMB\x01"
+        b":\x00\x00\x00"
+        b'{"dtype": "float32", "rows": 1, "dim": 2, "ids": ["kept"]}'
+        b"\x00\x00\x80?\x00\x00\x00@"
+    )
+    path = tmp_path / "graph.embeddings.bin"
+    path.write_bytes(golden)
+
+    loaded = FileEmbeddingSidecar(path).load()
+
+    assert set(loaded) == {"kept"}
+    np.testing.assert_allclose(loaded["kept"], np.float32([1.0, 2.0]))
 
 
 def test_save_refuses_to_overwrite_a_file_that_is_not_a_sidecar(tmp_path):
@@ -377,3 +424,29 @@ def test_save_replaces_an_empty_file_and_a_real_sidecar(tmp_path):
         {"n1": np.ones(4, dtype=np.float32), "n2": np.zeros(4, dtype=np.float32)}
     )
     assert set(sidecar.load()) == {"n1", "n2"}
+
+
+def test_a_failure_inside_save_leaves_the_previous_sidecar_intact(
+    tmp_path, monkeypatch
+):
+    """Every other failure test replaces save() wholesale, so the real
+    try/except after mkstemp is never entered. A cleanup that reached for the
+    destination rather than the temp file would destroy a good sidecar on a
+    full disk, and pass all of them."""
+    path = tmp_path / "graph.embeddings.bin"
+    sidecar = FileEmbeddingSidecar(path)
+    sidecar.save({"n1": np.ones(4, dtype=np.float32)})
+    good = path.read_bytes()
+
+    def failing_fsync(fd):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+
+    with pytest.raises(OSError):
+        sidecar.save({"n1": np.zeros(4, dtype=np.float32)})
+
+    assert path.read_bytes() == good, "a failed write destroyed the good sidecar"
+    assert set(FileEmbeddingSidecar(path).load()) == {"n1"}
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith("embeddings_")]
+    assert leftovers == [], f"temp files left behind: {leftovers}"

@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # scripts/ is not a package on the default path; the repo root above makes
 # "scripts.migrate_embeddings" importable the same way the CLI entry point is.
 
-from backend.core.embedding_sidecar import (  # noqa: E402
+from backend.core.embedding_sidecar import (
+    MAGIC,  # noqa: E402
     FileEmbeddingSidecar,
     resolve_sidecar_path,
 )
@@ -202,6 +203,28 @@ class TestMigrateEmbeddings:
         assert explicit.exists()
         assert not (tmpdir / "from-env.bin").exists()
         assert set(FileEmbeddingSidecar(explicit).load()) == {"n1"}
+
+    def test_the_same_file_refusal_survives_a_path_that_only_looks_different(
+        self, workspace, monkeypatch
+    ):
+        """The guard resolves both sides precisely because a path can name the
+        pickle without matching it textually. Comparing them as written lets
+        the migration write the sidecar over its own source and then rename
+        that away as a backup — pickle gone, sidecar gone, nothing left."""
+        tmpdir, graph_path = workspace
+        _write_pickle(tmpdir, {"n1": np.arange(DIM, dtype=np.float32)})
+        nested = tmpdir / "nested"
+        nested.mkdir()
+        # Same file, spelled with a hop through a directory.
+        monkeypatch.setenv("EMBEDDINGS_FILE", str(nested / ".." / "embeddings.pkl"))
+
+        migrate_embeddings(str(graph_path))
+
+        assert (tmpdir / "embeddings.pkl").exists(), (
+            "the migration wrote over its own source and renamed it away"
+        )
+        with open(tmpdir / "embeddings.pkl", "rb") as f:
+            assert f.read(len(MAGIC)) != MAGIC
 
     def test_a_missing_pickle_is_a_no_op(self, workspace, monkeypatch):
         tmpdir, graph_path = workspace
