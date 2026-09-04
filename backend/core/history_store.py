@@ -161,28 +161,40 @@ class GraphHistoryStore:
             self.max_events is not None or self.max_age_days is not None
         )
 
-        if compaction_interval is not None:
-            self._compaction_interval = max(1, compaction_interval)
-        elif self.max_events is not None:
-            # Scale the throttle with the cap. A compaction pass reads the whole
-            # sidecar and rewrites it, holding the lock throughout, so a
-            # constant interval makes the per-mutation cost grow with the cap:
-            # clamped at 256, a 100k-record cap meant a full rewrite every
-            # 0.26% of the file. A tenth of the cap amortises that to roughly
-            # ten records of work per append whatever the cap is. The trade-off
-            # is overshoot - the sidecar can reach about 110% of the cap between
-            # passes - and the min() keeps small caps trimming promptly rather
-            # than letting a cap of 5 grow to 256.
-            self._compaction_interval = max(
-                1,
-                min(
-                    self.max_events,
-                    max(_DEFAULT_COMPACTION_INTERVAL, self.max_events // 10),
-                ),
-            )
-        else:
-            self._compaction_interval = _DEFAULT_COMPACTION_INTERVAL
+        self._explicit_compaction_interval = compaction_interval
+        # How many records the last pass left behind. The throttle is derived
+        # from this rather than from max_events, because a pass costs whatever
+        # the FILE costs - and with age-based retention alone there is no count
+        # cap to derive it from, so a constant interval would put the
+        # per-mutation cost back in proportion to the history.
+        self._records_after_last_pass: Optional[int] = None
         self._appends_since_compaction = 0
+
+    @property
+    def _compaction_interval(self) -> int:
+        """Appends between compaction passes.
+
+        A pass reads and rewrites the whole sidecar while holding the lock, so
+        the interval has to grow with the file or the work per mutation grows
+        instead. A tenth of what the last pass kept amortises it to roughly ten
+        records per append at any size, and bounds the overshoot: between passes
+        the sidecar holds what retention keeps plus at most one interval, i.e.
+        about 110%.
+
+        Before the first pass there is nothing measured to go on, so it falls
+        back to the count cap, and to a constant when there is not one.
+        """
+        if self._explicit_compaction_interval is not None:
+            return max(1, self._explicit_compaction_interval)
+
+        basis = self._records_after_last_pass
+        if basis is None:
+            basis = (
+                self.max_events
+                if self.max_events is not None
+                else _DEFAULT_COMPACTION_INTERVAL * 10
+            )
+        return max(1, basis // 10)
 
     def append_event(self, event: "Event") -> None:
         """Persist one mutation event as a history record."""
@@ -303,6 +315,11 @@ class GraphHistoryStore:
         skip = 0
         if self.max_events is not None and surviving > self.max_events:
             skip = surviving - self.max_events
+
+        # What this pass leaves behind is what the next interval is sized from.
+        # Recorded even on the no-op path: an age-only policy has no count cap
+        # to fall back on, and its file size is exactly what needs measuring.
+        self._records_after_last_pass = surviving - skip
 
         if skip == 0 and surviving == total:
             return

@@ -533,12 +533,11 @@ class TestTheRewriteStaysOnTheSidecarsFilesystem:
         assert [r["entity_id"] for r in store.get_recent(limit=10)] == ["n5", "n4"]
 
 
-class TestCompactionThrottleScalesWithTheCap:
+class TestCompactionThrottleScalesWithTheHistory:
     """A compaction pass reads and rewrites the whole sidecar while holding the
-    store lock. A constant throttle makes that cost grow with the cap: clamped
-    at 256, the shipped 100k default meant a full rewrite every 0.26% of the
-    file — the same 'cost sized by the file, not by the work' this change exists
-    to remove, moved from the read path to the write path."""
+    store lock. A constant throttle therefore makes the work per mutation grow
+    with the file — the same 'cost sized by the file, not by the work' this
+    change removes from the read path, relocated to the write path."""
 
     @staticmethod
     def _interval(**kwargs) -> int:
@@ -546,34 +545,98 @@ class TestCompactionThrottleScalesWithTheCap:
             store = GraphHistoryStore(Path(tmpdir) / "h.ndjson", **kwargs)
             return store._compaction_interval
 
-    def test_a_large_cap_does_not_rewrite_every_few_hundred_appends(self):
-        assert self._interval(max_events=100_000) == 10_000
+    @pytest.mark.parametrize(
+        "cap", [10, 100, 256, 257, 1000, 2559, 2560, 10_000, 100_000, 1_000_000]
+    )
+    def test_the_interval_is_a_tenth_of_the_cap_at_every_size(self, cap):
+        """Uniform, with no band where a floor takes over — a floor is what made
+        the documented 'tenth of the cap' false below 2560, and let a small cap
+        overshoot to 200% while promising 110%."""
+        assert self._interval(max_events=cap) == cap // 10
 
     def test_the_work_per_append_stays_flat_as_the_cap_grows(self):
-        """records rewritten per append = cap / interval. Held roughly constant,
-        this is what keeps the write path from scaling with the cap."""
+        """records rewritten per append = cap / interval, held constant."""
         ratios = [
-            10_000 / self._interval(max_events=10_000),
-            100_000 / self._interval(max_events=100_000),
-            1_000_000 / self._interval(max_events=1_000_000),
+            cap / self._interval(max_events=cap) for cap in (10_000, 100_000, 1_000_000)
         ]
 
         assert max(ratios) <= 11, f"per-append work grows with the cap: {ratios}"
 
-    def test_a_small_cap_still_trims_promptly(self):
-        """Scaling must not let a cap of 5 grow to 256 before trimming."""
-        assert self._interval(max_events=5) == 5
-        assert self._interval(max_events=100) == 100
+    def test_a_tiny_cap_never_drops_below_one(self):
+        assert self._interval(max_events=5) == 1
+        assert self._interval(max_events=1) == 1
 
     def test_an_explicit_interval_still_wins(self):
         assert self._interval(max_events=100_000, compaction_interval=7) == 7
 
-    def test_the_overshoot_is_bounded(self, store_path):
-        """Between passes the sidecar exceeds the cap by at most the interval."""
-        store = GraphHistoryStore(store_path, max_events=50)
+    def test_age_only_retention_scales_off_what_the_last_pass_kept(self):
+        """With no count cap there is nothing to derive the interval from, so a
+        constant would put the per-mutation cost back in proportion to the
+        history. The interval must follow the file instead."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "h.ndjson"
+            recent = datetime.now(timezone.utc).isoformat()
+            _write(path, [_record(f"n{i}", recent) for i in range(5000)])
+            store = GraphHistoryStore(path, max_age_days=30)
 
-        for i in range(200):
+            before = store._compaction_interval
+            store.compact()
+            after = store._compaction_interval
+
+        assert before == 256, "pre-measurement fallback changed"
+        assert after == 500, (
+            f"interval stayed at {after} for a 5000-record age-only history; "
+            f"the per-mutation cost then grows with the file"
+        )
+
+
+class TestCompactionRunsAsOftenAsTheThrottleSays:
+    """The interval is only meaningful if it is actually applied. Asserting its
+    value cannot see a counter that never resets, or one compared the wrong way
+    — both of which make every append compact."""
+
+    @staticmethod
+    def _count_passes(store, appends: int) -> int:
+        passes = []
+        real = store._rewrite_streaming
+
+        def counting(cutoff, skip):
+            passes.append(1)
+            return real(cutoff, skip)
+
+        store._rewrite_streaming = counting
+        for i in range(appends):
             store.append_record(_record(f"n{i}"))
+        return len(passes)
 
-        on_disk = [line for line in store_path.read_text().splitlines() if line]
-        assert len(on_disk) <= 50 + store._compaction_interval
+    def test_passes_are_throttled_not_run_on_every_append(self, store_path):
+        store = GraphHistoryStore(store_path, max_events=50, compaction_interval=10)
+
+        passes = self._count_passes(store, 200)
+
+        # 200 appends at one pass per 10 is ~20, and certainly not ~200.
+        assert passes <= 25, f"{passes} compaction passes for 200 appends"
+        assert passes >= 10, f"only {passes} passes; retention is barely running"
+
+    def test_the_counter_resets_after_a_pass(self, store_path):
+        """Without the reset the counter stays above the threshold forever, so
+        every later append triggers a full rewrite."""
+        store = GraphHistoryStore(store_path, max_events=20, compaction_interval=5)
+        self._count_passes(store, 40)
+
+        assert store._appends_since_compaction < store._compaction_interval
+
+    def test_the_file_never_exceeds_the_cap_plus_one_interval(self, store_path):
+        """Sampled after every append against a literal bound. A bound computed
+        from the store's own interval passes for any interval the code picks,
+        including one that disables compaction altogether."""
+        store = GraphHistoryStore(store_path, max_events=50, compaction_interval=10)
+
+        peak = 0
+        for i in range(300):
+            store.append_record(_record(f"n{i}"))
+            lines = [ln for ln in store_path.read_text().splitlines() if ln]
+            peak = max(peak, len(lines))
+
+        assert peak <= 60, f"sidecar reached {peak} records against a cap of 50 + 10"
+        assert peak > 50, "compaction never ran, so the bound proves nothing"
