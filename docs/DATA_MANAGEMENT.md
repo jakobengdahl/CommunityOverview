@@ -9,7 +9,9 @@ data/
   examples/          # Example graph data files (tracked in git)
     default.json     # Default example dataset
   active/            # Active graph data used by the running app (git-ignored)
-    graph.json       # Currently active graph file
+    graph.json              # Currently active graph file
+    graph.embeddings.bin    # Embedding vectors for that graph (see below)
+    graph.history.ndjson    # Mutation history sidecar
 ```
 
 ## How It Works
@@ -175,12 +177,20 @@ What this means in practice:
 - **Restore.** A restore without the sidecar still works: the graph loads, and
   semantic search returns nothing until the vectors are regenerated. A sidecar
   that cannot be read is ignored with a warning for the same reason — the graph
-  never fails to load because of it.
+  never fails to load because of it. Regenerate with
+  `python scripts/generate_embeddings.py`, which needs the optional ML extras
+  (`pip install -r backend/requirements-ml.txt`).
 - **Migration.** A `graph.json` written before the split still carries its
   vectors inline. Those are read on load and moved into the sidecar on the next
   save; nothing needs to be run by hand.
 - **Portability.** Vectors are derived from node text, so a graph file moved
   without its sidecar is complete data — only the search index is missing.
+- **Replacing the graph.** A sidecar belongs to the graph it was built from.
+  Swapping in a different dataset while leaving the old sidecar in place would
+  give any node id present in both the *old* dataset's vector, and nothing
+  regenerates a vector for a node that is only loaded. `start-dev.sh --data`
+  deletes the sidecar for this reason; do the same when replacing a graph file
+  by hand.
 
 ## Environment Variables
 

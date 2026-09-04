@@ -29,8 +29,9 @@ from typing import Any, Dict, List
 
 MAGIC = b"CKGEMB\x01"
 _HEADER_LEN_STRUCT = struct.Struct("<I")
-# A header is ids plus three small scalars; anything larger means a corrupt or
-# hostile file, and we refuse it rather than allocating from a length field.
+# A header is ids plus three small scalars. The bound is redundant with the
+# "does the header fit in the file" check below, but states the intent: a
+# plausible header is small, and nothing is sized from the length field alone.
 MAX_HEADER_BYTES = 64 * 1024 * 1024
 
 
@@ -81,6 +82,9 @@ class FileEmbeddingSidecar:
             raise EmbeddingSidecarError(
                 f"{self.path} has an unreadable header: {exc}"
             ) from exc
+
+        if not isinstance(header, dict):
+            raise EmbeddingSidecarError(f"{self.path} header is not an object")
 
         ids = header.get("ids")
         rows = header.get("rows")

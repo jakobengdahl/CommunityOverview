@@ -25,10 +25,11 @@ def generate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
 
     print("Generating embeddings (this may take a moment)...")
     try:
-        # This will update node.embedding on the objects
+        # Vectors land in the vector store, not on the node objects.
         storage.vector_store.update_nodes_embeddings(nodes)
-        # We must explicitly save the storage to persist the updated nodes
-        storage.save()
+        # save() persists them through the embedding sidecar; wait for it so the
+        # success line below is not printed before the write lands.
+        storage.save().result()
         print(f"Success! Embeddings generated and saved to {graph_path}.")
         print(f"Total embeddings: {storage.vector_store.get_embedding_count()}")
     except Exception as e:

@@ -143,9 +143,20 @@ def test_load_rejects_unreadable_header(sidecar):
 
 def test_stored_matrix_is_float32_not_json_text(sidecar):
     """The whole point of the sidecar: 384 floats cost 4 bytes each, not the
-    ~15 bytes each they cost as JSON text inside graph.json."""
+    ~30 bytes each they cost as JSON text in an indent=2 graph.json - the 7.5x
+    inflation this split exists to remove."""
     vectors = {f"n{i}": np.random.rand(384).astype(np.float32) for i in range(50)}
     sidecar.save(vectors)
 
     payload_bytes = 50 * 384 * 4
     assert sidecar.path.stat().st_size < payload_bytes * 1.1
+
+
+def test_load_rejects_a_header_that_is_valid_json_but_not_an_object(sidecar):
+    """A bare scalar or array decodes fine but has no .get(). Raising the
+    module's own error is what keeps GraphStorage.load() from dying on it."""
+    for body in (b"null", b"[]", b'"a string"', b"123"):
+        sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(body)) + body)
+
+        with pytest.raises(EmbeddingSidecarError, match="header is not an object"):
+            sidecar.load()

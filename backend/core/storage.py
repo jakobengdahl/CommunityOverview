@@ -92,6 +92,28 @@ def _apply_metadata_patch(
     return result
 
 
+def _uniform_dimension(vectors: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the vectors sharing the most common dimension.
+
+    numpy cannot stack rows of differing width, so a single odd vector would
+    raise out of the index rebuild and fail the whole graph load. Vectors are
+    derived data, so dropping the minority is always recoverable.
+    """
+    if not vectors:
+        return vectors
+
+    counts: Dict[int, int] = {}
+    for vector in vectors.values():
+        counts[len(vector)] = counts.get(len(vector), 0) + 1
+    if len(counts) == 1:
+        return vectors
+
+    keep = max(counts, key=lambda dim: (counts[dim], dim))
+    return {
+        node_id: vector for node_id, vector in vectors.items() if len(vector) == keep
+    }
+
+
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -165,8 +187,8 @@ class GraphStorage:
         # Using max_workers=1 to ensure sequential writes
         self._io_executor = ThreadPoolExecutor(max_workers=1)
 
-        # We initialize VectorStore without a storage path as it now holds state in memory
-        # and relies on GraphStorage for persistence via graph.json
+        # The VectorStore owns the vectors in memory; GraphStorage persists them
+        # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
         self.vector_store = VectorStore()
         self.vector_store.preload_model()  # Start loading embedding model in background
 
@@ -407,6 +429,13 @@ class GraphStorage:
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
+                # The vector index is empty and nothing has been loaded, so this
+                # bootstrap write has no vectors to contribute. Marking the
+                # current revision persisted keeps it from writing an EMPTY
+                # sidecar over a real one — a graph file that is merely missing
+                # for now (wrong GRAPH_FILE, a restore in progress) must not
+                # destroy the only copy of the vectors.
+                self._persisted_vector_revision = self.vector_store.revision
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
@@ -537,6 +566,21 @@ class GraphStorage:
             payloads.append(payload)
         return payloads
 
+    def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
+        """Move any vector carried on a node object into a plain dict.
+
+        A vector reaches a node object two ways: a graph file written before the
+        split, and a caller passing `embedding` to add_nodes. Both have to end
+        up in the vector store, because the serialized payload no longer carries
+        the field — otherwise the value is written nowhere at all.
+        """
+        taken = {}
+        for node in nodes:
+            if node.embedding is not None:
+                taken[node.id] = node.embedding
+                node.embedding = None
+        return taken
+
     def _load_embeddings(self) -> None:
         """Populate the vector index after nodes have been loaded.
 
@@ -546,14 +590,10 @@ class GraphStorage:
         migrates them on the next save. Vectors are never left on the node
         objects — that inline copy is what made a node cost 51 kB resident.
         """
-        inline = {}
-        for node in self.nodes.values():
-            if node.embedding is not None:
-                inline[node.id] = node.embedding
-                node.embedding = None
+        inline = self._take_inline_vectors(self.nodes.values())
 
         if self._embedding_sidecar is None:
-            self.vector_store.load_vectors(inline)
+            self.vector_store.load_vectors(_uniform_dimension(inline))
             self._persisted_vector_revision = self.vector_store.revision
             return
 
@@ -571,13 +611,25 @@ class GraphStorage:
             for node_id, vector in inline.items()
             if node_id not in stored
         }
-        vectors = {**stored, **migrated}
-        orphaned = [node_id for node_id in vectors if node_id not in self.nodes]
+        merged = {**stored, **migrated}
+        orphaned = [node_id for node_id in merged if node_id not in self.nodes]
         for node_id in orphaned:
-            del vectors[node_id]
+            del merged[node_id]
+
+        # The two sources can disagree on dimension — a sidecar written by one
+        # embedding model merged with inline vectors from another. Stacking
+        # those raises in numpy and would take the whole load down, so drop the
+        # odd ones out instead.
+        vectors = _uniform_dimension(merged)
+        dropped = len(merged) - len(vectors)
+        if dropped:
+            print(
+                f"Warning: dropped {dropped} embedding(s) whose dimension did not "
+                f"match the rest; they will be regenerated on next update"
+            )
 
         self.vector_store.load_vectors(vectors)
-        if migrated or orphaned:
+        if migrated or orphaned or dropped:
             # Leave the persisted revision behind the live one so the next save
             # writes the migrated or pruned matrix out.
             self._persisted_vector_revision = None
@@ -841,6 +893,18 @@ class GraphStorage:
                     # Precompute searchable text
                     self._searchable_text_cache[node.id] = self._build_searchable_text(
                         node
+                    )
+
+                # A caller may pass `embedding` on the node itself. The
+                # serialized payload no longer carries that field, so adopt it
+                # into the vector store or it is persisted nowhere. Generation
+                # below still wins when the ML stack is available, as before.
+                supplied = self._take_inline_vectors(nodes_to_embed)
+                if supplied:
+                    self.vector_store.load_vectors(
+                        _uniform_dimension(
+                            {**self.vector_store.export_vectors(), **supplied}
+                        )
                     )
 
                 # Generate embeddings for new nodes (non-blocking)

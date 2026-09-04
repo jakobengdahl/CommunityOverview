@@ -65,12 +65,15 @@ test_embeddings_integration.pkl
 # session state and mutation history are local runtime output, never source.
 data/active/graph.json
 data/active/graph.history.ndjson
-data/active/graph.embeddings.bin
 data/active/sessions/
 
 # Stale runtime graph data (must not be tracked; see STRUCTURE_REVIEW.md C1)
 /graph.json
 /backend/graph.json
+
+# Embedding sidecar - derived data, written next to whichever graph file is in
+# use, so match it by name rather than by any one of those locations.
+*.embeddings.bin
 
 # Playwright e2e output: reports, traces, and the throwaway graph the
 # backend writes while the mobile smoke specs run.

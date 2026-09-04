@@ -73,11 +73,15 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
 
     print(f"Matched and assigned {updated_count} embeddings to nodes.")
 
-    # rebuild_index takes the vectors off the node objects and into the vector
-    # store, which is what the save below persists into the binary sidecar.
-    storage.vector_store.rebuild_index(list(storage.nodes.values()))
+    # Merge rather than rebuild: the graph may already have a sidecar, and
+    # rebuild_index would drop every vector in it that the pickle does not
+    # also carry. save() then persists the merged set into the sidecar.
+    merged = storage.vector_store.export_vectors()
     for node in storage.nodes.values():
-        node.embedding = None
+        if node.embedding is not None:
+            merged[node.id] = node.embedding
+            node.embedding = None
+    storage.vector_store.load_vectors(merged)
 
     storage.save().result()
     print("Graph saved; embeddings written to the sidecar.")

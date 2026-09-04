@@ -8,6 +8,7 @@ without the optional ML stack.
 
 import json
 import os
+import struct
 import tempfile
 import zlib
 from pathlib import Path
@@ -17,7 +18,7 @@ import numpy as np
 import pytest
 
 from backend.core import GraphStorage, Node, NodeType
-from backend.core.embedding_sidecar import FileEmbeddingSidecar
+from backend.core.embedding_sidecar import MAGIC, FileEmbeddingSidecar
 
 DIM = 8
 
@@ -337,3 +338,143 @@ def test_explicit_embeddings_path_is_honoured(tmpdir_path):
         assert set(FileEmbeddingSidecar(custom).load()) == {"n1", "n2", "n3"}
     finally:
         storage.flush()
+
+
+def test_a_missing_graph_file_does_not_destroy_an_existing_sidecar(
+    storage, tmpdir_path
+):
+    """A graph file that is merely absent for now — wrong GRAPH_FILE, a restore
+    in progress — must not cost the only copy of the vectors."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+    before = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+    assert set(before) == {"n1", "n2", "n3"}
+
+    os.unlink(os.path.join(tmpdir_path, "graph.json"))
+
+    rebooted = _make_storage(tmpdir_path)
+    try:
+        after = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+        assert set(after) == set(before)
+    finally:
+        rebooted.flush()
+
+
+def test_an_inline_vector_of_another_dimension_does_not_fail_the_load(tmpdir_path):
+    """Sidecar and graph file can disagree on dimension after a model change.
+    numpy cannot stack that, so the odd one out is dropped, not raised."""
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": [1.0] * DIM, "n2": [2.0] * DIM}
+    )
+    graph = {
+        "nodes": [
+            {"id": "n1", "type": "Actor", "name": "Covered"},
+            {"id": "n2", "type": "Actor", "name": "Also covered"},
+            {
+                "id": "n3",
+                "type": "Actor",
+                "name": "Odd one",
+                "embedding": [0.5] * (DIM + 4),
+            },
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"n1", "n2"}
+        assert len(storage.nodes) == 3
+    finally:
+        storage.flush()
+
+
+def test_a_sidecar_with_a_non_object_header_degrades_instead_of_failing_the_load(
+    storage, tmpdir_path
+):
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+    body = b"null"
+    _sidecar_path(tmpdir_path).write_bytes(MAGIC + struct.pack("<I", len(body)) + body)
+
+    reloaded = _make_storage(tmpdir_path)
+    try:
+        assert reloaded.vector_store.get_embedding_count() == 0
+        assert len(reloaded.nodes) == 3
+    finally:
+        reloaded.flush()
+
+
+def test_a_caller_supplied_vector_is_persisted_rather_than_dropped(
+    storage, tmpdir_path
+):
+    """`embedding` is an accepted add_nodes field. The serialized payload no
+    longer carries it, so the vector store has to adopt it or it lands nowhere.
+    No encoder here — the ML-free install is where this bites."""
+    storage.vector_store.model = None
+    supplied = [0.25] * DIM
+    node = Node(id="supplied", type=NodeType.ACTOR, name="Given a vector")
+    node.embedding = list(supplied)
+
+    storage.add_nodes([node], [])
+    storage.flush()
+
+    assert storage.nodes["supplied"].embedding is None
+    np.testing.assert_allclose(
+        FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()["supplied"],
+        np.float32(supplied),
+    )
+
+    reloaded = _make_storage(tmpdir_path)
+    try:
+        np.testing.assert_allclose(
+            reloaded.vector_store.export_vectors()["supplied"], np.float32(supplied)
+        )
+    finally:
+        reloaded.flush()
+
+
+def test_a_failed_sidecar_write_does_not_fail_the_graph_save_and_is_retried(
+    storage, tmpdir_path
+):
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+    _sidecar_path(tmpdir_path).unlink()
+
+    real_save = storage._embedding_sidecar.save
+
+    def failing_save(vectors):
+        raise OSError("no space left on device")
+
+    storage._embedding_sidecar.save = failing_save
+    storage.update_node("n1", {"name": "Renamed while the disk is full"})
+    storage.save().result()
+
+    # The graph still landed, and the vectors are not marked persisted.
+    assert len(_graph_json(tmpdir_path)["nodes"]) == 3
+    assert not _sidecar_path(tmpdir_path).exists()
+    assert storage._persisted_vector_revision != storage.vector_store.revision
+
+    storage._embedding_sidecar.save = real_save
+    storage.save().result()
+
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+    }
+
+
+def test_generated_vectors_are_not_left_on_the_node_objects(storage, tmpdir_path):
+    """G7 on the fast path: both the batch (add_nodes) and singular
+    (update_node) generation routes must leave the node object clean."""
+    storage.add_nodes(_sample_nodes(), [])
+    for node in storage.nodes.values():
+        assert node.embedding is None
+
+    storage.update_node("n1", {"name": "Renamed"})
+    storage.flush()
+
+    assert storage.nodes["n1"].embedding is None

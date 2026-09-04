@@ -37,6 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 DATA_DIR="$SCRIPT_DIR/data"
 ACTIVE_DATA="$DATA_DIR/active/graph.json"
+ACTIVE_DATA_EMBEDDINGS="$DATA_DIR/active/graph.embeddings.bin"
 DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 
 cd "$SCRIPT_DIR"
@@ -149,6 +150,15 @@ mkdir -p "$DATA_DIR/active"
 mkdir -p "$DATA_DIR/examples"
 
 if [ -n "$DATA_SOURCE" ]; then
+    # Replacing the graph invalidates the embedding sidecar beside it: node ids
+    # shared between the old and new datasets would keep the OLD dataset's
+    # vectors, and nothing regenerates a vector for a node that is merely
+    # loaded. Vectors are derived data, so drop it and let it be rebuilt.
+    if [ -f "$ACTIVE_DATA_EMBEDDINGS" ]; then
+        rm -f "$ACTIVE_DATA_EMBEDDINGS"
+        echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
+    fi
+
     # Data source specified - load from path or URL
     if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
         echo -e "Downloading graph data from: ${BLUE}$DATA_SOURCE${NC}"
