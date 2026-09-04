@@ -109,6 +109,8 @@ def create_app(
         graph_storage = GraphStorage(
             str(graph_path),
             embeddings_path=str(embeddings_path) if embeddings_path else None,
+            history_max_events=config.history_max_events,
+            history_max_age_days=config.history_max_age_days,
         )
 
     def _on_federated_node_event(operation, before_node, after_node):

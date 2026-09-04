@@ -25,6 +25,30 @@ class AppConfig:
         default_factory=lambda: os.getenv("EMBEDDINGS_FILE")
     )
 
+    # Mutation-history retention. The GraphHistoryStore library default is
+    # unbounded, deliberately — an audit trail is not something a library should
+    # silently truncate. The application picks the open-core policy here.
+    #
+    # HISTORY_MAX_EVENTS bounds the sidecar so it cannot grow without limit; 0
+    # removes the count cap, which keeps every record unless HISTORY_MAX_AGE_DAYS
+    # is also set. The default is generous so a typical deployment is not trimmed
+    # on upgrade, but it is a cap rather than a promise: a sidecar already holding
+    # more than this loses the excess on the first compaction.
+    #
+    # HISTORY_MAX_AGE_DAYS is opt-in and unset by default. "Delete records older
+    # than X" is a retention policy an operator has to choose, not one to
+    # inherit from a default.
+    history_max_events: int = field(
+        default_factory=lambda: int(os.getenv("HISTORY_MAX_EVENTS") or "100000")
+    )
+    history_max_age_days: Optional[float] = field(
+        default_factory=lambda: (
+            float(os.environ["HISTORY_MAX_AGE_DAYS"])
+            if os.getenv("HISTORY_MAX_AGE_DAYS")
+            else None
+        )
+    )
+
     # Shared-session store directory (one JSON file per session). Defaults to a
     # "sessions" directory next to the graph file when unset.
     sessions_dir: Optional[str] = field(

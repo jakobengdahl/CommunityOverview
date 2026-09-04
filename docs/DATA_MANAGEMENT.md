@@ -197,12 +197,61 @@ What this means in practice:
   `EMBEDDINGS_FILE` when doing so. Do the same when replacing a graph file by
   hand.
 
+## Mutation History
+
+Every graph mutation is appended to a history sidecar next to the graph file
+(`graph.history.ndjson` for the default layout). It is an audit trail: append-only,
+newest records last, one self-contained JSON record per line.
+
+**Retention.** The sidecar is capped at `HISTORY_MAX_EVENTS` records (default
+100000). When the cap is exceeded, a compaction pass rewrites the file keeping the
+newest N, atomically. `HISTORY_MAX_AGE_DAYS` additionally drops records older than
+a given age; it is unset by default, because "delete records older than X" is a
+retention policy an operator should choose rather than inherit. Setting
+`HISTORY_MAX_EVENTS=0` removes the count cap; trimming then stops altogether
+unless `HISTORY_MAX_AGE_DAYS` is also set, in which case age-based trimming
+still runs. **To keep every record you must set `HISTORY_MAX_EVENTS=0`
+explicitly and leave `HISTORY_MAX_AGE_DAYS` unset** — leaving both unset
+applies the default cap, it does not disable trimming.
+
+The default is deliberately generous, so that upgrading a typical deployment does
+not trim anything. It is a cap, not a promise: a sidecar that already holds more
+than `HISTORY_MAX_EVENTS` records loses the excess on the first compaction after
+the upgrade. Set `HISTORY_MAX_EVENTS=0` before upgrading if that matters. Note
+also that the resulting file size depends on the record size, so the cap bounds
+the record count rather than the bytes directly.
+
+**When trimming runs.** A compaction pass reads and rewrites the whole sidecar
+while holding the store lock, so it is throttled rather than run on every append:
+once per tenth of the records the previous pass left on disk. Deriving it from
+the file rather than from the cap keeps the work per mutation roughly constant at
+any size — on the order of twenty records read per append, since a pass makes two
+forward passes plus the rewrite — including under age-based retention, where
+there is no count cap to derive it from. The cost is a bounded overshoot — between passes the sidecar holds what
+retention keeps plus at most one interval, about 110%.
+
+One consequence worth knowing if you rely on `HISTORY_MAX_AGE_DAYS`: passes are
+counted in mutations, never in time. A record past the cutoff survives until the
+next pass — up to a tenth of the history's worth of appends — so on a quiet
+instance aged-out records stay on disk indefinitely. Age retention bounds records
+in mutations, not in wall-clock time; it is not a deletion deadline.
+
+**Reads.** History queries return a page at a time and read the file backwards, so
+answering one costs memory proportional to the page rather than to the file. That
+matters on a small container: the previous implementation parsed every record to
+return the newest 50.
+
+**Backup.** The sidecar is independent of `graph.json` and can be backed up,
+truncated or discarded on its own; the graph does not depend on it.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
 | `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see *Embedding Sidecar* above) |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see *Mutation History* above); `0` removes the count cap |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Age-based history retention, opt-in |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 
