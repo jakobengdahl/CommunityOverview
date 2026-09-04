@@ -191,9 +191,11 @@ What this means in practice:
 - **Replacing the graph.** A sidecar belongs to the graph it was built from.
   Swapping in a different dataset while leaving the old sidecar in place would
   give any node id present in both the *old* dataset's vector, and nothing
-  regenerates a vector for a node that is only loaded. `start-dev.sh --data`
-  deletes the sidecar for this reason; do the same when replacing a graph file
-  by hand.
+  regenerates a vector for a node that is only loaded. `start-dev.sh` deletes
+  the sidecar whenever it puts a different graph in place — `--data`, or seeding
+  a missing `graph.json` from a profile or example — and follows
+  `EMBEDDINGS_FILE` when doing so. Do the same when replacing a graph file by
+  hand.
 
 ## Environment Variables
 

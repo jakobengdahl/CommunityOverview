@@ -560,8 +560,23 @@ class GraphStorage:
                 and vector_revision != self._persisted_vector_revision
                 and vector_revision != self._snapshotted_vector_revision
             )
-            vectors = self.vector_store.export_vectors() if needs_write else None
+            vectors = None
             if needs_write:
+                exported = self.vector_store.export_vectors()
+                # The sidecar refuses a mixed-dimension matrix, and the only
+                # answer available at write time is to drop the write. Left
+                # unfiltered, one odd vector in the index — the generation path
+                # does not check widths — would make every future save fail and
+                # retry forever, freezing the sidecar and silently discarding
+                # all later vector work. Anchor here too, and lose the odd
+                # vectors rather than everything after them.
+                vectors = _matching_dimension(exported, _dominant_dimension(exported))
+                if len(vectors) != len(exported):
+                    print(
+                        f"Warning: {len(exported) - len(vectors)} embedding(s) of a "
+                        f"minority dimension were not persisted; regenerate them to "
+                        f"restore full semantic search coverage"
+                    )
                 self._snapshotted_vector_revision = vector_revision
 
         # Offload blocking I/O to background thread to avoid blocking event loop.

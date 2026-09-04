@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 DATA_DIR="$SCRIPT_DIR/data"
 ACTIVE_DATA="$DATA_DIR/active/graph.json"
-ACTIVE_DATA_EMBEDDINGS="$DATA_DIR/active/graph.embeddings.bin"
+DEFAULT_ACTIVE_DATA_EMBEDDINGS="$DATA_DIR/active/graph.embeddings.bin"
 DEFAULT_EXAMPLE="$DATA_DIR/examples/default.json"
 
 cd "$SCRIPT_DIR"
@@ -88,6 +88,19 @@ echo -e "  ${BLUE}Profile:${NC}     $PROFILE_NAME"
 
 # Source .env files with fallback chain: profile → default → root
 apply_profile_env "$PROFILE_NAME"
+
+# The profile/.env files may set EMBEDDINGS_FILE. Resolve it the same way the
+# backend does (relative values sit beside the graph file) so the sidecar this
+# script deletes on a graph replacement is the one the app will actually read;
+# otherwise the cleanup below silently misses it.
+if [ -n "${EMBEDDINGS_FILE:-}" ]; then
+    case "$EMBEDDINGS_FILE" in
+        /*) ACTIVE_DATA_EMBEDDINGS="$EMBEDDINGS_FILE" ;;
+        *)  ACTIVE_DATA_EMBEDDINGS="$(dirname "$ACTIVE_DATA")/$EMBEDDINGS_FILE" ;;
+    esac
+else
+    ACTIVE_DATA_EMBEDDINGS="$DEFAULT_ACTIVE_DATA_EMBEDDINGS"
+fi
 
 # Auto-detect LLM provider when not explicitly configured.
 # In SSPCloud (and similar environments), OPENAI_API_KEY + OPENAI_BASE_URL are
@@ -214,6 +227,7 @@ fi
 
 # Set GRAPH_FILE to point to active data
 export GRAPH_FILE="$ACTIVE_DATA"
+export EMBEDDINGS_FILE="$ACTIVE_DATA_EMBEDDINGS"
 
 # =====================
 # Node.js Check / Auto-install

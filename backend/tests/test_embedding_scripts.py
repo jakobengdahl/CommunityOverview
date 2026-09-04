@@ -25,6 +25,7 @@ from backend.core.embedding_sidecar import (  # noqa: E402
     FileEmbeddingSidecar,
     resolve_sidecar_path,
 )
+from scripts.generate_embeddings import generate_embeddings  # noqa: E402
 from scripts.migrate_embeddings import migrate_embeddings  # noqa: E402
 
 DIM = 8
@@ -66,6 +67,14 @@ class TestResolveSidecarPath:
         monkeypatch.setenv("EMBEDDINGS_FILE", "vectors.bin")
 
         assert resolve_sidecar_path("/data/graph.json") == Path("/data/vectors.bin")
+
+    def test_an_empty_env_var_means_derive_not_the_current_directory(self, monkeypatch):
+        """EMBEDDINGS_FILE= (exported but empty) is common in compose files and
+        shell wrappers. Treated as a path it becomes the graph's own directory
+        and every write fails."""
+        monkeypatch.setenv("EMBEDDINGS_FILE", "")
+
+        assert resolve_sidecar_path("/data/graph.json") is None
 
     def test_an_explicit_argument_beats_the_environment(self, monkeypatch):
         monkeypatch.setenv("EMBEDDINGS_FILE", "/vol/from-env.bin")
@@ -145,22 +154,47 @@ class TestMigrateEmbeddings:
 
 class TestGenerateEmbeddings:
     def test_writes_to_the_configured_sidecar(self, workspace, monkeypatch):
-        """generate_embeddings needs the ML extras to embed, but the path it
-        would write to is decided before any model is loaded."""
+        """Calls the script itself. Only the encoder is stubbed, so the path
+        resolution and the save are the script's own code."""
         tmpdir, graph_path = workspace
         configured = tmpdir / "configured.bin"
         monkeypatch.setenv("EMBEDDINGS_FILE", str(configured))
 
-        from backend.core import GraphStorage
+        from backend.core.vector_store import VectorStore
 
-        sidecar_path = resolve_sidecar_path(str(graph_path), None)
-        storage = GraphStorage(
-            json_path=str(graph_path), embeddings_path=str(sidecar_path)
-        )
-        try:
-            assert storage.embeddings_path == configured
-        finally:
-            storage.flush()
+        def fake_update(self, nodes):
+            for i, node in enumerate(nodes):
+                self.embeddings[node.id] = np.full(DIM, float(i), dtype=np.float32)
+            self._update_matrix()
+
+        monkeypatch.setattr(VectorStore, "update_nodes_embeddings", fake_update)
+
+        generate_embeddings(str(graph_path))
+
+        assert configured.exists()
+        assert not (tmpdir / "graph.embeddings.bin").exists()
+        assert set(FileEmbeddingSidecar(configured).load()) == {"n1", "n2"}
+
+    def test_an_explicit_argument_overrides_the_environment(
+        self, workspace, monkeypatch
+    ):
+        tmpdir, graph_path = workspace
+        monkeypatch.setenv("EMBEDDINGS_FILE", str(tmpdir / "from-env.bin"))
+        explicit = tmpdir / "explicit.bin"
+
+        from backend.core.vector_store import VectorStore
+
+        def fake_update(self, nodes):
+            for node in nodes:
+                self.embeddings[node.id] = np.zeros(DIM, dtype=np.float32)
+            self._update_matrix()
+
+        monkeypatch.setattr(VectorStore, "update_nodes_embeddings", fake_update)
+
+        generate_embeddings(str(graph_path), str(explicit))
+
+        assert explicit.exists()
+        assert not (tmpdir / "from-env.bin").exists()
 
 
 def test_scripts_and_app_agree_on_the_sidecar_location(workspace, monkeypatch):
@@ -175,3 +209,9 @@ def test_scripts_and_app_agree_on_the_sidecar_location(workspace, monkeypatch):
 
     assert resolve_sidecar_path(str(graph_path)) == config.get_embeddings_path()
     assert os.path.basename(str(config.get_embeddings_path())) == "vectors.bin"
+
+    # ... and they must still agree when the variable is exported but empty.
+    monkeypatch.setenv("EMBEDDINGS_FILE", "")
+    empty_config = AppConfig(graph_file=str(graph_path), embeddings_file="")
+    assert resolve_sidecar_path(str(graph_path)) is None
+    assert empty_config.get_embeddings_path() is None

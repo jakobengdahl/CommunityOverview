@@ -546,15 +546,16 @@ def test_a_supplied_vector_does_not_evict_the_vectors_already_indexed(
 def test_a_supplied_vector_of_another_dimension_is_refused_not_honoured(
     storage, tmpdir_path
 ):
-    """The index in memory anchors the dimension. A caller passing a wider
-    vector — or several — must not evict the vectors that are already right."""
+    """The index in memory anchors the dimension. The odd batch is deliberately
+    LARGER than the existing index (5 vs 3): with equal counts a majority vote
+    and the anchor agree, so only an outnumbering batch tells them apart."""
     storage.add_nodes(_sample_nodes(), [])
     storage.flush()
     before = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
 
     storage.vector_store.model = None
     odd = []
-    for i in range(3):
+    for i in range(5):
         node = Node(id=f"odd{i}", type=NodeType.ACTOR, name=f"Odd {i}")
         node.embedding = [0.5] * (DIM + 4)
         odd.append(node)
@@ -566,7 +567,7 @@ def test_a_supplied_vector_of_another_dimension_is_refused_not_honoured(
     assert set(storage.vector_store.export_vectors()) == set(before)
     assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == set(before)
     # The nodes themselves are still added; only their vectors are refused.
-    assert len(storage.nodes) == 6
+    assert len(storage.nodes) == 8
 
 
 def test_a_stale_graph_file_cannot_outvote_the_sidecar_on_dimension(tmpdir_path):
@@ -625,9 +626,9 @@ def test_one_add_nodes_call_writes_the_sidecar_once(storage, tmpdir_path):
 def test_a_zero_length_inline_vector_does_not_empty_the_whole_sidecar(tmpdir_path):
     """dim 0 would make the sidecar read back as no vectors at all.
 
-    The empty one is listed FIRST on purpose: dimensions are counted in
-    insertion order, so this is the ordering where a zero-length vector would
-    win the tie and take every real vector down with it.
+    The empty one is listed FIRST on purpose: that is the ordering in which an
+    unfiltered zero-length vector becomes the dimension every other vector is
+    then measured against, taking all of them down with it.
     """
     graph = {
         "nodes": [
@@ -653,10 +654,12 @@ def test_a_zero_length_inline_vector_does_not_empty_the_whole_sidecar(tmpdir_pat
 def test_a_non_file_backend_with_mixed_inline_dimensions_still_loads(tmpdir_path):
     backend = _MemoryBackend()
     backend.data = {
+        # Odd one FIRST: first-seen and majority then disagree, so this
+        # distinguishes "most common" from "whichever turned up first".
         "nodes": [
+            {"id": "c", "type": "Actor", "name": "C", "embedding": [1.0] * (DIM + 4)},
             {"id": "a", "type": "Actor", "name": "A", "embedding": [1.0] * DIM},
             {"id": "b", "type": "Actor", "name": "B", "embedding": [1.0] * DIM},
-            {"id": "c", "type": "Actor", "name": "C", "embedding": [1.0] * (DIM + 4)},
         ],
         "edges": [],
         "metadata": {"version": "1.0", "graph_name": "memory"},
@@ -668,3 +671,134 @@ def test_a_non_file_backend_with_mixed_inline_dimensions_still_loads(tmpdir_path
         assert len(storage.nodes) == 3
     finally:
         storage.flush()
+
+
+def test_a_tie_on_dimension_keeps_the_one_seen_first(tmpdir_path):
+    """An exact split must not be settled by width: one stray wide vector
+    would then outrank an equally common correct one."""
+    graph = {
+        "nodes": [
+            {"id": "a", "type": "Actor", "name": "A", "embedding": [1.0] * DIM},
+            {"id": "b", "type": "Actor", "name": "B", "embedding": [1.0] * DIM},
+            {"id": "c", "type": "Actor", "name": "C", "embedding": [1.0] * (DIM + 4)},
+            {"id": "d", "type": "Actor", "name": "D", "embedding": [1.0] * (DIM + 4)},
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert set(storage.vector_store.export_vectors()) == {"a", "b"}
+    finally:
+        storage.flush()
+
+
+def test_refusing_every_supplied_vector_writes_no_sidecar_at_all(storage, tmpdir_path):
+    """A refused batch changes nothing, so it must not bump the revision and
+    trigger a rewrite of the whole matrix."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    calls = []
+    real_save = storage._embedding_sidecar.save
+    storage._embedding_sidecar.save = lambda v: (calls.append(sorted(v)), real_save(v))[
+        1
+    ]
+
+    storage.vector_store.model = None
+    odd = []
+    for i in range(5):
+        node = Node(id=f"odd{i}", type=NodeType.ACTOR, name=f"Odd {i}")
+        node.embedding = [0.5] * (DIM + 4)
+        odd.append(node)
+    storage.add_nodes(odd, [])
+    storage.flush()
+
+    assert calls == [], f"sidecar rewritten despite nothing changing: {calls}"
+
+
+def test_a_vector_added_while_a_write_is_in_flight_is_still_persisted(
+    storage, tmpdir_path
+):
+    """The revision recorded as persisted must be the one actually written, not
+    whatever the live index has reached — otherwise a change landing during a
+    write is skipped by every later save and lost for good."""
+    import threading
+
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    release = threading.Event()
+    entered = threading.Event()
+    real_save = storage._embedding_sidecar.save
+
+    def blocking_save(vectors):
+        entered.set()
+        release.wait(timeout=5)
+        return real_save(vectors)
+
+    storage._embedding_sidecar.save = blocking_save
+    storage.update_node("n1", {"name": "Changed once"})
+    assert entered.wait(timeout=5)
+
+    # The index moves while that write is still in flight and BEFORE any save
+    # has been queued for it — the window between generating a vector and the
+    # save() call that follows it. Queueing a save here instead would hide the
+    # bug, because the queued write carries the new vector regardless.
+    vectors = storage.vector_store.export_vectors()
+    vectors["late"] = np.full(DIM, 0.75, dtype=np.float32)
+    storage.vector_store.load_vectors(vectors)
+
+    release.set()
+    storage.flush()
+
+    storage._embedding_sidecar.save = real_save
+    storage.save().result()
+
+    assert "late" in FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+
+
+def test_a_mixed_dimension_index_does_not_freeze_the_sidecar(storage, tmpdir_path):
+    """A model change mixes widths in the index: update_nodes_embeddings inserts
+    the new vectors, _update_matrix raises on the stack, and add_nodes swallows
+    that as an optional-embedding failure. The dict is left mixed. An unfiltered
+    write would then be refused on every future save, freezing the sidecar and
+    discarding all later vector work."""
+
+    class _WiderEncoder:
+        def encode(self, text):
+            if isinstance(text, str):
+                return np.ones(DIM + 4, dtype=np.float32)
+            return np.vstack([np.ones(DIM + 4, dtype=np.float32) for _ in text])
+
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    storage.vector_store.model = _WiderEncoder()
+    storage.add_nodes(
+        [Node(id="after-model-change", type=NodeType.ACTOR, name="Wider")], []
+    )
+    storage.flush()
+
+    widths = {len(v) for v in storage.vector_store.export_vectors().values()}
+    assert widths == {DIM, DIM + 4}, "the fixture no longer mixes dimensions"
+
+    # The majority dimension survives; the odd vector is dropped, not the write.
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+    }
+
+    # And the sidecar is not frozen: a later change to a good vector still lands.
+    storage.vector_store.model = _FakeEncoder()
+    storage.update_node("n2", {"name": "Still writable"})
+    storage.flush()
+
+    persisted = FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()
+    np.testing.assert_allclose(
+        persisted["n2"], storage.vector_store.export_vectors()["n2"]
+    )
