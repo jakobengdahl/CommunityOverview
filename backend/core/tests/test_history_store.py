@@ -9,6 +9,7 @@ Covers:
 - AI-action detection derived from origin/attribution
 """
 
+import copy
 import json
 import os
 import tempfile
@@ -720,32 +721,74 @@ def test_a_patched_entity_keeps_the_label_a_reader_falls_back_to():
     assert _rendered_diff(record) == [("weight", 1, 2)]
 
 
-def test_building_a_record_does_not_alter_the_event_itself():
+def _node_shaped_payload(**overrides):
+    """A payload the size and shape storage really emits (13 keys, embedding)."""
+    payload = _node_with_bulk().to_dict()
+    payload["embedding"] = [0.25] * 8
+    payload.update(overrides)
+    return payload
+
+
+def _event_payload_cases():
+    """Payload shapes that all reach the projection, for the G6 check.
+
+    Both matter, for different reasons:
+    - the node-shaped pair is what storage actually emits, and is large enough
+      that a size-conditional in-place strip would fire on it;
+    - the edge-shaped pair carries no `embedding` at all, which is the case
+      where `_without_excluded` hands back the caller's own dict, so a
+      `_project` that deleted in place would delete from the live event.
+    Both carry a field the patch does not name, so the projection has something
+    to drop, and neither patch is emptied by the embedding strip.
+    """
+    return [
+        pytest.param(
+            _node_shaped_payload(),
+            _node_shaped_payload(description="new desc", embedding=[0.5] * 8),
+            {"description": "new desc"},
+            id="node-shaped-with-vector",
+        ),
+        pytest.param(
+            {"label": "the edge", "weight": 1, "note": BULK},
+            {"label": "the edge", "weight": 2, "note": BULK},
+            {"weight": 2},
+            id="edge-shaped-no-embedding",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("before,after,patch", _event_payload_cases())
+def test_building_a_record_does_not_alter_the_event_itself(before, after, patch):
     """History trims its own copy; subscribers still get the whole event.
 
     `append_event` builds the trimmed record while `dispatch(event)` hands the
-    same Event to webhook subscribers and system listeners. `_without_excluded`
-    returns the caller's own dict when there is nothing to strip, so an
-    "optimisation" to pop the key in place would quietly strip it from the live
-    event too, and every other test here would still pass.
+    same Event to webhook subscribers and system listeners, so anything the
+    record builder does in place is visible to them. Two helpers can return the
+    caller's own dict rather than a copy, which is what makes an in-place strip
+    or an in-place narrowing easy to write and invisible from the record alone.
+
+    The payloads are parametrised to actually reach the projection: a patch that
+    the embedding strip empties would skip `_project` entirely and assert
+    nothing about it.
     """
-    before = {"name": "A", "summary": "s", "embedding": [0.25] * 8}
-    after = {"name": "A", "summary": "s", "embedding": [0.5] * 8}
-    patch = {"embedding": [0.5] * 8}
     event = _update_event(before=before, after=after, patch=patch)
+    untouched = copy.deepcopy(event.entity)
 
     record = event_to_history_record(event)
 
+    # The record is trimmed...
+    assert set(record["before"]) == frozenset(patch) | {"name", "label"} & set(before)
     assert "embedding" not in record["after"]
-    # The event the dispatcher will send is untouched.
-    assert event.entity.before == before
-    assert event.entity.after == after
-    assert event.entity.patch == patch
-    assert event.entity.after["embedding"] == [0.5] * 8
+
+    # ...and the event the dispatcher will send is not.
+    assert event.entity.before == untouched.before
+    assert event.entity.after == untouched.after
+    assert event.entity.patch == untouched.patch
+
     sent = event.to_webhook_payload()["entity"]["data"]
-    assert sent["after"]["embedding"] == [0.5] * 8
-    assert sent["before"]["embedding"] == [0.25] * 8
-    assert sent["patch"] == patch
+    assert sent["before"] == untouched.before
+    assert sent["after"] == untouched.after
+    assert sent["patch"] == untouched.patch
 
 
 def test_an_empty_patch_is_no_patch_and_keeps_both_snapshots_whole():
