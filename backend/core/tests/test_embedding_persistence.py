@@ -212,11 +212,18 @@ def test_legacy_inline_vectors_load_and_migrate_on_first_save(tmpdir_path):
 
         storage.save().result()
 
-        assert "embedding" not in _graph_json(tmpdir_path)["nodes"][0]
+        # The sidecar now has it. graph.json still does too: the payload is
+        # captured before the sidecar write can succeed, so the only copy is
+        # never removed on the strength of a write that has not landed yet.
         np.testing.assert_allclose(
             FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()["n1"],
             np.float32(legacy_vector),
         )
+        assert _graph_json(tmpdir_path)["nodes"][0]["embedding"] is not None
+
+        # The next save knows the sidecar holds it, and drops it.
+        storage.save().result()
+        assert "embedding" not in _graph_json(tmpdir_path)["nodes"][0]
     finally:
         storage.flush()
 
@@ -849,3 +856,110 @@ def test_a_sidecar_with_non_string_ids_degrades_instead_of_failing_the_load(
         assert len(reloaded.nodes) == 3
     finally:
         reloaded.flush()
+
+
+def test_a_failed_sidecar_write_does_not_strip_a_pre_split_graph(tmpdir_path):
+    """graph.json is the only durable copy of a pre-split vector. The sidecar
+    write is allowed to fail without failing the graph write, so stripping the
+    vector on that save would destroy it with nothing written in its place —
+    and the in-memory retry only survives while the process does."""
+    legacy = [0.5] * DIM
+    graph = {
+        "nodes": [{"id": "n1", "type": "Actor", "name": "Legacy", "embedding": legacy}],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    with open(os.path.join(tmpdir_path, "graph.json"), "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+
+    storage = _make_storage(tmpdir_path)
+    try:
+
+        def failing_save(vectors):
+            raise OSError("no space left on device")
+
+        storage._embedding_sidecar.save = failing_save
+        storage.save().result()
+
+        assert not _sidecar_path(tmpdir_path).exists()
+        np.testing.assert_allclose(
+            np.float32(_graph_json(tmpdir_path)["nodes"][0]["embedding"]),
+            np.float32(legacy),
+        )
+    finally:
+        storage.flush()
+
+    # And the vector is still there for a fresh process to pick up.
+    reloaded = _make_storage(tmpdir_path)
+    try:
+        np.testing.assert_allclose(
+            reloaded.vector_store.export_vectors()["n1"], np.float32(legacy)
+        )
+    finally:
+        reloaded.flush()
+
+
+def test_reload_onto_a_missing_graph_file_keeps_writing_the_sidecar(
+    storage, tmpdir_path
+):
+    """load() is also reload()'s body. On a populated instance the bootstrap
+    branch must not claim the live vectors are on disk: that stops every later
+    save from writing them, and vectors_persisted — which both maintenance
+    scripts trust — would report success for a write that never happened."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    os.unlink(os.path.join(tmpdir_path, "graph.json"))
+    _sidecar_path(tmpdir_path).unlink()
+
+    storage.reload()
+    storage.flush()
+
+    # The bootstrap save must actually write the vectors out. Marking them
+    # persisted without writing leaves needs_write false for good, so the
+    # sidecar is never recreated and the vectors die with the process.
+    assert _sidecar_path(tmpdir_path).exists(), (
+        "the populated index was marked persisted without being written, so no "
+        "later save will write it either"
+    )
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+    }
+
+
+def test_reopening_a_migrated_graph_does_not_put_the_vectors_back_inline(
+    storage, tmpdir_path
+):
+    """Inline retention is a bridge for vectors whose only durable copy is
+    graph.json, and it has to end when the sidecar covers them. Widening it to
+    every id the sidecar hands back would be invisible on the first process —
+    it only shows on the second, where no vector changes, so no sidecar write
+    lands to clear the retention, and every later save writes the whole matrix
+    back into graph.json: the size regression this split exists to remove."""
+    storage.add_nodes(_sample_nodes(), [])
+    storage.flush()
+
+    reopened = _make_storage(tmpdir_path)
+    try:
+        assert reopened._pending_migration_ids == set(), (
+            "nothing was migrated out of graph.json, so nothing is owed a copy there"
+        )
+        # metadata-only, so no vector moves and no sidecar write follows to
+        # clear a wrongly-populated retention set.
+        reopened.update_node("n1", {"metadata": {"reviewed": True}})
+        reopened.flush()
+    finally:
+        reopened.flush()
+
+    for payload in _graph_json(tmpdir_path)["nodes"]:
+        assert "embedding" not in payload, (
+            f"{payload['id']} was written back into graph.json although the "
+            f"sidecar already holds its vector"
+        )
+    assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == {
+        "n1",
+        "n2",
+        "n3",
+    }

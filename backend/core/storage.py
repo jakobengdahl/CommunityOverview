@@ -147,6 +147,13 @@ class GraphStorage:
         # they were before the split, so no backend silently loses them.
         self._embedding_sidecar = self._init_embedding_sidecar(embeddings_path)
         self._persisted_vector_revision: Optional[int] = None
+        # Ids whose vector came out of graph.json and is not yet in the
+        # sidecar. For those, graph.json is still the ONLY durable copy, so the
+        # vector stays in the node payload until a sidecar write has actually
+        # landed. A vector this process generated was never durable in
+        # graph.json, so it needs no such protection and is dropped at once -
+        # which is what keeps the file small from the first save.
+        self._pending_migration_ids: set = set()
         # Set when a save has already captured a revision for writing but the
         # background write has not landed yet. Without it a second save in the
         # same operation — add_nodes saves once for the nodes and again for the
@@ -431,13 +438,25 @@ class GraphStorage:
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
-                # The vector index is empty and nothing has been loaded, so this
-                # bootstrap write has no vectors to contribute. Marking the
-                # current revision persisted keeps it from writing an EMPTY
-                # sidecar over a real one — a graph file that is merely missing
-                # for now (wrong GRAPH_FILE, a restore in progress) must not
-                # destroy the only copy of the vectors.
-                self._persisted_vector_revision = self.vector_store.revision
+                # An empty index has nothing to contribute, and marking it
+                # persisted is what keeps this bootstrap write from putting an
+                # EMPTY sidecar over a real one — a graph file that is merely
+                # missing for now (wrong GRAPH_FILE, a restore in progress) must
+                # not destroy the only copy of the vectors.
+                #
+                # A populated index is the opposite case. load() is also the body
+                # of reload(), which re-saves the in-memory graph; if the sidecar
+                # has gone too, those vectors are now the only copy anywhere and
+                # this save is the one chance to write them. The revision alone
+                # cannot tell: it still matches the last successful write, of a
+                # file that no longer exists. Both markers have to go — the
+                # snapshot one records that this revision was already handed to
+                # a save, and on its own it keeps needs_write false forever.
+                if self.vector_store.embeddings:
+                    self._persisted_vector_revision = None
+                    self._snapshotted_vector_revision = None
+                else:
+                    self._persisted_vector_revision = self.vector_store.revision
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
@@ -565,14 +584,30 @@ class GraphStorage:
         the node payload, exactly as every backend did before the split, so a
         custom backend does not silently stop persisting them.
         """
-        inline_vectors = self._embedding_sidecar is None
+        no_sidecar = self._embedding_sidecar is None
         payloads = []
         for node in self.nodes.values():
             payload = node.to_dict()
-            if inline_vectors:
+            if no_sidecar:
                 payload["embedding"] = self.vector_store.get_vector_list(node.id)
-            else:
+                payloads.append(payload)
+                continue
+
+            # Dropping the vector is what makes graph.json small, and it is safe
+            # for every vector this process generated. It is NOT safe for one
+            # read out of a pre-split graph.json before the sidecar has it:
+            # there graph.json is the only durable copy, and the sidecar write
+            # is allowed to fail without failing the graph write, so removing it
+            # would destroy the vector with nothing written in its place.
+            vector = (
+                self.vector_store.get_vector_list(node.id)
+                if node.id in self._pending_migration_ids
+                else None
+            )
+            if vector is None:
                 payload.pop("embedding", None)
+            else:
+                payload["embedding"] = vector
             payloads.append(payload)
         return payloads
 
@@ -648,6 +683,7 @@ class GraphStorage:
             )
 
         self.vector_store.load_vectors(vectors)
+        self._pending_migration_ids = set(migrated) & set(vectors)
         if migrated or orphaned or dropped:
             # Leave the persisted revision behind the live one so the next save
             # writes the migrated or pruned matrix out.
@@ -680,6 +716,7 @@ class GraphStorage:
             try:
                 self._embedding_sidecar.save(vectors)
                 self._persisted_vector_revision = vector_revision
+                self._pending_migration_ids -= set(vectors)
             except Exception as e:
                 # Clear the snapshot marker too, or the retry this leaves open
                 # would be skipped by the next save as "already in flight".

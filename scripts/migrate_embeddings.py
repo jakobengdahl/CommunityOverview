@@ -61,7 +61,10 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH, embeddings_file=None):
         return
 
     sidecar_path = resolve_sidecar_path(graph_path, embeddings_file)
-    if sidecar_path is not None and Path(sidecar_path) == embeddings_path:
+    if (
+        sidecar_path is not None
+        and Path(sidecar_path).resolve() == embeddings_path.resolve()
+    ):
         print(
             f"Refusing to run: the sidecar path and the legacy pickle are the same "
             f"file ({embeddings_path}). The migration would rename away the "
