@@ -55,9 +55,7 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
         print(f"Error loading pickle: {e}")
         return
 
-    # Load storage (this loads nodes)
-    # Note: We initialize with embeddings_path=None to use the new in-memory VectorStore logic,
-    # effectively ignoring the pickle file for the storage itself initially.
+    # embeddings_path=None keeps the default sidecar location next to the graph.
     storage = GraphStorage(json_path=str(graph_path), embeddings_path=None)
 
     updated_count = 0
@@ -75,9 +73,14 @@ def migrate_embeddings(graph_path=DEFAULT_GRAPH_PATH):
 
     print(f"Matched and assigned {updated_count} embeddings to nodes.")
 
-    # Save graph (this will write nodes with embeddings to the graph file)
-    storage.save()
-    print("Graph saved with embeddings.")
+    # rebuild_index takes the vectors off the node objects and into the vector
+    # store, which is what the save below persists into the binary sidecar.
+    storage.vector_store.rebuild_index(list(storage.nodes.values()))
+    for node in storage.nodes.values():
+        node.embedding = None
+
+    storage.save().result()
+    print("Graph saved; embeddings written to the sidecar.")
 
     # Rename old pickle to indicate it's deprecated/backup
     backup_path = embeddings_path.with_suffix(".pkl.bak")

@@ -105,7 +105,11 @@ def create_app(
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
-        graph_storage = GraphStorage(str(graph_path))
+        embeddings_path = config.get_embeddings_path()
+        graph_storage = GraphStorage(
+            str(graph_path),
+            embeddings_path=str(embeddings_path) if embeddings_path else None,
+        )
 
     def _on_federated_node_event(operation, before_node, after_node):
         graph_storage.emit_federated_node_event(

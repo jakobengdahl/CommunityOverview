@@ -65,6 +65,7 @@ test_embeddings_integration.pkl
 # session state and mutation history are local runtime output, never source.
 data/active/graph.json
 data/active/graph.history.ndjson
+data/active/graph.embeddings.bin
 data/active/sessions/
 
 # Stale runtime graph data (must not be tracked; see STRUCTURE_REVIEW.md C1)

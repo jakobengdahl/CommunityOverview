@@ -156,11 +156,38 @@ All domain node types support an optional **subtypes** field for sub-classificat
 
 Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed. See [PROFILES.md](./PROFILES.md) for how to create custom profiles with different node types.
 
+## Embedding Sidecar
+
+Semantic search needs a vector per node. Those vectors are **not** part of the
+graph file — they live in a separate binary file next to it, by default
+`<graph stem>.embeddings.bin` (so `data/active/graph.embeddings.bin` for the
+default layout), overridable with `EMBEDDINGS_FILE`.
+
+They are kept out of `graph.json` because a 384-dimension vector costs about
+1.5 kB as float32 and roughly 7.5x that as JSON text. Written into the graph
+file, they dominated it, and every graph mutation rewrote all of them even when
+none had changed. The sidecar is rewritten only when a vector actually changes.
+
+What this means in practice:
+
+- **Backup.** Back up the sidecar alongside `graph.json`. It is the only copy
+  of the vectors.
+- **Restore.** A restore without the sidecar still works: the graph loads, and
+  semantic search returns nothing until the vectors are regenerated. A sidecar
+  that cannot be read is ignored with a warning for the same reason — the graph
+  never fails to load because of it.
+- **Migration.** A `graph.json` written before the split still carries its
+  vectors inline. Those are read on load and moved into the sidecar on the next
+  save; nothing needs to be run by hand.
+- **Portability.** Vectors are derived from node text, so a graph file moved
+  without its sidecar is complete data — only the search index is missing.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
+| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see below) |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 

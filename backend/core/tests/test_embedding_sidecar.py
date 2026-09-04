@@ -1,0 +1,151 @@
+"""
+Unit tests for the binary embedding sidecar.
+
+The sidecar is derived data, so the contract has two halves: a faithful
+round-trip for well-formed files, and a refusal that callers can catch for
+everything else — never a partial or silently wrong read.
+"""
+
+import json
+import struct
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from backend.core.embedding_sidecar import (
+    MAGIC,
+    EmbeddingSidecarError,
+    FileEmbeddingSidecar,
+)
+
+
+@pytest.fixture
+def sidecar():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield FileEmbeddingSidecar(Path(tmpdir) / "graph.embeddings.bin")
+
+
+def test_round_trip_preserves_ids_and_values(sidecar):
+    vectors = {
+        "node-a": [1.0, 0.0, -0.5],
+        "node-b": [0.25, 0.75, 1.5],
+    }
+    sidecar.save(vectors)
+    loaded = sidecar.load()
+
+    assert set(loaded) == {"node-a", "node-b"}
+    for node_id, expected in vectors.items():
+        assert loaded[node_id].dtype == np.float32
+        np.testing.assert_allclose(loaded[node_id], np.float32(expected))
+
+
+def test_round_trip_keeps_rows_with_their_own_ids(sidecar):
+    """A row/id mix-up would still load and still be the wrong vector."""
+    vectors = {f"n{i}": [float(i), float(i) + 0.5] for i in range(20)}
+    sidecar.save(vectors)
+    loaded = sidecar.load()
+
+    for node_id, expected in vectors.items():
+        np.testing.assert_allclose(loaded[node_id], np.float32(expected))
+
+
+def test_loaded_rows_are_writable_copies(sidecar):
+    """Rows must not stay views onto the file buffer, which would pin the whole
+    file in memory and be read-only."""
+    sidecar.save({"n1": [1.0, 2.0]})
+    row = sidecar.load()["n1"]
+
+    row += 1.0
+    np.testing.assert_allclose(row, np.float32([2.0, 3.0]))
+
+
+def test_empty_index_round_trips(sidecar):
+    sidecar.save({})
+    assert sidecar.exists()
+    assert sidecar.load() == {}
+
+
+def test_save_creates_missing_parent_directory():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "nested" / "dir" / "graph.embeddings.bin"
+        FileEmbeddingSidecar(target).save({"n1": [1.0]})
+        assert target.exists()
+
+
+def test_save_leaves_no_temp_files_behind(sidecar):
+    sidecar.save({"n1": [1.0, 2.0]})
+    sidecar.save({"n1": [3.0, 4.0]})
+
+    assert [p.name for p in sidecar.path.parent.iterdir()] == [sidecar.path.name]
+    np.testing.assert_allclose(sidecar.load()["n1"], np.float32([3.0, 4.0]))
+
+
+def test_save_rejects_mixed_dimensions(sidecar):
+    with pytest.raises(EmbeddingSidecarError, match="mixed dimensions"):
+        sidecar.save({"n1": [1.0, 2.0], "n2": [1.0, 2.0, 3.0]})
+
+
+def test_load_rejects_a_file_that_is_not_a_sidecar(sidecar):
+    sidecar.path.write_bytes(b"just some other file entirely")
+
+    with pytest.raises(EmbeddingSidecarError, match="not an embedding sidecar"):
+        sidecar.load()
+
+
+def test_load_rejects_truncated_payload(sidecar):
+    sidecar.save({"n1": [1.0, 2.0], "n2": [3.0, 4.0]})
+    raw = sidecar.path.read_bytes()
+    sidecar.path.write_bytes(raw[:-4])
+
+    with pytest.raises(EmbeddingSidecarError, match="payload"):
+        sidecar.load()
+
+
+def test_load_rejects_header_longer_than_the_file(sidecar):
+    header = json.dumps({"dtype": "float32", "rows": 0, "dim": 0, "ids": []}).encode()
+    sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(header) + 500) + header)
+
+    with pytest.raises(EmbeddingSidecarError, match="truncated header"):
+        sidecar.load()
+
+
+def test_load_rejects_header_whose_id_count_disagrees_with_rows(sidecar):
+    header = json.dumps(
+        {"dtype": "float32", "rows": 2, "dim": 1, "ids": ["only-one"]}
+    ).encode()
+    payload = np.float32([[1.0], [2.0]]).tobytes()
+    sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header + payload)
+
+    with pytest.raises(EmbeddingSidecarError, match="inconsistent header"):
+        sidecar.load()
+
+
+def test_load_rejects_unsupported_dtype(sidecar):
+    header = json.dumps(
+        {"dtype": "float64", "rows": 1, "dim": 1, "ids": ["n1"]}
+    ).encode()
+    payload = np.float64([[1.0]]).tobytes()
+    sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header + payload)
+
+    with pytest.raises(EmbeddingSidecarError, match="unsupported dtype"):
+        sidecar.load()
+
+
+def test_load_rejects_unreadable_header(sidecar):
+    header = b"{not json"
+    sidecar.path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header)
+
+    with pytest.raises(EmbeddingSidecarError, match="unreadable header"):
+        sidecar.load()
+
+
+def test_stored_matrix_is_float32_not_json_text(sidecar):
+    """The whole point of the sidecar: 384 floats cost 4 bytes each, not the
+    ~15 bytes each they cost as JSON text inside graph.json."""
+    vectors = {f"n{i}": np.random.rand(384).astype(np.float32) for i in range(50)}
+    sidecar.save(vectors)
+
+    payload_bytes = 50 * 384 * 4
+    assert sidecar.path.stat().st_size < payload_bytes * 1.1

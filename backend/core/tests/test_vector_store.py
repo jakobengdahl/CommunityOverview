@@ -217,25 +217,32 @@ class TestVectorStoreSearch:
 class TestVectorStoreRebuild:
     """Tests for rebuilding index from nodes"""
 
+    def test_rebuild_index_reads_vectors_carried_on_the_nodes(self, sample_nodes):
+        """rebuild_index is the pre-sidecar path: it ingests vectors that a
+        graph written before the split still carries on its node objects."""
+        for i, node in enumerate(sample_nodes):
+            node.embedding = [float(i), 1.0 - i, 0.5]
+
+        store = VectorStore()
+        store.rebuild_index(sample_nodes)
+
+        assert store.get_embedding_count() == 3
+        for i, node in enumerate(sample_nodes):
+            assert store.has_embedding(node.id)
+            np.testing.assert_allclose(
+                store.embeddings[node.id], np.float32([float(i), 1.0 - i, 0.5])
+            )
+
     @pytest.mark.slow
-    def test_rebuild_index(self, sample_nodes):
-        """Test that index can be rebuilt from nodes with embeddings"""
-        # First create a store and generate embeddings
-        store1 = VectorStore()
-        store1.update_nodes_embeddings(sample_nodes)
+    def test_generated_vectors_stay_off_the_node_object(self, sample_nodes):
+        """The vector store owns the vectors; leaving a copy on the node is
+        what made a node cost ~51 kB resident and bloated every snapshot."""
+        store = VectorStore()
+        store.update_nodes_embeddings(sample_nodes)
 
-        # Get the embeddings stored on nodes
+        assert store.get_embedding_count() == 3
         for node in sample_nodes:
-            assert node.embedding is not None
-
-        # Create a new store and rebuild from nodes
-        store2 = VectorStore()
-        store2.rebuild_index(sample_nodes)
-
-        # Verify embeddings were loaded
-        assert store2.get_embedding_count() == 3
-        for node in sample_nodes:
-            assert store2.has_embedding(node.id)
+            assert node.embedding is None
 
     @pytest.mark.slow
     def test_rebuild_empty_nodes(self):
@@ -250,6 +257,73 @@ class TestVectorStoreRebuild:
 
         # Should have no embeddings since nodes had none
         assert store.get_embedding_count() == 0
+
+
+class TestVectorStorePersistenceSeam:
+    """The store is the owner of the vectors; GraphStorage persists them via
+    these methods and uses `revision` to skip writes that change nothing."""
+
+    def _store(self):
+        store = VectorStore()
+        store.load_vectors({"n1": [1.0, 0.0], "n2": [0.0, 1.0]})
+        return store
+
+    def test_load_vectors_replaces_the_index(self):
+        store = self._store()
+        store.load_vectors({"n3": [1.0, 1.0]})
+
+        assert set(store.embeddings) == {"n3"}
+
+    def test_vectors_are_held_as_float32(self):
+        store = self._store()
+
+        assert store.embeddings["n1"].dtype == np.float32
+
+    def test_export_vectors_round_trips_through_load_vectors(self):
+        store = self._store()
+        exported = store.export_vectors()
+
+        other = VectorStore()
+        other.load_vectors(exported)
+
+        assert set(other.embeddings) == set(store.embeddings)
+        np.testing.assert_allclose(other.embeddings["n1"], store.embeddings["n1"])
+
+    def test_get_vector_list_returns_json_serialisable_values(self):
+        store = self._store()
+
+        assert store.get_vector_list("n1") == [1.0, 0.0]
+        assert store.get_vector_list("missing") is None
+
+    def test_revision_advances_on_every_change(self):
+        store = self._store()
+        start = store.revision
+
+        store.load_vectors({"n1": [1.0, 0.0]})
+        after_load = store.revision
+        assert after_load > start
+
+        store.remove_node_embedding("n1")
+        assert store.revision > after_load
+
+    def test_revision_is_unchanged_by_a_read(self):
+        store = self._store()
+        before = store.revision
+
+        store.export_vectors()
+        store.get_vector_list("n1")
+        store.search(query_text=None, query_node=None)
+
+        assert store.revision == before
+
+    def test_removing_an_absent_id_does_not_advance_the_revision(self):
+        """A no-op removal must not make GraphStorage rewrite the sidecar."""
+        store = self._store()
+        before = store.revision
+
+        store.remove_nodes_embeddings(["not-here"])
+
+        assert store.revision == before
 
 
 class TestVectorStoreMatrix:

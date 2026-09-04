@@ -60,8 +60,15 @@ class VectorStore:
     Uses sentence-transformers for generating embeddings (optional ML extra)
     and numpy for cosine similarity search.
 
-    Embeddings are stored directly on the Node objects and passed to this class
-    to build the in-memory search index.
+    This class owns the vectors. They are held as float32 numpy rows and
+    persisted by GraphStorage into a binary sidecar, not as a field on the
+    serialised Node — see backend/core/embedding_sidecar.py. ``Node.embedding``
+    remains on the model so a graph written before that split still loads, but
+    nothing writes it back.
+
+    ``revision`` increments on every change to the index. GraphStorage compares
+    it against the revision it last persisted to decide whether a save needs to
+    rewrite the sidecar at all.
     """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
@@ -72,6 +79,7 @@ class VectorStore:
             str
         ] = []  # ordered list of node ids corresponding to embeddings matrix
         self.embedding_matrix: Optional[Any] = None  # numpy array
+        self.revision: int = 0
 
     def _load_model(self):
         """Lazy load the model"""
@@ -99,20 +107,51 @@ class VectorStore:
         t.start()
 
     def rebuild_index(self, nodes: List[Node]):
-        """Rebuild the search index from a list of nodes."""
+        """Rebuild the search index from vectors carried on the node objects.
+
+        Only pre-split graphs carry them there; GraphStorage loads from the
+        sidecar via load_vectors() instead. Kept for callers that hold nodes
+        with inline vectors (the pickle migration script, tests).
+        """
         np = _ensure_numpy()
         self.embeddings = {}
 
         for node in nodes:
             if node.embedding is not None:
-                # Convert list to numpy array if needed
-                self.embeddings[node.id] = np.array(node.embedding)
+                self.embeddings[node.id] = np.asarray(node.embedding, dtype=np.float32)
 
         self._update_matrix()
         print(f"VectorStore index rebuilt with {len(self.embeddings)} embeddings")
 
+    def load_vectors(self, vectors: Dict[str, Any]) -> None:
+        """Replace the index with vectors read back from persistence."""
+        np = _ensure_numpy()
+        self.embeddings = {
+            node_id: np.asarray(vector, dtype=np.float32)
+            for node_id, vector in vectors.items()
+        }
+        self._update_matrix()
+
+    def export_vectors(self) -> Dict[str, Any]:
+        """Return the index for persistence.
+
+        A shallow copy is enough: rows are replaced, never mutated in place.
+        """
+        return dict(self.embeddings)
+
+    def get_vector_list(self, node_id: str) -> Optional[List[float]]:
+        """Return a node's vector as a JSON-serialisable list, or None."""
+        vector = self.embeddings.get(node_id)
+        return None if vector is None else vector.tolist()
+
     def _update_matrix(self):
-        """Update the numpy matrix for vectorized operations"""
+        """Update the numpy matrix for vectorized operations.
+
+        Every path that changes the index goes through here, so this is also
+        where the persistence revision is bumped.
+        """
+        self.revision += 1
+
         if not self.embeddings:
             self.node_ids = []
             self.embedding_matrix = None
@@ -144,13 +183,11 @@ class VectorStore:
         return embedding.tolist()
 
     def update_node_embedding(self, node: Node):
-        """Update or add embedding for a node (updates the node object too)"""
-        embedding_list = self.generate_embedding(node)
-        node.embedding = embedding_list
-
-        # Update internal index
+        """Generate and store the embedding for a node."""
         np = _ensure_numpy()
-        self.embeddings[node.id] = np.array(embedding_list)
+        self.embeddings[node.id] = np.asarray(
+            self.generate_embedding(node), dtype=np.float32
+        )
         self._update_matrix()
 
     def update_nodes_embeddings(self, nodes: List[Node]):
@@ -162,11 +199,9 @@ class VectorStore:
         texts = [self._get_text_representation(node) for node in nodes]
         embeddings = self.model.encode(texts)
 
+        np = _ensure_numpy()
         for node, embedding in zip(nodes, embeddings):
-            # Convert to list for JSON storage
-            node.embedding = embedding.tolist()
-            # Update internal index
-            self.embeddings[node.id] = embedding
+            self.embeddings[node.id] = np.asarray(embedding, dtype=np.float32)
 
         self._update_matrix()
 
