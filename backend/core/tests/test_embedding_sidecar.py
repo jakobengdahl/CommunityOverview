@@ -489,3 +489,118 @@ def test_a_damaged_file_at_a_name_we_were_given_is_still_refused(tmp_path):
 
     assert path.read_bytes() == original
     assert not path.with_name(path.name + ".corrupt").exists()
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        pytest.param(b"\x80\x04\x95 a pickle", id="pickle"),
+        pytest.param(b"CSV,header\nrow", id="shares-the-first-byte"),
+        pytest.param(b"CKGEMB\x02rest", id="shares-six-of-seven"),
+        pytest.param(b"lock", id="shorter-than-the-magic"),
+        pytest.param(b"\x00", id="one-null-byte"),
+    ],
+)
+def test_the_guard_discriminates_on_the_whole_magic_not_a_prefix(tmp_path, foreign):
+    """A single sample can only prove the guard rejects that sample. Comparing
+    one byte instead of seven, or only inspecting files above some size, still
+    rejects a pickle — and accepts anything that happens to start with C, or is
+    short, or is a sidecar of another version."""
+    path = tmp_path / "somewhere.bin"
+    path.write_bytes(foreign)
+
+    with pytest.raises(EmbeddingSidecarError, match="refusing to overwrite"):
+        FileEmbeddingSidecar(path, owns_path=False).save(
+            {"n1": np.ones(4, dtype=np.float32)}
+        )
+
+    assert path.read_bytes() == foreign
+
+
+def test_a_sidecar_of_another_version_is_not_read_as_this_one(tmp_path):
+    """The trailing byte of the magic is the format version. Ignoring it means
+    a later layout is read with this one's rules and silently misinterpreted,
+    which is worse than refusing to read it at all."""
+    golden = (
+        b"CKGEMB\x02"
+        b":\x00\x00\x00"
+        b'{"dtype": "float32", "rows": 1, "dim": 2, "ids": ["kept"]}'
+        b"\x00\x00\x80?\x00\x00\x00@"
+    )
+    path = tmp_path / "graph.embeddings.bin"
+    path.write_bytes(golden)
+
+    with pytest.raises(EmbeddingSidecarError, match="not an embedding sidecar"):
+        FileEmbeddingSidecar(path).load()
+
+
+def test_a_mixed_type_id_list_is_refused_rather_than_partly_adopted(tmp_path):
+    """Every other type-confusion case is homogeneous, so a check that asks
+    whether ANY id is a string passes them all — while a list like ["a", 5]
+    loads and puts an integer key into the vector index, where every consumer
+    expects a node id."""
+    path = tmp_path / "graph.embeddings.bin"
+    for ids in (["a", 5], ["a", [1, 2]], ["a", None]):
+        header = json.dumps(
+            {"dtype": "float32", "rows": 2, "dim": 1, "ids": ids}
+        ).encode("utf-8")
+        path.write_bytes(MAGIC + struct.pack("<I", len(header)) + header + b"\x00" * 8)
+
+        with pytest.raises(EmbeddingSidecarError):
+            FileEmbeddingSidecar(path).load()
+
+
+def test_a_two_dimensional_vector_round_trips_and_mixed_widths_still_raise(tmp_path):
+    """Callers hand this whatever numpy gives them, and a model returning a
+    (1, d) row is ordinary. Without flattening, a mixed batch raises out of
+    numpy instead of as this module's own error, and a (2, d) input writes a
+    file the module's own loader then rejects."""
+    path = tmp_path / "graph.embeddings.bin"
+    sidecar = FileEmbeddingSidecar(path)
+
+    sidecar.save({"n1": np.ones((1, 4), dtype=np.float32)})
+    assert set(sidecar.load()) == {"n1"}
+    np.testing.assert_allclose(sidecar.load()["n1"], np.ones(4, dtype=np.float32))
+
+    with pytest.raises(EmbeddingSidecarError, match="mixed dimensions"):
+        sidecar.save(
+            {
+                "n1": np.ones((1, 2), dtype=np.float32),
+                "n2": np.ones((1, 3), dtype=np.float32),
+            }
+        )
+
+
+def test_an_unreadable_destination_is_refused_rather_than_assumed_safe(tmp_path):
+    """The guard has to decide something when it cannot look. Assuming the file
+    is a sidecar it may replace is the one answer that can destroy data."""
+    path = tmp_path / "a-directory-in-the-way"
+    path.mkdir()
+
+    with pytest.raises(EmbeddingSidecarError, match="cannot inspect"):
+        FileEmbeddingSidecar(path, owns_path=True).save(
+            {"n1": np.ones(4, dtype=np.float32)}
+        )
+
+    assert path.is_dir()
+
+
+def test_the_temp_file_is_created_beside_the_destination(tmp_path, monkeypatch):
+    """os.replace cannot cross a filesystem. The suite writes both to one
+    filesystem, so a temp file in the system temp dir passes here and raises
+    EXDEV on exactly the mounted-volume deployment this format is written for."""
+    import tempfile as tempfile_module
+
+    seen = {}
+    real_mkstemp = tempfile_module.mkstemp
+
+    def recording(*args, **kwargs):
+        seen["dir"] = kwargs.get("dir")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile_module, "mkstemp", recording)
+
+    path = tmp_path / "graph.embeddings.bin"
+    FileEmbeddingSidecar(path).save({"n1": np.ones(4, dtype=np.float32)})
+
+    assert seen["dir"] == path.parent

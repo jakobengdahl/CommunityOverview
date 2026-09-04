@@ -357,6 +357,36 @@ def test_an_http_error_response_leaves_the_sidecar_alone(
     assert graph["nodes"] == [], "the 404 body was written over the graph"
 
 
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        pytest.param(b"\x80\x04\x95 a pickle", id="pickle"),
+        pytest.param(b"CSV,header\nrow", id="shares-the-first-byte"),
+        pytest.param(b"CKGEMB\x02rest", id="shares-six-of-seven"),
+        pytest.param(b"lock", id="shorter-than-the-magic"),
+    ],
+)
+def test_the_cleanup_discriminates_on_the_whole_magic(
+    data_setup_block, resolution_block, workspace, foreign
+):
+    """One sample proves only that the guard rejects that sample. Comparing a
+    single byte still rejects a pickle while deleting anything beginning with
+    C, and a size threshold deletes short files."""
+    configured = workspace / "elsewhere.bin"
+    configured.write_bytes(foreign)
+
+    _run(
+        data_setup_block,
+        workspace,
+        data_source=str(workspace / "replacement.json"),
+        env={"EMBEDDINGS_FILE": str(configured)},
+        resolution=resolution_block,
+    )
+
+    assert configured.exists()
+    assert configured.read_bytes() == foreign
+
+
 def test_the_cleanup_refuses_to_delete_a_file_that_is_not_a_sidecar(
     data_setup_block, resolution_block, workspace
 ):
