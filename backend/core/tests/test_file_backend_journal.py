@@ -1283,6 +1283,44 @@ class TestJournalIdentity:
             "d",
         }
 
+    def test_a_save_whose_truncate_fails_leaves_the_mirror_unstamped_too(
+        self, tmp, monkeypatch
+    ):
+        """The whole-graph twin of the previous test: the save's snapshot
+        lands stamped, its truncate raises. The mirror must stay unstamped,
+        or the next append writes a stamped record behind the pre-stamp one."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.load_graph_data()
+        real_truncate = backend._truncate_journal
+        fail = {"once": True}
+
+        def failing_truncate():
+            if fail["once"]:
+                fail["once"] = False
+                raise OSError("crash")
+            real_truncate()
+
+        monkeypatch.setattr(backend, "_truncate_journal", failing_truncate)
+        with pytest.raises(OSError, match="crash"):
+            backend.save_graph_data(_snapshot("a", "b", "z"))
+        assert "journal_id" not in backend._metadata
+
+        backend.upsert_node(_payload("c"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+            "z",
+            "c",
+        }
+
     def test_checkpoint_stamps_an_unstamped_graph_when_folding_a_legacy_journal(
         self, tmp
     ):
