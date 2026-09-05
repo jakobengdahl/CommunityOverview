@@ -195,7 +195,17 @@ if [ -n "$DATA_SOURCE" ]; then
             # below then deletes the sidecar of the graph that was there.
             curl -fsL "$DATA_SOURCE" -o "$ACTIVE_DATA"
         elif command -v wget &> /dev/null; then
-            wget -q "$DATA_SOURCE" -O "$ACTIVE_DATA"
+            # wget -O opens its target before the request, so a 404 would
+            # empty the graph to zero bytes and then fail. Land the body
+            # beside it and move it into place only once the transfer
+            # succeeded, which is what -f already gives the curl path.
+            download="$ACTIVE_DATA.download"
+            if ! wget -q "$DATA_SOURCE" -O "$download"; then
+                rm -f "$download"
+                echo -e "${RED}Error: download failed: $DATA_SOURCE${NC}"
+                exit 1
+            fi
+            mv -f "$download" "$ACTIVE_DATA"
         else
             echo -e "${RED}Error: curl or wget required to download data from URL${NC}"
             exit 1

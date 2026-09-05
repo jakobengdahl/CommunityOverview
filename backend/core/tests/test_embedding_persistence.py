@@ -1725,10 +1725,8 @@ def test_the_app_heals_a_damaged_sidecar_at_the_path_start_dev_exports(tmpdir_pa
         storage.flush()
 
 
-def test_a_relative_configured_path_naming_our_own_sidecar_is_still_ours(
-    tmpdir_path,
-):
-    """The same name spelled relatively resolves to the same file, so it must
+def test_our_own_sidecar_reached_through_a_parent_hop_is_still_ours(tmpdir_path):
+    """The same name spelled through `..` resolves to the same file, so it must
     land on the same side of the distinction."""
     graph_path = os.path.join(tmpdir_path, "graph.json")
     with open(graph_path, "w", encoding="utf-8") as f:
@@ -1740,6 +1738,123 @@ def test_a_relative_configured_path_naming_our_own_sidecar_is_still_ours(
     )
     try:
         assert storage._embedding_sidecar.owns_path is True
+    finally:
+        storage.flush()
+
+
+def test_a_genuinely_relative_configured_path_naming_our_sidecar_is_ours(
+    tmpdir_path, monkeypatch
+):
+    """The test above was named for this case but passed an absolute path with
+    a `..` in it, so a relative EMBEDDINGS_FILE - the shape an operator types
+    into .env - was pinned nowhere at this layer. It only resolves through the
+    working directory, which is what a comparison of the paths as written
+    misses on the configured side."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    monkeypatch.chdir(tmpdir_path)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path="graph.embeddings.bin")
+    try:
+        assert storage._embedding_sidecar.owns_path is True
+    finally:
+        storage.flush()
+
+
+def test_a_relative_graph_path_still_owns_its_absolutely_configured_sidecar(
+    tmpdir_path, monkeypatch
+):
+    """The production shape. Both maintenance scripts default to the RELATIVE
+    data/active/graph.json, so the derived name is relative too, while the
+    EMBEDDINGS_FILE start-dev.sh exports is absolute. Every other ownership
+    test passes an absolute graph path, so the comparison could resolve only
+    its configured side and still pass them all - and then flip to "not ours"
+    exactly where generate_embeddings.py runs, reinstating the refusal that
+    left semantic search dark."""
+    monkeypatch.chdir(tmpdir_path)
+    with open("graph.json", "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    derived = _sidecar_path(tmpdir_path)
+    derived.write_bytes(b"corrupted beyond recognition")
+
+    storage = GraphStorage(json_path="graph.json", embeddings_path=str(derived))
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert storage._embedding_sidecar.owns_path is True
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted, "refused to rebuild our own sidecar"
+        assert set(FileEmbeddingSidecar(derived).load()) == {"n1", "n2", "n3"}
+        assert derived.with_name(derived.name + ".corrupt").exists()
+    finally:
+        storage.flush()
+
+
+def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path):
+    """Ownership is the whole path, not the basename. No test configured an
+    operator path with our own file's NAME in a different directory, so
+    comparing only the last component passed every one of them - while
+    treating any graph.embeddings.bin anywhere as ours to move aside and
+    overwrite."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    elsewhere = Path(tmpdir_path) / "elsewhere"
+    elsewhere.mkdir()
+    theirs = elsewhere / "graph.embeddings.bin"
+    original = b"\x80\x04\x95 a pickle that happens to share our name"
+    theirs.write_bytes(original)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=str(theirs))
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert storage._embedding_sidecar.owns_path is False
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert theirs.read_bytes() == original, "a same-named file was overwritten"
+        assert not theirs.with_name(theirs.name + ".corrupt").exists()
+        assert storage.vectors_persisted is False
+        assert storage.vector_store.export_vectors(), "the refusal was never reached"
+    finally:
+        storage.flush()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(b"corrupted beyond recognition", id="differs-at-byte-0"),
+        # Proper prefixes of the magic: a comparison that checks only the bytes
+        # present accepts these as a sidecar and overwrites them in place, with
+        # no .corrupt copy kept - the refusal branch is pinned over these, the
+        # heal branch was not.
+        pytest.param(b"CKG", id="truncated-magic"),
+        pytest.param(b"CKGEMB", id="magic-without-version-byte"),
+        pytest.param(b"CKGEMB\x02rest", id="another-version"),
+    ],
+)
+def test_healing_judges_the_whole_magic_and_keeps_the_damaged_bytes(
+    tmpdir_path, damage
+):
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    derived = _sidecar_path(tmpdir_path)
+    derived.write_bytes(damage)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=str(derived))
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted
+        assert set(FileEmbeddingSidecar(derived).load()) == {"n1", "n2", "n3"}
+        kept = derived.with_name(derived.name + ".corrupt")
+        assert kept.exists(), "the damaged file was overwritten in place"
+        assert kept.read_bytes() == damage
     finally:
         storage.flush()
 

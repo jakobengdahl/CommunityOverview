@@ -295,6 +295,34 @@ class TestVectorStorePersistenceSeam:
         assert store.get_vector_list("n1") == [1.0, 0.0]
         assert store.get_vector_list("missing") is None
 
+    def test_matrix_rows_follow_node_ids_not_sorted_order(self):
+        """Row i of the matrix must belong to node_ids[i]. Both are built from
+        the same dict, so nothing pinned it - and a matrix stacked in sorted
+        order while node_ids kept insertion order passes every other test,
+        because their fixtures insert ids that are already sorted. It hands one
+        node's vector to another: the query node's own self-similarity turns up
+        attributed to whichever id sits at that row.
+        """
+        store = VectorStore()
+        # Insertion order differs from sorted order (alpha, mid, zeta).
+        store.load_vectors({"zeta": [1.0, 0.0], "alpha": [0.9, 0.1], "mid": [0.0, 1.0]})
+
+        assert store.node_ids == ["zeta", "alpha", "mid"]
+        assert store.node_ids == list(store.embeddings)
+        for row, node_id in enumerate(store.node_ids):
+            np.testing.assert_array_equal(
+                store.embedding_matrix[row], store.embeddings[node_id]
+            )
+
+        # The consequence a user would see: zeta's nearest neighbour is alpha.
+        # Under the sorted-stacking mismatch it comes back as mid at exactly
+        # 1.0, which is zeta's own vector wearing mid's id.
+        results = store.search(
+            query_node=Node(id="zeta", type=NodeType.ACTOR, name="Z")
+        )
+        assert results[0][0] == "alpha"
+        assert results[0][1] < 1.0
+
     def test_revision_advances_on_every_change(self):
         store = self._store()
         start = store.revision
