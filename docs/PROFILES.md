@@ -438,10 +438,16 @@ The profile's `graph.json` is example data only. Runtime state — `SavedView`,
 people using a running deployment and does not belong in it. A seed captured by
 exporting a live instance carries that state along, so run
 `scripts/strip_profile_runtime_nodes.py` over any such export before committing it:
-it removes those node types and every edge touching them, and refuses to write if
-the result would leave a dangling edge. Watch for what rides along in them —
-`EventSubscription` nodes carry webhook URLs, which is how a personal lab hostname
-once reached this repository.
+it removes those node types and every edge touching them, drops the file's
+`metadata.journal_id`, and refuses to write if the result would leave a dangling
+edge. Watch for what rides along in them — `EventSubscription` nodes carry webhook
+URLs, which is how a personal lab hostname once reached this repository. The
+`journal_id` is the lineage the graph journal beside a running instance's
+`graph.json` belongs to (see `DATA_MANAGEMENT.md`, *Graph Journal*); an export
+through the app never carries it, but a `graph.json` copied by hand does, and a
+seed that keeps it gives every instance seeded from it the same lineage. A test
+(`backend/tests/test_strip_profile_runtime_nodes.py`) fails if a committed seed
+carries the key.
 
 Metadata keys on `Variable` are snake_case, matching the convention every other
 profile follows. Nine camelCase keys remain on `DataSet`, `DataStructure` and
