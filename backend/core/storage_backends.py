@@ -312,10 +312,17 @@ class FileGraphPersistenceBackend:
             snapshot = {**data, "metadata": metadata}
             self._nodes = {n["id"]: n for n in data.get("nodes", [])}
             self._edges = {e["id"]: e for e in data.get("edges", [])}
+            # The mirror takes the save's metadata now, as it takes its nodes,
+            # but a freshly minted id only once both writes have landed - see
+            # _checkpoint_locked for why.
+            self._metadata = {
+                k: v
+                for k, v in metadata.items()
+                if k != "journal_id" or v == self._metadata.get("journal_id")
+            }
             self._mirrored = True
             self._write_snapshot(snapshot)
             self._truncate_journal()
-            # The id enters the mirror last - see _checkpoint_locked for why.
             self._metadata = metadata
 
     def default_graph_name(self) -> str:
@@ -360,13 +367,18 @@ class FileGraphPersistenceBackend:
         self._nodes = {n["id"]: n for n in mirror.get("nodes", [])}
         self._edges = {e["id"]: e for e in mirror.get("edges", [])}
         self._metadata = dict(mirror.get("metadata") or {})
-        self._mirrored = True
+        # Not a mirror until the journal is in it too: a refused journal
+        # leaves the backend unmirrored, so an append after a refused load
+        # loads again and is refused again, and writes nothing behind the
+        # records that were refused.
+        self._mirrored = False
         self._journaled = 0
 
         for record in self._read_journal():
             for op in record:
                 self._apply(op)
             self._journaled += 1
+        self._mirrored = True
         if self._journaled:
             data = {
                 "nodes": [json.loads(json.dumps(n)) for n in self._nodes.values()],
@@ -451,17 +463,20 @@ class FileGraphPersistenceBackend:
                 )
                 if record_id is None:
                     # The stamp is written by a checkpoint that folds the
-                    # pre-stamp records in first, and the backend only starts
-                    # writing stamped records once that checkpoint has also
-                    # emptied the journal; so a crash between its snapshot and
-                    # its truncate leaves exactly this shape, and nothing else
-                    # the backend does leaves a pre-stamp record beside a
-                    # stamped file.
+                    # pre-stamp records in first, or by a whole-graph save
+                    # that supersedes them, and the backend only starts
+                    # writing stamped records once that write has also
+                    # emptied the journal; so a crash between its snapshot
+                    # and its truncate leaves exactly this shape, and nothing
+                    # else the backend does leaves a pre-stamp record beside
+                    # a stamped file.
                     remedy += (
-                        ". If nobody replaced graph.json, this is the "
-                        "checkpoint that stamped the file, interrupted before "
-                        "it emptied the journal: the records are already in "
-                        "graph.json, and deleting the journal loses nothing"
+                        ". If nobody replaced graph.json, this is the write "
+                        "that stamped the file, interrupted before it emptied "
+                        "the journal: the records were folded into graph.json "
+                        "by that checkpoint or superseded by that whole-graph "
+                        "save, and either way deleting the journal loses "
+                        "nothing"
                     )
                 raise GraphJournalError(
                     f"{self.journal_path} line {index + 1} was written against "

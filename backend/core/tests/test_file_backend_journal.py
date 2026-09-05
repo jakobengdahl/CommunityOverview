@@ -1321,6 +1321,70 @@ class TestJournalIdentity:
             "c",
         }
 
+    def test_a_refused_reload_leaves_a_live_backend_unable_to_append(
+        self, tmp, monkeypatch
+    ):
+        """Round-3 finding: after a refused load the backend must not count
+        as mirrored, or the next append writes a stamped record behind the
+        records that were just refused (GraphStorage.reload() is that load)."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        real_truncate = backend._truncate_journal
+        fail = {"once": True}
+
+        def failing_truncate():
+            if fail["once"]:
+                fail["once"] = False
+                raise OSError("crash")
+            real_truncate()
+
+        monkeypatch.setattr(backend, "_truncate_journal", failing_truncate)
+        with pytest.raises(OSError, match="crash"):
+            backend.upsert_node(_payload("c"))
+        # Now: file stamped, journal pre-stamp. A reload on the same instance
+        # is refused, and so is every append after it.
+        before = (tmp / "g.journal.ndjson").read_bytes()
+        with pytest.raises(GraphJournalError, match="loses nothing"):
+            backend.load_graph_data()
+        with pytest.raises(GraphJournalError):
+            backend.upsert_node(_payload("d"))
+        assert (tmp / "g.journal.ndjson").read_bytes() == before
+
+    def test_a_failed_save_keeps_the_mirrors_metadata_with_its_nodes(
+        self, tmp, monkeypatch
+    ):
+        """A save whose snapshot fails leaves the mirror with the save's nodes;
+        the non-id metadata must travel with them, or a later checkpoint
+        writes the new nodes under the old graph name."""
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.save_graph_data(_snapshot("a"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        renamed = _snapshot("a", "z")
+        renamed["metadata"]["graph_name"] = "renamed"
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(renamed)
+        backend.upsert_node(_payload("b"))
+        backend.checkpoint()
+        written = json.loads((tmp / "g.json").read_text(encoding="utf-8"))
+        assert written["metadata"]["graph_name"] == "renamed"
+        assert written["metadata"]["journal_id"] == stamp
+        assert _ids(written) == {"a", "z", "b"}
+
     def test_checkpoint_stamps_an_unstamped_graph_when_folding_a_legacy_journal(
         self, tmp
     ):
