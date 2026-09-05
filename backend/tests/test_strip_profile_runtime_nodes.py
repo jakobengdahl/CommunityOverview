@@ -65,6 +65,34 @@ class TestStrip:
         assert graph["metadata"] == {"version": "1.0", "graph_name": "seed"}
         assert removed["metadata.journal_id"] == 1
 
+    @pytest.mark.parametrize(
+        "runtime_type",
+        ["SavedView", "VisualizationView", "EventSubscription", "Agent", "Skill"],
+    )
+    def test_every_runtime_type_goes(self, runtime_type):
+        graph = {
+            "nodes": [_node("a", "Actor"), _node("r", runtime_type)],
+            "edges": [_edge("ar", "a", "r")],
+            "metadata": {},
+        }
+        removed = strip(graph)
+        assert {n["id"] for n in graph["nodes"]} == {"a"}
+        assert graph["edges"] == []
+        assert removed[runtime_type] == 1
+
+    @pytest.mark.parametrize("value", ["", None])
+    def test_a_present_but_empty_journal_id_goes_too(self, value):
+        graph = {"nodes": [], "edges": [], "metadata": {"journal_id": value}}
+        removed = strip(graph)
+        assert "journal_id" not in graph["metadata"]
+        assert removed["metadata.journal_id"] == 1
+
+    @pytest.mark.parametrize("metadata", ["not a dict", ["list"], 42])
+    def test_a_non_dict_metadata_is_left_alone(self, metadata):
+        graph = {"nodes": [_node("a", "Actor")], "edges": [], "metadata": metadata}
+        assert strip(graph) == {}
+        assert graph["metadata"] == metadata
+
     def test_a_seed_without_runtime_state_is_left_alone(self):
         graph = {
             "nodes": [_node("a", "Actor")],
@@ -80,12 +108,11 @@ class TestStrip:
         assert strip(graph) == {}
         assert "metadata" not in graph
 
-    def test_a_dangling_edge_is_refused(self):
-        graph = {
-            "nodes": [_node("a", "Actor")],
-            "edges": [_edge("ax", "a", "missing")],
-            "metadata": {},
-        }
+    @pytest.mark.parametrize(
+        "edge", [_edge("ax", "a", "missing"), _edge("xa", "missing", "a")]
+    )
+    def test_a_dangling_edge_on_either_end_is_refused(self, edge):
+        graph = {"nodes": [_node("a", "Actor")], "edges": [edge], "metadata": {}}
         with pytest.raises(ValueError, match="dangling"):
             strip(graph)
 
@@ -103,12 +130,15 @@ class TestCli:
         assert result.returncode == 0, result.stderr
         assert "removed metadata.journal_id: 1" in result.stdout
         assert "removed SavedView: 1" in result.stdout
+        assert "dangling edges: 0" in result.stdout
         assert "(dry run)" in result.stdout
         assert seed.read_bytes() == before
 
     def test_write_strips_the_file(self, tmp_path):
         seed = tmp_path / "graph.json"
-        seed.write_text(json.dumps(_seed()), encoding="utf-8")
+        graph = _seed()
+        graph["nodes"][0]["name"] = "Ångström"
+        seed.write_text(json.dumps(graph), encoding="utf-8")
 
         result = subprocess.run(
             [sys.executable, str(SCRIPT), str(seed), "--write"],
@@ -118,9 +148,16 @@ class TestCli:
 
         assert result.returncode == 0, result.stderr
         assert "written" in result.stdout
-        written = json.loads(seed.read_text(encoding="utf-8"))
+        raw = seed.read_bytes()
+        written = json.loads(raw.decode("utf-8"))
         assert "journal_id" not in written["metadata"]
         assert {n["id"] for n in written["nodes"]} == {"a", "b"}
+        # The committed seeds are diffed and read by people: two-space
+        # indent, real UTF-8 rather than escapes or replacement characters,
+        # and a trailing newline.
+        assert raw.endswith(b"}\n")
+        assert b'\n  "nodes"' in raw
+        assert "Ångström".encode("utf-8") in raw
 
     def test_a_dangling_edge_aborts_without_writing(self, tmp_path):
         seed = tmp_path / "graph.json"
