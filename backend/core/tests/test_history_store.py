@@ -728,11 +728,12 @@ def test_a_patched_entity_keeps_the_label_a_reader_falls_back_to():
 
 
 def _node_shaped_payload(**overrides):
-    """A node payload of the shape storage emits, with a vector put back.
+    """A node payload of the shape storage emits, with a real vector put back.
 
-    Storage strips inline vectors before it builds a payload, so what it
-    really emits is 12 keys and no `embedding`; the vector is added here on
-    purpose so the strip has something to strip.
+    Storage moves inline vectors to the sidecar before it builds a payload,
+    but Node.to_dict() still emits the `embedding` key - 13 keys, the vector
+    slot holding None. A real vector is put back here on purpose so the strip
+    has something to strip rather than a key to drop.
     """
     payload = _node_with_bulk().to_dict()
     payload["embedding"] = [0.25] * 8
@@ -772,9 +773,12 @@ def _event_payload_cases():
             id="edge-shaped-no-embedding",
         ),
         pytest.param(
-            {"name": "A", "weight": 1, **large},
-            {"name": "A", "weight": 2, **large},
-            {"weight": 2},
+            {"name": "A", "weight": 1, "kind": "x", **large},
+            {"name": "A", "weight": 2, "kind": "y", **large},
+            # Two keys, so a narrowing conditioned on a multi-key patch (what
+            # every real update carries) fires on the one case where _project
+            # receives the caller's own dict.
+            {"weight": 2, "kind": "y"},
             id="large-no-embedding",
         ),
     ]
@@ -821,9 +825,14 @@ def test_subscribers_get_the_whole_event_on_a_real_update(storage, node_type):
     whatever storage actually emits, which is where the two diverged before.
     A real node update always patches at least two keys (updated_at moves
     every time), the entity type is whatever the graph holds, and the payload
-    carries nested structure - a dict-valued field and a list - so an in-place
-    change conditioned on any of those is visible here and not in a fixture
-    that happens to avoid it.
+    carries nested structure - a dict-valued field and a list.
+
+    What this can see: a reassignment onto event.entity, and anything
+    _without_excluded does in place, including to nested values. What it
+    cannot see: anything _project does in place - the real payload carries
+    the `embedding` key, so _without_excluded hands _project a fresh copy
+    here. That case is covered by the builder-level large-no-embedding
+    payload, whose patch has two keys for exactly that reason.
 
     The listener runs AFTER the history record is built, so it sees the event
     as the builder left it.
