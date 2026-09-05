@@ -164,21 +164,45 @@ snapshot path and the entity path alike. Any other backend:
 
 ## Writing a backend
 
-1. Implement the snapshot contract. Run the test suite with your backend in
-   place of the file backend — every existing behaviour must hold, since
-   `GraphStorage` will drive you exactly as it drives the file backend.
-2. Declare `SNAPSHOT_ONLY` and ship. This is a complete, correct backend.
+The contract is executable: `backend/core/tests/persistence_contract.py`
+holds `PersistenceBackendContract`, the test class every backend is held to,
+and `InMemoryGraphPersistenceBackend`, the reference implementation of the
+incremental contract. A backend is done when a subclass of the contract class
+passes against it.
+
+1. Implement the snapshot contract. Subclass `PersistenceBackendContract` in
+   a test module and provide a `factory` fixture — a zero-argument callable
+   returning a backend bound to one fresh store, such that calling it again
+   opens the *same* store. The snapshot clauses now run against you.
+2. Declare `SNAPSHOT_ONLY` and ship. This is a complete, correct backend;
+   the entity clauses skip themselves.
 3. To stop rewriting the whole graph per mutation, implement the incremental
    contract (the four entity methods, `apply_batch` and `checkpoint`),
    declare `incremental_writes`, and `transactions` if your batch is
-   atomic. `backend/core/tests/test_persistence_seam.py` shows a recording
-   in-memory backend that exercises every routing case; it doubles as a
-   reference for what each method receives.
+   atomic. The entity clauses — upsert replaces whole, deletes are
+   idempotent, a batch applies in order and lands entirely or not at all,
+   writes survive a checkpoint and a reopen, a later snapshot wins — now
+   run too.
+4. Give the contract a way to hurt you: override
+   `interrupt_next_snapshot` and `interrupt_next_append` so the crash-shape
+   clauses run (an interrupted snapshot leaves the previous graph readable;
+   an interrupted atomic batch lands nothing), and `previous_version_store`
+   if there is a store your previous release wrote. Without an override
+   those clauses skip, and a skipped clause is an unverified one.
+
+`backend/core/tests/test_persistence_contract_file.py` is the file backend
+against the contract, with every hook implemented;
+`test_persistence_contract_memory.py` runs the reference backend both as
+declared and as snapshot-only. `test_persistence_seam.py` covers the other
+half — which shape `GraphStorage` hands a backend for each mutation.
 
 The protocols are `runtime_checkable`, so `isinstance(backend,
 IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
 which contract drives you is decided by what you declare. The one type check
-it does make is for the file backend's sidecars (above).
+it does make is for the file backend's sidecars (above). The contract does
+check it: a backend declaring `incremental_writes` must satisfy the
+`IncrementalGraphPersistenceBackend` protocol, and no backend may declare
+`change_notification` until the notification seam exists.
 
 ## Current state
 

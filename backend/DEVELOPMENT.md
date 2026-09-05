@@ -113,7 +113,9 @@ write. The default file backend declares both: a mutation is one appended
 line in `graph.journal.ndjson` beside `graph.json`, folded back into it at a
 checkpoint (every 100 mutations, on flush, at shutdown). See
 `docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against
-and `docs/DATA_MANAGEMENT.md` for the journal's operational meaning.
+— executable as `backend/core/tests/persistence_contract.py`, which every
+backend's tests subclass — and `docs/DATA_MANAGEMENT.md` for the journal's
+operational meaning.
 
 See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
 
