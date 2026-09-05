@@ -3,7 +3,10 @@ Persistence backends for backend.core storage.
 
 This module defines the public storage seam used by GraphStorage for
 loading/saving graph state. The default backend remains file-backed JSON
-persistence to preserve standalone behavior.
+persistence to preserve standalone behavior: graph.json is still the graph,
+written whole and atomically; between those writes each mutation is appended
+to a journal beside it, so a mutation costs one small append rather than a
+rewrite of every node, and a crash loses nothing.
 
 The seam has two layers. Every backend implements the snapshot contract
 (`GraphPersistenceBackend`): load the whole graph, save the whole graph. A
@@ -22,9 +25,20 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Protocol, Sequence, runtime_checkable
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 
 # Cross-platform file locking
@@ -85,6 +99,7 @@ _INCREMENTAL_METHODS = (
     "upsert_edge",
     "delete_edge",
     "apply_batch",
+    "checkpoint",
 )
 
 
@@ -168,6 +183,14 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
     def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
         """Apply the operations in order, as one unit."""
 
+    def checkpoint(self) -> None:
+        """Fold any write the backend has deferred into its durable snapshot.
+
+        A backend that defers nothing implements this as a no-op. GraphStorage
+        calls it from flush() and at shutdown, so what is on disk afterwards
+        is the whole graph in its canonical form.
+        """
+
 
 def capabilities_of(backend: Any) -> BackendCapabilities:
     """The capabilities a backend declares, validated against what it implements.
@@ -199,31 +222,252 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
     return caps
 
 
+class GraphJournalError(Exception):
+    """The journal beside graph.json holds a record that cannot be applied."""
+
+
 class FileGraphPersistenceBackend:
     """Default JSON file-backed persistence backend for standalone mode.
 
-    Snapshot-only: a mutation of any size is written as the whole graph, with
-    the temp-file-plus-rename below making each write atomic.
+    graph.json is the graph, written whole and atomically (temp file plus
+    rename). A mutation does not rewrite it: it is appended, as one JSON
+    line, to ``<stem>.journal.ndjson`` beside it and applied to the in-memory
+    mirror of the file. The journal is folded back into graph.json - a
+    checkpoint - every ``checkpoint_interval`` appends, on ``checkpoint()``
+    (flush and shutdown), and on every explicit whole-graph save. Loading
+    reads graph.json and replays the journal, so a crash at any point loses
+    at most the append that was in flight, and that one is detected and
+    dropped whole: a batch is one line, so it lands entirely or not at all.
+
+    The cost per mutation is therefore one small append plus fsync instead of
+    a serialisation of every node. On a FUSE-mounted object store, where an
+    append re-uploads the file, the journal stays small because the interval
+    bounds it.
     """
 
-    def __init__(self, json_path: str | Path = "graph.json"):
+    DEFAULT_CHECKPOINT_INTERVAL = 100
+
+    def __init__(
+        self,
+        json_path: str | Path = "graph.json",
+        journal_path: Optional[str | Path] = None,
+        checkpoint_interval: int = DEFAULT_CHECKPOINT_INTERVAL,
+    ):
         self.json_path = Path(json_path)
+        self.journal_path = (
+            Path(journal_path)
+            if journal_path
+            else self.json_path.with_name(self.json_path.stem + ".journal.ndjson")
+        )
+        if checkpoint_interval < 1:
+            raise ValueError("checkpoint_interval must be at least 1")
+        self._checkpoint_interval = checkpoint_interval
+        self._lock = threading.Lock()
+        # The in-memory mirror of graph.json plus the journal. Valid only
+        # after a load or a save; an entity operation before either loads.
+        self._nodes: Dict[str, Dict[str, Any]] = {}
+        self._edges: Dict[str, Dict[str, Any]] = {}
+        self._metadata: Dict[str, Any] = {}
+        self._mirrored = False
+        # Journal lines not yet folded into graph.json.
+        self._journaled = 0
 
     def capabilities(self) -> BackendCapabilities:
-        return SNAPSHOT_ONLY
+        return BackendCapabilities(incremental_writes=True, transactions=True)
 
     def exists(self) -> bool:
         return self.json_path.exists()
 
+    # -- snapshot contract ---------------------------------------------------
+
     def load_graph_data(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._load_locked()
+
+    def save_graph_data(self, data: Dict[str, Any]) -> None:
+        with self._lock:
+            self._nodes = {n["id"]: n for n in data.get("nodes", [])}
+            self._edges = {e["id"]: e for e in data.get("edges", [])}
+            self._metadata = dict(data.get("metadata") or {})
+            self._mirrored = True
+            self._write_snapshot(data)
+            self._truncate_journal()
+
+    def default_graph_name(self) -> str:
+        return self.json_path.stem
+
+    # -- incremental contract ------------------------------------------------
+
+    def upsert_node(self, node: Dict[str, Any]) -> None:
+        self._journal([EntityOperation.upsert_node(node)])
+
+    def delete_node(self, node_id: str) -> None:
+        self._journal([EntityOperation.delete_node(node_id)])
+
+    def upsert_edge(self, edge: Dict[str, Any]) -> None:
+        self._journal([EntityOperation.upsert_edge(edge)])
+
+    def delete_edge(self, edge_id: str) -> None:
+        self._journal([EntityOperation.delete_edge(edge_id)])
+
+    def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
+        self._journal(list(operations))
+
+    def checkpoint(self) -> None:
+        with self._lock:
+            if self._journaled:
+                self._checkpoint_locked()
+
+    # -- internals -----------------------------------------------------------
+
+    def _load_locked(self) -> Dict[str, Any]:
         with open(self.json_path, "r", encoding="utf-8") as f:
             _lock_file(f, exclusive=False)
             try:
-                return json.load(f)
+                raw = f.read()
+            finally:
+                _unlock_file(f)
+        data = json.loads(raw)
+        # Parsed twice on purpose: the caller's copy is handed to Node.from_dict
+        # and Edge.from_dict, which rewrite fields in place (timestamps become
+        # datetimes), and the mirror has to stay JSON-serialisable.
+        mirror = json.loads(raw)
+        self._nodes = {n["id"]: n for n in mirror.get("nodes", [])}
+        self._edges = {e["id"]: e for e in mirror.get("edges", [])}
+        self._metadata = dict(mirror.get("metadata") or {})
+        self._mirrored = True
+        self._journaled = 0
+
+        for record in self._read_journal():
+            for op in record:
+                self._apply(op)
+            self._journaled += 1
+        if self._journaled:
+            data = {
+                "nodes": [json.loads(json.dumps(n)) for n in self._nodes.values()],
+                "edges": [json.loads(json.dumps(e)) for e in self._edges.values()],
+                "metadata": dict(self._metadata),
+            }
+        return data
+
+    def _read_journal(self) -> List[List[EntityOperation]]:
+        """The journal's records, oldest first.
+
+        A last line that is incomplete or unparsable is the append a crash
+        interrupted; it is dropped whole, which is what makes a batch atomic.
+        A damaged line anywhere else is not a crash shape but damage, and the
+        records after it may depend on it, so loading stops with an error
+        that names the line rather than silently losing mutations.
+        """
+        if not self.journal_path.exists():
+            return []
+        with open(self.journal_path, "rb") as f:
+            _lock_file(f, exclusive=False)
+            try:
+                raw = f.read()
+            finally:
+                _unlock_file(f)
+        if not raw:
+            return []
+        lines = raw.split(b"\n")
+        complete = raw.endswith(b"\n")
+        if complete:
+            lines.pop()
+        records: List[List[EntityOperation]] = []
+        last = len(lines) - 1
+        for index, line in enumerate(lines):
+            try:
+                parsed = json.loads(line)
+                ops = [EntityOperation(**op) for op in parsed["ops"]]
+            except (ValueError, KeyError, TypeError) as exc:
+                if index == last:
+                    print(
+                        f"Warning: dropping the incomplete last record of "
+                        f"{self.journal_path} (interrupted write): {exc}"
+                    )
+                    break
+                raise GraphJournalError(
+                    f"{self.journal_path} line {index + 1} cannot be applied "
+                    f"({exc}); the graph was not loaded. Repair or remove the "
+                    f"journal - graph.json holds the graph as of the last "
+                    f"checkpoint"
+                ) from exc
+            if index == last and not complete:
+                print(
+                    f"Warning: dropping the incomplete last record of "
+                    f"{self.journal_path} (interrupted write)"
+                )
+                break
+            records.append(ops)
+        return records
+
+    def _apply(self, op: EntityOperation) -> None:
+        store = self._nodes if op.kind == "node" else self._edges
+        if op.action == "upsert":
+            store[op.entity_id] = op.payload
+        else:
+            store.pop(op.entity_id, None)
+
+    def _journal(self, operations: List[EntityOperation]) -> None:
+        # Serialised before anything is written or applied, so a payload that
+        # cannot be represented fails here and touches neither disk nor mirror.
+        line = json.dumps(
+            {"ops": [asdict(op) for op in operations]}, ensure_ascii=False
+        )
+        # The mirror keeps its own copy, parsed back from the line, so a caller
+        # that later mutates the dict it passed cannot change what was stored.
+        stored = [EntityOperation(**op) for op in json.loads(line)["ops"]]
+        with self._lock:
+            if not self._mirrored:
+                self._load_locked()
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.journal_path, "a", encoding="utf-8") as f:
+                _lock_file(f, exclusive=True)
+                try:
+                    f.write(line + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    _unlock_file(f)
+            for op in stored:
+                self._apply(op)
+            self._journaled += 1
+            if self._journaled >= self._checkpoint_interval:
+                # The record is durable in the journal already; folding it into
+                # graph.json is maintenance and must not fail the mutation. A
+                # failed checkpoint is retried on the next append.
+                try:
+                    self._checkpoint_locked()
+                except Exception as exc:
+                    print(f"Warning: graph checkpoint failed, will retry: {exc}")
+
+    def _checkpoint_locked(self) -> None:
+        data = {
+            "nodes": list(self._nodes.values()),
+            "edges": list(self._edges.values()),
+            "metadata": {
+                **self._metadata,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+        self._write_snapshot(data)
+        # Snapshot first, then the journal: a crash in between replays records
+        # the snapshot already holds, and every operation is idempotent.
+        self._truncate_journal()
+
+    def _truncate_journal(self) -> None:
+        self._journaled = 0
+        if not self.journal_path.exists():
+            return
+        with open(self.journal_path, "w", encoding="utf-8") as f:
+            _lock_file(f, exclusive=True)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
             finally:
                 _unlock_file(f)
 
-    def save_graph_data(self, data: Dict[str, Any]) -> None:
+    def _write_snapshot(self, data: Dict[str, Any]) -> None:
         self.json_path.parent.mkdir(parents=True, exist_ok=True)
 
         temp_fd, temp_path = tempfile.mkstemp(
@@ -250,6 +494,3 @@ class FileGraphPersistenceBackend:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
             raise
-
-    def default_graph_name(self) -> str:
-        return self.json_path.stem

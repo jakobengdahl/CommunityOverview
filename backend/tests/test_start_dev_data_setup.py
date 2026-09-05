@@ -21,6 +21,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # What start-dev.sh checks for before deleting anything at the sidecar path.
 SIDECAR_BYTES = b"CKGEMB\x01" + b"a stand-in for a real matrix"
+JOURNAL_LINE = '{"ops": [{"kind": "node", "action": "delete", "entity_id": "x", "payload": null}]}\n'
+
 START_DEV = REPO_ROOT / "start-dev.sh"
 
 
@@ -118,6 +120,7 @@ def workspace():
         # Must carry the format's magic: the cleanup refuses to delete a file
         # that is not a sidecar, so a stand-in without it tests the wrong path.
         (root / "data" / "active" / "graph.embeddings.bin").write_bytes(SIDECAR_BYTES)
+        (root / "data" / "active" / "graph.journal.ndjson").write_text(JOURNAL_LINE)
         (root / "replacement.json").write_text(json.dumps(graph))
         yield root
 
@@ -126,12 +129,50 @@ def _sidecar(root: Path) -> Path:
     return root / "data" / "active" / "graph.embeddings.bin"
 
 
+def _journal(root: Path) -> Path:
+    return root / "data" / "active" / "graph.journal.ndjson"
+
+
 def test_an_ordinary_start_keeps_the_sidecar(data_setup_block, workspace):
     """The single most damaging mistake would be deleting it on every run."""
     _run(data_setup_block, workspace)
 
     assert _sidecar(workspace).exists()
     assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
+
+
+def test_an_ordinary_start_keeps_the_journal(data_setup_block, workspace):
+    """The journal holds mutations graph.json does not have yet. Deleting it
+    on an ordinary start would lose every edit since the last checkpoint."""
+    _run(data_setup_block, workspace)
+
+    assert _journal(workspace).read_text() == JOURNAL_LINE
+
+
+@pytest.mark.parametrize(
+    "replace",
+    [
+        lambda ws: dict(data_source=str(ws / "replacement.json")),
+        lambda ws: dict(remove_active=True),
+    ],
+    ids=["--data", "seeded-from-example"],
+)
+def test_replacing_the_graph_drops_the_journal(data_setup_block, workspace, replace):
+    """Replayed onto a different graph, the journal would resurrect nodes of
+    the old dataset and overwrite same-id nodes of the new one."""
+    kwargs = replace(workspace)
+    if kwargs.pop("remove_active", False):
+        (workspace / "data" / "active" / "graph.json").unlink()
+
+    _run(data_setup_block, workspace, **kwargs)
+
+    assert not _journal(workspace).exists()
+
+
+def test_a_missing_data_source_leaves_the_journal_alone(data_setup_block, workspace):
+    _run(data_setup_block, workspace, data_source=str(workspace / "nope.json"))
+
+    assert _journal(workspace).read_text() == JOURNAL_LINE
 
 
 def test_replacing_the_graph_drops_the_sidecar(data_setup_block, workspace):
@@ -245,10 +286,12 @@ def test_the_extraction_still_matches_the_script(data_setup_block):
     """Guards the harness itself: if the block is renamed or restructured, these
     tests must fail loudly rather than silently testing nothing."""
     assert "drop_stale_embeddings()" in data_setup_block
+    assert "drop_stale_journal()" in data_setup_block
     # One definition plus one call per replacement path: the --data copy, the
     # --data download, the profile graph, the example graph, the empty stub.
     # An exact count means removing any single call fails here.
     assert data_setup_block.count("drop_stale_embeddings") == 6
+    assert data_setup_block.count("drop_stale_journal") == 6
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")

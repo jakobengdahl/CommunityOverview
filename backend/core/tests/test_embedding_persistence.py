@@ -1075,23 +1075,25 @@ def test_a_second_save_under_a_failing_sidecar_still_keeps_the_inline_copy(
 
 def test_a_failed_graph_write_does_not_cost_the_vectors_their_only_copy(tmpdir_path):
     """The sidecar is written before the graph, never after. Going second, one
-    transient graph-write failure would skip it — and save() has already
-    stamped the snapshot marker, so every later save treats that revision as
+    transient graph-write failure would skip it — and the write has already
+    stamped the snapshot marker, so every later write treats that revision as
     already in flight and the vectors this process generated never reach disk
     at all. Nothing recovers them: they are absent from graph.json by design
-    and were never in the migration retention set."""
+    and were never in the migration retention set. On the file backend the
+    graph write a mutation makes is the entity write, so that is the one that
+    fails here."""
     storage = _make_storage(tmpdir_path)
     try:
-        original = storage._persistence_backend.save_graph_data
+        original = storage._persistence_backend.apply_batch
         failures = {"left": 1}
 
-        def flaky(data):
+        def flaky(operations):
             if failures["left"]:
                 failures["left"] -= 1
                 raise OSError("transient graph write failure")
-            return original(data)
+            return original(operations)
 
-        storage._persistence_backend.save_graph_data = flaky
+        storage._persistence_backend.apply_batch = flaky
         storage.add_nodes(_sample_nodes(), [])
         storage.flush()
 
@@ -1111,21 +1113,29 @@ def test_a_failed_graph_write_does_not_cost_the_vectors_their_only_copy(tmpdir_p
 def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
     storage, tmpdir_path
 ):
-    """save() hands the vectors to a background thread. Passing the live dict
+    """A write hands the vectors to a background thread. Passing the live dict
     lets that thread iterate it while the main thread mutates it — a
     RuntimeError swallowed as a sidecar failure, or a half-written matrix.
     The race is not reproducible on demand, so pin the property that prevents
-    it: what is handed over is not the object the store keeps mutating."""
-    # add_nodes saves twice — once for the nodes, once for the edges — and only
-    # the first carries a matrix, so keep every call rather than the last.
+    it: what is handed over is not the object the store keeps mutating.
+    Both writers are captured: the snapshot one and the entity one, which is
+    what a mutation on the file backend now goes through."""
+    # add_nodes writes twice — once for the nodes, once for the edges — and
+    # only the first carries a matrix, so keep every call rather than the last.
     captured = []
-    original = storage._do_save_to_disk
+    original_save = storage._do_save_to_disk
+    original_apply = storage._do_apply
 
-    def capture(data, node_count, edge_count, vectors=None, vector_revision=None):
+    def capture_save(data, node_count, edge_count, vectors=None, vector_revision=None):
         captured.append(vectors)
-        return original(data, node_count, edge_count, vectors, vector_revision)
+        return original_save(data, node_count, edge_count, vectors, vector_revision)
 
-    storage._do_save_to_disk = capture
+    def capture_apply(operations, vectors=None, vector_revision=None):
+        captured.append(vectors)
+        return original_apply(operations, vectors, vector_revision)
+
+    storage._do_save_to_disk = capture_save
+    storage._do_apply = capture_apply
     storage.add_nodes(_sample_nodes(), [])
     storage.flush()
 
