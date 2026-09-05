@@ -1382,12 +1382,78 @@ class TestGraphStorageConcurrency:
             assert node is not None, f"Base node {i} was lost"
             assert node.name == f"Base Node {i}", f"Base node {i} name was corrupted"
 
-        # Verify graph is still loadable
+        # Verify graph is still loadable. The writes are queued on a
+        # background thread; without a flush the reload races them and can
+        # see the file before they land.
+        temp_storage.flush()
         json_path = str(temp_storage.json_path)
         reloaded = GraphStorage(json_path=json_path)
         assert len(reloaded.nodes) >= 5, (
             "Graph is corrupted after concurrent operations"
         )
+        reloaded.shutdown_events()
+
+    def test_snapshots_land_in_capture_order(self, temp_storage):
+        """save() submits its snapshot under the same lock it captured it
+        with. Two callers racing on save() must land in the order they
+        captured, or the older image is what ends up on disk.
+
+        The interleaving is forced: the first save's lock release lets a
+        newer mutation and a second save in before the first save can go
+        on (which, submitted after the release, would put it last).
+        """
+        import threading
+
+        temp_storage.add_nodes([Node(id="n", type=NodeType.ACTOR, name="v1")], [])
+        temp_storage.flush()
+
+        real_lock = temp_storage._lock
+        released_once = threading.Event()
+        newer_write_queued = threading.Event()
+        state = {"armed": False, "depth": 0}
+
+        class HoldAfterRelease:
+            def __enter__(self):
+                real_lock.__enter__()
+                state["depth"] += 1
+
+            def __exit__(self, *exc):
+                state["depth"] -= 1
+                real_lock.__exit__(*exc)
+                if state["armed"] and state["depth"] == 0:
+                    state["armed"] = False
+                    released_once.set()
+                    assert newer_write_queued.wait(5)
+
+            def acquire(self, *args, **kwargs):
+                return real_lock.acquire(*args, **kwargs)
+
+            def release(self):
+                return real_lock.release()
+
+        temp_storage._lock = HoldAfterRelease()
+        try:
+            state["armed"] = True
+            first = {}
+            thread = threading.Thread(
+                target=lambda: first.setdefault("future", temp_storage.save())
+            )
+            thread.start()
+            assert released_once.wait(5)
+            temp_storage.update_node("n", {"name": "v2"})
+            second = temp_storage.save()
+            newer_write_queued.set()
+            thread.join(5)
+            assert not thread.is_alive()
+            first["future"].result()
+            second.result()
+        finally:
+            temp_storage._lock = real_lock
+
+        temp_storage.flush()
+        reloaded = GraphStorage(json_path=str(temp_storage.json_path))
+        assert reloaded.nodes["n"].name == "v2"
+        reloaded.shutdown_events()
 
     def test_atomic_save_prevents_corruption(self, temp_storage):
         """
