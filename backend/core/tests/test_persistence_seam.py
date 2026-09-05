@@ -55,6 +55,7 @@ class _IncrementalBackend:
         self._transactions = transactions
         self.calls = []
         self.snapshots = 0
+        self.checkpoints = 0
         self.nodes = {}
         self.edges = {}
         self.metadata = {}
@@ -111,6 +112,11 @@ class _IncrementalBackend:
         for op in operations:
             self._apply(op)
 
+    def checkpoint(self):
+        # Not a write: flush() asks for it on every call, and the assertions
+        # below are about what the mutations sent.
+        self.checkpoints += 1
+
     def _apply(self, op):
         store = self.nodes if op.kind == "node" else self.edges
         if op.action == "upsert":
@@ -146,10 +152,12 @@ class TestCapabilityDeclaration:
         assert capabilities_of(_SnapshotBackend()) is SNAPSHOT_ONLY
         assert not any(vars(SNAPSHOT_ONLY).values())
 
-    def test_the_file_backend_declares_snapshot_only(self):
+    def test_the_file_backend_declares_incremental_atomic_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             backend = FileGraphPersistenceBackend(os.path.join(tmp, "g.json"))
-            assert backend.capabilities() == SNAPSHOT_ONLY
+            assert backend.capabilities() == BackendCapabilities(
+                incremental_writes=True, transactions=True
+            )
 
     def test_declaring_incremental_without_the_operations_is_refused(self):
         class Overclaims(_SnapshotBackend):
@@ -163,7 +171,13 @@ class TestCapabilityDeclaration:
             GraphStorage(persistence_backend=Overclaims())
         message = str(exc.value)
         assert "upsert_node" not in message
-        for method in ("delete_node", "upsert_edge", "delete_edge", "apply_batch"):
+        for method in (
+            "delete_node",
+            "upsert_edge",
+            "delete_edge",
+            "apply_batch",
+            "checkpoint",
+        ):
             assert method in message
 
     def test_a_declaration_of_the_wrong_type_is_refused(self):
@@ -178,8 +192,9 @@ class TestCapabilityDeclaration:
         with tempfile.TemporaryDirectory() as tmp:
             file_backend = FileGraphPersistenceBackend(os.path.join(tmp, "g.json"))
         assert isinstance(file_backend, GraphPersistenceBackend)
-        assert not isinstance(file_backend, IncrementalGraphPersistenceBackend)
+        assert isinstance(file_backend, IncrementalGraphPersistenceBackend)
         assert isinstance(_IncrementalBackend(), IncrementalGraphPersistenceBackend)
+        assert not isinstance(_SnapshotBackend(), IncrementalGraphPersistenceBackend)
         # A pre-contract backend fails the isinstance check (no capabilities)
         # yet is still driven by GraphStorage: capabilities_of tolerates it.
         assert not isinstance(_SnapshotBackend(), GraphPersistenceBackend)
@@ -207,41 +222,39 @@ class TestSnapshotOnlyBackends:
         assert backend.calls == [("snapshot", None)]
         assert backend.written
 
-    def test_a_sidecar_keeps_a_backend_on_the_snapshot_path(self):
-        """The vector sidecar is written by the snapshot path alone. It is only
-        ever created for the file backend, so this pairing cannot arise today;
-        the guard is what keeps that true if a subclass ever declares more."""
+    def test_flush_asks_an_incremental_backend_to_checkpoint(self):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        before = backend.checkpoints
 
-        class IncrementalFile(FileGraphPersistenceBackend, _IncrementalBackend):
-            def __init__(self, path):
-                FileGraphPersistenceBackend.__init__(self, path)
-                _IncrementalBackend.__init__(self)
+        storage.flush()
 
-            def capabilities(self):
-                return BackendCapabilities(incremental_writes=True, transactions=True)
+        assert backend.checkpoints == before + 1
 
-            def exists(self):
-                return FileGraphPersistenceBackend.exists(self)
-
-            def load_graph_data(self):
-                return FileGraphPersistenceBackend.load_graph_data(self)
-
-            def save_graph_data(self, data):
-                self.calls.append(("snapshot", None))
-                FileGraphPersistenceBackend.save_graph_data(self, data)
-
+    def test_the_sidecar_travels_with_an_entity_write(self):
+        """The file backend has a vector sidecar AND writes incrementally. A
+        mutation that moved a vector lands it in the sidecar before the entity
+        write, exactly as a snapshot would - and does not rewrite graph.json."""
         with tempfile.TemporaryDirectory() as tmp:
-            backend = IncrementalFile(os.path.join(tmp, "g.json"))
-            storage = GraphStorage(persistence_backend=backend)
-            storage.flush()
-            backend.calls.clear()
-            assert storage._embedding_sidecar is not None
+            graph_path = os.path.join(tmp, "g.json")
+            storage = GraphStorage(json_path=graph_path)
+            try:
+                storage.flush()
+                written_at_bootstrap = os.stat(graph_path).st_mtime_ns
+                node = Node(
+                    id="v", type=NodeType.ACTOR, name="V", embedding=[0.5, 0.25]
+                )
 
-            storage.add_nodes([_node("a")], [])
-            storage.update_node("a", {"name": "Renamed"})
-            storage.flush()
+                storage.add_nodes([node], [])
+                # Drain the write without checkpointing: the queue, not flush().
+                storage._io_executor.submit(lambda: None).result()
 
-            assert _kinds(backend) == ["snapshot", "snapshot", "snapshot"]
+                assert storage.vectors_persisted
+                assert storage.embeddings_path.exists()
+                assert os.stat(graph_path).st_mtime_ns == written_at_bootstrap
+                assert storage._persistence_backend.journal_path.exists()
+            finally:
+                storage.flush()
 
 
 class TestIncrementalBackends:

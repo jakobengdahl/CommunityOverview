@@ -191,6 +191,13 @@ class GraphStorage:
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
         self._io_executor = ThreadPoolExecutor(max_workers=1)
+        # Set by the writer thread when an entity write failed: the backend's
+        # image then lacks a mutation memory has. Consumed on the caller's
+        # thread - by the next write, flush() or shutdown - which re-issues
+        # the whole graph. The writer never takes _lock itself: load() and
+        # save() wait on the queue while holding it, so a writer that did
+        # would deadlock the process.
+        self._resync_pending = False
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
@@ -387,8 +394,49 @@ class GraphStorage:
         self._event_dispatcher = None
         self._events_enabled = False
 
-        # Shut down I/O executor and wait for pending saves
+        # Let every queued write land, heal a failed one, fold deferred
+        # writes into the snapshot, then shut down the I/O executor and wait
+        # for everything queued before it.
+        checkpoint = None
+        try:
+            self._io_executor.submit(lambda: None).result()
+            self._heal_if_needed()
+            if self._backend_capabilities.incremental_writes:
+                checkpoint = self._io_executor.submit(
+                    self._persistence_backend.checkpoint
+                )
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
         self._io_executor.shutdown(wait=True)
+        # A write that failed after the heal above ran - or the heal itself,
+        # which re-raises the flag - has nowhere to queue a retry; write the
+        # graph on this thread instead, or it is lost.
+        if self._resync_pending:
+            self._save_now()
+        # Data is safe either way - the journal still holds the difference and
+        # is replayed on the next start - but an operator reading "clean
+        # shutdown means graph.json is complete" must be told when it is not.
+        if checkpoint is not None and checkpoint.exception() is not None:
+            print(
+                f"Warning: graph checkpoint at shutdown failed: {checkpoint.exception()}"
+            )
+
+    def _save_now(self) -> None:
+        """A whole-graph write on the calling thread, for after the executor
+        is gone. Reports rather than raises: this runs from a shutdown hook."""
+        with self._lock:
+            vectors, vector_revision = self._take_vector_snapshot()
+            data = self._snapshot_data()
+            node_count, edge_count = len(self.nodes), len(self.edges)
+            self._resync_pending = False
+        try:
+            self._do_save_to_disk(
+                data, node_count, edge_count, vectors, vector_revision
+            )
+        except Exception as exc:
+            # _do_save_to_disk has re-raised the flag; it stays raised, which
+            # is the honest state - the journal still holds what it can.
+            print(f"Warning: graph write at shutdown failed: {exc}")
 
     def _emit_event(
         self,
@@ -566,25 +614,8 @@ class GraphStorage:
         Thread-safe: Uses lock for reading in-memory data.
         """
         with self._lock:
-            # Only snapshot the vectors when they have actually moved since the
-            # last successful sidecar write; an ordinary metadata edit changes
-            # no vector and must not rewrite the matrix.
-            vector_revision = self.vector_store.revision
-            needs_write = (
-                self._embedding_sidecar is not None
-                and vector_revision != self._persisted_vector_revision
-                and vector_revision != self._snapshotted_vector_revision
-            )
-            vectors = None
-            if needs_write:
-                # No filtering here: VectorStore keeps the index uniform, so
-                # what it exports is always a matrix the sidecar accepts. An
-                # extra vote at this boundary would only re-decide the
-                # dimension, and it decided it by raw count — which favours
-                # whichever vectors are the more numerous, i.e. the stale ones.
-                vectors = self.vector_store.export_vectors()
-                self._snapshotted_vector_revision = vector_revision
-
+            vectors, vector_revision = self._take_vector_snapshot()
+            if vectors is not None:
                 # Migration is the one case where what the node payload may
                 # contain depends on whether the sidecar write has landed:
                 # those ids keep their inline copy until it has, because
@@ -619,20 +650,13 @@ class GraphStorage:
                     # retry open for the next save.
                     vectors = None
 
-            data = {
-                "nodes": self._serialize_nodes(),
-                "edges": [edge.to_dict() for edge in self.edges.values()],
-                "metadata": {
-                    **(self.graph_metadata or {}),
-                    "version": (self.graph_metadata or {}).get("version", "1.0"),
-                    "graph_name": (self.graph_metadata or {}).get(
-                        "graph_name", self._default_graph_name()
-                    ),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                },
-            }
+            data = self._snapshot_data()
             node_count = len(self.nodes)
             edge_count = len(self.edges)
+            # Cleared under the lock, with the capture: a write issued after
+            # this point is issued after the clear, so its failure cannot be
+            # erased by a snapshot that does not contain it.
+            self._resync_pending = False
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
@@ -644,6 +668,71 @@ class GraphStorage:
             vectors,
             vector_revision,
         )
+
+    def _snapshot_data(self) -> Dict[str, Any]:
+        """The whole graph as a backend snapshot. Callers must hold _lock."""
+        return {
+            "nodes": self._serialize_nodes(),
+            "edges": [edge.to_dict() for edge in self.edges.values()],
+            "metadata": {
+                **(self.graph_metadata or {}),
+                "version": (self.graph_metadata or {}).get("version", "1.0"),
+                "graph_name": (self.graph_metadata or {}).get(
+                    "graph_name", self._default_graph_name()
+                ),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+
+    def _take_vector_snapshot(self) -> Tuple[Optional[Dict[str, Any]], int]:
+        """The vectors the write being issued must carry to the sidecar, if any.
+
+        Callers must hold _lock. Only when they have actually moved since the
+        last successful sidecar write, and are not already in flight: an
+        ordinary metadata edit changes no vector and must not rewrite the
+        matrix. Returns (vectors or None, the revision they are).
+        """
+        vector_revision = self.vector_store.revision
+        needs_write = (
+            self._embedding_sidecar is not None
+            and vector_revision != self._persisted_vector_revision
+            and vector_revision != self._snapshotted_vector_revision
+        )
+        if not needs_write:
+            return None, vector_revision
+        # No filtering here: VectorStore keeps the index uniform, so what it
+        # exports is always a matrix the sidecar accepts. An extra vote at
+        # this boundary would only re-decide the dimension, and it decided it
+        # by raw count — which favours whichever vectors are the more
+        # numerous, i.e. the stale ones.
+        vectors = self.vector_store.export_vectors()
+        self._snapshotted_vector_revision = vector_revision
+        return vectors, vector_revision
+
+    def _migration_pending(self) -> bool:
+        """Whether graph.json is still the only durable home of some vector.
+
+        Callers must hold _lock. True while a vector read out of a pre-split
+        graph file is in the index but not yet in the sidecar. Ids whose
+        vector the index refused are in the fallback map too, and stay there;
+        they are not a pending migration, or every write would be one.
+        """
+        if self._embedding_sidecar is None or not self._inline_fallback:
+            return False
+        # Gated on the sidecar actually needing a write, exactly as save() is.
+        # Once a sidecar write lands it pops the ids it carried from the
+        # fallback map, so after that the intersection below is empty on its
+        # own; the gate matters in the window BEFORE it lands - a write
+        # already queued behind this one, its vectors snapshotted but not yet
+        # written - where the map still holds those ids and, without the
+        # gate, every mutation issued meanwhile would be a whole-graph write.
+        revision = self.vector_store.revision
+        if revision in (
+            self._persisted_vector_revision,
+            self._snapshotted_vector_revision,
+        ):
+            return False
+        return bool(self._inline_fallback.keys() & self.vector_store.embeddings.keys())
 
     def _serialize_node(self, node: "Node") -> Dict[str, Any]:
         """Serialize one node for persistence, routing its vector to the sidecar.
@@ -853,15 +942,23 @@ class GraphStorage:
             )
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
+            # The backend's image may now lack what memory has, exactly as
+            # after a failed entity write: the next write is the whole graph
+            # again, until one lands. Before the entity path existed every
+            # write was, so this is the same "next successful write carries
+            # everything" as before.
+            self._resync_pending = True
             raise
 
     def _persist(self, operations: List[EntityOperation]) -> "Future[None]":
         """Persist a mutation, as entity operations where the backend takes them.
 
         Callers must hold _lock and pass the operations that describe exactly
-        what they changed. Which shape reaches the backend is decided by its
-        declared capabilities - and by the one type-bound fact below, whether
-        it has a vector sidecar:
+        what they changed. After a failed entity write the next write here is
+        the whole graph, whatever its own shape would have been, so the
+        backend's image catches up with memory (see _do_apply). Otherwise
+        which shape reaches the backend is decided by its declared
+        capabilities:
 
         - no incremental support: the whole graph, exactly as before the
           entity contract existed;
@@ -870,30 +967,49 @@ class GraphStorage:
         - several operations and no transactions: the whole graph, since the
           snapshot write is atomic and a loop of single operations is not.
 
-        The vector sidecar is written by the snapshot path only. It exists for
-        the file backend alone, which is snapshot-only, so an incremental
-        backend never has one today; should a backend ever pair the two, the
-        snapshot path is the one that knows how to write it.
+        The vector sidecar, where there is one, travels with either shape:
+        the write carries whatever vectors moved since the last sidecar
+        write, and lands them first. The one exception is a pending
+        migration - vectors read out of a pre-split graph.json that the
+        sidecar does not hold yet - which only the snapshot path knows how to
+        complete, so a write during one is a snapshot.
 
         Same single-worker executor as save(), so entity writes and snapshots
         land in the order they were issued and flush() drains both.
         """
         caps = self._backend_capabilities
-        if not caps.incremental_writes or self._embedding_sidecar is not None:
+        if (
+            not caps.incremental_writes
+            or self._resync_pending
+            or self._migration_pending()
+        ):
             return self.save()
         if not operations:
             return self._io_executor.submit(lambda: None)
         if len(operations) > 1 and not caps.transactions:
             return self.save()
-        return self._io_executor.submit(self._do_apply, tuple(operations))
+        vectors, vector_revision = self._take_vector_snapshot()
+        return self._io_executor.submit(
+            self._do_apply, tuple(operations), vectors, vector_revision
+        )
 
-    def _do_apply(self, operations: Tuple[EntityOperation, ...]) -> None:
+    def _do_apply(
+        self,
+        operations: Tuple[EntityOperation, ...],
+        vectors: Optional[Dict[str, Any]] = None,
+        vector_revision: Optional[int] = None,
+    ) -> None:
         """Hand entity operations to the backend, on the executor thread.
 
         A single operation goes to its own method; more than one go to
         apply_batch, which the backend has declared atomic. Exceptions are
         re-raised, as in _do_save_to_disk, so the Future carries them.
         """
+        if vectors is not None:
+            # Written first, as in _do_save_to_disk: an orphaned vector is
+            # harmless, a node whose vector never landed is a silent gap.
+            self._persist_vectors(vectors, vector_revision)
+
         backend = self._persistence_backend
         try:
             if len(operations) > 1:
@@ -910,20 +1026,50 @@ class GraphStorage:
                 backend.delete_edge(op.entity_id)
         except Exception as e:
             print(f"Error applying {len(operations)} entity operation(s): {e}")
+            # The mutation is in memory and nowhere else now, and the backend's
+            # own image lacks it - a later checkpoint would write that image
+            # and truncate the journal, and the mutation would be gone at the
+            # next start. Flag it; the caller's thread re-issues the whole
+            # graph, the way every failed write was healed before the entity
+            # path existed. Nothing else happens here, so the Future carries
+            # this exception and this thread never touches _lock.
+            self._resync_pending = True
             raise
 
     def flush(self) -> None:
         """
-        Wait for any pending background save operations to complete.
+        Wait for any pending background write to complete, and have the
+        backend fold whatever it has deferred into its canonical snapshot.
 
-        Useful in tests and in code that reloads from disk immediately
-        after mutating the graph.
+        Useful in tests and in code that reads the graph file directly, or
+        reloads from disk, immediately after mutating the graph.
 
-        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
-        submitted here will only run after all previously submitted saves.
+        Correctness relies on max_workers=1 (FIFO task ordering): the
+        checkpoint and the no-op sentinel run only after every previously
+        submitted write. A checkpoint that fails surfaces here.
         """
+        # Drain first, so a failed entity write already queued has had its
+        # say; then heal it, so the checkpoint folds a complete image. A heal
+        # that fails surfaces here, like a failed checkpoint.
+        self._io_executor.submit(lambda: None).result()
+        heal = self._heal_if_needed()
+        if heal is not None:
+            heal.result()
+        if self._backend_capabilities.incremental_writes:
+            self._io_executor.submit(self._persistence_backend.checkpoint).result()
         # Submit a no-op sentinel and block until it runs — drains the queue.
         self._io_executor.submit(lambda: None).result()
+
+    def _heal_if_needed(self) -> "Optional[Future[None]]":
+        """Re-issue the whole graph after a failed entity write, if one failed.
+
+        Runs on the caller's thread. save() clears the flag; the write it
+        queues carries every mutation in memory, including the failed one.
+        """
+        with self._lock:
+            if not self._resync_pending:
+                return None
+            return self.save()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""

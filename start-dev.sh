@@ -185,6 +185,19 @@ drop_stale_embeddings() {
     echo -e "Removed stale embedding sidecar: ${BLUE}$ACTIVE_DATA_EMBEDDINGS${NC}"
 }
 
+# The journal beside graph.json holds mutations not yet folded into it, and is
+# replayed onto the graph at startup. Replayed onto a DIFFERENT graph it would
+# resurrect nodes of the old dataset, or overwrite same-id nodes of the new one
+# with stale payloads - so it goes whenever the graph beneath it is replaced.
+# Same rule as the sidecar: only after the replacement is in place.
+drop_stale_journal() {
+    local journal="${ACTIVE_DATA%.*}.journal.ndjson"
+    if [ -f "$journal" ]; then
+        rm -f "$journal"
+        echo -e "Removed stale graph journal: ${BLUE}$journal${NC}"
+    fi
+}
+
 if [ -n "$DATA_SOURCE" ]; then
     # Data source specified - load from path or URL
     if [[ "$DATA_SOURCE" =~ ^https?:// ]]; then
@@ -212,6 +225,7 @@ if [ -n "$DATA_SOURCE" ]; then
         fi
         echo -e "${GREEN}Graph data downloaded to $ACTIVE_DATA${NC}"
         drop_stale_embeddings
+        drop_stale_journal
     else
         # Resolve relative paths
         if [[ ! "$DATA_SOURCE" = /* ]]; then
@@ -225,6 +239,7 @@ if [ -n "$DATA_SOURCE" ]; then
         cp "$DATA_SOURCE" "$ACTIVE_DATA"
         echo -e "${GREEN}Graph data copied to $ACTIVE_DATA${NC}"
         drop_stale_embeddings
+        drop_stale_journal
     fi
 elif [ ! -f "$ACTIVE_DATA" ]; then
     # No active data and no source specified - try profile graph.json, then default example
@@ -234,15 +249,18 @@ elif [ ! -f "$ACTIVE_DATA" ]; then
         cp "$PROFILE_GRAPH" "$ACTIVE_DATA"
         echo -e "${GREEN}Profile graph data loaded.${NC}"
         drop_stale_embeddings
+        drop_stale_journal
     elif [ -f "$DEFAULT_EXAMPLE" ]; then
         echo -e "No active graph data found. Copying default example data..."
         cp "$DEFAULT_EXAMPLE" "$ACTIVE_DATA"
         echo -e "${GREEN}Default example data loaded.${NC}"
         drop_stale_embeddings
+        drop_stale_journal
     else
         echo -e "${YELLOW}No example data found. Starting with empty graph.${NC}"
         echo '{"nodes": [], "edges": [], "metadata": {"version": "1.0"}}' > "$ACTIVE_DATA"
         drop_stale_embeddings
+        drop_stale_journal
     fi
 else
     echo -e "${GREEN}Using existing active graph data.${NC}"

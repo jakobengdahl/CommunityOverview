@@ -1075,23 +1075,25 @@ def test_a_second_save_under_a_failing_sidecar_still_keeps_the_inline_copy(
 
 def test_a_failed_graph_write_does_not_cost_the_vectors_their_only_copy(tmpdir_path):
     """The sidecar is written before the graph, never after. Going second, one
-    transient graph-write failure would skip it — and save() has already
-    stamped the snapshot marker, so every later save treats that revision as
+    transient graph-write failure would skip it — and the write has already
+    stamped the snapshot marker, so every later write treats that revision as
     already in flight and the vectors this process generated never reach disk
     at all. Nothing recovers them: they are absent from graph.json by design
-    and were never in the migration retention set."""
+    and were never in the migration retention set. On the file backend the
+    graph write a mutation makes is the entity write, so that is the one that
+    fails here."""
     storage = _make_storage(tmpdir_path)
     try:
-        original = storage._persistence_backend.save_graph_data
+        original = storage._persistence_backend.apply_batch
         failures = {"left": 1}
 
-        def flaky(data):
+        def flaky(operations):
             if failures["left"]:
                 failures["left"] -= 1
                 raise OSError("transient graph write failure")
-            return original(data)
+            return original(operations)
 
-        storage._persistence_backend.save_graph_data = flaky
+        storage._persistence_backend.apply_batch = flaky
         storage.add_nodes(_sample_nodes(), [])
         storage.flush()
 
@@ -1111,21 +1113,29 @@ def test_a_failed_graph_write_does_not_cost_the_vectors_their_only_copy(tmpdir_p
 def test_the_matrix_handed_to_the_writer_is_a_snapshot_not_the_live_index(
     storage, tmpdir_path
 ):
-    """save() hands the vectors to a background thread. Passing the live dict
+    """A write hands the vectors to a background thread. Passing the live dict
     lets that thread iterate it while the main thread mutates it — a
     RuntimeError swallowed as a sidecar failure, or a half-written matrix.
     The race is not reproducible on demand, so pin the property that prevents
-    it: what is handed over is not the object the store keeps mutating."""
-    # add_nodes saves twice — once for the nodes, once for the edges — and only
-    # the first carries a matrix, so keep every call rather than the last.
+    it: what is handed over is not the object the store keeps mutating.
+    Both writers are captured: the snapshot one and the entity one, which is
+    what a mutation on the file backend now goes through."""
+    # add_nodes writes twice — once for the nodes, once for the edges — and
+    # only the first carries a matrix, so keep every call rather than the last.
     captured = []
-    original = storage._do_save_to_disk
+    original_save = storage._do_save_to_disk
+    original_apply = storage._do_apply
 
-    def capture(data, node_count, edge_count, vectors=None, vector_revision=None):
+    def capture_save(data, node_count, edge_count, vectors=None, vector_revision=None):
         captured.append(vectors)
-        return original(data, node_count, edge_count, vectors, vector_revision)
+        return original_save(data, node_count, edge_count, vectors, vector_revision)
 
-    storage._do_save_to_disk = capture
+    def capture_apply(operations, vectors=None, vector_revision=None):
+        captured.append(vectors)
+        return original_apply(operations, vectors, vector_revision)
+
+    storage._do_save_to_disk = capture_save
+    storage._do_apply = capture_apply
     storage.add_nodes(_sample_nodes(), [])
     storage.flush()
 
@@ -1213,6 +1223,58 @@ def test_a_migrating_save_writes_the_sidecar_off_the_caller_thread(tmpdir_path):
             "the migrating write ran on the caller's thread, outside the queue "
             "that orders it against saves already in flight"
         )
+    finally:
+        storage.flush()
+
+
+def test_a_refused_vector_in_the_fallback_does_not_force_whole_graph_writes(
+    tmpdir_path,
+):
+    """Same fixture as the test below: a fallback entry the index refused is
+    not a pending migration. Treating it as one would send every mutation for
+    the life of the process down the snapshot path - a rewrite of graph.json
+    each time - instead of one journal line."""
+    graph = {
+        "nodes": [
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": f"N{i}",
+                "embedding": [0.5] * (DIM * 2),
+            }
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": np.ones(DIM, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert storage._inline_fallback
+        # One explicit whole-graph save settles whatever the load left to
+        # write; from here on nothing is pending, and nothing may pretend to be.
+        storage.save().result()
+        storage.flush()
+        before = os.stat(graph_path).st_mtime_ns
+
+        # A metadata edit moves no vector. (A text edit would re-embed n2 and
+        # that one write IS a migration for n2 - its refused copy leaves
+        # graph.json - which is one snapshot, not one per write.)
+        storage.update_node("n2", {"metadata": {"reviewed": True}})
+        # A new node moves a vector, but touches no fallback id: still not a
+        # migration, and it must not be judged one for the map being non-empty.
+        storage.add_nodes([Node(id="n4", type=NodeType.ACTOR, name="Brand new")], [])
+        storage._io_executor.submit(lambda: None).result()
+
+        assert os.stat(graph_path).st_mtime_ns == before
+        journal = storage._persistence_backend.journal_path
+        assert len(journal.read_text().splitlines()) == 2
     finally:
         storage.flush()
 
