@@ -968,9 +968,12 @@ class TestJournalIdentity:
         other.save_graph_data(_snapshot("x"))
         (tmp / "g.json").write_bytes((tmp / "other.json").read_bytes())
 
+        before = backend.journal_path.read_bytes()
         with pytest.raises(GraphJournalError, match="different graph.json"):
             FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
-        assert _lines(backend.journal_path), "the journal is left for the operator"
+        assert backend.journal_path.read_bytes() == before, (
+            "the journal is left for the operator, byte for byte"
+        )
 
     def test_the_refusal_names_both_ids_and_the_line(self, tmp, backend):
         backend.upsert_node(_payload("c"))
@@ -1029,8 +1032,66 @@ class TestJournalIdentity:
             + "\n",
             encoding="utf-8",
         )
+        with pytest.raises(GraphJournalError, match="journal id none") as excinfo:
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        # The one shape that is not a swap: the stamping checkpoint interrupted
+        # after the snapshot and before the truncate. The message covers it.
+        assert "interrupted before it emptied the journal" in str(excinfo.value)
+
+    def test_a_null_id_record_beside_a_stamped_graph_is_refused(self, backend):
+        backend.journal_path.write_text(
+            json.dumps(
+                {
+                    "journal_id": None,
+                    "ops": [asdict_op(EntityOperation.upsert_node(_payload("c")))],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         with pytest.raises(GraphJournalError, match="journal id none"):
             FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+
+    def test_the_interrupted_stamp_checkpoint_shape_loses_nothing(
+        self, tmp, monkeypatch
+    ):
+        """Crash between the stamping snapshot and the truncate: the file is
+        stamped and holds the legacy records; the journal still has them
+        without an id. Load refuses, and following the message (delete the
+        journal) gives the complete graph."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        monkeypatch.setattr(
+            backend,
+            "_truncate_journal",
+            lambda: (_ for _ in ()).throw(OSError("crash")),
+        )
+        with pytest.raises(OSError, match="crash"):
+            backend.upsert_node(_payload("c"))
+
+        with pytest.raises(GraphJournalError, match="loses nothing"):
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        (tmp / "g.journal.ndjson").unlink()
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+        }
+
+    def test_the_cadence_checkpoint_keeps_the_id(self, tmp):
+        backend = FileGraphPersistenceBackend(tmp / "g.json", checkpoint_interval=2)
+        backend.save_graph_data(_snapshot("a"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        backend.upsert_node(_payload("b"))
+        backend.upsert_node(_payload("c"))
+        assert _lines(tmp / "g.journal.ndjson") == [], "the cadence checkpoint ran"
+        assert _graph_metadata(tmp / "g.json")["journal_id"] == stamp
+        backend.upsert_node(_payload("d"))
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == stamp
 
     def test_the_first_append_on_an_unstamped_graph_stamps_it_first(self, tmp):
         (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")

@@ -237,7 +237,12 @@ What this means in practice:
   where the file has one, is **refused at startup** with a message naming
   both ids; the graph is not loaded, and nothing is deleted. If you replaced
   `graph.json` on purpose, delete the journal (its mutations belong to the old
-  graph); if not, put back the `graph.json` it belongs to. `start-dev.sh`
+  graph); if not, put back the `graph.json` it belongs to. One more shape
+  reads the same way: a journal whose lines carry *no* id beside a stamped
+  file, where nobody replaced anything, is the checkpoint that stamped the
+  file interrupted before it emptied the journal — its records are already
+  in `graph.json`, and deleting the journal loses nothing; the message says
+  so. `start-dev.sh`
   still deletes the journal whenever it puts a different graph in place, for
   the same reasons and at the same points as the embedding sidecar, and doing
   the same when replacing `graph.json` by hand saves a refused start.

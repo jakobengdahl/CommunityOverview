@@ -442,14 +442,27 @@ class FileGraphPersistenceBackend:
                 )
                 break
             if record_id != snapshot_id:
+                remedy = (
+                    "If graph.json was replaced deliberately, delete the "
+                    "journal - its mutations belong to the graph it was written "
+                    "against. Otherwise put back the graph.json the journal "
+                    "belongs to"
+                )
+                if record_id is None:
+                    # The stamp is written by a checkpoint that folds the
+                    # pre-stamp records in first; a crash between that
+                    # snapshot and the truncate leaves exactly this shape.
+                    remedy += (
+                        ". If nobody replaced graph.json, this is the "
+                        "checkpoint that stamped the file, interrupted before "
+                        "it emptied the journal: the records are already in "
+                        "graph.json, and deleting the journal loses nothing"
+                    )
                 raise GraphJournalError(
                     f"{self.journal_path} line {index + 1} was written against "
                     f"a different graph.json (journal id {record_id or 'none'}, "
                     f"{self.json_path} id {snapshot_id or 'none'}); the graph "
-                    f"was not loaded. If graph.json was replaced deliberately, "
-                    f"delete the journal - its mutations belong to the graph it "
-                    f"was written against. Otherwise put back the graph.json "
-                    f"the journal belongs to"
+                    f"was not loaded. {remedy}"
                 )
             records.append(ops)
             kept += len(line) + 1
