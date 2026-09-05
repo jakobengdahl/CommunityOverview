@@ -637,3 +637,102 @@ class TestRecoveryAfterFailure:
             assert backend.journal_path.read_bytes() == b""
         finally:
             storage.flush()
+
+
+class TestHealingWithoutDeadlock:
+    def _failing_once(self, storage):
+        backend = storage._persistence_backend
+        real = backend.upsert_node
+        failures = {"left": 1}
+
+        def flaky(node):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise OSError("transient append failure")
+            return real(node)
+
+        backend.upsert_node = flaky
+
+    def test_the_failed_write_keeps_its_own_exception(self, tmp):
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+            self._failing_once(storage)
+            with storage._lock:
+                future = storage._persist(
+                    [
+                        EntityOperation.upsert_node(
+                            storage._serialize_node(storage.nodes["a"])
+                        )
+                    ]
+                )
+            with pytest.raises(OSError, match="transient append failure"):
+                future.result()
+        finally:
+            storage.flush()
+
+    def test_reload_after_a_failed_write_does_not_hang(self, tmp):
+        """load() waits on the writer while holding the lock. A heal that
+        took the lock on the writer would deadlock the whole process."""
+        import threading
+
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        storage.flush()
+        self._failing_once(storage)
+        storage.update_node("a", {"name": "Renamed"})
+
+        done = threading.Event()
+
+        def run():
+            storage.reload()
+            done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        assert done.wait(timeout=20), "reload() deadlocked after a failed entity write"
+        storage.flush()
+
+    def test_shutdown_heals_a_write_that_failed_after_the_last_flush(self, tmp):
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        storage.flush()
+        self._failing_once(storage)
+        storage.update_node("a", {"name": "Renamed"})
+
+        storage.shutdown_events()
+
+        data = json.loads(Path(path).read_text())
+        assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+
+    def test_a_short_append_in_a_live_process_leaves_no_bytes_behind(
+        self, backend, monkeypatch
+    ):
+        """The tail cut at load does not help the process that suffered the
+        short write: it never loads. The append itself must restore the
+        length, or the next append lands on the same line and, at the next
+        start, that line is damage rather than a crash tail."""
+        import backend.core.storage_backends as sb
+
+        real_fsync = os.fsync
+
+        def fail_once(fd):
+            monkeypatch.setattr(sb.os, "fsync", real_fsync)
+            raise OSError("fsync failed")
+
+        monkeypatch.setattr(sb.os, "fsync", fail_once)
+        before = (
+            backend.journal_path.stat().st_size if backend.journal_path.exists() else 0
+        )
+        with pytest.raises(OSError, match="fsync failed"):
+            backend.upsert_node(_payload("c"))
+
+        assert (
+            backend.journal_path.stat().st_size if backend.journal_path.exists() else 0
+        ) == before
+        backend.upsert_node(_payload("d"))
+        backend.upsert_node(_payload("e"))
+
+        data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        assert _ids(data) == {"a", "b", "d", "e"}

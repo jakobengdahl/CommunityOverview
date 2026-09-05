@@ -438,12 +438,19 @@ class FileGraphPersistenceBackend:
             if not self._mirrored:
                 self._load_locked()
             self.journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.journal_path, "a", encoding="utf-8") as f:
+            # Unbuffered, so a failed write leaves nothing queued to flush at
+            # close; and the length is restored on failure, so a short write
+            # leaves no bytes for the next append to be glued onto.
+            with open(self.journal_path, "ab", buffering=0) as f:
                 _lock_file(f, exclusive=True)
                 try:
-                    f.write(line + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
+                    start = os.fstat(f.fileno()).st_size
+                    try:
+                        f.write((line + "\n").encode("utf-8"))
+                        os.fsync(f.fileno())
+                    except Exception:
+                        os.ftruncate(f.fileno(), start)
+                        raise
                 finally:
                     _unlock_file(f)
             for op in stored:

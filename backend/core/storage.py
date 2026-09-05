@@ -191,6 +191,13 @@ class GraphStorage:
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
         self._io_executor = ThreadPoolExecutor(max_workers=1)
+        # Set by the writer thread when an entity write failed: the backend's
+        # image then lacks a mutation memory has. Consumed on the caller's
+        # thread - by the next write, flush() or shutdown - which re-issues
+        # the whole graph. The writer never takes _lock itself: load() and
+        # save() wait on the queue while holding it, so a writer that did
+        # would deadlock the process.
+        self._resync_pending = False
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
@@ -387,17 +394,24 @@ class GraphStorage:
         self._event_dispatcher = None
         self._events_enabled = False
 
-        # Fold deferred writes into the snapshot, then shut down the I/O
-        # executor and wait for everything queued before it.
+        # Let every queued write land, heal a failed one, fold deferred
+        # writes into the snapshot, then shut down the I/O executor and wait
+        # for everything queued before it.
         checkpoint = None
-        if self._backend_capabilities.incremental_writes:
-            try:
+        try:
+            self._io_executor.submit(lambda: None).result()
+            self._heal_if_needed()
+            if self._backend_capabilities.incremental_writes:
                 checkpoint = self._io_executor.submit(
                     self._persistence_backend.checkpoint
                 )
-            except RuntimeError:
-                pass  # already shut down: nothing can be queued, nothing is pending
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
         self._io_executor.shutdown(wait=True)
+        # A write that failed after the heal above ran has nowhere to queue a
+        # retry; write the graph on this thread instead, or it is lost.
+        if self._resync_pending:
+            self._save_now()
         # Data is safe either way - the journal still holds the difference and
         # is replayed on the next start - but an operator reading "clean
         # shutdown means graph.json is complete" must be told when it is not.
@@ -405,6 +419,21 @@ class GraphStorage:
             print(
                 f"Warning: graph checkpoint at shutdown failed: {checkpoint.exception()}"
             )
+
+    def _save_now(self) -> None:
+        """A whole-graph write on the calling thread, for after the executor
+        is gone. Reports rather than raises: this runs from a shutdown hook."""
+        with self._lock:
+            vectors, vector_revision = self._take_vector_snapshot()
+            data = self._snapshot_data()
+            node_count, edge_count = len(self.nodes), len(self.edges)
+            self._resync_pending = False
+        try:
+            self._do_save_to_disk(
+                data, node_count, edge_count, vectors, vector_revision
+            )
+        except Exception as exc:
+            print(f"Warning: graph write at shutdown failed: {exc}")
 
     def _emit_event(
         self,
@@ -618,23 +647,13 @@ class GraphStorage:
                     # retry open for the next save.
                     vectors = None
 
-            data = {
-                "nodes": self._serialize_nodes(),
-                "edges": [edge.to_dict() for edge in self.edges.values()],
-                "metadata": {
-                    **(self.graph_metadata or {}),
-                    "version": (self.graph_metadata or {}).get("version", "1.0"),
-                    "graph_name": (self.graph_metadata or {}).get(
-                        "graph_name", self._default_graph_name()
-                    ),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                },
-            }
+            data = self._snapshot_data()
             node_count = len(self.nodes)
             edge_count = len(self.edges)
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
+        self._resync_pending = False
         return self._io_executor.submit(
             self._do_save_to_disk,
             data,
@@ -643,6 +662,21 @@ class GraphStorage:
             vectors,
             vector_revision,
         )
+
+    def _snapshot_data(self) -> Dict[str, Any]:
+        """The whole graph as a backend snapshot. Callers must hold _lock."""
+        return {
+            "nodes": self._serialize_nodes(),
+            "edges": [edge.to_dict() for edge in self.edges.values()],
+            "metadata": {
+                **(self.graph_metadata or {}),
+                "version": (self.graph_metadata or {}).get("version", "1.0"),
+                "graph_name": (self.graph_metadata or {}).get(
+                    "graph_name", self._default_graph_name()
+                ),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            },
+        }
 
     def _take_vector_snapshot(self) -> Tuple[Optional[Dict[str, Any]], int]:
         """The vectors the write being issued must carry to the sidecar, if any.
@@ -908,9 +942,11 @@ class GraphStorage:
         """Persist a mutation, as entity operations where the backend takes them.
 
         Callers must hold _lock and pass the operations that describe exactly
-        what they changed. A failed entity write is followed by a whole-graph
-        write of the same state (see _do_apply). Which shape reaches the
-        backend is decided by its declared capabilities:
+        what they changed. After a failed entity write the next write here is
+        the whole graph, whatever its own shape would have been, so the
+        backend's image catches up with memory (see _do_apply). Otherwise
+        which shape reaches the backend is decided by its declared
+        capabilities:
 
         - no incremental support: the whole graph, exactly as before the
           entity contract existed;
@@ -930,7 +966,11 @@ class GraphStorage:
         land in the order they were issued and flush() drains both.
         """
         caps = self._backend_capabilities
-        if not caps.incremental_writes or self._migration_pending():
+        if (
+            not caps.incremental_writes
+            or self._resync_pending
+            or self._migration_pending()
+        ):
             return self.save()
         if not operations:
             return self._io_executor.submit(lambda: None)
@@ -975,13 +1015,13 @@ class GraphStorage:
         except Exception as e:
             print(f"Error applying {len(operations)} entity operation(s): {e}")
             # The mutation is in memory and nowhere else now, and the backend's
-            # own image no longer has it - a later checkpoint would write that
-            # image and truncate the journal, and the mutation would be gone
-            # at the next start. Re-issue it the way every failed write was
-            # healed before the entity path existed: as the whole graph,
-            # which resyncs the backend's image. Queued behind this write on
-            # the same worker; if it fails too, its own Future says so.
-            self.save()
+            # own image lacks it - a later checkpoint would write that image
+            # and truncate the journal, and the mutation would be gone at the
+            # next start. Flag it; the caller's thread re-issues the whole
+            # graph, the way every failed write was healed before the entity
+            # path existed. Nothing else happens here, so the Future carries
+            # this exception and this thread never touches _lock.
+            self._resync_pending = True
             raise
 
     def flush(self) -> None:
@@ -996,10 +1036,25 @@ class GraphStorage:
         checkpoint and the no-op sentinel run only after every previously
         submitted write. A checkpoint that fails surfaces here.
         """
+        # Drain first, so a failed entity write already queued has had its
+        # say; then heal it, so the checkpoint folds a complete image.
+        self._io_executor.submit(lambda: None).result()
+        self._heal_if_needed()
         if self._backend_capabilities.incremental_writes:
             self._io_executor.submit(self._persistence_backend.checkpoint).result()
         # Submit a no-op sentinel and block until it runs — drains the queue.
         self._io_executor.submit(lambda: None).result()
+
+    def _heal_if_needed(self) -> "Optional[Future[None]]":
+        """Re-issue the whole graph after a failed entity write, if one failed.
+
+        Runs on the caller's thread. save() clears the flag; the write it
+        queues carries every mutation in memory, including the failed one.
+        """
+        with self._lock:
+            if not self._resync_pending:
+                return None
+            return self.save()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""

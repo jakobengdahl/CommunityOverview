@@ -136,11 +136,11 @@ All writes — snapshots and entity operations alike — go through the same
 single-worker background thread, so they land in the order they were issued;
 `flush()` drains both kinds and then asks the backend to `checkpoint()`. A
 write that raises puts the exception on its `Future`, as a failing snapshot
-always has; the in-memory graph is not rolled back. A failed *entity* write is
-then re-issued as a whole-graph `save_graph_data` of the current in-memory
-graph, queued right behind it, so a transient failure heals the way it always
-did — the next successful write carries everything — rather than leaving the
-mutation only in memory.
+always has; the in-memory graph is not rolled back. After a failed *entity*
+write the next write — the next mutation, `flush()` or shutdown, whichever
+comes first — is a whole-graph `save_graph_data` of the in-memory graph, so a
+transient failure heals the way it always did: the next successful write
+carries everything, rather than leaving the mutation only in memory.
 
 What still goes through the snapshot path on every backend: the bootstrap
 write of an empty graph (also what `reload()` of a missing store does),
