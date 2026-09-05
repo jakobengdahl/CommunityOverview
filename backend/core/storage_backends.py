@@ -312,10 +312,11 @@ class FileGraphPersistenceBackend:
             snapshot = {**data, "metadata": metadata}
             self._nodes = {n["id"]: n for n in data.get("nodes", [])}
             self._edges = {e["id"]: e for e in data.get("edges", [])}
-            self._metadata = metadata
             self._mirrored = True
             self._write_snapshot(snapshot)
             self._truncate_journal()
+            # The id enters the mirror last - see _checkpoint_locked for why.
+            self._metadata = metadata
 
     def default_graph_name(self) -> str:
         return self.json_path.stem
@@ -450,8 +451,12 @@ class FileGraphPersistenceBackend:
                 )
                 if record_id is None:
                     # The stamp is written by a checkpoint that folds the
-                    # pre-stamp records in first; a crash between that
-                    # snapshot and the truncate leaves exactly this shape.
+                    # pre-stamp records in first, and the backend only starts
+                    # writing stamped records once that checkpoint has also
+                    # emptied the journal; so a crash between its snapshot and
+                    # its truncate leaves exactly this shape, and nothing else
+                    # the backend does leaves a pre-stamp record beside a
+                    # stamped file.
                     remedy += (
                         ". If nobody replaced graph.json, this is the "
                         "checkpoint that stamped the file, interrupted before "
@@ -559,12 +564,16 @@ class FileGraphPersistenceBackend:
             },
         }
         self._write_snapshot(data)
-        # Only now is the id on disk; taken into the mirror earlier, a failed
-        # snapshot would leave the next record naming an id the file lacks.
-        self._metadata = metadata
         # Snapshot first, then the journal: a crash in between replays records
         # the snapshot already holds, and every operation is idempotent.
         self._truncate_journal()
+        # The id enters the mirror only once both have landed. Taken earlier,
+        # a failed snapshot would leave the next record naming an id the file
+        # lacks, and a failed truncate would leave that record behind the
+        # pre-stamp ones - a journal no reading can make sense of. Failing
+        # here fails the append that asked for the stamp; the next one asks
+        # again.
+        self._metadata = metadata
 
     def _truncate_journal(self) -> None:
         self._journaled = 0

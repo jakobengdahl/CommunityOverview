@@ -234,8 +234,9 @@ What this means in practice:
   `graph.json` carries a `journal_id` in its metadata — minted the first time
   the app writes the file, kept for its lifetime — and every journal line
   names the id it extends. A journal whose lines name a different id, or none
-  where the file has one, is **refused at startup** with a message naming
-  both ids; the graph is not loaded, and nothing is deleted. If you replaced
+  where the file has one, or one where the file has none, is **refused at
+  startup** with a message naming both ids; the graph is not loaded, and
+  nothing is deleted. If you replaced
   `graph.json` on purpose, delete the journal (its mutations belong to the old
   graph); if not, put back the `graph.json` it belongs to. One more shape
   reads the same way: a journal whose lines carry *no* id beside a stamped
@@ -250,10 +251,12 @@ What this means in practice:
   before the stamp it replays, and the file is stamped at the next
   checkpoint — which happens before the first new mutation is journaled.
   The id identifies the file's *lineage*, not a point in time: a copy of
-  `graph.json` taken earlier from the same lineage, restored beside a newer
-  journal, replays that journal — the crash-recovery shape, and correct
-  only if the copy is older than the journal. The backup guidance above
-  stands.
+  `graph.json` taken after the file was stamped, restored beside a newer
+  journal of the same lineage, replays that journal — the crash-recovery
+  shape, and correct only if the copy is older than the journal. A copy
+  taken *before* the stamp (a pre-upgrade backup) has no id, so a stamped
+  journal beside it is refused: put the stamped `graph.json` back, or accept
+  losing the journal. The backup guidance above stands.
 - **Damage.** An incomplete or unreadable *last* line is the crash shape and
   is skipped with a warning. An unreadable line anywhere else is not, and the
   records after it may depend on it, so the app refuses to load and names the
