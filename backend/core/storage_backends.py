@@ -486,7 +486,7 @@ class FileGraphPersistenceBackend:
         with self._lock:
             if not self._mirrored:
                 self._load_locked()
-            if "journal_id" not in self._metadata:
+            if not self._metadata.get("journal_id"):
                 # A graph.json from before the stamp. It gets its id from a
                 # checkpoint before the first record that will name it lands;
                 # if that fails the append fails, or the record would name an

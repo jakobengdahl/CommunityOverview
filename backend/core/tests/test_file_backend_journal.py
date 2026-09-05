@@ -1098,6 +1098,30 @@ class TestJournalIdentity:
         assert _graph_metadata(tmp / "g.json").get("journal_id")
         assert _lines(tmp / "g.journal.ndjson") == []
 
+    def test_a_whole_graph_save_keeps_the_files_id_over_one_the_data_carries(
+        self, backend
+    ):
+        """The mirror's id is what any record on disk names; a dict that
+        arrives with another lineage's id (a snapshot copied from elsewhere)
+        does not rename the file."""
+        stamp = _graph_metadata(backend.json_path)["journal_id"]
+        data = _snapshot("z")
+        data["metadata"]["journal_id"] = "given"
+        backend.save_graph_data(data)
+        assert _graph_metadata(backend.json_path)["journal_id"] == stamp
+        backend.upsert_node(_payload("y"))
+        assert _records(backend.journal_path)[0]["journal_id"] == stamp
+
+    def test_a_null_id_in_a_hand_edited_file_counts_as_unstamped(self, tmp):
+        data = _snapshot("a")
+        data["metadata"]["journal_id"] = None
+        (tmp / "g.json").write_text(json.dumps(data), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.upsert_node(_payload("b"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert stamp
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == stamp
+
     def test_a_snapshot_saved_with_an_id_of_its_own_keeps_it_on_a_fresh_file(self, tmp):
         """A caller restoring a snapshot that already carries an id (a copy of
         another graph.json's content) keeps that lineage - the journal is
