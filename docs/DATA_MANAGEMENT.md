@@ -230,10 +230,33 @@ What this means in practice:
   mutations.
 - **Replacing the graph.** A journal belongs to the graph it was written
   against. Replayed onto a different dataset it would resurrect nodes of the
-  old one and overwrite same-id nodes of the new one with stale payloads.
-  `start-dev.sh` deletes it whenever it puts a different graph in place, for
-  the same reasons and at the same points as the embedding sidecar. Do the
-  same when replacing `graph.json` by hand.
+  old one and overwrite same-id nodes of the new one with stale payloads. So
+  `graph.json` carries a `journal_id` in its metadata — minted the first time
+  the app writes the file, kept for its lifetime — and every journal line
+  names the id it extends. A journal whose lines name a different id, or none
+  where the file has one, or one where the file has none, is **refused at
+  startup** with a message naming both ids; the graph is not loaded, and
+  nothing is deleted. If you replaced
+  `graph.json` on purpose, delete the journal (its mutations belong to the old
+  graph); if not, put back the `graph.json` it belongs to. One more shape
+  reads the same way: a journal whose lines carry *no* id beside a stamped
+  file, where nobody replaced anything, is the write that stamped the file
+  (a checkpoint, which folds those lines in first, or a whole-graph save,
+  which supersedes them) interrupted before it emptied the journal — either
+  way deleting the journal loses nothing; the message says so. `start-dev.sh`
+  still deletes the journal whenever it puts a different graph in place, for
+  the same reasons and at the same points as the embedding sidecar, and doing
+  the same when replacing `graph.json` by hand saves a refused start.
+  A `graph.json` from before the stamp loads as before: with a journal from
+  before the stamp it replays, and the file is stamped at the next
+  checkpoint — which happens before the first new mutation is journaled.
+  The id identifies the file's *lineage*, not a point in time: a copy of
+  `graph.json` taken after the file was stamped, restored beside a newer
+  journal of the same lineage, replays that journal — the crash-recovery
+  shape, and correct only if the copy is older than the journal. A copy
+  taken *before* the stamp (a pre-upgrade backup) has no id, so a stamped
+  journal beside it is refused: put the stamped `graph.json` back, or accept
+  losing the journal. The backup guidance above stands.
 - **Damage.** An incomplete or unreadable *last* line is the crash shape and
   is skipped with a warning. An unreadable line anywhere else is not, and the
   records after it may depend on it, so the app refuses to load and names the

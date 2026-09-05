@@ -10,6 +10,7 @@ must never do: replay a journal onto the wrong graph, or lose one silently.
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -906,3 +907,531 @@ class TestHealingIsWholeGraph:
             "b2",
             "d",
         }
+
+
+def _graph_metadata(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))["metadata"]
+
+
+def _records(path: Path):
+    return [json.loads(line) for line in _lines(path)]
+
+
+class TestJournalIdentity:
+    """A journal is bound to the graph.json it was written against."""
+
+    def test_the_snapshot_carries_an_id_and_every_record_names_it(self, backend):
+        stamp = _graph_metadata(backend.json_path)["journal_id"]
+        assert stamp
+        backend.upsert_node(_payload("c"))
+        backend.apply_batch(
+            [
+                EntityOperation.delete_node("a"),
+                EntityOperation.upsert_node(_payload("d")),
+            ]
+        )
+        assert [r["journal_id"] for r in _records(backend.journal_path)] == [
+            stamp,
+            stamp,
+        ]
+
+    def test_the_id_is_kept_across_checkpoints_and_whole_graph_saves(self, backend):
+        stamp = _graph_metadata(backend.json_path)["journal_id"]
+        backend.upsert_node(_payload("c"))
+        backend.checkpoint()
+        assert _graph_metadata(backend.json_path)["journal_id"] == stamp
+        backend.save_graph_data(_snapshot("z"))
+        assert _graph_metadata(backend.json_path)["journal_id"] == stamp
+        backend.upsert_node(_payload("y"))
+        assert _records(backend.journal_path)[0]["journal_id"] == stamp
+
+    def test_the_id_is_the_backends_own_and_not_handed_to_the_caller(self, tmp):
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.save_graph_data(_snapshot("a"))
+        assert "journal_id" not in backend.load_graph_data()["metadata"]
+        backend.upsert_node(_payload("b"))
+        assert "journal_id" not in backend.load_graph_data()["metadata"]
+        storage = GraphStorage(str(tmp / "g.json"))
+        assert "journal_id" not in storage.graph_metadata
+        storage.shutdown_events()
+
+    def test_a_whole_graph_save_through_the_storage_keeps_the_files_id(self, tmp):
+        storage = GraphStorage(str(tmp / "g.json"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        storage.add_nodes([Node(id="n1", type=NodeType.ACTOR, name="N1")], [])
+        storage.save().result()
+        storage.shutdown_events()
+        assert _graph_metadata(tmp / "g.json")["journal_id"] == stamp
+
+    def test_a_journal_from_a_different_graph_is_refused(self, tmp, backend):
+        backend.upsert_node(_payload("c"))
+        other = FileGraphPersistenceBackend(tmp / "other.json")
+        other.save_graph_data(_snapshot("x"))
+        (tmp / "g.json").write_bytes((tmp / "other.json").read_bytes())
+
+        before = backend.journal_path.read_bytes()
+        with pytest.raises(GraphJournalError, match="different graph.json"):
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        assert backend.journal_path.read_bytes() == before, (
+            "the journal is left for the operator, byte for byte"
+        )
+
+    def test_the_refusal_names_both_ids_and_the_line(self, tmp, backend):
+        backend.upsert_node(_payload("c"))
+        record_id = _records(backend.journal_path)[0]["journal_id"]
+        other = FileGraphPersistenceBackend(tmp / "other.json")
+        other.save_graph_data(_snapshot("x"))
+        file_id = _graph_metadata(tmp / "other.json")["journal_id"]
+        (tmp / "g.json").write_bytes((tmp / "other.json").read_bytes())
+
+        with pytest.raises(GraphJournalError) as excinfo:
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        message = str(excinfo.value)
+        assert "line 1" in message
+        assert record_id in message and file_id in message
+        assert "delete the journal" in message
+        assert "put back the graph.json" in message
+        # Two stamped files: nothing says the records are safe anywhere.
+        assert "loses nothing" not in message
+
+    def test_a_refused_journal_stops_the_storage_from_loading_too(self, tmp, backend):
+        backend.upsert_node(_payload("c"))
+        other = FileGraphPersistenceBackend(tmp / "other.json")
+        other.save_graph_data(_snapshot("x"))
+        (tmp / "g.json").write_bytes((tmp / "other.json").read_bytes())
+        with pytest.raises(GraphJournalError, match="different graph.json"):
+            GraphStorage(str(tmp / "g.json"))
+
+    def test_a_matching_journal_beside_a_restored_copy_still_replays(
+        self, tmp, backend
+    ):
+        """Same lineage: a graph.json copied out earlier plus the journal
+        written since is exactly the crash-recovery shape, not a mismatch."""
+        copy = (tmp / "g.json").read_bytes()
+        backend.upsert_node(_payload("c"))
+        (tmp / "g.json").write_bytes(copy)
+        loaded = FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        assert _ids(loaded) == {"a", "b", "c"}
+
+    def test_an_unstamped_graph_with_an_unstamped_journal_replays(self, tmp):
+        """The upgrade path: both files predate the stamp."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        loaded = FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        assert _ids(loaded) == {"a", "b"}
+
+    def test_an_unstamped_graph_with_a_stamped_journal_is_refused(self, tmp, backend):
+        backend.upsert_node(_payload("c"))
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a", "b")), encoding="utf-8")
+        with pytest.raises(GraphJournalError, match="id none") as excinfo:
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        # A pre-stamp copy put back: the records are NOT in it.
+        assert "loses nothing" not in str(excinfo.value)
+        assert "put back the graph.json" in str(excinfo.value)
+
+    def test_a_foreign_record_in_the_middle_is_refused_at_its_line(self, tmp, backend):
+        backend.upsert_node(_payload("c"))
+        own = _lines(backend.journal_path)[0]
+        foreign = json.dumps(
+            {
+                "journal_id": "elsewhere",
+                "ops": [asdict_op(EntityOperation.upsert_node(_payload("x")))],
+            }
+        )
+        backend.journal_path.write_text(
+            "\n".join([own, foreign, own]) + "\n", encoding="utf-8"
+        )
+        before = backend.journal_path.read_bytes()
+        with pytest.raises(GraphJournalError, match="line 2") as excinfo:
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        assert "elsewhere" in str(excinfo.value)
+        assert backend.journal_path.read_bytes() == before
+
+    def test_a_stamped_graph_with_an_unstamped_journal_is_refused(self, backend):
+        backend.journal_path.write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("c")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(GraphJournalError, match="journal id none") as excinfo:
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        # The one shape that is not a swap: the stamping checkpoint interrupted
+        # after the snapshot and before the truncate. The message covers it.
+        assert "interrupted before it emptied the journal" in str(excinfo.value)
+
+    def test_a_null_id_record_beside_a_stamped_graph_is_refused(self, backend):
+        backend.journal_path.write_text(
+            json.dumps(
+                {
+                    "journal_id": None,
+                    "ops": [asdict_op(EntityOperation.upsert_node(_payload("c")))],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(GraphJournalError, match="journal id none"):
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+
+    def test_the_interrupted_stamp_checkpoint_shape_loses_nothing(
+        self, tmp, monkeypatch
+    ):
+        """Crash between the stamping snapshot and the truncate: the file is
+        stamped and holds the legacy records; the journal still has them
+        without an id. Load refuses, and following the message (delete the
+        journal) gives the complete graph."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        monkeypatch.setattr(
+            backend,
+            "_truncate_journal",
+            lambda: (_ for _ in ()).throw(OSError("crash")),
+        )
+        with pytest.raises(OSError, match="crash"):
+            backend.upsert_node(_payload("c"))
+
+        with pytest.raises(GraphJournalError, match="loses nothing"):
+            FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        (tmp / "g.journal.ndjson").unlink()
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+        }
+
+    def test_the_cadence_checkpoint_keeps_the_id(self, tmp):
+        backend = FileGraphPersistenceBackend(tmp / "g.json", checkpoint_interval=2)
+        backend.save_graph_data(_snapshot("a"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        backend.upsert_node(_payload("b"))
+        backend.upsert_node(_payload("c"))
+        assert _lines(tmp / "g.journal.ndjson") == [], "the cadence checkpoint ran"
+        assert _graph_metadata(tmp / "g.json")["journal_id"] == stamp
+        backend.upsert_node(_payload("d"))
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == stamp
+
+    def test_the_first_append_on_an_unstamped_graph_stamps_it_first(self, tmp):
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.upsert_node(_payload("c"))
+
+        stamp = _graph_metadata(tmp / "g.json").get("journal_id")
+        assert stamp, "the file was stamped by a checkpoint"
+        assert _ids(json.loads((tmp / "g.json").read_text())) == {"a", "b"}, (
+            "the pre-stamp journal was folded in by that checkpoint"
+        )
+        records = _records(tmp / "g.journal.ndjson")
+        assert [r["journal_id"] for r in records] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+            "c",
+        }
+
+    def test_a_failed_stamp_fails_the_append_and_leaves_no_record(
+        self, tmp, monkeypatch
+    ):
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.upsert_node(_payload("b"))
+
+        assert "journal_id" not in _graph_metadata(tmp / "g.json")
+        assert not (tmp / "g.journal.ndjson").exists() or not _lines(
+            tmp / "g.journal.ndjson"
+        )
+        # The next append retries the stamp rather than naming an id the
+        # file does not carry.
+        backend.upsert_node(_payload("b"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+
+    def test_a_failed_whole_graph_save_leaves_the_mirror_unstamped(
+        self, tmp, monkeypatch
+    ):
+        """Round-2 finding: the minted id must not sit in the mirror while the
+        file is still unstamped, or the next append writes a record naming an
+        id no graph.json ever carried."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.load_graph_data()
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(_snapshot("a", "z"))
+        assert "journal_id" not in _graph_metadata(tmp / "g.json")
+
+        backend.upsert_node(_payload("b"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert stamp, "the append stamped the file first"
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "z",
+            "b",
+        }
+
+    def test_a_failed_save_through_the_storage_never_strands_a_record(self, tmp):
+        """The same hazard through GraphStorage: a whole-graph save whose
+        snapshot fails on a pre-stamp file, then a mutation. Every record on
+        disk must name an id the file carries, and a restart must load."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        storage = GraphStorage(str(tmp / "g.json"))
+        backend = storage._persistence_backend
+        real_write = backend._write_snapshot
+        save_may_fail = threading.Event()
+        fail = {"once": True}
+
+        def failing_write(data):
+            if fail["once"]:
+                fail["once"] = False
+                # Hold the save until the mutation is queued behind it, so
+                # the mutation was shaped as an entity write before the
+                # failure could ask for a whole-graph resync instead.
+                assert save_may_fail.wait(5)
+                raise OSError("disk full")
+            real_write(data)
+
+        backend._write_snapshot = failing_write
+        failing_save = storage.save()
+        storage.add_nodes([Node(id="b", type=NodeType.ACTOR, name="B")], [])
+        save_may_fail.set()
+        with pytest.raises(OSError, match="disk full"):
+            failing_save.result()
+        # Drain the queued entity write without the heal a flush would run:
+        # the disk must already be loadable at this point (a crash here is
+        # the reviewer's shape).
+        storage._io_executor.submit(lambda: None).result()
+
+        stamp = _graph_metadata(tmp / "g.json").get("journal_id")
+        assert stamp
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        reopened = GraphStorage(str(tmp / "g.json"))
+        assert set(reopened.nodes) == {"a", "b"}
+        reopened.shutdown_events()
+        storage.shutdown_events()
+
+    def test_a_stamp_whose_truncate_fails_is_retried_and_never_mixes_the_journal(
+        self, tmp, monkeypatch
+    ):
+        """Round-2 finding: the stamping checkpoint's snapshot lands but its
+        truncate raises in-process. The append that asked for the stamp
+        fails and writes nothing; the mirror stays unstamped, so the next
+        append stamps again - and the journal never holds a stamped record
+        behind pre-stamp ones, which is the shape the refusal message could
+        not be honest about."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        real_truncate = backend._truncate_journal
+        fail = {"once": True}
+
+        def failing_truncate():
+            if fail["once"]:
+                fail["once"] = False
+                raise OSError("crash")
+            real_truncate()
+
+        monkeypatch.setattr(backend, "_truncate_journal", failing_truncate)
+        with pytest.raises(OSError, match="crash"):
+            backend.upsert_node(_payload("c"))
+        assert _records(tmp / "g.journal.ndjson") == [
+            {"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]}
+        ], "no stamped record landed behind the pre-stamp one"
+
+        backend.upsert_node(_payload("d"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+            "d",
+        }
+
+    def test_a_save_whose_truncate_fails_leaves_the_mirror_unstamped_too(
+        self, tmp, monkeypatch
+    ):
+        """The whole-graph twin of the previous test: the save's snapshot
+        lands stamped, its truncate raises. The mirror must stay unstamped,
+        or the next append writes a stamped record behind the pre-stamp one."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.load_graph_data()
+        real_truncate = backend._truncate_journal
+        fail = {"once": True}
+
+        def failing_truncate():
+            if fail["once"]:
+                fail["once"] = False
+                raise OSError("crash")
+            real_truncate()
+
+        monkeypatch.setattr(backend, "_truncate_journal", failing_truncate)
+        with pytest.raises(OSError, match="crash"):
+            backend.save_graph_data(_snapshot("a", "b", "z"))
+        assert "journal_id" not in backend._metadata
+
+        backend.upsert_node(_payload("c"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "b",
+            "z",
+            "c",
+        }
+
+    def test_a_refused_reload_leaves_a_live_backend_unable_to_append(
+        self, tmp, monkeypatch
+    ):
+        """Round-3 finding: after a refused load the backend must not count
+        as mirrored, or the next append writes a stamped record behind the
+        records that were just refused (GraphStorage.reload() is that load)."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        real_truncate = backend._truncate_journal
+        fail = {"once": True}
+
+        def failing_truncate():
+            if fail["once"]:
+                fail["once"] = False
+                raise OSError("crash")
+            real_truncate()
+
+        monkeypatch.setattr(backend, "_truncate_journal", failing_truncate)
+        with pytest.raises(OSError, match="crash"):
+            backend.upsert_node(_payload("c"))
+        # Now: file stamped, journal pre-stamp. A reload on the same instance
+        # is refused, and so is every append after it.
+        before = (tmp / "g.journal.ndjson").read_bytes()
+        with pytest.raises(GraphJournalError, match="loses nothing"):
+            backend.load_graph_data()
+        with pytest.raises(GraphJournalError):
+            backend.upsert_node(_payload("d"))
+        assert (tmp / "g.journal.ndjson").read_bytes() == before
+
+    def test_a_failed_save_keeps_the_mirrors_metadata_with_its_nodes(
+        self, tmp, monkeypatch
+    ):
+        """A save whose snapshot fails leaves the mirror with the save's nodes;
+        the non-id metadata must travel with them, or a later checkpoint
+        writes the new nodes under the old graph name."""
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.save_graph_data(_snapshot("a"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        renamed = _snapshot("a", "z")
+        renamed["metadata"]["graph_name"] = "renamed"
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(renamed)
+        backend.upsert_node(_payload("b"))
+        backend.checkpoint()
+        written = json.loads((tmp / "g.json").read_text(encoding="utf-8"))
+        assert written["metadata"]["graph_name"] == "renamed"
+        assert written["metadata"]["journal_id"] == stamp
+        assert _ids(written) == {"a", "z", "b"}
+
+    def test_checkpoint_stamps_an_unstamped_graph_when_folding_a_legacy_journal(
+        self, tmp
+    ):
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        (tmp / "g.journal.ndjson").write_text(
+            json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("b")))]})
+            + "\n",
+            encoding="utf-8",
+        )
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.load_graph_data()
+        backend.checkpoint()
+        assert _graph_metadata(tmp / "g.json").get("journal_id")
+        assert _lines(tmp / "g.journal.ndjson") == []
+
+    def test_a_whole_graph_save_keeps_the_files_id_over_one_the_data_carries(
+        self, backend
+    ):
+        """The mirror's id is what any record on disk names; a dict that
+        arrives with another lineage's id (a snapshot copied from elsewhere)
+        does not rename the file."""
+        stamp = _graph_metadata(backend.json_path)["journal_id"]
+        data = _snapshot("z")
+        data["metadata"]["journal_id"] = "given"
+        backend.save_graph_data(data)
+        assert _graph_metadata(backend.json_path)["journal_id"] == stamp
+        backend.upsert_node(_payload("y"))
+        assert _records(backend.journal_path)[0]["journal_id"] == stamp
+
+    def test_a_null_id_in_a_hand_edited_file_counts_as_unstamped(self, tmp):
+        data = _snapshot("a")
+        data["metadata"]["journal_id"] = None
+        (tmp / "g.json").write_text(json.dumps(data), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.upsert_node(_payload("b"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert stamp
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == stamp
+
+    def test_a_snapshot_saved_with_an_id_of_its_own_keeps_it_on_a_fresh_file(self, tmp):
+        """A caller restoring a snapshot that already carries an id (a copy of
+        another graph.json's content) keeps that lineage - the journal is
+        truncated in the same call, so nothing can mismatch."""
+        data = _snapshot("a")
+        data["metadata"]["journal_id"] = "given"
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.save_graph_data(data)
+        assert _graph_metadata(tmp / "g.json")["journal_id"] == "given"
+        backend.upsert_node(_payload("b"))
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == "given"

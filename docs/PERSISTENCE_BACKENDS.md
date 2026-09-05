@@ -218,7 +218,11 @@ declares `incremental_writes` and `transactions`. It keeps `graph.json` as the
 graph — written whole and atomically — and lands each mutation as one appended
 line in `graph.journal.ndjson` beside it, folding the journal back into
 `graph.json` every 100 mutations, on `checkpoint()`, and on every whole-graph
-save; loading replays the journal. See
+save; loading replays the journal — and refuses one written against a
+different `graph.json`, which it tells by a `journal_id` the backend keeps in
+the file's metadata and stamps on every journal line. That id is the backend's
+own: it is not in the dict `load_graph_data` hands out, so `GraphStorage` and
+exports never see it. See
 [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#graph-journal) for what that means
 for backups and for replacing a graph file. The constructor's
 `checkpoint_interval` and `journal_path` are the only knobs, and nothing sets

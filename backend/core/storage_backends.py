@@ -26,6 +26,7 @@ import os
 import sys
 import tempfile
 import threading
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,6 +223,10 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
     return caps
 
 
+def _new_journal_id() -> str:
+    return uuid.uuid4().hex
+
+
 class GraphJournalError(Exception):
     """The journal beside graph.json holds a record that cannot be applied."""
 
@@ -238,6 +243,15 @@ class FileGraphPersistenceBackend:
     reads graph.json and replays the journal, so a crash at any point loses
     at most the append that was in flight, and that one is detected and
     dropped whole: a batch is one line, so it lands entirely or not at all.
+
+    A journal belongs to the graph.json it was written against: replayed onto
+    a different one it would resurrect that graph's deleted nodes and overwrite
+    same-id nodes with stale payloads. So graph.json carries a ``journal_id``
+    in its metadata - minted by the first snapshot this backend writes, kept
+    for the life of the file - and every journal record names the id it
+    extends. A record whose id is not the snapshot's is refused at load
+    rather than replayed. The id is the backend's own: it is not in the dict
+    ``load_graph_data`` hands out, so it never reaches exports.
 
     The cost per mutation is therefore one small append plus fsync instead of
     a serialisation of every node. On a FUSE-mounted object store, where an
@@ -286,12 +300,30 @@ class FileGraphPersistenceBackend:
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
+            metadata = dict(data.get("metadata") or {})
+            # The file keeps its identity across whole-graph saves: the
+            # journal is truncated in the same call, so the id only has to be
+            # stable, and a mirrored one is what any journal on disk names.
+            metadata["journal_id"] = (
+                (self._metadata.get("journal_id") if self._mirrored else None)
+                or metadata.get("journal_id")
+                or _new_journal_id()
+            )
+            snapshot = {**data, "metadata": metadata}
             self._nodes = {n["id"]: n for n in data.get("nodes", [])}
             self._edges = {e["id"]: e for e in data.get("edges", [])}
-            self._metadata = dict(data.get("metadata") or {})
+            # The mirror takes the save's metadata now, as it takes its nodes,
+            # but a freshly minted id only once both writes have landed - see
+            # _checkpoint_locked for why.
+            self._metadata = {
+                k: v
+                for k, v in metadata.items()
+                if k != "journal_id" or v == self._metadata.get("journal_id")
+            }
             self._mirrored = True
-            self._write_snapshot(data)
+            self._write_snapshot(snapshot)
             self._truncate_journal()
+            self._metadata = metadata
 
     def default_graph_name(self) -> str:
         return self.json_path.stem
@@ -335,20 +367,31 @@ class FileGraphPersistenceBackend:
         self._nodes = {n["id"]: n for n in mirror.get("nodes", [])}
         self._edges = {e["id"]: e for e in mirror.get("edges", [])}
         self._metadata = dict(mirror.get("metadata") or {})
-        self._mirrored = True
+        # Not a mirror until the journal is in it too: a refused journal
+        # leaves the backend unmirrored, so an append after a refused load
+        # loads again and is refused again, and writes nothing behind the
+        # records that were refused.
+        self._mirrored = False
         self._journaled = 0
 
         for record in self._read_journal():
             for op in record:
                 self._apply(op)
             self._journaled += 1
+        self._mirrored = True
         if self._journaled:
             data = {
                 "nodes": [json.loads(json.dumps(n)) for n in self._nodes.values()],
                 "edges": [json.loads(json.dumps(e)) for e in self._edges.values()],
-                "metadata": dict(self._metadata),
+                "metadata": self._public_metadata(),
             }
+        elif isinstance(data.get("metadata"), dict):
+            data["metadata"].pop("journal_id", None)
         return data
+
+    def _public_metadata(self) -> Dict[str, Any]:
+        """The mirror's metadata without the backend's own journal id."""
+        return {k: v for k, v in self._metadata.items() if k != "journal_id"}
 
     def _read_journal(self) -> List[List[EntityOperation]]:
         """The journal's records, oldest first.
@@ -360,6 +403,13 @@ class FileGraphPersistenceBackend:
         anywhere else is not a crash shape but damage, and the records after
         it may depend on it, so loading stops with an error that names the
         line rather than silently losing mutations.
+
+        A complete record that names a different journal id than graph.json
+        carries was written against another graph.json, and loading stops
+        too. The one exception is a record with no id at all beside a
+        graph.json with no id: both predate the stamp, which is what an
+        upgrade in place looks like, and the file is stamped at its next
+        checkpoint.
         """
         if not self.journal_path.exists():
             return []
@@ -379,10 +429,12 @@ class FileGraphPersistenceBackend:
         # Bytes covered by the records kept; anything past it is the tail.
         kept = 0
         last = len(lines) - 1
+        snapshot_id = self._metadata.get("journal_id")
         for index, line in enumerate(lines):
             try:
                 parsed = json.loads(line)
                 ops = [EntityOperation(**op) for op in parsed["ops"]]
+                record_id = parsed.get("journal_id")
             except (ValueError, KeyError, TypeError) as exc:
                 if index == last:
                     print(
@@ -402,6 +454,36 @@ class FileGraphPersistenceBackend:
                     f"{self.journal_path} (interrupted write)"
                 )
                 break
+            if record_id != snapshot_id:
+                remedy = (
+                    "If graph.json was replaced deliberately, delete the "
+                    "journal - its mutations belong to the graph it was written "
+                    "against. Otherwise put back the graph.json the journal "
+                    "belongs to"
+                )
+                if record_id is None:
+                    # The stamp is written by a checkpoint that folds the
+                    # pre-stamp records in first, or by a whole-graph save
+                    # that supersedes them, and the backend only starts
+                    # writing stamped records once that write has also
+                    # emptied the journal; so a crash between its snapshot
+                    # and its truncate leaves exactly this shape, and nothing
+                    # else the backend does leaves a pre-stamp record beside
+                    # a stamped file.
+                    remedy += (
+                        ". If nobody replaced graph.json, this is the write "
+                        "that stamped the file, interrupted before it emptied "
+                        "the journal: the records were folded into graph.json "
+                        "by that checkpoint or superseded by that whole-graph "
+                        "save, and either way deleting the journal loses "
+                        "nothing"
+                    )
+                raise GraphJournalError(
+                    f"{self.journal_path} line {index + 1} was written against "
+                    f"a different graph.json (journal id {record_id or 'none'}, "
+                    f"{self.json_path} id {snapshot_id or 'none'}); the graph "
+                    f"was not loaded. {remedy}"
+                )
             records.append(ops)
             kept += len(line) + 1
         if kept < len(raw):
@@ -428,15 +510,25 @@ class FileGraphPersistenceBackend:
     def _journal(self, operations: List[EntityOperation]) -> None:
         # Serialised before anything is written or applied, so a payload that
         # cannot be represented fails here and touches neither disk nor mirror.
-        line = json.dumps(
-            {"ops": [asdict(op) for op in operations]}, ensure_ascii=False
+        ops = json.loads(
+            json.dumps([asdict(op) for op in operations], ensure_ascii=False)
         )
         # The mirror keeps its own copy, parsed back from the line, so a caller
         # that later mutates the dict it passed cannot change what was stored.
-        stored = [EntityOperation(**op) for op in json.loads(line)["ops"]]
+        stored = [EntityOperation(**op) for op in ops]
         with self._lock:
             if not self._mirrored:
                 self._load_locked()
+            if not self._metadata.get("journal_id"):
+                # A graph.json from before the stamp. It gets its id from a
+                # checkpoint before the first record that will name it lands;
+                # if that fails the append fails, or the record would name an
+                # id the file does not carry.
+                self._checkpoint_locked()
+            line = json.dumps(
+                {"journal_id": self._metadata["journal_id"], "ops": ops},
+                ensure_ascii=False,
+            )
             self.journal_path.parent.mkdir(parents=True, exist_ok=True)
             # Unbuffered, so a failed write leaves nothing queued to flush at
             # close; and the length is restored on failure, so a short write
@@ -474,11 +566,15 @@ class FileGraphPersistenceBackend:
                     print(f"Warning: graph checkpoint failed, will retry: {exc}")
 
     def _checkpoint_locked(self) -> None:
+        metadata = {
+            **self._metadata,
+            "journal_id": self._metadata.get("journal_id") or _new_journal_id(),
+        }
         data = {
             "nodes": list(self._nodes.values()),
             "edges": list(self._edges.values()),
             "metadata": {
-                **self._metadata,
+                **metadata,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             },
         }
@@ -486,6 +582,13 @@ class FileGraphPersistenceBackend:
         # Snapshot first, then the journal: a crash in between replays records
         # the snapshot already holds, and every operation is idempotent.
         self._truncate_journal()
+        # The id enters the mirror only once both have landed. Taken earlier,
+        # a failed snapshot would leave the next record naming an id the file
+        # lacks, and a failed truncate would leave that record behind the
+        # pre-stamp ones - a journal no reading can make sense of. Failing
+        # here fails the append that asked for the stamp; the next one asks
+        # again.
+        self._metadata = metadata
 
     def _truncate_journal(self) -> None:
         self._journaled = 0
