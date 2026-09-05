@@ -230,10 +230,25 @@ What this means in practice:
   mutations.
 - **Replacing the graph.** A journal belongs to the graph it was written
   against. Replayed onto a different dataset it would resurrect nodes of the
-  old one and overwrite same-id nodes of the new one with stale payloads.
-  `start-dev.sh` deletes it whenever it puts a different graph in place, for
-  the same reasons and at the same points as the embedding sidecar. Do the
-  same when replacing `graph.json` by hand.
+  old one and overwrite same-id nodes of the new one with stale payloads. So
+  `graph.json` carries a `journal_id` in its metadata — minted the first time
+  the app writes the file, kept for its lifetime — and every journal line
+  names the id it extends. A journal whose lines name a different id, or none
+  where the file has one, is **refused at startup** with a message naming
+  both ids; the graph is not loaded, and nothing is deleted. If you replaced
+  `graph.json` on purpose, delete the journal (its mutations belong to the old
+  graph); if not, put back the `graph.json` it belongs to. `start-dev.sh`
+  still deletes the journal whenever it puts a different graph in place, for
+  the same reasons and at the same points as the embedding sidecar, and doing
+  the same when replacing `graph.json` by hand saves a refused start.
+  A `graph.json` from before the stamp loads as before: with a journal from
+  before the stamp it replays, and the file is stamped at the next
+  checkpoint — which happens before the first new mutation is journaled.
+  The id identifies the file's *lineage*, not a point in time: a copy of
+  `graph.json` taken earlier from the same lineage, restored beside a newer
+  journal, replays that journal — the crash-recovery shape, and correct
+  only if the copy is older than the journal. The backup guidance above
+  stands.
 - **Damage.** An incomplete or unreadable *last* line is the crash shape and
   is skipped with a warning. An unreadable line anywhere else is not, and the
   records after it may depend on it, so the app refuses to load and names the
