@@ -105,11 +105,12 @@ The `GraphStorage` layer implements thread-safety and multi-process safety mecha
 
 Where the graph is stored is behind `backend/core/storage_backends.py`. Every
 backend implements the snapshot contract (load / save the whole graph); one
-that declares `incremental_writes` in its capabilities also gets each mutation
-as per-entity operations (`upsert_node`, `delete_edge`, an atomic
-`apply_batch`, …) instead of a whole-graph rewrite. The default file backend
-is snapshot-only. See `docs/PERSISTENCE_BACKENDS.md` for the contract a
-backend implements against.
+that declares `incremental_writes` in its capabilities gets a single-entity
+mutation as that entity's operation (`upsert_node`, `delete_edge`, …) and, if
+it also declares `transactions`, a multi-entity one as an atomic
+`apply_batch` — otherwise a multi-entity mutation is still a whole-graph
+write. The default file backend is snapshot-only. See
+`docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against.
 
 See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
 

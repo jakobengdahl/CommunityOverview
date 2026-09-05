@@ -1110,6 +1110,12 @@ class GraphStorage:
         with self._lock:
             added_node_ids = []
             added_edge_ids = []
+            # What has landed in memory but not yet reached the store. A
+            # failure part-way returns a failure result while leaving what was
+            # added in place, as it always has; the handler below persists
+            # exactly that, so the store never falls behind the memory image.
+            unpersisted_nodes: List[Node] = []
+            unpersisted_edges: List[Edge] = []
 
             try:
                 # Add nodes
@@ -1127,6 +1133,7 @@ class GraphStorage:
                     self.graph.add_node(node.id, data=node)
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
+                    unpersisted_nodes.append(node)
 
                     # Precompute searchable text
                     self._searchable_text_cache[node.id] = self._build_searchable_text(
@@ -1171,6 +1178,7 @@ class GraphStorage:
                         for node in nodes_to_embed
                     ]
                 )
+                unpersisted_nodes = []
 
                 # Create name-to-ID mapping for newly added nodes and existing nodes
                 name_to_id = {}
@@ -1220,6 +1228,7 @@ class GraphStorage:
                         edge.source, edge.target, key=edge.id, data=edge
                     )
                     added_edge_ids.append(edge.id)
+                    unpersisted_edges.append(edge)
 
                 self._persist(
                     [
@@ -1227,6 +1236,7 @@ class GraphStorage:
                         for edge_id in added_edge_ids
                     ]
                 )
+                unpersisted_edges = []
 
                 # Emit events for added nodes
                 for node_id in added_node_ids:
@@ -1274,6 +1284,17 @@ class GraphStorage:
                 )
 
             except Exception as e:
+                if unpersisted_nodes or unpersisted_edges:
+                    self._persist(
+                        [
+                            EntityOperation.upsert_node(self._serialize_node(node))
+                            for node in unpersisted_nodes
+                        ]
+                        + [
+                            EntityOperation.upsert_edge(edge.to_dict())
+                            for edge in unpersisted_edges
+                        ]
+                    )
                 return AddNodesResult(
                     added_node_ids=[],
                     added_edge_ids=[],

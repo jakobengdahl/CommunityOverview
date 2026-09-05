@@ -454,3 +454,112 @@ class TestIncrementalBackends:
             assert [e.id for e in reloaded.get_all_edges()] == ["ab"]
         finally:
             reloaded.flush()
+
+
+class TestPartialFailure:
+    def test_edges_added_before_a_rejected_one_still_reach_the_store(self):
+        """add_nodes returns failure on a bad edge but keeps, in memory, the
+        nodes and the edges it had already added. On a snapshot backend the
+        next write of anything carried those edges; on an incremental backend
+        nothing would ever send them unless the failure path does."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+
+        result = storage.add_nodes(
+            [_node("a"), _node("b")],
+            [_edge("good", "a", "b"), _edge("bad", "a", "no-such-node")],
+        )
+        storage.flush()
+
+        assert not result.success
+        assert set(storage.edges) == {"good"}
+        assert _kinds(backend) == ["apply_batch", "upsert_edge"]
+        assert backend.calls[1][1]["id"] == "good"
+        assert set(backend.nodes) == {"a", "b"} and set(backend.edges) == {"good"}
+
+    def test_a_snapshot_backend_writes_once_more_on_the_same_failure(self):
+        backend = _SnapshotBackend()
+        storage = _storage(backend)
+
+        result = storage.add_nodes(
+            [_node("a"), _node("b")],
+            [_edge("good", "a", "b"), _edge("bad", "a", "no-such-node")],
+        )
+        storage.flush()
+
+        assert not result.success
+        # The nodes' write, then the failure handler's write of the edge.
+        assert backend.snapshots == 2
+        assert [e["id"] for e in backend.data["edges"]] == ["good"]
+
+
+class TestPayloadFidelity:
+    def test_a_node_upsert_carries_the_vector_a_snapshot_would(self):
+        """Node.to_dict() emits embedding=None - the vector lives in the vector
+        store, not on the node - so an upsert built from it would silently
+        drop the vector on a backend with no sidecar. Every node-upsert site
+        must go through _serialize_node, which puts it back."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        node = Node(
+            id="v", type=NodeType.ACTOR, name="Vectored", embedding=[0.1, 0.2, 0.3]
+        )
+
+        storage.add_nodes([node], [])
+        storage.update_node("v", {"name": "Renamed"})
+        storage.set_nodes_archived(["v"], True)
+        storage.flush()
+
+        # One node in add_nodes is a single operation, so three upserts in all.
+        upserts = [arg for name, arg in backend.calls if name == "upsert_node"]
+        assert len(upserts) == 3
+        storage.save().result()
+        snapshot = backend.nodes["v"]
+        assert snapshot["embedding"] is not None
+        for payload in upserts:
+            assert payload["embedding"] == snapshot["embedding"]
+
+    def test_an_edge_upsert_carries_what_a_snapshot_would_hold_for_the_edge(self):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.update_edge("e", {"label": "knows", "metadata": {"w": 2}})
+        storage.flush()
+        upserted = backend.calls[-1][1]
+        assert upserted["label"] == "knows" and upserted["metadata"] == {"w": 2}
+
+        storage.save().result()
+        assert backend.edges["e"] == upserted
+
+    def test_archiving_persists_only_the_entities_whose_flag_changed(self):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes(
+            [_node("a"), _node("b")], [_edge("e", "a", "b"), _edge("f", "b", "a")]
+        )
+        storage.set_nodes_archived(["a"], True)
+        storage.set_edges_archived(["e"], True)
+        storage.flush()
+        backend.calls.clear()
+
+        storage.set_nodes_archived(["a", "b"], True)
+        storage.set_edges_archived(["e", "f"], True)
+        storage.flush()
+
+        assert [(n, a["id"]) for n, a in backend.calls] == [
+            ("upsert_node", "b"),
+            ("upsert_edge", "f"),
+        ]
+
+    def test_deleting_an_edgeless_node_is_one_delete_node(self):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("lone")], [])
+        storage.flush()
+        backend.calls.clear()
+
+        storage.delete_nodes(["lone"], confirmed=True)
+        storage.flush()
+
+        assert backend.calls == [("delete_node", "lone")]
+        assert set(backend.nodes) == {"a"}

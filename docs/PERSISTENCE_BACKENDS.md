@@ -21,7 +21,10 @@ the only shape a backend that cannot write one entity at a time needs.
 A backend that *can* write one entity at a time implements the incremental
 contract as well and **declares** it. `GraphStorage` then delivers a mutation as
 the entity operations that describe it — a renamed node is one `upsert_node`,
-not a rewrite of every node — and never asks the backend's type.
+not a rewrite of every node. Which contract drives a backend is decided by
+that declaration, not by an `isinstance` check against the protocols. (The two
+things `GraphStorage` does decide by type are the vector and history sidecars,
+which exist for the file backend alone — see *Vectors and history*.)
 
 ## The snapshot contract
 
@@ -131,8 +134,9 @@ and `flush()` drains both kinds. A write that raises puts the exception on its
 back.
 
 What still goes through the snapshot path on every backend: the bootstrap
-write of an empty graph, `save()` called explicitly (the maintenance scripts,
-`reload()`), and a backend paired with a vector sidecar.
+write of an empty graph (also what `reload()` of a missing store does),
+`save()` called explicitly (the maintenance scripts), and a backend paired
+with a vector sidecar.
 
 ## Vectors and history
 
@@ -161,7 +165,9 @@ backend. Any other backend:
 
 The protocols are `runtime_checkable`, so `isinstance(backend,
 IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
-what it does is decided by what you declare.
+which contract drives you is decided by what you declare. The one type check
+it does make is for the file backend's sidecars (above), and a file backend
+with a sidecar stays on the snapshot path whatever it declares.
 
 ## Current state
 

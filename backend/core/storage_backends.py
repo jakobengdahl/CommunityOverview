@@ -10,9 +10,10 @@ The seam has two layers. Every backend implements the snapshot contract
 backend that can land one entity at a time additionally implements the
 incremental contract (`IncrementalGraphPersistenceBackend`) and says so in its
 capability declaration; GraphStorage then routes a mutation to the entity
-operations that describe it instead of rewriting the whole graph. Callers
-branch on the declared capabilities, never on the backend's type. See
-docs/PERSISTENCE_BACKENDS.md for the contract a third-party backend has to meet.
+operations that describe it instead of rewriting the whole graph. Which
+contract drives a backend is decided by what it declares, not by an isinstance
+check against these protocols. See docs/PERSISTENCE_BACKENDS.md for the
+contract a third-party backend has to meet.
 """
 
 from __future__ import annotations
