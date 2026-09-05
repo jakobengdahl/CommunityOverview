@@ -854,7 +854,7 @@ def test_subscribers_get_the_whole_event_on_a_real_update(storage, node_type):
     top-level key _project deletes in place - the real payload carries the
     `embedding` key, so _without_excluded hands _project a fresh copy here.
     That case is covered by the builder-level cases that carry no
-    `embedding` key, whose patches have more than one key for exactly that
+    `embedding` key - two of which patch more than one key for exactly that
     reason.
 
     The listener runs AFTER the history record is built, so it sees the event
