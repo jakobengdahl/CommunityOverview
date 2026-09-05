@@ -312,6 +312,43 @@ def test_a_failed_download_leaves_the_sidecar_alone(data_setup_block, workspace)
 
 
 @pytest.fixture
+def path_without(tmp_path):
+    """A PATH holding every executable the real one does, minus the named tools.
+
+    `command -v curl` has to FAIL for the script to take its wget branch, and
+    every CI runner and dev box here has curl - which is exactly why that
+    branch had no coverage. Symlinking the rest of PATH keeps bash, wget, mv
+    and cmp reachable while making curl genuinely absent rather than shadowed.
+    """
+
+    def _build(*hidden: str) -> str:
+        shim = tmp_path / ("bin-without-" + "-".join(hidden))
+        shim.mkdir()
+        seen = set(hidden)
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            directory = Path(entry)
+            if not directory.is_dir():
+                continue
+            for tool in directory.iterdir():
+                if tool.name in seen or not os.access(tool, os.X_OK):
+                    continue
+                seen.add(tool.name)
+                (shim / tool.name).symlink_to(tool)
+        return str(shim)
+
+    return _build
+
+
+def _downloader_env(path_without, downloader: str) -> dict:
+    """Force the script onto one download branch, skipping if it cannot."""
+    if shutil.which(downloader) is None:
+        pytest.skip(f"{downloader} required")
+    hidden = {"curl": ("curl",), "wget": ("wget",)}
+    other = "wget" if downloader == "curl" else "curl"
+    return {"PATH": path_without(*hidden[other])}
+
+
+@pytest.fixture
 def http_404_url():
     """A URL that answers 404 with a body — the shape a mistyped URL takes."""
     import http.server
@@ -338,23 +375,35 @@ def http_404_url():
         thread.join(timeout=5)
 
 
-@pytest.mark.skipif(shutil.which("curl") is None, reason="curl required")
-def test_an_http_error_response_leaves_the_sidecar_alone(
-    data_setup_block, workspace, http_404_url
+@pytest.mark.parametrize("downloader", ["curl", "wget"])
+def test_an_http_error_response_leaves_the_graph_and_sidecar_alone(
+    data_setup_block, workspace, http_404_url, path_without, downloader
 ):
-    """The likeliest way to reach this branch is a mistyped URL, and curl
-    without -f exits 0 on a 404: it writes the error page over the graph, the
-    script reports success, and the cleanup then deletes the vectors of the
-    graph that was there. A connection refusal is not the same test — that one
-    fails the transport, so set -e stops the script before the cleanup."""
-    _run(data_setup_block, workspace, data_source=http_404_url)
+    """The likeliest way to reach this branch is a mistyped URL. Each
+    downloader fails it differently, and both ways lost data: curl without -f
+    exits 0 on a 404 and writes the error page over the graph, so the cleanup
+    then deletes the vectors of the graph that was there; wget -O opens its
+    target before the request, so a 404 empties the graph to zero bytes and
+    THEN fails. A connection refusal is not the same test - that one fails the
+    transport, so set -e stops the script before either can do harm."""
+    _run(
+        data_setup_block,
+        workspace,
+        data_source=http_404_url,
+        env=_downloader_env(path_without, downloader),
+    )
 
     assert _sidecar(workspace).exists(), (
         "an HTTP error was treated as a successful download and the sidecar was dropped"
     )
     assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
-    graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
+    body = (workspace / "data" / "active" / "graph.json").read_bytes()
+    assert body, f"{downloader} emptied the graph before its request failed"
+    graph = json.loads(body)
     assert graph["nodes"] == [], "the 404 body was written over the graph"
+    assert not list((workspace / "data" / "active").glob("*.download")), (
+        "a failed transfer left its partial file behind"
+    )
 
 
 @pytest.mark.parametrize(
@@ -448,18 +497,26 @@ def http_graph_url(workspace):
         thread.join(timeout=5)
 
 
-@pytest.mark.skipif(shutil.which("curl") is None, reason="curl required")
+@pytest.mark.parametrize("downloader", ["curl", "wget"])
 def test_a_successful_download_replaces_the_graph_and_drops_the_sidecar(
-    data_setup_block, workspace, http_graph_url
+    data_setup_block, workspace, http_graph_url, path_without, downloader
 ):
     """Both other download tests are failure paths, so nothing checked that a
     download which reports success actually put the graph where the cleanup
     then assumes it is. A download landing somewhere else would still drop the
     sidecar, leaving the old graph beside no vectors."""
-    _run(data_setup_block, workspace, data_source=http_graph_url)
+    _run(
+        data_setup_block,
+        workspace,
+        data_source=http_graph_url,
+        env=_downloader_env(path_without, downloader),
+    )
 
     graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
     assert [n["id"] for n in graph["nodes"]] == ["downloaded"], (
         "the download reported success but the graph was not replaced"
     )
     assert not _sidecar(workspace).exists()
+    assert not list((workspace / "data" / "active").glob("*.download")), (
+        "the transfer was copied into place rather than moved"
+    )
