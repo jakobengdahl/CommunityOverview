@@ -47,3 +47,27 @@ def test_configured_path_reaches_the_graph_storage():
 
         assert storage.embeddings_path == Path(sidecar)
         storage.flush()
+
+
+def test_the_environment_variable_is_read_when_nothing_is_passed(monkeypatch):
+    """Every other test hands embeddings_file in explicitly, so the field's
+    default - reading EMBEDDINGS_FILE - was exercised nowhere. The app could
+    have silently ignored the variable while both maintenance scripts and
+    start-dev.sh honoured it, and the pair would drift apart on the volume."""
+    monkeypatch.setenv("GRAPH_FILE", "/data/graph.json")
+    monkeypatch.setenv("EMBEDDINGS_FILE", "vectors.bin")
+
+    config = AppConfig.from_env()
+
+    assert config.embeddings_file == "vectors.bin"
+    assert config.get_embeddings_path() == Path("/data/vectors.bin")
+
+
+def test_an_unset_environment_variable_means_derive(monkeypatch):
+    monkeypatch.setenv("GRAPH_FILE", "/data/graph.json")
+    monkeypatch.delenv("EMBEDDINGS_FILE", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.embeddings_file is None
+    assert config.get_embeddings_path() is None
