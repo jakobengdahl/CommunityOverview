@@ -31,3 +31,9 @@ select = ["E4", "E7", "E9", "F"]
 [tool.ruff.format]
 # Black-compatible defaults.
 quote-style = "double"
+
+[tool.pytest.ini_options]
+# Convert a hang into a failure. The whole backend suite runs in about three
+# minutes, so no single test comes near this; it exists so a deadlock names a
+# red test instead of stalling the job until the runner kills it.
+timeout = 300
