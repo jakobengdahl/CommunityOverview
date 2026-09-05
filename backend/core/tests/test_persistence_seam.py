@@ -2,8 +2,9 @@
 
 Every backend here is a fake. What is under test is which shape GraphStorage
 hands a backend for each mutation - decided by the capabilities the backend
-declares, never by its type - and that the shape is one a backend can store
-and a later load can rebuild the graph from.
+declares, with the file backend's sidecar as the one type-bound exception -
+and that the shape is one a backend can store and a later load can rebuild
+the graph from.
 """
 
 import json
@@ -476,6 +477,48 @@ class TestPartialFailure:
         assert _kinds(backend) == ["apply_batch", "upsert_edge"]
         assert backend.calls[1][1]["id"] == "good"
         assert set(backend.nodes) == {"a", "b"} and set(backend.edges) == {"good"}
+
+    @pytest.mark.parametrize(
+        "nodes, edges, expect_nodes, expect_edges",
+        [
+            ([_node("c"), _node("a")], [], {"a", "b", "c"}, {"e"}),
+            (
+                [],
+                [_edge("e2", "a", "b"), _edge("e", "a", "b")],
+                {"a", "b"},
+                {"e", "e2"},
+            ),
+        ],
+        ids=["duplicate-node-id", "duplicate-edge-id"],
+    )
+    def test_a_rejected_duplicate_id_still_persists_what_landed_before_it(
+        self, nodes, edges, expect_nodes, expect_edges
+    ):
+        """The duplicate-id exits are returns, not raises, and fire after the
+        entities before them have landed in memory; the store must follow."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+        backend.calls.clear()
+
+        result = storage.add_nodes(nodes, edges)
+        storage.flush()
+
+        assert not result.success and "already exists" in result.message
+        assert set(storage.nodes) == expect_nodes == set(backend.nodes)
+        assert set(storage.edges) == expect_edges == set(backend.edges)
+
+    def test_a_failure_after_the_executor_is_gone_is_still_a_failure_result(self):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.shutdown_events()
+
+        result = storage.add_nodes([_node("a")], [])
+
+        assert not result.success
+        assert "Error during add" in result.message
+        assert "a" in storage.nodes and "a" not in backend.nodes
 
     def test_a_snapshot_backend_writes_once_more_on_the_same_failure(self):
         backend = _SnapshotBackend()

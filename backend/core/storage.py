@@ -860,7 +860,8 @@ class GraphStorage:
 
         Callers must hold _lock and pass the operations that describe exactly
         what they changed. Which shape reaches the backend is decided by its
-        declared capabilities, never by its type:
+        declared capabilities - and by the one type-bound fact below, whether
+        it has a vector sidecar:
 
         - no incremental support: the whole graph, exactly as before the
           entity contract existed;
@@ -1111,17 +1112,38 @@ class GraphStorage:
             added_node_ids = []
             added_edge_ids = []
             # What has landed in memory but not yet reached the store. A
-            # failure part-way returns a failure result while leaving what was
-            # added in place, as it always has; the handler below persists
+            # failure part-way - a rejected id, an unresolvable endpoint, a
+            # raise - returns a failure result while leaving what was added in
+            # place, as it always has; every failure exit first persists
             # exactly that, so the store never falls behind the memory image.
             unpersisted_nodes: List[Node] = []
             unpersisted_edges: List[Edge] = []
+
+            def persist_landed() -> None:
+                if not (unpersisted_nodes or unpersisted_edges):
+                    return
+                try:
+                    self._persist(
+                        [
+                            EntityOperation.upsert_node(self._serialize_node(node))
+                            for node in unpersisted_nodes
+                        ]
+                        + [
+                            EntityOperation.upsert_edge(edge.to_dict())
+                            for edge in unpersisted_edges
+                        ]
+                    )
+                except Exception as persist_error:
+                    # The failure being handled may be the persist itself
+                    # (executor shut down); the caller still gets its result.
+                    print(f"Warning: could not persist what was added: {persist_error}")
 
             try:
                 # Add nodes
                 nodes_to_embed = []
                 for node in nodes:
                     if node.id in self.nodes:
+                        persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
                             added_edge_ids=[],
@@ -1178,7 +1200,7 @@ class GraphStorage:
                         for node in nodes_to_embed
                     ]
                 )
-                unpersisted_nodes = []
+                unpersisted_nodes.clear()
 
                 # Create name-to-ID mapping for newly added nodes and existing nodes
                 name_to_id = {}
@@ -1214,6 +1236,7 @@ class GraphStorage:
                     edge.target = target_id
 
                     if edge.id in self.edges:
+                        persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
                             added_edge_ids=[],
@@ -1236,7 +1259,7 @@ class GraphStorage:
                         for edge_id in added_edge_ids
                     ]
                 )
-                unpersisted_edges = []
+                unpersisted_edges.clear()
 
                 # Emit events for added nodes
                 for node_id in added_node_ids:
@@ -1284,17 +1307,7 @@ class GraphStorage:
                 )
 
             except Exception as e:
-                if unpersisted_nodes or unpersisted_edges:
-                    self._persist(
-                        [
-                            EntityOperation.upsert_node(self._serialize_node(node))
-                            for node in unpersisted_nodes
-                        ]
-                        + [
-                            EntityOperation.upsert_edge(edge.to_dict())
-                            for edge in unpersisted_edges
-                        ]
-                    )
+                persist_landed()
                 return AddNodesResult(
                     added_node_ids=[],
                     added_edge_ids=[],
