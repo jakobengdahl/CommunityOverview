@@ -440,6 +440,7 @@ def test_an_http_error_response_leaves_the_graph_and_sidecar_alone(
         "an HTTP error was treated as a successful download and the sidecar was dropped"
     )
     assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
+    assert _journal(workspace).read_text() == JOURNAL_LINE
     body = (workspace / "data" / "active" / "graph.json").read_bytes()
     assert body, f"{downloader} emptied the graph before its request failed"
     graph = json.loads(body)

@@ -389,12 +389,22 @@ class GraphStorage:
 
         # Fold deferred writes into the snapshot, then shut down the I/O
         # executor and wait for everything queued before it.
+        checkpoint = None
         if self._backend_capabilities.incremental_writes:
             try:
-                self._io_executor.submit(self._persistence_backend.checkpoint)
+                checkpoint = self._io_executor.submit(
+                    self._persistence_backend.checkpoint
+                )
             except RuntimeError:
                 pass  # already shut down: nothing can be queued, nothing is pending
         self._io_executor.shutdown(wait=True)
+        # Data is safe either way - the journal still holds the difference and
+        # is replayed on the next start - but an operator reading "clean
+        # shutdown means graph.json is complete" must be told when it is not.
+        if checkpoint is not None and checkpoint.exception() is not None:
+            print(
+                f"Warning: graph checkpoint at shutdown failed: {checkpoint.exception()}"
+            )
 
     def _emit_event(
         self,
@@ -668,6 +678,17 @@ class GraphStorage:
         they are not a pending migration, or every write would be one.
         """
         if self._embedding_sidecar is None or not self._inline_fallback:
+            return False
+        # Gated on the sidecar actually needing a write, exactly as save() is:
+        # once the index's version of an id has landed, the fallback copy of
+        # that id is the refused one (a pre-split vector of another width),
+        # which no sidecar write will ever carry, and it must not keep every
+        # later write on the snapshot path.
+        revision = self.vector_store.revision
+        if revision in (
+            self._persisted_vector_revision,
+            self._snapshotted_vector_revision,
+        ):
             return False
         return bool(self._inline_fallback.keys() & self.vector_store.embeddings.keys())
 

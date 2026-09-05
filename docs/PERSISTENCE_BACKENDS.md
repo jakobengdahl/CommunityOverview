@@ -70,12 +70,12 @@ class BackendCapabilities:
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | declared only; the notification seam is a later change |
 
-Everything defaults to `False`. `SNAPSHOT_ONLY` is that default, and what the
-file backend declares.
+Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
 The declaration is checked once, when `GraphStorage` is constructed
 (`capabilities_of`). A backend that declares `incremental_writes` without
-implementing all five entity methods is refused there with a `TypeError`
+implementing all six methods of the incremental contract is refused there
+with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
 the in-memory graph has already changed.
 
@@ -164,8 +164,9 @@ snapshot path and the entity path alike. Any other backend:
    place of the file backend — every existing behaviour must hold, since
    `GraphStorage` will drive you exactly as it drives the file backend.
 2. Declare `SNAPSHOT_ONLY` and ship. This is a complete, correct backend.
-3. To stop rewriting the whole graph per mutation, implement the five entity
-   methods, declare `incremental_writes`, and `transactions` if your batch is
+3. To stop rewriting the whole graph per mutation, implement the incremental
+   contract (the four entity methods, `apply_batch` and `checkpoint`),
+   declare `incremental_writes`, and `transactions` if your batch is
    atomic. `backend/core/tests/test_persistence_seam.py` shows a recording
    in-memory backend that exercises every routing case; it doubles as a
    reference for what each method receives.
@@ -173,8 +174,7 @@ snapshot path and the entity path alike. Any other backend:
 The protocols are `runtime_checkable`, so `isinstance(backend,
 IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
 which contract drives you is decided by what you declare. The one type check
-it does make is for the file backend's sidecars (above), and a file backend
-with a sidecar stays on the snapshot path whatever it declares.
+it does make is for the file backend's sidecars (above).
 
 ## Current state
 

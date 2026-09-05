@@ -437,3 +437,141 @@ class TestThroughGraphStorage:
             assert len(_lines(storage._persistence_backend.journal_path)) == 10
         finally:
             storage.flush()
+
+
+class TestFailureReporting:
+    def test_a_valid_last_line_without_its_newline_is_still_an_interrupted_append(
+        self, backend, capsys
+    ):
+        """The newline is what says the append completed; a well-formed line
+        without it was not acknowledged and must not be replayed."""
+        backend.upsert_node(_payload("c"))
+        with open(backend.journal_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ops": [asdict_op(EntityOperation.delete_node("a"))]}))
+
+        data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+
+        assert _ids(data) == {"a", "b", "c"}
+        assert "incomplete last record" in capsys.readouterr().out
+
+    def test_flush_surfaces_a_failed_checkpoint(self, tmp, monkeypatch):
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            monkeypatch.setattr(
+                "backend.core.storage_backends.json.dump",
+                lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+            )
+            with pytest.raises(OSError, match="disk full"):
+                storage.flush()
+        finally:
+            monkeypatch.undo()
+            storage.flush()
+
+    def test_a_failed_checkpoint_at_shutdown_is_reported_not_swallowed(
+        self, tmp, monkeypatch, capsys
+    ):
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        monkeypatch.setattr(
+            "backend.core.storage_backends.json.dump",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        storage.shutdown_events()  # must not raise out of the shutdown hook
+
+        assert "checkpoint at shutdown failed" in capsys.readouterr().out
+        # The journal still holds the mutation for the next start.
+        assert len(_lines(storage._persistence_backend.journal_path)) == 1
+
+    def test_shutdown_twice_is_harmless(self, tmp):
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+
+        storage.shutdown_events()
+        storage.shutdown_events()
+
+        assert _ids(json.loads((tmp / "g.json").read_text())) == {"a"}
+
+
+def asdict_op(op):
+    return {
+        "kind": op.kind,
+        "action": op.action,
+        "entity_id": op.entity_id,
+        "payload": op.payload,
+    }
+
+
+class TestOrderingAndFailedAppends:
+    def test_the_sidecar_lands_before_the_entity_write(self, tmp):
+        storage = GraphStorage(json_path=str(tmp / "g.json"))
+        order = []
+        real_sidecar_save = storage._embedding_sidecar.save
+        real_apply = storage._persistence_backend.apply_batch
+        real_upsert = storage._persistence_backend.upsert_node
+
+        def sidecar_save(vectors):
+            order.append("sidecar")
+            return real_sidecar_save(vectors)
+
+        storage._embedding_sidecar.save = sidecar_save
+        storage._persistence_backend.apply_batch = lambda ops: (
+            order.append("entity"),
+            real_apply(ops),
+        )
+        storage._persistence_backend.upsert_node = lambda n: (
+            order.append("entity"),
+            real_upsert(n),
+        )
+        try:
+            storage.add_nodes(
+                [Node(id="v", type=NodeType.ACTOR, name="V", embedding=[0.5, 0.25])],
+                [],
+            )
+            storage._io_executor.submit(lambda: None).result()
+
+            assert order[:2] == ["sidecar", "entity"]
+        finally:
+            storage.flush()
+
+    def test_a_failed_append_leaves_the_mirror_untouched(self, backend):
+        """A mutation the caller was told failed must not become durable at
+        the next checkpoint: the mirror is applied only after the append."""
+        backend.journal_path.mkdir()  # opening it for append now fails
+        try:
+            with pytest.raises(OSError):
+                backend.upsert_node(_payload("c"))
+        finally:
+            backend.journal_path.rmdir()
+
+        backend.upsert_node(_payload("d"))
+        backend.checkpoint()
+
+        assert _ids(json.loads(backend.json_path.read_text())) == {"a", "b", "d"}
+
+    def test_operations_within_a_record_replay_in_order(self, backend):
+        backend.apply_batch(
+            [
+                EntityOperation.upsert_node(_payload("c", name="first")),
+                EntityOperation.upsert_node(_payload("c", name="second")),
+                EntityOperation.upsert_node(_payload("d")),
+                EntityOperation.delete_node("d"),
+            ]
+        )
+
+        data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+
+        assert {n["id"]: n["name"] for n in data["nodes"]}["c"] == "second"
+        assert "d" not in _ids(data)
+
+    def test_records_replay_in_order(self, backend):
+        backend.upsert_node(_payload("c", name="first"))
+        backend.upsert_node(_payload("c", name="second"))
+        backend.delete_node("b")
+        backend.upsert_node(_payload("b", name="back"))
+
+        data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+
+        names = {n["id"]: n["name"] for n in data["nodes"]}
+        assert names["c"] == "second" and names["b"] == "back"

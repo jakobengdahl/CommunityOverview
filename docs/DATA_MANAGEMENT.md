@@ -211,14 +211,19 @@ On startup the app reads `graph.json` and replays whatever the journal holds.
 
 What this means in practice:
 
-- **Durability.** Nothing acknowledged is lost on a crash. A crash mid-append
-  leaves an incomplete last line, which is detected and dropped whole — a
+- **Durability.** Nothing the backend has written is lost on a crash. (What
+  a crash can lose is a write still queued behind the app's single writer
+  thread — the same window the whole-file write always had.) A crash
+  mid-append leaves an incomplete last line, which is detected and dropped
+  whole — a
   multi-entity mutation is one line, so it lands entirely or not at all. A
   crash mid-checkpoint leaves the previous `graph.json` intact (the rename is
   atomic) and the journal still complete; replaying it onto a snapshot that
   already contains its records is harmless.
 - **`graph.json` on its own is the graph as of the last checkpoint.** After a
-  clean shutdown the journal is empty and `graph.json` is complete. While the
+  clean shutdown the journal is empty and `graph.json` is complete; a
+  checkpoint that fails at shutdown is reported in the log, and the journal
+  then still holds the difference. While the
   app is running, or after a crash, the journal holds the difference. **Back up
   the journal alongside `graph.json`**, or checkpoint first; a copy of
   `graph.json` taken while the journal is non-empty is behind by up to 100

@@ -6,7 +6,7 @@ loading/saving graph state. The default backend remains file-backed JSON
 persistence to preserve standalone behavior: graph.json is still the graph,
 written whole and atomically; between those writes each mutation is appended
 to a journal beside it, so a mutation costs one small append rather than a
-rewrite of every node, and a crash loses nothing.
+rewrite of every node, and a crash loses nothing that was written.
 
 The seam has two layers. Every backend implements the snapshot contract
 (`GraphPersistenceBackend`): load the whole graph, save the whole graph. A

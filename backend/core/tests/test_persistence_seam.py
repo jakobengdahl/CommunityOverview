@@ -171,7 +171,13 @@ class TestCapabilityDeclaration:
             GraphStorage(persistence_backend=Overclaims())
         message = str(exc.value)
         assert "upsert_node" not in message
-        for method in ("delete_node", "upsert_edge", "delete_edge", "apply_batch"):
+        for method in (
+            "delete_node",
+            "upsert_edge",
+            "delete_edge",
+            "apply_batch",
+            "checkpoint",
+        ):
             assert method in message
 
     def test_a_declaration_of_the_wrong_type_is_refused(self):

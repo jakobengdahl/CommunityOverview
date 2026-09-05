@@ -1227,6 +1227,55 @@ def test_a_migrating_save_writes_the_sidecar_off_the_caller_thread(tmpdir_path):
         storage.flush()
 
 
+def test_a_refused_vector_in_the_fallback_does_not_force_whole_graph_writes(
+    tmpdir_path,
+):
+    """Same fixture as the test below: a fallback entry the index refused is
+    not a pending migration. Treating it as one would send every mutation for
+    the life of the process down the snapshot path - a rewrite of graph.json
+    each time - instead of one journal line."""
+    graph = {
+        "nodes": [
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": f"N{i}",
+                "embedding": [0.5] * (DIM * 2),
+            }
+            for i in (1, 2, 3)
+        ],
+        "edges": [],
+        "metadata": {"version": "1.0", "graph_name": "graph"},
+    }
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump(graph, f)
+    FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).save(
+        {"n1": np.ones(DIM, dtype=np.float32)}
+    )
+
+    storage = _make_storage(tmpdir_path)
+    try:
+        assert storage._inline_fallback
+        # One explicit whole-graph save settles whatever the load left to
+        # write; from here on nothing is pending, and nothing may pretend to be.
+        storage.save().result()
+        storage.flush()
+        before = os.stat(graph_path).st_mtime_ns
+
+        # A metadata edit moves no vector. (A text edit would re-embed n2 and
+        # that one write IS a migration for n2 - its refused copy leaves
+        # graph.json - which is one snapshot, not one per write.)
+        storage.update_node("n2", {"metadata": {"reviewed": True}})
+        storage._io_executor.submit(lambda: None).result()
+
+        assert os.stat(graph_path).st_mtime_ns == before
+        journal = storage._persistence_backend.journal_path
+        assert len(journal.read_text().splitlines()) == 1
+    finally:
+        storage.flush()
+
+
 def test_a_save_with_nothing_to_migrate_does_not_wait_for_the_sidecar(tmpdir_path):
     """A fallback entry the index refused for its width is never in any matrix,
     so it can never be cleared by a write. Gating the synchronous path on the
