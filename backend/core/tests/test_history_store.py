@@ -747,18 +747,28 @@ def _event_payload_cases():
     Each covers a different way the builder could touch the live event:
     - the node-shaped pair carries an `embedding`, so `_without_excluded` has
       to strip it - an in-place pop there would strip it from the event. It
-      then hands `_project` a fresh copy, so nothing `_project` does in place
-      is visible on this pair;
+      then hands `_project` a fresh (shallow) copy, so no top-level key
+      `_project` deletes in place is visible on this pair - though a nested
+      value it altered still would be, since those stay shared;
     - the edge-shaped pair carries no `embedding`, which is the case where
       `_without_excluded` hands back the caller's own dict, so a `_project`
       that deleted in place would delete from the live event;
     - the large-no-embedding pair is the same case at a size a threshold-
       conditioned in-place narrowing would fire on, which the small edge pair
-      is not.
+      is not;
+    - the real-shape-no-embedding-key pair is a node payload as storage emits
+      it with the `embedding` key removed outright, so `_project` receives
+      the caller's own dict while the payload still has storage's real shape
+      (a nested dict, a list, the real field names) and a three-key patch
+      like a real update's. A narrowing gated on any of those fires here.
     All carry a field the patch does not name, so the projection has something
     to drop, and no patch is emptied by the embedding strip.
     """
     large = {f"field_{i}": BULK for i in range(12)}
+    real_before = _node_with_bulk().to_dict()
+    real_before.pop("embedding")
+    real_after = dict(real_before, description="new desc", summary="s2")
+    real_after["updated_at"] = "2026-09-05T00:00:00+00:00"
     return [
         pytest.param(
             _node_shaped_payload(),
@@ -780,6 +790,16 @@ def _event_payload_cases():
             # receives the caller's own dict.
             {"weight": 2, "kind": "y"},
             id="large-no-embedding",
+        ),
+        pytest.param(
+            real_before,
+            real_after,
+            {
+                "description": "new desc",
+                "summary": "s2",
+                "updated_at": "2026-09-05T00:00:00+00:00",
+            },
+            id="real-shape-no-embedding-key",
         ),
     ]
 
@@ -827,12 +847,15 @@ def test_subscribers_get_the_whole_event_on_a_real_update(storage, node_type):
     every time), the entity type is whatever the graph holds, and the payload
     carries nested structure - a dict-valued field and a list.
 
-    What this can see: a reassignment onto event.entity, and anything
-    _without_excluded does in place, including to nested values. What it
-    cannot see: anything _project does in place - the real payload carries
-    the `embedding` key, so _without_excluded hands _project a fresh copy
-    here. That case is covered by the builder-level large-no-embedding
-    payload, whose patch has two keys for exactly that reason.
+    What this can see: a reassignment onto event.entity, anything
+    _without_excluded does in place, and any change to a NESTED value by
+    either helper - the copy _without_excluded makes is shallow, so nested
+    dicts and lists stay shared with the live event. What it cannot see: a
+    top-level key _project deletes in place - the real payload carries the
+    `embedding` key, so _without_excluded hands _project a fresh copy here.
+    That case is covered by the builder-level cases that carry no
+    `embedding` key, whose patches have more than one key for exactly that
+    reason.
 
     The listener runs AFTER the history record is built, so it sees the event
     as the builder left it.
