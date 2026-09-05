@@ -19,7 +19,7 @@ Event System:
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
 from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
@@ -37,7 +37,12 @@ from .models import (
     _parse_datetime,
 )
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
-from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
+from .storage_backends import (
+    EntityOperation,
+    FileGraphPersistenceBackend,
+    GraphPersistenceBackend,
+    capabilities_of,
+)
 from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
@@ -136,6 +141,10 @@ class GraphStorage:
         self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(
             json_path
         )
+        # Read once: what the backend can take decides the shape of every
+        # write (see _persist), and a backend that declares more than it
+        # implements is refused here rather than on the first mutation.
+        self._backend_capabilities = capabilities_of(self._persistence_backend)
         self.json_path = getattr(
             self._persistence_backend, "json_path", Path(json_path)
         )
@@ -636,39 +645,40 @@ class GraphStorage:
             vector_revision,
         )
 
-    def _serialize_nodes(self) -> List[Dict[str, Any]]:
-        """Serialize nodes for persistence, routing vectors to the sidecar.
+    def _serialize_node(self, node: "Node") -> Dict[str, Any]:
+        """Serialize one node for persistence, routing its vector to the sidecar.
 
-        Callers must hold _lock. Backends without a sidecar keep the vector in
-        the node payload, exactly as every backend did before the split, so a
-        custom backend does not silently stop persisting them.
+        Callers must hold _lock. This is the node's shape in a snapshot and in
+        an upsert alike, so an incremental backend stores for a node exactly
+        what a snapshot would have held for it. Backends without a sidecar keep
+        the vector in the node payload, exactly as every backend did before the
+        split, so a custom backend does not silently stop persisting them.
         """
-        no_sidecar = self._embedding_sidecar is None
-        payloads = []
-        for node in self.nodes.values():
-            payload = node.to_dict()
-            if no_sidecar:
-                payload["embedding"] = self._vector_for_payload(node.id)
-                payloads.append(payload)
-                continue
+        payload = node.to_dict()
+        if self._embedding_sidecar is None:
+            payload["embedding"] = self._vector_for_payload(node.id)
+            return payload
 
-            # Dropping the vector is what makes graph.json small, and it is safe
-            # for every vector this process generated. It is NOT safe for one
-            # read out of a pre-split graph.json before the sidecar has it:
-            # there graph.json is the only durable copy, and the sidecar write
-            # is allowed to fail without failing the graph write, so removing it
-            # would destroy the vector with nothing written in its place.
-            vector = (
-                self._vector_for_payload(node.id)
-                if node.id in self._inline_fallback
-                else None
-            )
-            if vector is None:
-                payload.pop("embedding", None)
-            else:
-                payload["embedding"] = vector
-            payloads.append(payload)
-        return payloads
+        # Dropping the vector is what makes graph.json small, and it is safe
+        # for every vector this process generated. It is NOT safe for one
+        # read out of a pre-split graph.json before the sidecar has it:
+        # there graph.json is the only durable copy, and the sidecar write
+        # is allowed to fail without failing the graph write, so removing it
+        # would destroy the vector with nothing written in its place.
+        vector = (
+            self._vector_for_payload(node.id)
+            if node.id in self._inline_fallback
+            else None
+        )
+        if vector is None:
+            payload.pop("embedding", None)
+        else:
+            payload["embedding"] = vector
+        return payload
+
+    def _serialize_nodes(self) -> List[Dict[str, Any]]:
+        """Serialize every node for a snapshot. Callers must hold _lock."""
+        return [self._serialize_node(node) for node in self.nodes.values()]
 
     def _vector_for_payload(self, node_id: str) -> Optional[List[float]]:
         """The vector to write into a node's payload, or None.
@@ -843,6 +853,62 @@ class GraphStorage:
             )
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
+            raise
+
+    def _persist(self, operations: List[EntityOperation]) -> "Future[None]":
+        """Persist a mutation, as entity operations where the backend takes them.
+
+        Callers must hold _lock and pass the operations that describe exactly
+        what they changed. Which shape reaches the backend is decided by its
+        declared capabilities, never by its type:
+
+        - no incremental support: the whole graph, exactly as before the
+          entity contract existed;
+        - one operation: that operation;
+        - several operations and transactions: one atomic batch;
+        - several operations and no transactions: the whole graph, since the
+          snapshot write is atomic and a loop of single operations is not.
+
+        The vector sidecar is written by the snapshot path only. It exists for
+        the file backend alone, which is snapshot-only, so an incremental
+        backend never has one today; should a backend ever pair the two, the
+        snapshot path is the one that knows how to write it.
+
+        Same single-worker executor as save(), so entity writes and snapshots
+        land in the order they were issued and flush() drains both.
+        """
+        caps = self._backend_capabilities
+        if not caps.incremental_writes or self._embedding_sidecar is not None:
+            return self.save()
+        if not operations:
+            return self._io_executor.submit(lambda: None)
+        if len(operations) > 1 and not caps.transactions:
+            return self.save()
+        return self._io_executor.submit(self._do_apply, tuple(operations))
+
+    def _do_apply(self, operations: Tuple[EntityOperation, ...]) -> None:
+        """Hand entity operations to the backend, on the executor thread.
+
+        A single operation goes to its own method; more than one go to
+        apply_batch, which the backend has declared atomic. Exceptions are
+        re-raised, as in _do_save_to_disk, so the Future carries them.
+        """
+        backend = self._persistence_backend
+        try:
+            if len(operations) > 1:
+                backend.apply_batch(operations)
+                return
+            op = operations[0]
+            if op.kind == "node" and op.action == "upsert":
+                backend.upsert_node(op.payload)
+            elif op.kind == "node":
+                backend.delete_node(op.entity_id)
+            elif op.action == "upsert":
+                backend.upsert_edge(op.payload)
+            else:
+                backend.delete_edge(op.entity_id)
+        except Exception as e:
+            print(f"Error applying {len(operations)} entity operation(s): {e}")
             raise
 
     def flush(self) -> None:
@@ -1097,8 +1163,14 @@ class GraphStorage:
                         # Embedding generation is optional - log but don't fail
                         print(f"Warning: Could not generate embeddings: {embed_error}")
 
-                # Save again to persist embeddings generated above
-                self.save()
+                # Persisted before the edges so that, as before, a rejected
+                # edge leaves the nodes it was meant to join in place.
+                self._persist(
+                    [
+                        EntityOperation.upsert_node(self._serialize_node(node))
+                        for node in nodes_to_embed
+                    ]
+                )
 
                 # Create name-to-ID mapping for newly added nodes and existing nodes
                 name_to_id = {}
@@ -1149,8 +1221,12 @@ class GraphStorage:
                     )
                     added_edge_ids.append(edge.id)
 
-                # Save to JSON
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.upsert_edge(self.edges[edge_id].to_dict())
+                        for edge_id in added_edge_ids
+                    ]
+                )
 
                 # Emit events for added nodes
                 for node_id in added_node_ids:
@@ -1362,8 +1438,7 @@ class GraphStorage:
                 except Exception as embed_error:
                     print(f"Warning: Could not update embedding: {embed_error}")
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_node(self._serialize_node(node))])
 
             # Emit update event
             node_type = (
@@ -1399,7 +1474,7 @@ class GraphStorage:
         """
         with self._lock:
             found: List[Node] = []
-            changed = False
+            changed: List[Node] = []
             for node_id in node_ids:
                 node = self.nodes.get(node_id)
                 if node is None:
@@ -1412,7 +1487,7 @@ class GraphStorage:
                 node.archived = archived
                 node.updated_at = datetime.now(timezone.utc)
                 self.graph.nodes[node_id]["data"] = node
-                changed = True
+                changed.append(node)
 
                 node_type = (
                     node.type.value if hasattr(node.type, "value") else str(node.type)
@@ -1428,7 +1503,12 @@ class GraphStorage:
                 )
 
             if changed:
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.upsert_node(self._serialize_node(node))
+                        for node in changed
+                    ]
+                )
 
             return found
 
@@ -1511,8 +1591,18 @@ class GraphStorage:
                 for node_id in deleted_node_ids:
                     self._inline_fallback.pop(node_id, None)
 
-                # Save
-                self.save()
+                # Edges first, for the same reason the events below go out in
+                # that order: an edge must never outlive an endpoint in the store.
+                self._persist(
+                    [
+                        EntityOperation.delete_edge(edge_id)
+                        for edge_id in edge_before_states
+                    ]
+                    + [
+                        EntityOperation.delete_node(node_id)
+                        for node_id in deleted_node_ids
+                    ]
+                )
 
                 # Emit delete events for edges (before nodes, to maintain referential integrity info)
                 for edge_id, before_state in edge_before_states.items():
@@ -1673,8 +1763,7 @@ class GraphStorage:
             for key in allowed_fields:
                 setattr(edge, key, getattr(validated_edge, key))
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
 
             # Emit update event
             edge_type = (
@@ -1709,7 +1798,7 @@ class GraphStorage:
         """
         with self._lock:
             found: List[Edge] = []
-            changed = False
+            changed: List[Edge] = []
             for edge_id in edge_ids:
                 edge = self.edges.get(edge_id)
                 if edge is None:
@@ -1720,7 +1809,7 @@ class GraphStorage:
 
                 before_state = edge.to_dict()
                 edge.archived = archived
-                changed = True
+                changed.append(edge)
 
                 edge_type = (
                     edge.type.value if hasattr(edge.type, "value") else str(edge.type)
@@ -1736,7 +1825,9 @@ class GraphStorage:
                 )
 
             if changed:
-                self.save()
+                self._persist(
+                    [EntityOperation.upsert_edge(edge.to_dict()) for edge in changed]
+                )
 
             return found
 
@@ -1776,8 +1867,7 @@ class GraphStorage:
             # Remove from edges dict
             del self.edges[edge_id]
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.delete_edge(edge_id)])
 
             # Emit delete event
             self._emit_event(
@@ -1818,7 +1908,12 @@ class GraphStorage:
                     del self.edges[edge_id]
                     deleted_edge_ids.append(edge_id)
 
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.delete_edge(edge_id)
+                        for edge_id in deleted_edge_ids
+                    ]
+                )
 
                 for edge_id in deleted_edge_ids:
                     before_state = edge_before_states[edge_id]
@@ -1887,8 +1982,7 @@ class GraphStorage:
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
 
             # Emit create event
             edge_type = (

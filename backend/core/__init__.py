@@ -31,7 +31,14 @@ Usage:
 
 # Core storage
 from .storage import GraphStorage, StaleUpdateError
-from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
+from .storage_backends import (
+    BackendCapabilities,
+    EntityOperation,
+    FileGraphPersistenceBackend,
+    GraphPersistenceBackend,
+    IncrementalGraphPersistenceBackend,
+    capabilities_of,
+)
 from .history_store import (
     GraphHistoryStore,
     event_to_history_record,
@@ -80,7 +87,11 @@ __all__ = [
     "GraphStorage",
     "StaleUpdateError",
     "GraphPersistenceBackend",
+    "IncrementalGraphPersistenceBackend",
     "FileGraphPersistenceBackend",
+    "BackendCapabilities",
+    "EntityOperation",
+    "capabilities_of",
     "GraphHistoryStore",
     "event_to_history_record",
     "derive_is_ai_action",
