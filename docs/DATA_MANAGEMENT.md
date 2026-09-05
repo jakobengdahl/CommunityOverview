@@ -10,6 +10,7 @@ data/
     default.json     # Default example dataset
   active/            # Active graph data used by the running app (git-ignored)
     graph.json              # Currently active graph file
+    graph.journal.ndjson    # Mutations not yet folded into graph.json (see below)
     graph.embeddings.bin    # Embedding vectors for that graph (see below)
     graph.history.ndjson    # Mutation history sidecar
 ```
@@ -194,8 +195,48 @@ What this means in practice:
   regenerates a vector for a node that is only loaded. `start-dev.sh` deletes
   the sidecar whenever it puts a different graph in place — `--data`, or seeding
   a missing `graph.json` from a profile or example — and follows
-  `EMBEDDINGS_FILE` when doing so. Do the same when replacing a graph file by
-  hand.
+  `EMBEDDINGS_FILE` when doing so. It deletes the graph journal at the same
+  points (see *Graph Journal* below). Do the same when replacing a graph file
+  by hand.
+
+## Graph Journal
+
+`graph.json` is the graph, and it is still written whole and atomically (a temp
+file, then a rename). What changed is *when*. A mutation no longer rewrites it:
+it is appended as one JSON line to `graph.journal.ndjson` beside it, with an
+`fsync`, so a one-word edit to a large graph costs one small append rather than
+a serialisation of every node. The journal is folded back into `graph.json` — a
+**checkpoint** — every 100 mutations, whenever the app flushes, and at shutdown.
+On startup the app reads `graph.json` and replays whatever the journal holds.
+
+What this means in practice:
+
+- **Durability.** Nothing acknowledged is lost on a crash. A crash mid-append
+  leaves an incomplete last line, which is detected and dropped whole — a
+  multi-entity mutation is one line, so it lands entirely or not at all. A
+  crash mid-checkpoint leaves the previous `graph.json` intact (the rename is
+  atomic) and the journal still complete; replaying it onto a snapshot that
+  already contains its records is harmless.
+- **`graph.json` on its own is the graph as of the last checkpoint.** After a
+  clean shutdown the journal is empty and `graph.json` is complete. While the
+  app is running, or after a crash, the journal holds the difference. **Back up
+  the journal alongside `graph.json`**, or checkpoint first; a copy of
+  `graph.json` taken while the journal is non-empty is behind by up to 100
+  mutations.
+- **Replacing the graph.** A journal belongs to the graph it was written
+  against. Replayed onto a different dataset it would resurrect nodes of the
+  old one and overwrite same-id nodes of the new one with stale payloads.
+  `start-dev.sh` deletes it whenever it puts a different graph in place, for
+  the same reasons and at the same points as the embedding sidecar. Do the
+  same when replacing `graph.json` by hand.
+- **Damage.** An incomplete or unreadable *last* line is the crash shape and
+  is skipped with a warning. An unreadable line anywhere else is not, and the
+  records after it may depend on it, so the app refuses to load and names the
+  line rather than silently losing mutations; `graph.json` still holds the
+  graph as of the last checkpoint.
+- **Object-store mounts.** On a FUSE-mounted bucket an append re-uploads the
+  file, so the journal's cost there is proportional to its size — which the
+  checkpoint cadence keeps small.
 
 ## Mutation History
 

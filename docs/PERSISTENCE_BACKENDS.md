@@ -88,6 +88,7 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
     def upsert_edge(self, edge: dict) -> None: ...
     def delete_edge(self, edge_id: str) -> None: ...
     def apply_batch(self, operations: Sequence[EntityOperation]) -> None: ...
+    def checkpoint(self) -> None: ...
 ```
 
 - An **upsert** receives the entity's serialized form — exactly the dict that
@@ -100,6 +101,10 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
   backend that declares `transactions` must make the batch atomic. One that
   does not is never handed a batch: it gets single operations, and a snapshot
   for anything larger.
+- `checkpoint()` folds anything the backend has deferred into its canonical
+  snapshot, so that what is on disk afterwards is the whole graph. A backend
+  that defers nothing implements it as a no-op. `GraphStorage` calls it from
+  `flush()` and at shutdown.
 
 ```python
 @dataclass(frozen=True)
@@ -128,21 +133,23 @@ capabilities:
 | `incremental_writes` only | several entities | `save_graph_data` — the snapshot is atomic, a loop of single writes is not |
 
 All writes — snapshots and entity operations alike — go through the same
-single-worker background thread, so they land in the order they were issued
-and `flush()` drains both kinds. A write that raises puts the exception on its
-`Future`, as a failing snapshot always has; the in-memory graph is not rolled
-back.
+single-worker background thread, so they land in the order they were issued;
+`flush()` drains both kinds and then asks the backend to `checkpoint()`. A
+write that raises puts the exception on its `Future`, as a failing snapshot
+always has; the in-memory graph is not rolled back.
 
 What still goes through the snapshot path on every backend: the bootstrap
 write of an empty graph (also what `reload()` of a missing store does),
-`save()` called explicitly (the maintenance scripts), and a backend paired
-with a vector sidecar.
+`save()` called explicitly (the maintenance scripts), and — on the file
+backend — a write while a pre-split `graph.json` still holds vectors the
+sidecar does not, because only the snapshot path completes that migration.
 
 ## Vectors and history
 
 The file backend keeps node vectors in a binary sidecar and mutation history
 in an NDJSON sidecar next to `graph.json`. Both exist only for the file
-backend. Any other backend:
+backend. A write that moved a vector carries it to the sidecar first, on the
+snapshot path and the entity path alike. Any other backend:
 
 - receives each node's vector inline, as an `embedding` key on the node
   payload (`None` when the node has none), in snapshots and upserts alike.
@@ -171,7 +178,12 @@ with a sidecar stays on the snapshot path whatever it declares.
 
 ## Current state
 
-`FileGraphPersistenceBackend` is snapshot-only. It remains the default, needs
-no configuration, and behaves exactly as before the incremental contract
-existed. No shipped backend declares `incremental_writes` yet; the contract is
-what the shared-store and file-coalescing backends are built against.
+`FileGraphPersistenceBackend` is the default, needs no configuration, and
+declares `incremental_writes` and `transactions`. It keeps `graph.json` as the
+graph — written whole and atomically — and lands each mutation as one appended
+line in `graph.journal.ndjson` beside it, folding the journal back into
+`graph.json` every 100 mutations, on `checkpoint()`, and on every whole-graph
+save; loading replays the journal. See
+[DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#graph-journal) for what that means
+for backups and for replacing a graph file. The constructor's
+`checkpoint_interval` is the only knob, and nothing sets it in the app.
