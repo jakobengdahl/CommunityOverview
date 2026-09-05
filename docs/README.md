@@ -24,6 +24,7 @@ and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
 | [PROFILES.md](PROFILES.md) | Configuration profiles: node types, presentation, env |
 | [ICONS.md](ICONS.md) | Icon-name reference for node-type definitions |
 | [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md) | How graph data files are stored and loaded |
+| [PERSISTENCE_BACKENDS.md](PERSISTENCE_BACKENDS.md) | The storage seam: what a persistence backend implements, and how mutations reach it |
 | [EVENT_SUBSCRIPTIONS.md](EVENT_SUBSCRIPTIONS.md) | Webhook / graph-mutation event system |
 | [AGENT_SCHEDULING.md](AGENT_SCHEDULING.md) | Time-based agent schedule triggers |
 | [FEDERATED_GRAPH_DESIGN.md](FEDERATED_GRAPH_DESIGN.md) | Federation design and its implementation status |

@@ -295,4 +295,4 @@ For the long-term shared SaaS architecture, the target is different:
 - user access to graphs should be controlled through application-managed identity and authorization
 - the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
 
-That future storage direction is not implemented by this document. Its purpose here is only to clarify that file-based graph storage is a current implementation choice, not the intended final architecture for shared SaaS hosting.
+That future storage direction is not implemented by this document. Its purpose here is only to clarify that file-based graph storage is a current implementation choice, not the intended final architecture for shared SaaS hosting. The seam a shared backend plugs into — and what it has to implement — is described in [PERSISTENCE_BACKENDS.md](./PERSISTENCE_BACKENDS.md).
