@@ -786,7 +786,7 @@ def _event_payload_cases():
             {"name": "A", "weight": 1, "kind": "x", **large},
             {"name": "A", "weight": 2, "kind": "y", **large},
             # Two keys, so a narrowing conditioned on a multi-key patch (what
-            # every real update carries) fires on the one case where _project
+            # every real update carries) fires on a case where _project
             # receives the caller's own dict.
             {"weight": 2, "kind": "y"},
             id="large-no-embedding",
