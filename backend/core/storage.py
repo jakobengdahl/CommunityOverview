@@ -679,11 +679,13 @@ class GraphStorage:
         """
         if self._embedding_sidecar is None or not self._inline_fallback:
             return False
-        # Gated on the sidecar actually needing a write, exactly as save() is:
-        # once the index's version of an id has landed, the fallback copy of
-        # that id is the refused one (a pre-split vector of another width),
-        # which no sidecar write will ever carry, and it must not keep every
-        # later write on the snapshot path.
+        # Gated on the sidecar actually needing a write, exactly as save() is.
+        # Once a sidecar write lands it pops the ids it carried from the
+        # fallback map, so after that the intersection below is empty on its
+        # own; the gate matters in the window BEFORE it lands - a write
+        # already queued behind this one, its vectors snapshotted but not yet
+        # written - where the map still holds those ids and, without the
+        # gate, every mutation issued meanwhile would be a whole-graph write.
         revision = self.vector_store.revision
         if revision in (
             self._persisted_vector_revision,

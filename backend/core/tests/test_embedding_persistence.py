@@ -1267,11 +1267,14 @@ def test_a_refused_vector_in_the_fallback_does_not_force_whole_graph_writes(
         # that one write IS a migration for n2 - its refused copy leaves
         # graph.json - which is one snapshot, not one per write.)
         storage.update_node("n2", {"metadata": {"reviewed": True}})
+        # A new node moves a vector, but touches no fallback id: still not a
+        # migration, and it must not be judged one for the map being non-empty.
+        storage.add_nodes([Node(id="n4", type=NodeType.ACTOR, name="Brand new")], [])
         storage._io_executor.submit(lambda: None).result()
 
         assert os.stat(graph_path).st_mtime_ns == before
         journal = storage._persistence_backend.journal_path
-        assert len(journal.read_text().splitlines()) == 1
+        assert len(journal.read_text().splitlines()) == 2
     finally:
         storage.flush()
 
