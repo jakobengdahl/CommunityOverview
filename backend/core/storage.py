@@ -906,8 +906,9 @@ class GraphStorage:
         """Persist a mutation, as entity operations where the backend takes them.
 
         Callers must hold _lock and pass the operations that describe exactly
-        what they changed. Which shape reaches the backend is decided by its
-        declared capabilities:
+        what they changed. A failed entity write is followed by a whole-graph
+        write of the same state (see _do_apply). Which shape reaches the
+        backend is decided by its declared capabilities:
 
         - no incremental support: the whole graph, exactly as before the
           entity contract existed;
@@ -971,6 +972,14 @@ class GraphStorage:
                 backend.delete_edge(op.entity_id)
         except Exception as e:
             print(f"Error applying {len(operations)} entity operation(s): {e}")
+            # The mutation is in memory and nowhere else now, and the backend's
+            # own image no longer has it - a later checkpoint would write that
+            # image and truncate the journal, and the mutation would be gone
+            # at the next start. Re-issue it the way every failed write was
+            # healed before the entity path existed: as the whole graph,
+            # which resyncs the backend's image. Queued behind this write on
+            # the same worker; if it fails too, its own Future says so.
+            self.save()
             raise
 
     def flush(self) -> None:

@@ -575,3 +575,65 @@ class TestOrderingAndFailedAppends:
 
         names = {n["id"]: n["name"] for n in data["nodes"]}
         assert names["c"] == "second" and names["b"] == "back"
+
+
+class TestRecoveryAfterFailure:
+    def test_an_interrupted_tail_is_cut_off_so_the_next_append_is_not_glued_to_it(
+        self, backend
+    ):
+        """Dropping the tail at read time is not enough: left in the file, the
+        next append lands on the same line and becomes the next 'incomplete
+        last record' - an acknowledged write lost at the following start."""
+        backend.upsert_node(_payload("b2"))
+        with open(backend.journal_path, "a", encoding="utf-8") as f:
+            f.write(
+                '{"ops": [{"kind": "node", "action": "upsert", "entity_id": "x", "pay'
+            )
+
+        restarted = FileGraphPersistenceBackend(backend.json_path)
+        assert _ids(restarted.load_graph_data()) == {"a", "b", "b2"}
+        assert backend.journal_path.read_bytes().endswith(b"\n")
+        restarted.upsert_node(_payload("c"))
+
+        third = FileGraphPersistenceBackend(backend.json_path)
+        assert _ids(third.load_graph_data()) == {"a", "b", "b2", "c"}
+        third.upsert_node(_payload("d"))
+        assert _ids(
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        ) == {
+            "a",
+            "b",
+            "b2",
+            "c",
+            "d",
+        }
+
+    def test_a_failed_entity_write_is_healed_by_a_whole_graph_write(self, tmp):
+        """Before the entity path existed, a transiently failed write was
+        healed by the next save rewriting everything. A failed append leaves
+        the backend's image without the mutation, so it must be re-issued
+        whole or a later checkpoint writes an image that never had it."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+            backend = storage._persistence_backend
+            real = backend.upsert_node
+            failures = {"left": 1}
+
+            def flaky(node):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise OSError("transient append failure")
+                return real(node)
+
+            backend.upsert_node = flaky
+            storage.update_node("a", {"name": "Renamed"})
+            storage.flush()
+
+            data = json.loads(Path(path).read_text())
+            assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+            assert backend.journal_path.read_bytes() == b""
+        finally:
+            storage.flush()

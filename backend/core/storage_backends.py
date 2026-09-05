@@ -354,10 +354,12 @@ class FileGraphPersistenceBackend:
         """The journal's records, oldest first.
 
         A last line that is incomplete or unparsable is the append a crash
-        interrupted; it is dropped whole, which is what makes a batch atomic.
-        A damaged line anywhere else is not a crash shape but damage, and the
-        records after it may depend on it, so loading stops with an error
-        that names the line rather than silently losing mutations.
+        interrupted; it is dropped whole, which is what makes a batch atomic -
+        and it is cut off the file too, or the next append would be glued
+        onto it and become the next "incomplete last record". A damaged line
+        anywhere else is not a crash shape but damage, and the records after
+        it may depend on it, so loading stops with an error that names the
+        line rather than silently losing mutations.
         """
         if not self.journal_path.exists():
             return []
@@ -374,6 +376,8 @@ class FileGraphPersistenceBackend:
         if complete:
             lines.pop()
         records: List[List[EntityOperation]] = []
+        # Bytes covered by the records kept; anything past it is the tail.
+        kept = 0
         last = len(lines) - 1
         for index, line in enumerate(lines):
             try:
@@ -399,7 +403,20 @@ class FileGraphPersistenceBackend:
                 )
                 break
             records.append(ops)
+            kept += len(line) + 1
+        if kept < len(raw):
+            self._cut_journal_to(kept)
         return records
+
+    def _cut_journal_to(self, length: int) -> None:
+        with open(self.journal_path, "r+b") as f:
+            _lock_file(f, exclusive=True)
+            try:
+                f.truncate(length)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                _unlock_file(f)
 
     def _apply(self, op: EntityOperation) -> None:
         store = self._nodes if op.kind == "node" else self._edges

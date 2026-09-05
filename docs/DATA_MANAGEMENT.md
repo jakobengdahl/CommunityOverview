@@ -214,8 +214,8 @@ What this means in practice:
 - **Durability.** Nothing the backend has written is lost on a crash. (What
   a crash can lose is a write still queued behind the app's single writer
   thread — the same window the whole-file write always had.) A crash
-  mid-append leaves an incomplete last line, which is detected and dropped
-  whole — a
+  mid-append leaves an incomplete last line, which is detected, dropped
+  whole and cut off the file at the next start — a
   multi-entity mutation is one line, so it lands entirely or not at all. A
   crash mid-checkpoint leaves the previous `graph.json` intact (the rename is
   atomic) and the journal still complete; replaying it onto a snapshot that
