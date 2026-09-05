@@ -408,8 +408,9 @@ class GraphStorage:
         except RuntimeError:
             pass  # already shut down: nothing can be queued, nothing is pending
         self._io_executor.shutdown(wait=True)
-        # A write that failed after the heal above ran has nowhere to queue a
-        # retry; write the graph on this thread instead, or it is lost.
+        # A write that failed after the heal above ran - or the heal itself,
+        # which re-raises the flag - has nowhere to queue a retry; write the
+        # graph on this thread instead, or it is lost.
         if self._resync_pending:
             self._save_now()
         # Data is safe either way - the journal still holds the difference and
@@ -433,6 +434,8 @@ class GraphStorage:
                 data, node_count, edge_count, vectors, vector_revision
             )
         except Exception as exc:
+            # _do_save_to_disk has re-raised the flag; it stays raised, which
+            # is the honest state - the journal still holds what it can.
             print(f"Warning: graph write at shutdown failed: {exc}")
 
     def _emit_event(
@@ -650,10 +653,13 @@ class GraphStorage:
             data = self._snapshot_data()
             node_count = len(self.nodes)
             edge_count = len(self.edges)
+            # Cleared under the lock, with the capture: a write issued after
+            # this point is issued after the clear, so its failure cannot be
+            # erased by a snapshot that does not contain it.
+            self._resync_pending = False
 
         # Offload blocking I/O to background thread to avoid blocking event loop.
         # Returns the Future so callers that must wait (e.g. load()) can call .result().
-        self._resync_pending = False
         return self._io_executor.submit(
             self._do_save_to_disk,
             data,
@@ -936,6 +942,12 @@ class GraphStorage:
             )
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
+            # The backend's image may now lack what memory has, exactly as
+            # after a failed entity write: the next write is the whole graph
+            # again, until one lands. Before the entity path existed every
+            # write was, so this is the same "next successful write carries
+            # everything" as before.
+            self._resync_pending = True
             raise
 
     def _persist(self, operations: List[EntityOperation]) -> "Future[None]":
@@ -1037,9 +1049,12 @@ class GraphStorage:
         submitted write. A checkpoint that fails surfaces here.
         """
         # Drain first, so a failed entity write already queued has had its
-        # say; then heal it, so the checkpoint folds a complete image.
+        # say; then heal it, so the checkpoint folds a complete image. A heal
+        # that fails surfaces here, like a failed checkpoint.
         self._io_executor.submit(lambda: None).result()
-        self._heal_if_needed()
+        heal = self._heal_if_needed()
+        if heal is not None:
+            heal.result()
         if self._backend_capabilities.incremental_writes:
             self._io_executor.submit(self._persistence_backend.checkpoint).result()
         # Submit a no-op sentinel and block until it runs — drains the queue.

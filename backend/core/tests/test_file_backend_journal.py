@@ -225,6 +225,8 @@ class TestCrashShapes:
 
         assert _ids(data) == {"a", "b", "c"}
         assert "incomplete last record" in capsys.readouterr().out
+        assert backend.journal_path.read_bytes().endswith(b"\n")
+        _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_a_complete_last_line_that_is_not_json_is_dropped_too(
         self, backend, capsys
@@ -237,6 +239,7 @@ class TestCrashShapes:
 
         assert _ids(data) == {"a", "b", "c"}
         assert "incomplete last record" in capsys.readouterr().out
+        _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_an_interrupted_batch_lands_nowhere(self, backend):
         line = json.dumps(
@@ -494,6 +497,17 @@ class TestFailureReporting:
         assert _ids(json.loads((tmp / "g.json").read_text())) == {"a"}
 
 
+def _appends_still_land_after(json_path, expected):
+    """After a load that dropped a tail, a further append must land on a fresh
+    line and be seen - with no error - by the loads that follow."""
+    reopened = FileGraphPersistenceBackend(json_path)
+    reopened.load_graph_data()
+    reopened.upsert_node(_payload("z"))
+    assert _ids(
+        FileGraphPersistenceBackend(json_path).load_graph_data()
+    ) == expected | {"z"}
+
+
 def asdict_op(op):
     return {
         "kind": op.kind,
@@ -682,6 +696,10 @@ class TestHealingWithoutDeadlock:
         storage.flush()
         self._failing_once(storage)
         storage.update_node("a", {"name": "Renamed"})
+        # A missing file is the reload() shape that waits on the writer while
+        # holding the lock (the bootstrap write); an existing file never does.
+        os.unlink(tmp / "g.json")
+        storage._persistence_backend.journal_path.unlink(missing_ok=True)
 
         done = threading.Event()
 
@@ -736,3 +754,155 @@ class TestHealingWithoutDeadlock:
 
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
         assert _ids(data) == {"a", "b", "d", "e"}
+
+
+class TestHealingIsWholeGraph:
+    def _fail_once(self, obj, name):
+        real = getattr(obj, name)
+        failures = {"left": 1}
+
+        def flaky(*args):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise OSError(f"transient {name} failure")
+            return real(*args)
+
+        setattr(obj, name, flaky)
+
+    def test_a_failed_batch_is_healed_too(self, tmp):
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+            self._fail_once(storage._persistence_backend, "apply_batch")
+
+            storage.add_nodes(
+                [
+                    Node(id="b", type=NodeType.ACTOR, name="B"),
+                    Node(id="c", type=NodeType.ACTOR, name="C"),
+                ],
+                [],
+            )
+            storage.flush()
+
+            assert _ids(json.loads(Path(path).read_text())) == {"a", "b", "c"}
+        finally:
+            storage.flush()
+
+    def test_a_permanently_failing_entity_write_is_still_healed_by_a_snapshot(
+        self, tmp
+    ):
+        """Retrying the entity op would never land; only a whole-graph write
+        can, and that is what the heal must be."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        backend = storage._persistence_backend
+        real = backend.upsert_node
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+
+            def always_fails(node):
+                raise OSError("entity path down")
+
+            backend.upsert_node = always_fails
+            storage.update_node("a", {"name": "Renamed"})
+            storage.flush()
+
+            data = json.loads(Path(path).read_text())
+            assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+        finally:
+            backend.upsert_node = real
+            storage.flush()
+
+    def test_a_failed_healing_snapshot_surfaces_and_is_retried(self, tmp):
+        """Two failures in a row must not leave a permanent, silent gap: the
+        heal that failed raises the flag again, flush() reports it, and the
+        next write is whole-graph again until one lands."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        backend = storage._persistence_backend
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+            self._fail_once(backend, "upsert_node")
+            self._fail_once(backend, "save_graph_data")
+
+            storage.add_nodes([Node(id="b", type=NodeType.ACTOR, name="B")], [])
+            with pytest.raises(OSError, match="save_graph_data"):
+                storage.flush()
+            assert storage._resync_pending
+
+            storage.update_node("a", {"name": "Renamed"})
+            storage.flush()
+
+            data = json.loads(Path(path).read_text())
+            assert _ids(data) == {"a", "b"}
+            assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+        finally:
+            storage.flush()
+
+    def test_shutdown_writes_synchronously_when_the_queued_heal_is_gone(
+        self, tmp, monkeypatch
+    ):
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        storage.flush()
+        self._fail_once(storage._persistence_backend, "upsert_node")
+        storage.update_node("a", {"name": "Renamed"})
+        # The in-queue heal never runs: only the synchronous fallback is left.
+        monkeypatch.setattr(storage, "_heal_if_needed", lambda: None)
+
+        storage.shutdown_events()
+
+        data = json.loads(Path(path).read_text())
+        assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+
+    def test_a_short_write_is_a_failed_append(self, backend, monkeypatch):
+        """A raw write may land fewer bytes than given without raising; that
+        is a failure, and the length is restored like any other."""
+        import backend.core.storage_backends as sb
+
+        real_open = open
+
+        class HalfWriter:
+            def __init__(self, f):
+                self._f = f
+
+            def write(self, data):
+                return self._f.write(data[: len(data) // 2])
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self._f.__exit__(*exc)
+
+        def half_open(path, mode="r", *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            if mode == "ab":
+                monkeypatch.setattr(sb, "open", real_open, raising=False)
+                return HalfWriter(f)
+            return f
+
+        backend.upsert_node(_payload("b2"))  # a real line to be glued onto
+        before = backend.journal_path.stat().st_size
+        monkeypatch.setattr(sb, "open", half_open, raising=False)
+        with pytest.raises(OSError, match="short journal write"):
+            backend.upsert_node(_payload("c"))
+
+        assert backend.journal_path.stat().st_size == before
+        backend.upsert_node(_payload("d"))
+        assert _ids(
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        ) == {
+            "a",
+            "b",
+            "b2",
+            "d",
+        }

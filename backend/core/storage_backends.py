@@ -445,8 +445,16 @@ class FileGraphPersistenceBackend:
                 _lock_file(f, exclusive=True)
                 try:
                     start = os.fstat(f.fileno()).st_size
+                    payload = (line + "\n").encode("utf-8")
                     try:
-                        f.write((line + "\n").encode("utf-8"))
+                        # A raw write may land fewer bytes than given without
+                        # raising (a full disk reports the shortfall first and
+                        # the error on the next call); that is a failure here.
+                        written = f.write(payload)
+                        if written != len(payload):
+                            raise OSError(
+                                f"short journal write: {written} of {len(payload)} bytes"
+                            )
                         os.fsync(f.fileno())
                     except Exception:
                         os.ftruncate(f.fileno(), start)
