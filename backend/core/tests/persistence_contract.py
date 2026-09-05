@@ -20,15 +20,17 @@ What a subclass provides:
   backends): make the next entity write fail after it has started. Without
   it the interrupted-batch test is skipped.
 - `previous_version_store(tmp_path)` (optional): a store as the previous
-  release wrote it, plus the factory that opens it. Without it the
-  backwards-compatibility test is skipped.
+  release wrote it, returned as `(factory, node_ids, ids_with_vectors)` -
+  the factory that opens it, every node id it holds, and the ids whose
+  entry carries a vector. Without it the backwards-compatibility test is
+  skipped.
 """
 
 from __future__ import annotations
 
 import copy
 import threading
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 import pytest
 
@@ -90,7 +92,7 @@ def snapshot(
 
 
 def by_id(data: Dict[str, Any], key: str) -> Dict[str, Dict[str, Any]]:
-    return {entity["id"]: entity for entity in data.get(key, [])}
+    return {entity.get("id"): entity for entity in data.get(key, [])}
 
 
 # --- the reference in-memory backend ---------------------------------------
@@ -100,16 +102,17 @@ class InMemoryGraphPersistenceBackend:
     """The reference implementation of the incremental contract.
 
     A dict-backed store shared by every instance created from the same
-    `store` dict, so a "reopened" instance sees what another one wrote.
-    `apply_batch` is atomic the simplest way there is: the operations are
-    applied to a copy and the copy is swapped in at the end, so a failure
-    part-way leaves the store exactly as it was.
+    `store` dict, so a "reopened" instance sees what another one wrote; the
+    lock lives in the store too, so it is one lock across those instances.
+    Both writes are atomic the simplest way there is: the new state is built
+    first and swapped in at the end, so a failure part-way - in a copy, say -
+    leaves the store exactly as it was.
     """
 
     def __init__(self, store: Dict[str, Any], *, incremental: bool = True):
         self._store = store
         self._incremental = incremental
-        self._lock = threading.Lock()
+        self._lock = store.setdefault("lock", threading.Lock())
         store.setdefault("nodes", {})
         store.setdefault("edges", {})
         store.setdefault("metadata", {})
@@ -135,10 +138,12 @@ class InMemoryGraphPersistenceBackend:
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
-            self._store["nodes"] = {n["id"]: copy.deepcopy(n) for n in data["nodes"]}
-            self._store["edges"] = {e["id"]: copy.deepcopy(e) for e in data["edges"]}
-            self._store["metadata"] = copy.deepcopy(data.get("metadata") or {})
-            self._store["written"] = True
+            nodes = {n["id"]: copy.deepcopy(n) for n in data["nodes"]}
+            edges = {e["id"]: copy.deepcopy(e) for e in data["edges"]}
+            metadata = copy.deepcopy(data.get("metadata") or {})
+            self._store.update(
+                nodes=nodes, edges=edges, metadata=metadata, written=True
+            )
 
     def default_graph_name(self) -> str:
         return "in-memory"
@@ -187,7 +192,7 @@ class PersistenceBackendContract:
     def interrupt_next_append(self, backend, monkeypatch) -> None:
         pytest.skip("this backend has no way to interrupt an append under test")
 
-    def previous_version_store(self, tmp_path) -> Callable[[], Any]:
+    def previous_version_store(self, tmp_path):
         pytest.skip("no previous-version store defined for this backend")
 
     # -- helpers --------------------------------------------------------------
@@ -264,14 +269,6 @@ class PersistenceBackendContract:
         assert by_id(backend.load_graph_data(), "nodes")["a"]["name"] == "A"
         assert by_id(factory().load_graph_data(), "nodes")["a"]["name"] == "A"
 
-    def test_the_saved_dict_is_the_callers_too(self, factory):
-        backend = factory()
-        data = snapshot([node_payload("a")])
-        backend.save_graph_data(data)
-        data["nodes"][0]["name"] = "mutated afterwards"
-
-        assert by_id(factory().load_graph_data(), "nodes")["a"]["name"] == "A"
-
     # -- the entity contract --------------------------------------------------
 
     def test_an_upsert_creates_and_a_second_upsert_replaces_whole(self, factory):
@@ -279,13 +276,17 @@ class PersistenceBackendContract:
         self._require_incremental(backend)
         backend.save_graph_data(snapshot())
 
-        backend.upsert_node(node_payload("a", tags=["first"], metadata={"k": 1}))
+        # The first payload carries a key the replacement will not: exactly
+        # what happens when a node's vector moves out of graph.json into the
+        # sidecar and the `embedding` key stops being written.
+        backend.upsert_node(node_payload("a", tags=["first"], embedding=[1.0]))
         replacement = node_payload("a", name="Replaced")
         backend.upsert_edge(edge_payload("e", "a", "a"))
         backend.upsert_node(replacement)
 
         nodes = by_id(factory().load_graph_data(), "nodes")
-        assert nodes["a"] == replacement  # not a patch: k and tags are gone
+        assert nodes["a"] == replacement
+        assert "embedding" not in nodes["a"]  # replaced whole, not patched
         assert by_id(factory().load_graph_data(), "edges")["e"]["source"] == "a"
 
     def test_a_delete_removes_and_deleting_the_absent_is_not_an_error(self, factory):
@@ -404,14 +405,23 @@ class PersistenceBackendContract:
     # -- backwards compatibility ---------------------------------------------
 
     def test_a_store_written_by_the_previous_version_loads(self, tmp_path):
-        open_previous = self.previous_version_store(tmp_path)
+        """Whole, through the backend and through GraphStorage: every node the
+        old store held is there, and a vector it carried is in the index."""
+        open_previous, node_ids, ids_with_vectors = self.previous_version_store(
+            tmp_path
+        )
         backend = open_previous()
 
         assert backend.exists()
-        loaded = backend.load_graph_data()
-        assert by_id(loaded, "nodes"), "the previous-version store held no nodes"
-        for node in loaded["nodes"]:
-            assert "id" in node and "type" in node and "name" in node
+        assert set(by_id(backend.load_graph_data(), "nodes")) == set(node_ids)
+
+        storage = GraphStorage(persistence_backend=open_previous())
+        try:
+            assert {n.id for n in storage.get_all_nodes()} == set(node_ids)
+            for node_id in ids_with_vectors:
+                assert storage.vector_store.get_vector_list(node_id) is not None
+        finally:
+            storage.shutdown_events()
 
     # -- through GraphStorage -------------------------------------------------
 
@@ -453,7 +463,9 @@ class PersistenceBackendContract:
             assert reopened.get_node("b").tags == ["t"]
             edges = {e.id: e for e in reopened.get_all_edges()}
             assert set(edges) == {"ab"} and edges["ab"].label == "knows"
-            assert reopened.vector_store.get_vector_list("a") is not None
+            assert reopened.vector_store.get_vector_list("a") == pytest.approx(
+                [0.5, 0.25]
+            )
         finally:
             reopened.shutdown_events()
 

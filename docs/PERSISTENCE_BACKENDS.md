@@ -45,10 +45,14 @@ class GraphPersistenceBackend(Protocol):
   [DATA_MANAGEMENT.md](DATA_MANAGEMENT.md#graph-json-format)). Node and edge
   dicts are what `Node.to_dict()` / `Edge.to_dict()` produce, plus an
   `embedding` key on nodes for backends without a vector sidecar (below).
+  **The dict is handed over**: `GraphStorage` rewrites it in place
+  (timestamps become `datetime`s), so return a copy, never your own store.
 - `save_graph_data(data)` — persist that dict, whole. **Must be atomic**: a
   reader must see the previous graph or the new one, never a partial write.
-  The file backend does this with a temp file and a rename. Runs on
-  `GraphStorage`'s single background writer thread.
+  The file backend does this with a temp file and a rename. The dict is
+  handed over the other way: a backend may keep it, and `GraphStorage`
+  never touches it again. Runs on `GraphStorage`'s single background
+  writer thread.
 - `default_graph_name()` — the name to fall back on when the stored metadata
   has none.
 - `capabilities()` — see below. A backend written before this method existed
@@ -68,7 +72,7 @@ class BackendCapabilities:
 |---|---|---|
 | `incremental_writes` | the entity operations are implemented | mutations arrive as entity operations, not snapshots |
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
-| `change_notification` | the backend can report changes made by another instance | declared only; the notification seam is a later change |
+| `change_notification` | the backend can report changes made by another instance | not yet declarable: the notification seam is a later change, and until it lands the contract suite refuses the declaration |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -173,7 +177,10 @@ passes against it.
 1. Implement the snapshot contract. Subclass `PersistenceBackendContract` in
    a test module and provide a `factory` fixture — a zero-argument callable
    returning a backend bound to one fresh store, such that calling it again
-   opens the *same* store. The snapshot clauses now run against you.
+   opens the *same* store. The snapshot clauses now run against you: a
+   snapshot round-trips through a reopened backend, a later one replaces
+   the graph whole, the loaded dict is the caller's to mutate, an
+   interrupted snapshot leaves the previous graph readable.
 2. Declare `SNAPSHOT_ONLY` and ship. This is a complete, correct backend;
    the entity clauses skip themselves.
 3. To stop rewriting the whole graph per mutation, implement the incremental

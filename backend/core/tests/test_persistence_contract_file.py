@@ -49,13 +49,18 @@ class TestFileBackendContract(PersistenceBackendContract):
         path = tmp_path / "graph.json"
         shutil.copy(PREVIOUS_VERSION_GRAPH, path)
         assert not (tmp_path / "graph.journal.ndjson").exists()
-        return lambda: FileGraphPersistenceBackend(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        node_ids = [n["id"] for n in data["nodes"]]
+        with_vectors = [n["id"] for n in data["nodes"] if n.get("embedding")]
+        return (lambda: FileGraphPersistenceBackend(path)), node_ids, with_vectors
 
 
 def test_the_previous_version_fixture_is_the_shipped_example():
-    """The example dataset is the one graph.json shape every release has
-    written; if it moves or changes shape, the compatibility clause above is
-    testing something else."""
+    """The example dataset is the graph.json shape PREVIOUS releases wrote -
+    vectors inline under an `embedding` key, which the current release no
+    longer writes. If it moves or changes shape, the compatibility clause
+    above is testing something else."""
     data = json.loads(PREVIOUS_VERSION_GRAPH.read_text(encoding="utf-8"))
     assert data["nodes"] and data["edges"]
     assert "embedding" in data["nodes"][0]
+    assert any(n.get("embedding") for n in data["nodes"]), "no inline vector to migrate"

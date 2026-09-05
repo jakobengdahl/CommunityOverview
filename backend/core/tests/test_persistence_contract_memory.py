@@ -21,24 +21,15 @@ class TestInMemoryBackendContract(PersistenceBackendContract):
         return lambda: InMemoryGraphPersistenceBackend(store)
 
     def interrupt_next_snapshot(self, backend, monkeypatch):
-        def refuse(data):
-            raise RuntimeError("store unavailable")
-
-        monkeypatch.setattr(backend, "save_graph_data", refuse)
+        """Fail while the edges are being copied - after the nodes were: a
+        snapshot that assigned as it went would leave new nodes with old
+        edges, which the contract must see."""
+        _fail_on_deepcopy(monkeypatch, call=2)
 
     def interrupt_next_append(self, backend, monkeypatch):
         """Fail while the second operation of a batch is being applied: the
         reference applies to a copy, so nothing may have reached the store."""
-        real_deepcopy = contract.copy.deepcopy
-        calls = {"n": 0}
-
-        def flaky(obj, *args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("store unavailable mid-batch")
-            return real_deepcopy(obj, *args, **kwargs)
-
-        monkeypatch.setattr(contract.copy, "deepcopy", flaky)
+        _fail_on_deepcopy(monkeypatch, call=1)
 
 
 class TestSnapshotOnlyInMemoryBackendContract(PersistenceBackendContract):
@@ -48,7 +39,19 @@ class TestSnapshotOnlyInMemoryBackendContract(PersistenceBackendContract):
         return lambda: InMemoryGraphPersistenceBackend(store, incremental=False)
 
     def interrupt_next_snapshot(self, backend, monkeypatch):
-        def refuse(data):
-            raise RuntimeError("store unavailable")
+        _fail_on_deepcopy(monkeypatch, call=2)
 
-        monkeypatch.setattr(backend, "save_graph_data", refuse)
+
+def _fail_on_deepcopy(monkeypatch, call: int) -> None:
+    """Make the Nth deepcopy after this call raise, then restore."""
+    real_deepcopy = contract.copy.deepcopy
+    calls = {"n": 0}
+
+    def flaky(obj, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == call:
+            monkeypatch.setattr(contract.copy, "deepcopy", real_deepcopy)
+            raise RuntimeError("store unavailable part-way through the write")
+        return real_deepcopy(obj, *args, **kwargs)
+
+    monkeypatch.setattr(contract.copy, "deepcopy", flaky)
