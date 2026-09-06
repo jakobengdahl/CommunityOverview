@@ -39,6 +39,7 @@ from .models import (
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
     EntityOperation,
+    ExternalChange,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     capabilities_of,
@@ -50,6 +51,10 @@ from . import storage_events
 
 # Event system imports
 from .events.models import EventType, EntityKind, EventContext
+
+# The origin stamped on events that report a change another writer made, so a
+# subscriber reacting by writing can tell them from its own instance's work.
+EXTERNAL_CHANGE_ORIGIN = "external-change"
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
@@ -230,6 +235,13 @@ class GraphStorage:
 
         self.load()
 
+        # Only after the first load: a change reported against a model that
+        # does not exist yet has nothing to refresh.
+        if self._backend_capabilities.change_notification:
+            self._persistence_backend.start_change_notification(
+                self.apply_external_change
+            )
+
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
@@ -387,6 +399,13 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
+        # First, so nothing arrives to refresh a model that is being torn down.
+        if self._backend_capabilities.change_notification:
+            try:
+                self._persistence_backend.stop_change_notification()
+            except Exception as exc:
+                print(f"Warning: stopping change notification failed: {exc}")
+
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
@@ -793,6 +812,31 @@ class GraphStorage:
             return None
         return raw.tolist() if hasattr(raw, "tolist") else list(raw)
 
+    def _adopt_supplied_vectors(self, nodes) -> None:
+        """Move vectors carried on node objects into the vector index.
+
+        The serialized payload no longer carries `embedding`, so a vector that
+        arrived on a node object is persisted nowhere unless it is adopted
+        here. Callers that can also generate embeddings do that afterwards,
+        so generation still wins when the ML stack is available.
+        """
+        supplied = self._take_inline_vectors(nodes)
+        if not supplied:
+            return
+        # The index already in memory anchors the dimension; a caller passing
+        # vectors of some other width must never evict the vectors that are
+        # already correct.
+        existing = self.vector_store.export_vectors()
+        dimension = dominant_dimension(existing) or dominant_dimension(supplied)
+        accepted = matching_dimension(supplied, dimension)
+        if len(accepted) != len(supplied):
+            print(
+                f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+                f"embedding(s) whose dimension is not {dimension}"
+            )
+        if accepted:
+            self.vector_store.load_vectors({**existing, **accepted})
+
     def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
         """Move any vector carried on a node object into a plain dict.
 
@@ -1086,6 +1130,173 @@ class GraphStorage:
             return name.strip()
         return self._default_graph_name()
 
+    def apply_external_change(self, change: "ExternalChange") -> None:
+        """Bring the in-memory model in step with a write someone else made.
+
+        A backend that declares `change_notification` calls this - on whatever
+        thread it likes - when the store changed behind this instance's back.
+        Nothing here is persisted: the change is already in the store, and
+        writing it back would fight the writer that made it.
+
+        Every derived structure a read path serves has to move with it, not
+        just the node dictionary: the NetworkX graph, the searchable-text
+        cache behind lexical search, and the vector index behind semantic
+        search. A stale entry in any of them is worse than a missing one,
+        because a miss is refilled on demand and a stale hit is served.
+
+        Events are emitted so subscriptions, agents and the history see the
+        change, marked with a distinct origin so an agent that reacts by
+        writing cannot bounce it between instances forever. A change the
+        backend could not describe is a reload, and a reload emits nothing:
+        a backend that wants subscribers to see individual changes has to
+        report them as operations.
+        """
+        with self._lock:
+            if change.operations is None:
+                self.load()
+                return
+            for op in change.operations:
+                if op.kind == "node":
+                    if op.action == "upsert":
+                        self._external_upsert_node(op)
+                    else:
+                        self._external_delete_node(op.entity_id)
+                else:
+                    if op.action == "upsert":
+                        self._external_upsert_edge(op)
+                    else:
+                        self._external_delete_edge(op.entity_id)
+
+    @staticmethod
+    def _entity_type_name(entity) -> str:
+        value = getattr(entity, "type", None)
+        return value.value if hasattr(value, "value") else str(value)
+
+    def _external_upsert_node(self, op: EntityOperation) -> None:
+        """Callers must hold _lock."""
+        node = Node.from_dict(op.payload)
+        existing = self.nodes.get(node.id)
+        before = existing.to_dict() if existing is not None else None
+
+        # The vector described the text this node used to have. Keeping it
+        # would let semantic search go on matching a description that is gone,
+        # so it goes first and is replaced below by whatever the store carried
+        # or by a fresh one.
+        self.vector_store.remove_node_embedding(node.id)
+        self._inline_fallback.pop(node.id, None)
+
+        self.nodes[node.id] = node
+        # add_node on an existing id replaces the attributes, which is what
+        # repoints `data` at the new object; every read path that walks the
+        # graph would otherwise still hand out the old one.
+        self.graph.add_node(node.id, data=node)
+        self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
+        self._adopt_supplied_vectors([node])
+        if not self.vector_store.has_embedding(node.id):
+            try:
+                self.vector_store.update_node_embedding(node)
+            except Exception as embed_error:
+                print(f"Warning: Could not update embedding: {embed_error}")
+
+        self._emit_event(
+            event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node.id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=node.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_node(self, node_id: str) -> None:
+        """Callers must hold _lock."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        before = node.to_dict()
+
+        # An edge cannot outlive an endpoint. The store may well have reported
+        # the edge deletions too; deleting one twice is a no-op.
+        incident = [
+            edge.id
+            for edge in self.edges.values()
+            if edge.source == node_id or edge.target == node_id
+        ]
+        for edge_id in incident:
+            self._external_delete_edge(edge_id)
+
+        if self.graph.has_node(node_id):
+            self.graph.remove_node(node_id)
+        del self.nodes[node_id]
+        self._searchable_text_cache.pop(node_id, None)
+        self.vector_store.remove_node_embedding(node_id)
+        self._inline_fallback.pop(node_id, None)
+
+        self._emit_event(
+            event_type=EventType.NODE_DELETE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node_id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_upsert_edge(self, op: EntityOperation) -> None:
+        """Callers must hold _lock."""
+        edge = Edge.from_dict(op.payload)
+        if edge.source not in self.nodes or edge.target not in self.nodes:
+            # add_edge would invent the missing endpoint as a node with no
+            # data, which every read path walking the graph would then trip
+            # over. Report it and leave the edge out of both structures.
+            absent = edge.source if edge.source not in self.nodes else edge.target
+            print(
+                f"Warning: ignoring external edge {edge.id}: "
+                f"endpoint {absent} is not present"
+            )
+            return
+
+        existing = self.edges.get(edge.id)
+        before = existing.to_dict() if existing is not None else None
+        if existing is not None and self.graph.has_edge(
+            existing.source, existing.target, key=existing.id
+        ):
+            # An endpoint may have moved; the old graph edge is keyed on where
+            # it used to point and would otherwise stay.
+            self.graph.remove_edge(existing.source, existing.target, key=existing.id)
+
+        self.edges[edge.id] = edge
+        self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+        self._emit_event(
+            event_type=EventType.EDGE_UPDATE if before else EventType.EDGE_CREATE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge.id,
+            entity_type=self._entity_type_name(edge),
+            before=before,
+            after=edge.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_edge(self, edge_id: str) -> None:
+        """Callers must hold _lock."""
+        edge = self.edges.pop(edge_id, None)
+        if edge is None:
+            return
+        if self.graph.has_edge(edge.source, edge.target, key=edge_id):
+            self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+
+        self._emit_event(
+            event_type=EventType.EDGE_DELETE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge_id,
+            entity_type=self._entity_type_name(edge),
+            before=edge.to_dict(),
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
     def reload(self) -> None:
         """
         Reload graph from disk, discarding any in-memory changes.
@@ -1320,23 +1531,7 @@ class GraphStorage:
                 # serialized payload no longer carries that field, so adopt it
                 # into the vector store or it is persisted nowhere. Generation
                 # below still wins when the ML stack is available, as before.
-                supplied = self._take_inline_vectors(nodes_to_embed)
-                if supplied:
-                    # The index already in memory anchors the dimension; a
-                    # caller passing vectors of some other width must never
-                    # evict the vectors that are already correct.
-                    existing = self.vector_store.export_vectors()
-                    dimension = dominant_dimension(existing) or dominant_dimension(
-                        supplied
-                    )
-                    accepted = matching_dimension(supplied, dimension)
-                    if len(accepted) != len(supplied):
-                        print(
-                            f"Warning: ignored {len(supplied) - len(accepted)} supplied "
-                            f"embedding(s) whose dimension is not {dimension}"
-                        )
-                    if accepted:
-                        self.vector_store.load_vectors({**existing, **accepted})
+                self._adopt_supplied_vectors(nodes_to_embed)
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:

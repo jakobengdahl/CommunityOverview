@@ -72,7 +72,7 @@ class BackendCapabilities:
 |---|---|---|
 | `incremental_writes` | the entity operations are implemented | mutations arrive as entity operations, not snapshots |
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
-| `change_notification` | the backend can report changes made by another instance | not yet declarable: the notification seam is a later change, and until it lands the contract suite refuses the declaration |
+| `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes after its first load and refreshes what each reported entity touches; see *Reporting external changes* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -196,6 +196,13 @@ passes against it.
    an interrupted atomic batch lands nothing), and `previous_version_store`
    if there is a store your previous release wrote. Without an override
    those clauses skip, and a skipped clause is an unverified one.
+5. If your store can have more than one writer, implement the notification
+   protocol and declare `change_notification`. The clauses that then run are
+   the ones a shared store exists for: a write made through a second backend
+   on the same store reaches a running `GraphStorage` — its node dictionary,
+   its edges, lexical search, and the vector index behind semantic search —
+   without a restart, an external delete takes the incident edges with it,
+   and the subscription ends when the storage shuts down.
 
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
@@ -208,13 +215,63 @@ IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
 which contract drives you is decided by what you declare. The one type check
 it does make is for the file backend's sidecars (above). The contract does
 check it: a backend declaring `incremental_writes` must satisfy the
-`IncrementalGraphPersistenceBackend` protocol, and no backend may declare
-`change_notification` until the notification seam exists.
+`IncrementalGraphPersistenceBackend` protocol, and one declaring
+`change_notification` the `ChangeNotifyingBackend` protocol.
+
+## Reporting external changes
+
+Every read path serves state built at load: the node and edge dictionaries,
+the NetworkX graph, the searchable-text cache behind lexical search, and the
+vector index behind semantic search. Nothing tells them another writer moved
+the store underneath. That is why one instance is the limit today, and it is
+what `change_notification` is for — it is a property of the store, not of the
+storage engine: a file lock is kernel-local and coordinates nothing between
+machines.
+
+A backend that declares it implements two methods:
+
+```python
+def start_change_notification(self, listener) -> None: ...
+def stop_change_notification(self) -> None: ...
+```
+
+`GraphStorage` subscribes once, after its first load — a change reported
+against a model that does not exist yet has nothing to refresh — and
+unsubscribes in `shutdown_events()`. The listener may be called from any
+thread the backend likes, and is called only with changes the store has
+already applied: the refresh writes nothing back.
+
+What the backend passes is an `ExternalChange`:
+
+- `ExternalChange.entities(operations)` — the same `EntityOperation`s a
+  mutation is delivered as, read the other way round, in the order the store
+  applied them. Each upsert carries the entity's new content, so the refresh
+  needs no read-back. An upsert whose payload carries an `embedding` hands
+  the vector over with it.
+- `ExternalChange.unknown()` — the backend knows only that something
+  changed. `GraphStorage` reloads the whole graph. A reload emits no
+  per-entity events, so a backend that wants subscribers to see individual
+  changes has to report them as operations.
+
+Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
+`event_origin` set to `external-change`, so subscriptions, agents and the
+history see them and an agent that reacts by writing can tell them from its
+own instance's work. An external edge whose endpoint this instance does not
+have is reported and skipped rather than inventing the missing node.
+
+The reference backend in `persistence_contract.py` implements the protocol:
+instances built on the same store notify each other, which is what lets the
+contract prove the refresh path end to end.
 
 ## Current state
 
 `FileGraphPersistenceBackend` is the default, needs no configuration, and
-declares `incremental_writes` and `transactions`. It keeps `graph.json` as the
+declares `incremental_writes` and `transactions` — **not**
+`change_notification`. Not an oversight: two instances writing one graph file
+would fight over the checkpoint that folds the journal back in, and the
+`journal_id` binding a journal to its graph assumes a single writer lineage.
+Declaring notification would advertise a shared store the file backend cannot
+safely be. A shared store is what the seam is there for. It keeps `graph.json` as the
 graph — written whole and atomically — and lands each mutation as one appended
 line in `graph.journal.ndjson` beside it, folding the journal back into
 `graph.json` every 100 mutations, on `checkpoint()`, and on every whole-graph

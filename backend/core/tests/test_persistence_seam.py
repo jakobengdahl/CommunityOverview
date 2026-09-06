@@ -13,17 +13,37 @@ import tempfile
 
 import pytest
 
+from backend.core.events.models import EventType
 from backend.core.models import Edge, Node, NodeType
-from backend.core.storage import GraphStorage
+from backend.core.storage import EXTERNAL_CHANGE_ORIGIN, GraphStorage
 from backend.core.storage_backends import (
     SNAPSHOT_ONLY,
     BackendCapabilities,
     EntityOperation,
+    ExternalChange,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
+
+
+def _node_payload(node_id: str, name: str):
+    """A node as GraphStorage serialises one, for a store to hand back."""
+    return {
+        "id": node_id,
+        "type": "Actor",
+        "name": name,
+        "description": "",
+        "summary": "",
+        "tags": [],
+        "subtypes": [],
+        "aliases": [],
+        "metadata": {},
+        "archived": False,
+        "created_at": "2026-09-06T00:00:00+00:00",
+        "updated_at": "2026-09-06T00:00:00+00:00",
+    }
 
 
 class _SnapshotBackend:
@@ -147,6 +167,36 @@ def _kinds(backend):
     return [name for name, _ in backend.calls]
 
 
+class _NotifyingBackend(_IncrementalBackend):
+    """An incremental backend that also reports what someone else wrote.
+
+    `on_subscribe` lets a test deliver a change at the moment the listener is
+    registered, which is how the wiring's ordering is pinned.
+    """
+
+    def __init__(self, on_subscribe=None, **kwargs):
+        super().__init__(**kwargs)
+        self.listener = None
+        self.subscribes = 0
+        self.unsubscribes = 0
+        self._on_subscribe = on_subscribe
+
+    def capabilities(self):
+        return BackendCapabilities(
+            incremental_writes=True, transactions=True, change_notification=True
+        )
+
+    def start_change_notification(self, listener):
+        self.listener = listener
+        self.subscribes += 1
+        if self._on_subscribe is not None:
+            self._on_subscribe(listener)
+
+    def stop_change_notification(self):
+        self.listener = None
+        self.unsubscribes += 1
+
+
 class TestCapabilityDeclaration:
     def test_a_backend_without_a_declaration_is_snapshot_only(self):
         assert capabilities_of(_SnapshotBackend()) is SNAPSHOT_ONLY
@@ -198,6 +248,145 @@ class TestCapabilityDeclaration:
         # A pre-contract backend fails the isinstance check (no capabilities)
         # yet is still driven by GraphStorage: capabilities_of tolerates it.
         assert not isinstance(_SnapshotBackend(), GraphPersistenceBackend)
+
+
+class TestChangeNotificationWiring:
+    """What GraphStorage does about a backend that reports external changes:
+    when it subscribes, when it stops, and what a refresh must not do."""
+
+    def test_declaring_change_notification_without_the_methods_is_refused(self):
+        class Overclaims(_SnapshotBackend):
+            def capabilities(self):
+                return BackendCapabilities(change_notification=True)
+
+            def start_change_notification(self, listener):
+                pass
+
+        with pytest.raises(TypeError) as exc:
+            GraphStorage(persistence_backend=Overclaims())
+        message = str(exc.value)
+        assert "start_change_notification" not in message
+        assert "stop_change_notification" in message
+
+    def test_a_backend_that_does_not_declare_it_is_never_subscribed(self):
+        backend = _NotifyingBackend()
+        backend.capabilities = lambda: BackendCapabilities(
+            incremental_writes=True, transactions=True
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert backend.subscribes == 0
+        finally:
+            storage.shutdown_events()
+        assert backend.unsubscribes == 0
+
+    def test_the_listener_is_subscribed_once_the_graph_is_loaded(self):
+        """A change reported against a model that does not exist yet would
+        refresh nothing, and the seeded graph would be gone."""
+        delivered = []
+
+        def deliver(listener):
+            delivered.append(True)
+            listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+        backend = _NotifyingBackend(on_subscribe=deliver)
+        backend.save_graph_data(
+            {
+                "nodes": [_node_payload("a", "Alpha")],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        backend.calls.clear()
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert delivered == [True]
+            assert backend.subscribes == 1
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+        finally:
+            storage.shutdown_events()
+
+    def test_shutdown_stops_the_notification_before_tearing_down(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        assert backend.subscribes == 1
+        storage.shutdown_events()
+        assert backend.unsubscribes == 1
+        assert backend.listener is None
+
+    def test_a_refresh_is_never_written_back(self):
+        """The change is already in the store. Persisting it would hand the
+        writer that made it a second copy of its own work."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.calls.clear()
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("b", "Beacon")),
+                        EntityOperation.delete_node("a"),
+                    ]
+                )
+            )
+            storage.flush()
+
+            assert backend.calls == []
+            assert {n.id for n in storage.get_all_nodes()} == {"b"}
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_emits_events_marked_as_someone_else_s_write(self):
+        """Subscriptions, agents and the history see external changes too -
+        and can tell them from this instance's own work, or an agent that
+        reacts by writing would bounce the change between instances."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+            assert [e.event_type for e in seen] == [EventType.NODE_CREATE]
+            assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.after["name"] == "Beacon"
+
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("b")])
+            )
+            assert [e.event_type for e in seen] == [EventType.NODE_DELETE]
+            assert seen[0].entity.before["name"] == "Beacon"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_does_not_emit_per_entity_events(self):
+        """A backend that cannot name what changed gets a reload, and a reload
+        has no before-states to report. The docs say so; this pins it."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.nodes = {"z": _node_payload("z", "Zulu")}
+            backend.written = True
+            backend.listener(ExternalChange.unknown())
+
+            assert {n.id for n in storage.get_all_nodes()} == {"z"}
+            assert seen == []
+        finally:
+            storage.shutdown_events()
 
 
 class TestSnapshotOnlyBackends:
