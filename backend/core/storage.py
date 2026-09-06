@@ -588,7 +588,7 @@ class GraphStorage:
 
                 metadata = data.get("metadata") if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": metadata.get("version", "1.0"),
                         "graph_name": metadata.get("graph_name")
                         or self._default_graph_name(),
@@ -599,34 +599,44 @@ class GraphStorage:
                         },
                     }
                 else:
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": "1.0",
                         "graph_name": self._default_graph_name(),
                     }
 
-                # Clear existing data
-                self.nodes.clear()
-                self.edges.clear()
-                self.graph.clear()
+                # Everything is parsed beside the live model and swapped in
+                # only once all of it parsed. Clearing first and refilling
+                # would mean an entity this build cannot read leaves the graph
+                # truncated - and a refresh, which cannot raise at its caller,
+                # would report that as merely being behind the store.
+                nodes: Dict[str, Node] = {}
+                edges: Dict[str, Edge] = {}
+                searchable: Dict[str, str] = {}
 
-                # Clear searchable text cache
-                self._searchable_text_cache.clear()
-
-                # Load nodes
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
-                    self.nodes[node.id] = node
-                    self.graph.add_node(node.id, data=node)
+                    nodes[node.id] = node
+                    searchable[node.id] = self._build_searchable_text(node)
 
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
-                        node
-                    )
-
-                # Load edges
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
-                    self.edges[edge.id] = edge
+                    edges[edge.id] = edge
+
+                # Past here nothing can fail: the containers are replaced in
+                # place, so anything holding a reference to one still sees the
+                # graph this instance serves.
+                self.graph_metadata = graph_metadata
+                self.nodes.clear()
+                self.nodes.update(nodes)
+                self.edges.clear()
+                self.edges.update(edges)
+                self._searchable_text_cache.clear()
+                self._searchable_text_cache.update(searchable)
+
+                self.graph.clear()
+                for node in nodes.values():
+                    self.graph.add_node(node.id, data=node)
+                for edge in edges.values():
                     self.graph.add_edge(
                         edge.source, edge.target, key=edge.id, data=edge
                     )
@@ -1173,18 +1183,19 @@ class GraphStorage:
         report them as operations.
         """
         if threading.get_ident() == self._writer_thread_id:
-            # Delivered from inside a write this instance issued, so we are
-            # the queue a refresh may have to wait for. Waiting here would be
-            # waiting on ourselves, and skipping the wait would reload over
-            # the very write we are in the middle of. Neither: hand the
-            # refresh to a thread that can wait properly.
-            threading.Thread(
-                target=self.apply_external_change,
-                args=(change,),
-                name="external-change",
-                daemon=True,
-            ).start()
-            return
+            # This thread is the write queue. A refresh may have to wait for
+            # that queue, and waiting here would be waiting for ourselves;
+            # not waiting would reload over the write we are inside. Handing
+            # it to another thread was tried and is worse: two such refreshes
+            # race each other, and one can outlive the shutdown that was
+            # supposed to have stopped them. So it is a contract violation,
+            # and said plainly - every real transport reports from its own
+            # thread, and the reference backend never reports to the instance
+            # whose write it is running.
+            raise RuntimeError(
+                "a change was reported from the thread the application issued "
+                "a write on; report changes from the backend's own thread"
+            )
 
         with self._lock:
             if change.operations is None:
@@ -1237,6 +1248,25 @@ class GraphStorage:
         cannot be read at all is reported and left; nothing is raised, because
         the only thread to raise into is the backend's.
         """
+        if self._resync_pending:
+            # An entity write failed, so a mutation is in memory and nowhere
+            # else, and the heal that would write it has not run. Reloading
+            # first drops it from memory, and the heal then writes the
+            # reloaded graph - losing a mutation this instance had already
+            # accepted. Finishing our own write is not the refresh writing
+            # back; it is a write that was accepted landing where it was
+            # always going.
+            heal = self._heal_if_needed()
+            if heal is not None:
+                try:
+                    heal.result()
+                except Exception as exc:
+                    print(
+                        f"Warning: not reloading: a local write is still "
+                        f"unwritten and could not be completed ({exc})"
+                    )
+                    return
+
         try:
             self._io_executor.submit(lambda: None).result()
         except RuntimeError:
@@ -1251,8 +1281,9 @@ class GraphStorage:
             # having failed. What is in memory is behind, not wrong: whatever
             # a half-applied batch already applied is real store state.
             print(
-                f"Warning: could not reload the graph ({exc}); what is in "
-                f"memory is behind the store until the next change is reported"
+                f"Warning: could not reload the graph ({exc}); the graph in "
+                f"memory is unchanged and behind the store until the next "
+                f"change is reported"
             )
 
     @staticmethod

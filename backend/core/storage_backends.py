@@ -240,10 +240,18 @@ class ChangeNotifyingBackend(Protocol):
     ) -> None:
         """Begin reporting external changes to ``listener``.
 
-        The listener may be called from any thread the backend likes, and is
-        called only with changes the store has already applied - it never
-        writes back. Called once, after the application's first load, so no
-        change can be reported against a model that does not exist yet.
+        The listener is called only with changes the store has already
+        applied - it never writes back. Called once, after the application's
+        first load, so no change can be reported against a model that does
+        not exist yet.
+
+        Report from a thread of the backend's own - the thread a notification
+        channel, a poller or a watcher runs on. Any thread will do but one:
+        never the thread the application is running a write on, i.e. never
+        synchronously from inside a call the application made into the
+        backend. A refresh may have to wait for the write queue, and on that
+        thread it would be waiting for itself; the application refuses such a
+        report rather than deadlock.
         """
         ...
 

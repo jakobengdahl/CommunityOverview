@@ -267,10 +267,15 @@ cannot run either — the store is being replaced as we read it — that is
 logged too and the graph in memory stays behind the store until the next
 change is reported. Nothing is raised at the backend on any of these paths.
 
-The listener may be called from any thread, including the one the
-application is running a write on: `GraphStorage` hands the refresh to
-another thread rather than wait, from inside a write, on the queue that
-write is in.
+Report from a thread of your own — whatever a notification channel, a
+poller or a watcher runs on. Any thread will do but one: never the thread
+the application is running a write on, that is, never synchronously from
+inside a call the application made into the backend. A refresh may have to
+wait for the write queue, and on that thread it would be waiting for
+itself; `GraphStorage` refuses such a report with an error rather than
+deadlock. The reference backend satisfies this without trying: it reports
+to the other instances on the store, never to the one whose write it is
+running.
 
 Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
 `event_origin` set to `external-change`, so subscriptions, agents and the
