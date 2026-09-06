@@ -1777,7 +1777,11 @@ def test_an_empty_file_at_an_operator_path_is_replaced_not_refused(tmpdir_path):
         storage.flush()
 
         assert storage.vectors_persisted, "an empty file was treated as foreign data"
-        assert set(FileEmbeddingSidecar(Path(operator_path)).load()) == {"n1", "n2", "n3"}
+        assert set(FileEmbeddingSidecar(Path(operator_path)).load()) == {
+            "n1",
+            "n2",
+            "n3",
+        }
     finally:
         storage.flush()
 
@@ -1872,7 +1876,9 @@ def test_a_genuinely_relative_configured_path_naming_a_foreign_file_is_not_ours(
         storage.flush()
 
         with open("embeddings.pkl", "rb") as f:
-            assert f.read() == original, "a relatively-named foreign file was overwritten"
+            assert f.read() == original, (
+                "a relatively-named foreign file was overwritten"
+            )
         assert not os.path.exists("embeddings.pkl.corrupt")
         assert storage.vectors_persisted is False
     finally:
