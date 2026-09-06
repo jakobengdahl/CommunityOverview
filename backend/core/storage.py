@@ -528,14 +528,26 @@ class GraphStorage:
             self._history_store, edge_id, limit, offset
         )
 
-    def load(self) -> None:
+    def load(self, *, bootstrap_if_missing: bool = True) -> None:
         """
         Load graph from the configured persistence backend.
 
         Thread-safe: Uses lock for in-memory updates.
+
+        `bootstrap_if_missing` is what makes a first start work: a store that
+        does not exist yet is created from whatever is in memory. A refresh
+        passes False, because there the store belongs to somebody else - it
+        may be missing only for a moment, mid-restore, and writing this
+        instance's graph over it is the one thing a refresh must never do.
         """
         with self._lock:
             if not self._persistence_backend.exists():
+                if not bootstrap_if_missing:
+                    print(
+                        f"Warning: cannot refresh from {self.json_path}: it is "
+                        f"not there. Serving the graph in memory unchanged."
+                    )
+                    return
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
@@ -817,8 +829,9 @@ class GraphStorage:
 
         The serialized payload no longer carries `embedding`, so a vector that
         arrived on a node object is persisted nowhere unless it is adopted
-        here. Callers that can also generate embeddings do that afterwards,
-        so generation still wins when the ML stack is available.
+        here. What happens next is the caller's: `add_nodes` generates over
+        the whole batch afterwards, so generation wins there, while a refresh
+        generates only where the store supplied nothing.
         """
         supplied = self._take_inline_vectors(nodes)
         if not supplied:
@@ -1153,19 +1166,51 @@ class GraphStorage:
         """
         with self._lock:
             if change.operations is None:
-                self.load()
+                self._reload_from_store()
                 return
-            for op in change.operations:
-                if op.kind == "node":
-                    if op.action == "upsert":
-                        self._external_upsert_node(op)
+            try:
+                for op in change.operations:
+                    if op.kind == "node":
+                        if op.action == "upsert":
+                            self._external_upsert_node(op)
+                        else:
+                            self._external_delete_node(op.entity_id)
                     else:
-                        self._external_delete_node(op.entity_id)
-                else:
-                    if op.action == "upsert":
-                        self._external_upsert_edge(op)
-                    else:
-                        self._external_delete_edge(op.entity_id)
+                        if op.action == "upsert":
+                            self._external_upsert_edge(op)
+                        else:
+                            self._external_delete_edge(op.entity_id)
+            except Exception as exc:
+                # A payload this build cannot read - two instances mid-upgrade,
+                # say - would otherwise leave the batch half applied and throw
+                # into whatever backend thread called us, where the writing
+                # instance would read it as its own write having failed.
+                # Resync instead, and keep it to ourselves.
+                print(
+                    f"Warning: could not apply an external change ({exc}); "
+                    f"reloading the graph instead"
+                )
+                self._reload_from_store()
+
+    def _reload_from_store(self) -> None:
+        """Re-read the whole graph. Callers must hold _lock.
+
+        The write queue is drained first. A local mutation is applied in
+        memory and written in the background, so reloading over one still in
+        flight would take it out of memory while it goes on to land in the
+        store - leaving this instance permanently unable to see an entity it
+        wrote. Holding _lock is what makes the drain enough: every mutation
+        path submits under it, so nothing new can be queued while we wait,
+        and queued work never takes _lock, so waiting cannot deadlock.
+
+        Bootstrapping is off: a store reporting that it is not there is not
+        an invitation to write this instance's graph over it.
+        """
+        try:
+            self._io_executor.submit(lambda: None).result()
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
+        self.load(bootstrap_if_missing=False)
 
     @staticmethod
     def _entity_type_name(entity) -> str:

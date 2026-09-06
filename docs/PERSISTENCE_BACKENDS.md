@@ -249,9 +249,17 @@ What the backend passes is an `ExternalChange`:
   needs no read-back. An upsert whose payload carries an `embedding` hands
   the vector over with it.
 - `ExternalChange.unknown()` — the backend knows only that something
-  changed. `GraphStorage` reloads the whole graph. A reload emits no
-  per-entity events, so a backend that wants subscribers to see individual
-  changes has to report them as operations.
+  changed. `GraphStorage` drains its own write queue and reloads the whole
+  graph. Two things it will not do: bootstrap, so a store that reports it is
+  not there (mid-restore, say) is never overwritten with this instance's
+  graph — the graph in memory is served on, with a warning — and emit
+  per-entity events, since a reload has no before-states. A backend that
+  wants subscribers to see individual changes has to report them as
+  operations.
+
+A payload this build cannot read stops the batch: rather than leave it half
+applied, or throw into the backend's thread where the writing instance would
+read it as its own write having failed, `GraphStorage` logs it and reloads.
 
 Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
 `event_origin` set to `external-change`, so subscriptions, agents and the
@@ -271,8 +279,10 @@ declares `incremental_writes` and `transactions` — **not**
 would fight over the checkpoint that folds the journal back in, and the
 `journal_id` binding a journal to its graph assumes a single writer lineage.
 Declaring notification would advertise a shared store the file backend cannot
-safely be. A shared store is what the seam is there for. It keeps `graph.json` as the
-graph — written whole and atomically — and lands each mutation as one appended
+safely be. A shared store is what the seam is there for.
+
+The file backend keeps `graph.json` as the graph — written whole and
+atomically — and lands each mutation as one appended
 line in `graph.journal.ndjson` beside it, folding the journal back into
 `graph.json` every 100 mutations, on `checkpoint()`, and on every whole-graph
 save; loading replays the journal — and refuses one written against a

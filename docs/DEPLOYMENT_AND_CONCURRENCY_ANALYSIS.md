@@ -104,18 +104,19 @@ Two seams keep the core single-instance while letting the SaaS layer scale out
 | `SessionPersistenceBackend` (`core/session_store.py`) | `FileSessionPersistenceBackend` — one JSON file per session | Shared DB-backed store (e.g. Postgres) so every replica reads/writes the same session state |
 | `SessionEventBus` (`core/session_hub.py`) | `InProcessEventBus` — per-subscriber asyncio queues, one process | Redis (or equivalent) pub/sub bus so applied ops, presence and claims fan out across replicas |
 
-A third seam sits at the graph level rather than the session level:
-`change_notification` in the persistence seam (`core/storage_backends.py`). A
-backend whose store can have another writer reports what changed, and
-`GraphStorage` refreshes the affected entities — including the searchable-text
-cache and the vector index — without a restart. No shipped backend declares it:
-the file backend cannot be a shared store. See `docs/PERSISTENCE_BACKENDS.md`.
-
 The core's only obligation to SaaS is to keep these two seams stable and to pass
 through an optional identity context on the session endpoints when present.
 Everything else about multi-instance scale-out (shared DB, Redis fan-out,
 account-bound history, workspace ACLs) lives behind that boundary and is out of
 scope for the open core.
+
+A seam of the same kind exists one level down, on the graph rather than the
+session: `change_notification` in the persistence seam
+(`core/storage_backends.py`). A backend whose store can have another writer
+reports what changed, and `GraphStorage` refreshes the affected entities —
+including the searchable-text cache and the vector index — without a restart.
+No shipped backend declares it: the file backend cannot be a shared store. See
+`docs/PERSISTENCE_BACKENDS.md`.
 
 The REST/ops surface is bounded to keep a single instance healthy under load:
 each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413` —
