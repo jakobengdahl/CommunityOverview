@@ -620,11 +620,26 @@ class TestExternalEdgeRefresh:
                 storage.shutdown_events()
 
 
+def _unreadable_change():
+    """A change whose payload this build cannot read, so the refresh takes
+    its error path - the twin of the reload below, and just as bound by
+    everything a refresh may not do."""
+    return ExternalChange.entities(
+        [EntityOperation.upsert_node({"id": "bad", "type": "Nonsense"})]
+    )
+
+
+# Both ways into the resync, so neither entry point is pinned alone.
+_RESYNCING_CHANGES = [ExternalChange.unknown, _unreadable_change]
+_RESYNC_IDS = ["unknown", "unreadable-payload"]
+
+
 class TestExternalRefreshFailureModes:
     """What a refresh must not do when the store is not in the state it
     expects: write back, drop a local write, or throw into the caller."""
 
-    def test_a_reload_does_not_write_back_over_a_missing_store(self):
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_reload_does_not_write_back_over_a_missing_store(self, change):
         """A store can stop existing - another writer emptied it, a restore is
         in progress. Bootstrapping there would put this instance's graph over
         it, which is a write-back, and a whole-graph one."""
@@ -636,7 +651,7 @@ class TestExternalRefreshFailureModes:
             backend.written = False
             backend.calls.clear()
 
-            backend.listener(ExternalChange.unknown())
+            backend.listener(change())
             storage.flush()
 
             assert backend.calls == []
@@ -645,7 +660,8 @@ class TestExternalRefreshFailureModes:
         finally:
             storage.shutdown_events()
 
-    def test_a_reload_does_not_drop_a_write_still_in_flight(self):
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_reload_does_not_drop_a_write_still_in_flight(self, change):
         """A mutation is in memory before it is in the store. Reloading over
         one still queued would take it out of memory while it goes on to
         land, leaving this instance unable to ever see what it wrote."""
@@ -664,7 +680,7 @@ class TestExternalRefreshFailureModes:
 
             refresh = threading.Thread(
                 target=storage.apply_external_change,
-                args=(ExternalChange.unknown(),),
+                args=(change(),),
             )
             refresh.start()
             # The refresh must be waiting on the queued write, not racing it.
@@ -679,27 +695,49 @@ class TestExternalRefreshFailureModes:
             proceed.set()
             storage.shutdown_events()
 
-    def test_a_payload_this_build_cannot_read_does_not_escape(self):
+    @pytest.mark.parametrize(
+        "unreadable",
+        [
+            EntityOperation.upsert_node({"id": "bad", "type": "Nonsense"}),
+            # A backend deserialising its own store builds the operation
+            # directly, so the payload need not have survived the classmethod.
+            EntityOperation(
+                kind="node", action="upsert", entity_id="bad", payload=None
+            ),
+            EntityOperation(
+                kind="edge", action="upsert", entity_id="bad", payload="not a payload"
+            ),
+        ],
+        ids=["unknown-type", "a-node-that-is-not-a-dict", "an-edge-that-is-a-string"],
+    )
+    def test_a_payload_this_build_cannot_read_does_not_escape(self, unreadable):
         """Two instances mid-upgrade. Half a batch is worse than none, and the
-        writing instance must not read our failure as its own."""
+        writing instance must not read our failure as its own. The payload
+        need not be a dict at all - a store of another vintage decides what
+        it hands over - so the containment cannot be narrowed to one family
+        of exception."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
             storage.flush()
+            backend.calls.clear()
 
             backend.listener(
                 ExternalChange.entities(
                     [
                         EntityOperation.upsert_node(_node_payload("b", "Beacon")),
-                        EntityOperation.upsert_node({"id": "bad", "type": "Nonsense"}),
+                        unreadable,
                         EntityOperation.upsert_node(_node_payload("c", "Cedar")),
                     ]
                 )
             )
+            storage.flush()
 
-            # Resynced from the store rather than left half applied.
+            # Resynced from the store rather than left half applied, and the
+            # resync is still a refresh: it writes nothing back.
             assert {n.id for n in storage.get_all_nodes()} == {"a"}
+            assert backend.calls == []
         finally:
             storage.shutdown_events()
 
