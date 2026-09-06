@@ -389,6 +389,7 @@ function FloatingSearch({ variant = 'floating' }) {
           type="text"
           className="floating-search-input"
           placeholder="Search graph..."
+          aria-label="Search graph"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -422,6 +423,7 @@ function FloatingSearch({ variant = 'floating' }) {
                 className={`floating-search-result ${index === selectedIndex ? 'selected' : ''}`}
                 onClick={() => selectResult(node)}
                 onMouseEnter={() => setSelectedIndex(index)}
+                aria-label={getResultLabel(node)}
               >
                 <span className="floating-search-result-dot" style={{ backgroundColor: color }} />
                 {Icon && <Icon size={14} style={{ color, flexShrink: 0 }} />}
