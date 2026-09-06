@@ -40,6 +40,7 @@ from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
     EntityOperation,
     ExternalChange,
+    ExternalChangeRefused,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     capabilities_of,
@@ -195,8 +196,9 @@ class GraphStorage:
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
-        # Identified so a change notification delivered on it can be got off
-        # it before anything waits on the queue this thread *is*.
+        # Identified so a change reported on it - which would be a report
+        # from inside the write it is running - is refused rather than left
+        # to wait on the queue this thread *is*.
         self._writer_thread_id: Optional[int] = None
         self._io_executor = ThreadPoolExecutor(
             max_workers=1, initializer=self._mark_writer_thread
@@ -1107,6 +1109,14 @@ class GraphStorage:
                 backend.upsert_edge(op.payload)
             else:
                 backend.delete_edge(op.entity_id)
+        except ExternalChangeRefused:
+            # Not a write failure: the backend broke the reporting rule and
+            # got told so, on its own call stack, out of a listener it called
+            # itself. Flagging a resync here would answer that with a
+            # whole-graph write over a store that by definition has another
+            # writer. The Future still carries it, so the mutation is not
+            # reported as having landed.
+            raise
         except Exception as e:
             print(f"Error applying {len(operations)} entity operation(s): {e}")
             # The mutation is in memory and nowhere else now, and the backend's
@@ -1164,8 +1174,11 @@ class GraphStorage:
     def apply_external_change(self, change: "ExternalChange") -> None:
         """Bring the in-memory model in step with a write someone else made.
 
-        A backend that declares `change_notification` calls this - on whatever
-        thread it likes - when the store changed behind this instance's back.
+        A backend that declares `change_notification` calls this, from a
+        thread of its own, when the store changed behind this instance's
+        back. Which threads count as its own is the backend's obligation and
+        is stated on ChangeNotifyingBackend; only one violation of it is
+        visible from here, and that one is refused below.
         Nothing here is persisted: the change is already in the store, and
         writing it back would fight the writer that made it.
 
@@ -1189,10 +1202,9 @@ class GraphStorage:
             # it to another thread was tried and is worse: two such refreshes
             # race each other, and one can outlive the shutdown that was
             # supposed to have stopped them. So it is a contract violation,
-            # and said plainly - every real transport reports from its own
-            # thread, and the reference backend never reports to the instance
-            # whose write it is running.
-            raise RuntimeError(
+            # and said plainly - every real transport reports from a thread
+            # of its own.
+            raise ExternalChangeRefused(
                 "a change was reported from the thread the application issued "
                 "a write on; report changes from the backend's own thread"
             )
@@ -1241,7 +1253,14 @@ class GraphStorage:
         store - leaving this instance permanently unable to see an entity it
         wrote. Holding _lock is what makes the drain enough: every mutation
         path submits under it, so nothing new can be queued while we wait,
-        and queued work never takes _lock, so waiting cannot deadlock.
+        and queued work never takes _lock. Waiting is safe only because a
+        report arrives on a thread that is not running a write - see
+        ChangeNotifyingBackend, which is where that obligation is stated.
+
+        Nothing here writes. A refresh that wrote would re-assert this
+        instance's image over a store whose whole point is that someone else
+        is writing it too, which is why a failed local write stops the
+        refresh instead of being healed into it.
 
         Bootstrapping is off: a store reporting that it is not there is not
         an invitation to write this instance's graph over it. A store that
@@ -1250,22 +1269,19 @@ class GraphStorage:
         """
         if self._resync_pending:
             # An entity write failed, so a mutation is in memory and nowhere
-            # else, and the heal that would write it has not run. Reloading
-            # first drops it from memory, and the heal then writes the
-            # reloaded graph - losing a mutation this instance had already
-            # accepted. Finishing our own write is not the refresh writing
-            # back; it is a write that was accepted landing where it was
-            # always going.
-            heal = self._heal_if_needed()
-            if heal is not None:
-                try:
-                    heal.result()
-                except Exception as exc:
-                    print(
-                        f"Warning: not reloading: a local write is still "
-                        f"unwritten and could not be completed ({exc})"
-                    )
-                    return
+            # else. Reloading would drop it. Writing it first is worse: the
+            # only write that carries it is the whole graph, and re-issuing
+            # this instance's whole image over a store that by definition has
+            # another writer destroys what that writer just committed -
+            # including the change being reported. So neither: stay put and
+            # say so. The next write, flush or shutdown heals the flag, and
+            # the next report brings this instance forward.
+            print(
+                "Warning: not refreshing the graph: a local write failed and "
+                "is still only in memory. This instance stays behind the "
+                "store until that write has been re-issued."
+            )
+            return
 
         try:
             self._io_executor.submit(lambda: None).result()

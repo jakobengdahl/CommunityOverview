@@ -22,6 +22,7 @@ from backend.core.storage_backends import (
     BackendCapabilities,
     EntityOperation,
     ExternalChange,
+    ExternalChangeRefused,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     IncrementalGraphPersistenceBackend,
@@ -552,7 +553,7 @@ class TestExternalRefreshOnTheWriterThread:
             refused = storage._io_executor.submit(
                 storage.apply_external_change, ExternalChange.unknown()
             )
-            with pytest.raises(RuntimeError, match="backend's own thread"):
+            with pytest.raises(ExternalChangeRefused, match="backend's own thread"):
                 refused.result(timeout=30)
 
             # And the queue still works: refusing is not wedging.
@@ -564,14 +565,17 @@ class TestExternalRefreshOnTheWriterThread:
 
     def test_a_backend_reporting_from_inside_its_write_does_not_wedge(self):
         """The realistic shape of the same mistake: the report comes from
-        inside the write that made it. The write fails and is healed; what
-        must not happen is the queue stopping forever."""
+        inside the write that made it. What must not happen is the queue
+        stopping forever - nor the refusal being read as the write having
+        failed, which would answer a backend's reporting bug by re-issuing
+        the whole graph over a store that has another writer in it."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
             storage.flush()
             backend.report_from_writes = ExternalChange.unknown()
+            backend.snapshots = 0
 
             storage.update_node("a", {"name": "Renamed"})
             drain = threading.Thread(target=storage.flush, daemon=True)
@@ -581,6 +585,14 @@ class TestExternalRefreshOnTheWriterThread:
 
             backend.report_from_writes = None
             assert storage.get_node("a").name == "Renamed"
+            # The write itself landed - the backend reported after applying
+            # it - so nothing is owed to the store. Reading the refusal as a
+            # failed write would answer a backend's reporting bug by
+            # re-issuing the whole graph over a store that has another writer
+            # in it, which is why no snapshot may have been sent.
+            assert backend.nodes["a"]["name"] == "Renamed"
+            assert backend.snapshots == 0
+            assert not storage._resync_pending
         finally:
             backend.report_from_writes = None
             storage.shutdown_events()
@@ -752,11 +764,19 @@ class TestExternalRefreshFailureModes:
         finally:
             storage.shutdown_events()
 
-    def test_a_reload_that_cannot_read_the_store_leaves_the_graph_whole(self):
+    @pytest.mark.parametrize("unreadable", ["node", "edge"])
+    def test_a_reload_that_cannot_read_the_store_leaves_the_graph_whole(
+        self, unreadable
+    ):
         """The store is readable but holds an entity this build is not: a
         rolling upgrade. Clearing the graph and then failing to refill it
         would leave every read path short of entities the store still has,
-        reported as merely being behind it."""
+        reported as merely being behind it.
+
+        The unreadable entity goes *first*, before anything this build can
+        read. Put it last and a reload that clears as it goes still ends up
+        with the right contents by accident, and the test passes against the
+        very failure it is here for."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         try:
@@ -765,25 +785,36 @@ class TestExternalRefreshFailureModes:
                     Node(id="a", type=NodeType.ACTOR, name="Alpha"),
                     Node(id="b", type=NodeType.ACTOR, name="Beacon"),
                 ],
-                [],
+                [Edge(id="ab", source="a", target="b", type="RELATES_TO")],
             )
             storage.flush()
-            backend.nodes["bad"] = {"id": "bad", "type": "Nonsense"}
+            if unreadable == "node":
+                backend.nodes = {
+                    "bad": {"id": "bad", "type": "Nonsense"},
+                    **backend.nodes,
+                }
+            else:
+                backend.edges = {"bad": {"id": "bad"}, **backend.edges}
 
             backend.listener(ExternalChange.unknown())
 
             assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
             assert [n.id for n in storage.search_nodes("Beacon")] == ["b"]
             assert set(storage.graph.nodes) == {"a", "b"}
+            # The edge half fails out of sight of get_all_edges, which reads
+            # a dictionary; a torn reload shows as the two disagreeing.
+            assert {e.id for e in storage.get_all_edges()} == {"ab"}
+            assert storage.graph.number_of_edges() == 1
         finally:
             storage.shutdown_events()
 
-    def test_a_reload_does_not_drop_a_write_whose_own_write_failed(self):
+    def test_a_refresh_over_a_failed_write_neither_drops_it_nor_writes(self):
         """The other half of the in-flight case: the write did not just not
-        land yet, it failed, and the heal that would write it has not run.
-        Reloading over that loses a mutation this instance already accepted -
-        from memory, and then from the store when the heal writes what it
-        reloaded."""
+        land yet, it failed, so a mutation is in memory and nowhere else.
+        Reloading drops it. Writing it first is worse - the only write that
+        carries it is the whole graph, and the store being refreshed from is
+        one another writer is committing to. So the refresh does neither: it
+        stops, and leaves both sides intact."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         try:
@@ -799,11 +830,18 @@ class TestExternalRefreshFailureModes:
             assert storage._resync_pending, "the failed write did not raise the flag"
             del backend.upsert_node
 
-            backend.listener(ExternalChange.unknown())
-            storage.flush()
+            # What the other writer committed while our write was failing.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
 
+            backend.listener(ExternalChange.unknown())
+
+            # The refresh wrote nothing: what the other writer committed is
+            # intact, and our own mutation is still owed to the store.
+            assert set(backend.nodes) == {"a", "z"}
+            # And it dropped nothing: the accepted mutation is still in
+            # memory, still flagged as owed.
             assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
-            assert set(backend.nodes) == {"a", "c"}
+            assert storage._resync_pending
         finally:
             storage.shutdown_events()
 

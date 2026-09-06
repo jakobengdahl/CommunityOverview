@@ -237,9 +237,11 @@ def stop_change_notification(self) -> None: ...
 
 `GraphStorage` subscribes once, after its first load — a change reported
 against a model that does not exist yet has nothing to refresh — and
-unsubscribes in `shutdown_events()`. The listener may be called from any
-thread the backend likes, and is called only with changes the store has
-already applied: the refresh writes nothing back.
+unsubscribes in `shutdown_events()`. The listener is called only with
+changes the store has already applied, and from a thread of the backend's own
+— which thread, and why it matters, is *Which thread reports* below. The
+refresh never writes: not the change it was told about, and not the graph it
+holds.
 
 What the backend passes is an `ExternalChange`:
 
@@ -267,15 +269,42 @@ cannot run either — the store is being replaced as we read it — that is
 logged too and the graph in memory stays behind the store until the next
 change is reported. Nothing is raised at the backend on any of these paths.
 
-Report from a thread of your own — whatever a notification channel, a
-poller or a watcher runs on. Any thread will do but one: never the thread
-the application is running a write on, that is, never synchronously from
-inside a call the application made into the backend. A refresh may have to
-wait for the write queue, and on that thread it would be waiting for
-itself; `GraphStorage` refuses such a report with an error rather than
-deadlock. The reference backend satisfies this without trying: it reports
-to the other instances on the store, never to the one whose write it is
-running.
+### Which thread reports
+
+Report from a thread of your own — whatever a notification channel, a poller
+or a watcher runs on. One kind of thread is forbidden: **never a thread that
+is executing a write**, whether it is the write of the application being
+refreshed or of another application sharing the store. In practice: never
+synchronously from inside a call an application made into the backend.
+
+A refresh may have to wait for the refreshed application's write queue.
+Delivered from inside that application's own write, it would be waiting for
+the call it is inside; `GraphStorage` sees that one — the report arrives on
+the thread it runs its writes on — and raises `ExternalChangeRefused` back at
+you rather than wait. Delivered from inside a *second* application's write it
+is worse and quieter: each instance's refresh waits on its own queue while
+that queue waits for the other's refresh to return, and both stop for good.
+`GraphStorage` cannot see that one. It is yours to get right, and every real
+transport already does: a listener connection, a poller and a watcher each
+have a thread of their own.
+
+`ExternalChangeRefused` is deliberately not an I/O error. A write that fails
+is healed by re-issuing the whole graph, and answering a reporting bug that
+way would overwrite whatever the other writer had just committed.
+
+### A local write that failed
+
+A failed entity write leaves a mutation in memory and nowhere else, and
+`GraphStorage` heals it by re-issuing the whole graph on the next write,
+`flush()` or shutdown. On a shared store that is a last-resort recovery, not
+a routine: it re-asserts one instance's whole image over a store someone else
+is writing. A refresh arriving while such a write is outstanding therefore
+does neither thing — it does not reload (that would drop the mutation) and it
+does not heal first (that would overwrite the change being reported). It logs
+and leaves both sides intact; the instance stays behind the store until the
+write has been re-issued. A backend declaring `change_notification` should
+keep that path rare: retry a failing entity write internally rather than
+raising, where it can.
 
 Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
 `event_origin` set to `external-change`, so subscriptions, agents and the
@@ -284,8 +313,12 @@ own instance's work. An external edge whose endpoint this instance does not
 have is reported and skipped rather than inventing the missing node.
 
 The reference backend in `persistence_contract.py` implements the protocol:
-instances built on the same store notify each other, which is what lets the
-contract prove the refresh path end to end.
+instances built on the same store notify each other, from one thread the
+store owns rather than from inside the write, which is what lets the contract
+prove the refresh path end to end — including two `GraphStorage` instances
+writing one store at the same time. Because it dispatches rather than
+delivers inline, the contract has a `settle_notifications` hook; any backend
+whose reports are not delivered before the write returns has to override it.
 
 ## Current state
 

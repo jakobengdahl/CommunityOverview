@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Sequence
 
 import pytest
@@ -119,6 +120,7 @@ class InMemoryGraphPersistenceBackend:
         store.setdefault("edges", {})
         store.setdefault("metadata", {})
         store.setdefault("listeners", {})
+        store.setdefault("dispatched", [])
         store.setdefault("written", False)
 
     def capabilities(self) -> BackendCapabilities:
@@ -195,22 +197,64 @@ class InMemoryGraphPersistenceBackend:
             self._store["listeners"][id(self)] = listener
 
     def stop_change_notification(self) -> None:
+        notifier = None
         with self._lock:
             self._store["listeners"].pop(id(self), None)
+            if not self._store["listeners"]:
+                notifier = self._store.pop("notifier", None)
+        # Outside the lock, and after the last listener is gone: a delivery
+        # still in flight refreshes an application that reads this backend
+        # straight back, and would take this lock to do it.
+        if notifier is not None:
+            notifier.shutdown(wait=True)
+
+    def settle_notifications(self) -> None:
+        """Wait for every report dispatched so far to have been delivered."""
+        with self._lock:
+            notifier = self._store.get("notifier")
+            pending, self._store["dispatched"] = self._store["dispatched"], []
+        if notifier is not None:
+            notifier.submit(lambda: None).result(timeout=30)
+        for future in pending:
+            future.result(timeout=30)
 
     def _notify_others(self, change: ExternalChange) -> None:
         """Report a write to every instance on this store except the writer.
 
         The writer's own application already has the change; telling it would
-        re-apply its own work and emit a second event for it. Listeners are
-        called outside the store lock, because one of them refreshes an
-        application that may read this backend straight back.
+        re-apply its own work and emit a second event for it.
+
+        Delivered on a thread of this store's own, never on the thread that
+        made the write - the rule ChangeNotifyingBackend states. A listener
+        refreshes an application that may wait for its own write queue, so a
+        report handed over inside a write would have that queue wait for the
+        write it is running, and two instances reporting into each other that
+        way would wait for each other for good. One worker, so reports are
+        delivered in the order the writes happened.
+        """
+        with self._lock:
+            if not [key for key in self._store["listeners"] if key != id(self)]:
+                return  # nobody to tell: do not start a thread to say nothing
+            notifier = self._store.get("notifier")
+            if notifier is None:
+                notifier = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="in-memory-notify"
+                )
+                self._store["notifier"] = notifier
+            future = notifier.submit(self._deliver, id(self), change)
+            self._store["dispatched"].append(future)
+
+    def _deliver(self, writer_key: int, change: ExternalChange) -> None:
+        """Call the listeners registered *now*, on the notifier thread.
+
+        Read at delivery rather than at dispatch, so an instance that has
+        since shut down is not refreshed after the fact.
         """
         with self._lock:
             others = [
                 listener
                 for key, listener in self._store["listeners"].items()
-                if key != id(self)
+                if key != writer_key
             ]
         for listener in others:
             listener(change)
@@ -232,6 +276,17 @@ class PersistenceBackendContract:
 
     def previous_version_store(self, tmp_path):
         pytest.skip("no previous-version store defined for this backend")
+
+    def settle_notifications(self, backend) -> None:
+        """Wait for the reports `backend` has dispatched to be delivered.
+
+        A backend reports from a thread of its own (ChangeNotifyingBackend),
+        so a clause that writes through one instance and then reads another
+        has to wait for that thread first. The default does nothing, which
+        suits a backend whose reports are delivered before the write returns;
+        one that dispatches them has to override this, or every clause below
+        is a race.
+        """
 
     # -- helpers --------------------------------------------------------------
 
@@ -570,6 +625,7 @@ class PersistenceBackendContract:
                     EntityOperation.upsert_edge(edge_payload("ab", "a", "b")),
                 ]
             )
+            self.settle_notifications(elsewhere)
 
             assert storage.get_node("b").name == "Beacon"
             assert {e.id for e in storage.get_all_edges()} == {"ab"}
@@ -596,6 +652,7 @@ class PersistenceBackendContract:
                     )
                 ]
             )
+            self.settle_notifications(elsewhere)
 
             assert storage.get_node("a").name == "Renamed"
             assert storage.search_nodes("Alpha") == []
@@ -633,9 +690,11 @@ class PersistenceBackendContract:
                 [0.5, 0.25]
             )
 
-            factory().apply_batch(
+            elsewhere = factory()
+            elsewhere.apply_batch(
                 [EntityOperation.upsert_node(node_payload("a", name="Renamed"))]
             )
+            self.settle_notifications(elsewhere)
 
             # Either regenerated from the new text, or gone until something
             # regenerates it. Never still the vector for "Alpha".
@@ -658,6 +717,7 @@ class PersistenceBackendContract:
                 ]
             )
             elsewhere.apply_batch([EntityOperation.delete_node("b")])
+            self.settle_notifications(elsewhere)
 
             assert storage.get_node("b") is None
             assert storage.search_nodes("Beacon") == []
@@ -676,11 +736,55 @@ class PersistenceBackendContract:
         storage, elsewhere = self._running_storage_and_writer(factory)
         try:
             elsewhere.save_graph_data(snapshot([node_payload("z", name="Zulu")]))
+            self.settle_notifications(elsewhere)
 
             assert {n.id for n in storage.get_all_nodes()} == {"z"}
             assert [n.id for n in storage.search_nodes("Zulu")] == ["z"]
         finally:
             storage.shutdown_events()
+
+    def test_two_storages_writing_one_store_do_not_wait_on_each_other(self, factory):
+        """The shape this seam exists for, and the one that breaks when a
+        report is handed over inside a write: two instances writing the same
+        store at once. Each whole-graph write is reported to the other, whose
+        refresh waits for its own write queue - which must never be the queue
+        that is waiting for that report to return. Content is not asserted;
+        two whole-graph writers overwrite each other by design. That they
+        both finish is the property."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        first, second = factory(), factory()
+        one = GraphStorage(persistence_backend=first)
+        two = GraphStorage(persistence_backend=second)
+        errors: List[Exception] = []
+
+        def hammer(storage, prefix):
+            try:
+                for i in range(5):
+                    storage.add_nodes(
+                        [Node(id=f"{prefix}{i}", type=NodeType.ACTOR, name=prefix)],
+                        [],
+                    )
+                    storage.save().result(timeout=60)
+            except Exception as exc:  # reported, not raised off-thread
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=hammer, args=(one, "a"), daemon=True),
+            threading.Thread(target=hammer, args=(two, "b"), daemon=True),
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(120)
+            assert not [t for t in threads if t.is_alive()], (
+                "two instances writing one store waited on each other"
+            )
+            assert errors == []
+        finally:
+            one.shutdown_events()
+            two.shutdown_events()
 
     def test_notification_stops_when_the_storage_shuts_down(self, factory):
         """A torn-down storage must not still be refreshed: its executor is
@@ -693,6 +797,7 @@ class PersistenceBackendContract:
         elsewhere.apply_batch(
             [EntityOperation.upsert_node(node_payload("q", name="Quiet"))]
         )
+        self.settle_notifications(elsewhere)
         assert storage.get_node("q") is None
 
 

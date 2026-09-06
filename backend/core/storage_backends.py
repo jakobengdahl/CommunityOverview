@@ -226,6 +226,17 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
         """
 
 
+class ExternalChangeRefused(RuntimeError):
+    """Raised back at a backend that reported a change on a writing thread.
+
+    Distinct from an I/O failure on purpose. A backend that breaks the
+    threading rule below raises this out of its own write call, and the
+    application must not read that as the write having failed: a failed write
+    escalates to re-issuing the whole graph, which on a shared store would
+    overwrite what the other writer just committed.
+    """
+
+
 @runtime_checkable
 class ChangeNotifyingBackend(Protocol):
     """A backend that can report writes another writer made to the store.
@@ -246,12 +257,25 @@ class ChangeNotifyingBackend(Protocol):
         not exist yet.
 
         Report from a thread of the backend's own - the thread a notification
-        channel, a poller or a watcher runs on. Any thread will do but one:
-        never the thread the application is running a write on, i.e. never
-        synchronously from inside a call the application made into the
-        backend. A refresh may have to wait for the write queue, and on that
-        thread it would be waiting for itself; the application refuses such a
-        report rather than deadlock.
+        channel, a poller or a watcher runs on. One kind of thread is
+        forbidden: never a thread that is executing a write, whether it is
+        this application's write or that of another application sharing the
+        store. In practice that means never synchronously from inside a call
+        an application made into the backend.
+
+        The reason is that a refresh may have to wait for the refreshed
+        application's write queue. Delivered from inside that application's
+        own write it would be waiting for the call it is inside. Delivered
+        from inside a *second* application's write it is worse and quieter:
+        each one's refresh waits on its own queue while its queue waits for
+        the other's refresh to return, and both stop for good.
+
+        The application detects the one case it can see - a report arriving
+        on the thread it runs its own writes on - and raises
+        ExternalChangeRefused back at the backend. It cannot see a report
+        delivered from another instance's write thread. That one is the
+        backend's to get right, and every real transport does: a listener
+        connection, a poller and a watcher all have a thread of their own.
         """
         ...
 
