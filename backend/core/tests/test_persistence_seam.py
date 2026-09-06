@@ -11,6 +11,8 @@ import json
 import os
 import tempfile
 import threading
+import time
+from threading import get_ident
 
 import pytest
 
@@ -194,6 +196,9 @@ class _NotifyingBackend(_IncrementalBackend):
         self.subscribes = 0
         self.unsubscribes = 0
         self._on_subscribe = on_subscribe
+        # When set, every write also reports one - from inside the write,
+        # which is the application's own writer thread.
+        self.report_from_writes = None
 
     def capabilities(self):
         return BackendCapabilities(
@@ -209,6 +214,18 @@ class _NotifyingBackend(_IncrementalBackend):
     def stop_change_notification(self):
         self.listener = None
         self.unsubscribes += 1
+
+    def _report_from_write(self):
+        if self.report_from_writes is not None and self.listener is not None:
+            self.listener(self.report_from_writes)
+
+    def upsert_node(self, node):
+        super().upsert_node(node)
+        self._report_from_write()
+
+    def apply_batch(self, operations):
+        super().apply_batch(operations)
+        self._report_from_write()
 
 
 class TestCapabilityDeclaration:
@@ -488,8 +505,11 @@ class TestExternalRefreshLeavesNothingStale:
 
             assert "c" not in storage._inline_fallback
             # Still in the fallback, this would be written back out as the
-            # vector for "Cedar" and re-adopted on the next load.
-            assert storage._serialize_node(storage.get_node("c"))["embedding"] is None
+            # vector for "Cedar" and re-adopted on the next load. Where the ML
+            # stack is installed a fresh vector is generated for the new text
+            # instead, which is equally not the old one.
+            written = storage._serialize_node(storage.get_node("c"))["embedding"]
+            assert written is None or written != pytest.approx([1.0])
         finally:
             storage.shutdown_events()
 
@@ -515,6 +535,46 @@ class TestExternalRefreshLeavesNothingStale:
             assert {n.id for n in storage.get_all_nodes()} == {"a"}
             assert seen == []
         finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshOnTheWriterThread:
+    """A backend may report a change from inside the write that made it, and
+    the docs promise any thread will do. That thread is the one the write
+    queue runs on: waiting there for the queue would be waiting for
+    ourselves, and not waiting would reload over the write we are inside."""
+
+    def test_a_report_from_inside_a_write_is_applied_off_that_thread(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        applied_on = []
+        storage.add_system_listener(lambda event: applied_on.append(get_ident()))
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            applied_on.clear()
+
+            backend.report_from_writes = ExternalChange.entities(
+                [EntityOperation.upsert_node(_node_payload("z", "Zulu"))]
+            )
+            storage.update_node("a", {"name": "Renamed"})
+            storage.flush()
+            backend.report_from_writes = None
+
+            deadline = time.time() + 10
+            while time.time() < deadline and storage.get_node("z") is None:
+                time.sleep(0.01)
+            assert storage.get_node("z") is not None, "the deferred refresh never ran"
+
+            writer = storage._writer_thread_id
+            assert writer is not None
+            external = [t for t in applied_on if t != get_ident()]
+            assert external, "the refresh emitted nothing"
+            assert writer not in external, (
+                "the refresh ran on the write queue's own thread"
+            )
+        finally:
+            backend.report_from_writes = None
             storage.shutdown_events()
 
 
@@ -670,7 +730,10 @@ class TestExternalRefreshFailureModes:
         real_upsert = backend.upsert_node
 
         def slow_upsert(node):
-            assert proceed.wait(5)
+            # Unbounded on purpose: the `finally` below always releases it, so
+            # a deadline here could only turn a slow runner into a failure
+            # about a state this test never meant to create.
+            proceed.wait()
             real_upsert(node)
 
         storage = GraphStorage(persistence_backend=backend)
@@ -693,6 +756,69 @@ class TestExternalRefreshFailureModes:
             assert {n.id for n in storage.get_all_nodes()} == {"a"}
         finally:
             proceed.set()
+            storage.shutdown_events()
+
+    def test_an_unknown_action_resyncs_instead_of_deleting(self):
+        """A build that does not recognise an action must not read it as a
+        delete: the entity would go, and every subscriber would be told it
+        was deleted, on a message that said nothing of the kind."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            seen.clear()
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation(
+                            kind="node",
+                            action="archive",
+                            entity_id="a",
+                            payload=_node_payload("a", "Alpha"),
+                        )
+                    ]
+                )
+            )
+
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+            assert [e.event_type for e in seen] == []
+        finally:
+            storage.shutdown_events()
+
+    def test_a_resync_that_fails_too_does_not_escape(self):
+        """The fallback has its own failure mode - the store is being replaced
+        as we read it. Throwing from there puts the failure back in the
+        caller's lap, which is what the fallback exists to prevent."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            def unreadable_store():
+                raise OSError("the store is being replaced")
+
+            backend.load_graph_data = unreadable_store
+
+            # Both ways in: the reload, and the containment fallback.
+            backend.listener(ExternalChange.unknown())
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation(
+                            kind="node", action="upsert", entity_id="bad", payload=None
+                        )
+                    ]
+                )
+            )
+
+            # Incomplete, not wrong, and nothing thrown at the backend.
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+        finally:
             storage.shutdown_events()
 
     @pytest.mark.parametrize(

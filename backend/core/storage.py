@@ -195,7 +195,12 @@ class GraphStorage:
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
-        self._io_executor = ThreadPoolExecutor(max_workers=1)
+        # Identified so a change notification delivered on it can be got off
+        # it before anything waits on the queue this thread *is*.
+        self._writer_thread_id: Optional[int] = None
+        self._io_executor = ThreadPoolExecutor(
+            max_workers=1, initializer=self._mark_writer_thread
+        )
         # Set by the writer thread when an entity write failed: the backend's
         # image then lacks a mutation memory has. Consumed on the caller's
         # thread - by the next write, flush() or shutdown - which re-issues
@@ -241,6 +246,9 @@ class GraphStorage:
             self._persistence_backend.start_change_notification(
                 self.apply_external_change
             )
+
+    def _mark_writer_thread(self) -> None:
+        self._writer_thread_id = threading.get_ident()
 
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
@@ -1164,22 +1172,43 @@ class GraphStorage:
         a backend that wants subscribers to see individual changes has to
         report them as operations.
         """
+        if threading.get_ident() == self._writer_thread_id:
+            # Delivered from inside a write this instance issued, so we are
+            # the queue a refresh may have to wait for. Waiting here would be
+            # waiting on ourselves, and skipping the wait would reload over
+            # the very write we are in the middle of. Neither: hand the
+            # refresh to a thread that can wait properly.
+            threading.Thread(
+                target=self.apply_external_change,
+                args=(change,),
+                name="external-change",
+                daemon=True,
+            ).start()
+            return
+
         with self._lock:
             if change.operations is None:
                 self._reload_from_store()
                 return
             try:
                 for op in change.operations:
+                    # Anything this build does not recognise is a resync, not
+                    # a delete: reading an unknown action as one would drop
+                    # the entity and tell every subscriber it was deleted.
+                    if op.action not in ("upsert", "delete"):
+                        raise ValueError(f"unknown entity action {op.action!r}")
                     if op.kind == "node":
                         if op.action == "upsert":
                             self._external_upsert_node(op)
                         else:
                             self._external_delete_node(op.entity_id)
-                    else:
+                    elif op.kind == "edge":
                         if op.action == "upsert":
                             self._external_upsert_edge(op)
                         else:
                             self._external_delete_edge(op.entity_id)
+                    else:
+                        raise ValueError(f"unknown entity kind {op.kind!r}")
             except Exception as exc:
                 # A payload this build cannot read - two instances mid-upgrade,
                 # say - would otherwise leave the batch half applied and throw
@@ -1204,13 +1233,27 @@ class GraphStorage:
         and queued work never takes _lock, so waiting cannot deadlock.
 
         Bootstrapping is off: a store reporting that it is not there is not
-        an invitation to write this instance's graph over it.
+        an invitation to write this instance's graph over it. A store that
+        cannot be read at all is reported and left; nothing is raised, because
+        the only thread to raise into is the backend's.
         """
         try:
             self._io_executor.submit(lambda: None).result()
         except RuntimeError:
             pass  # already shut down: nothing can be queued, nothing is pending
-        self.load(bootstrap_if_missing=False)
+        try:
+            self.load(bootstrap_if_missing=False)
+        except Exception as exc:
+            # The store can be unreadable for a moment - being replaced as we
+            # read it, a network read failing. Throwing here would put that in
+            # the caller's lap, and the caller is the backend's thread, where
+            # the instance that made the write would read it as its own write
+            # having failed. What is in memory is behind, not wrong: whatever
+            # a half-applied batch already applied is real store state.
+            print(
+                f"Warning: could not reload the graph ({exc}); what is in "
+                f"memory is behind the store until the next change is reported"
+            )
 
     @staticmethod
     def _entity_type_name(entity) -> str:

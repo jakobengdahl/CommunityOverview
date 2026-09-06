@@ -257,9 +257,20 @@ What the backend passes is an `ExternalChange`:
   wants subscribers to see individual changes has to report them as
   operations.
 
-A payload this build cannot read stops the batch: rather than leave it half
-applied, or throw into the backend's thread where the writing instance would
-read it as its own write having failed, `GraphStorage` logs it and reloads.
+A payload this build cannot read stops the batch, and `GraphStorage` logs it
+and reloads rather than throwing into the backend's thread — where the
+instance that made the write would read it as its own write having failed.
+The operations before the unreadable one have already been applied, which is
+not a problem in itself: they are real store state, so what is in memory is
+incomplete rather than wrong, and the reload completes it. If the reload
+cannot run either — the store is being replaced as we read it — that is
+logged too and the graph in memory stays behind the store until the next
+change is reported. Nothing is raised at the backend on any of these paths.
+
+The listener may be called from any thread, including the one the
+application is running a write on: `GraphStorage` hands the refresh to
+another thread rather than wait, from inside a write, on the queue that
+write is in.
 
 Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
 `event_origin` set to `external-change`, so subscriptions, agents and the
