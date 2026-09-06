@@ -1413,47 +1413,96 @@ class TestGraphStorageConcurrency:
         state = {"armed": False, "depth": 0}
 
         class HoldAfterRelease:
+            # Every release path is hooked, not just the with-statement's, so
+            # a save that let go of the lock by hand around its submit would
+            # still meet the hold.
             def __enter__(self):
-                real_lock.__enter__()
-                state["depth"] += 1
+                return self.acquire()
 
             def __exit__(self, *exc):
+                self.release()
+
+            def acquire(self, *args, **kwargs):
+                got = real_lock.acquire(*args, **kwargs)
+                if got:
+                    state["depth"] += 1
+                return got
+
+            def release(self):
                 state["depth"] -= 1
-                real_lock.__exit__(*exc)
+                real_lock.release()
                 if state["armed"] and state["depth"] == 0:
                     state["armed"] = False
                     released_once.set()
                     assert newer_write_queued.wait(5)
 
-            def acquire(self, *args, **kwargs):
-                return real_lock.acquire(*args, **kwargs)
-
-            def release(self):
-                return real_lock.release()
-
         temp_storage._lock = HoldAfterRelease()
         try:
             state["armed"] = True
             first = {}
-            thread = threading.Thread(
-                target=lambda: first.setdefault("future", temp_storage.save())
-            )
+
+            def first_save():
+                try:
+                    first["future"] = temp_storage.save()
+                except BaseException as exc:  # reported by the test, not the hook
+                    first["error"] = exc
+
+            thread = threading.Thread(target=first_save)
             thread.start()
             assert released_once.wait(5)
             temp_storage.update_node("n", {"name": "v2"})
             second = temp_storage.save()
+            # Changed in memory only, after the second capture: a save that
+            # captured again after its release would land this instead.
+            temp_storage.nodes["n"].name = "v3"
             newer_write_queued.set()
             thread.join(5)
             assert not thread.is_alive()
+            assert "error" not in first, first.get("error")
             first["future"].result()
             second.result()
         finally:
             temp_storage._lock = real_lock
 
-        temp_storage.flush()
+        temp_storage._io_executor.submit(lambda: None).result()
         reloaded = GraphStorage(json_path=str(temp_storage.json_path))
         assert reloaded.nodes["n"].name == "v2"
         reloaded.shutdown_events()
+
+    def test_a_failed_write_is_never_erased_by_the_save_that_issued_it(
+        self, temp_storage
+    ):
+        """save() clears _resync_pending under the lock, before it submits.
+        A write that fails sets the flag from the worker; cleared after the
+        submit, the caller could erase that and lose the heal. Run the write
+        inline to make the order observable without timing."""
+        from concurrent.futures import Future
+
+        class InlineExecutor:
+            def submit(self, fn, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except BaseException as exc:
+                    future.set_exception(exc)
+                return future
+
+        def failing_save(data):
+            raise OSError("disk full")
+
+        real_executor = temp_storage._io_executor
+        real_executor.submit(lambda: None).result()
+        backend = temp_storage._persistence_backend
+        temp_storage._io_executor = InlineExecutor()
+        backend.save_graph_data = failing_save
+        try:
+            future = temp_storage.save()
+        finally:
+            temp_storage._io_executor = real_executor
+            del backend.save_graph_data  # back to the class's method
+        with pytest.raises(OSError, match="disk full"):
+            future.result()
+        assert temp_storage._resync_pending is True
 
     def test_atomic_save_prevents_corruption(self, temp_storage):
         """
