@@ -1759,6 +1759,29 @@ def test_the_app_refuses_an_operator_path_holding_a_pickle(tmpdir_path):
         storage.flush()
 
 
+def test_an_empty_file_at_an_operator_path_is_replaced_not_refused(tmpdir_path):
+    """An empty file is a failed write, not data - the sidecar's own save()
+    comment says so, but nothing pinned it. Removing the `st_size > 0` clause
+    from that guard would make this indistinguishable from a real foreign
+    file and refuse to ever write the sidecar."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    operator_path = os.path.join(tmpdir_path, "operator.bin")
+    open(operator_path, "wb").close()  # zero bytes
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path=operator_path)
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        assert storage.vectors_persisted, "an empty file was treated as foreign data"
+        assert set(FileEmbeddingSidecar(Path(operator_path)).load()) == {"n1", "n2", "n3"}
+    finally:
+        storage.flush()
+
+
 def test_the_app_heals_a_damaged_sidecar_at_the_path_start_dev_exports(tmpdir_path):
     """start-dev.sh exports EMBEDDINGS_FILE on every run, set to exactly the
     path the app would have derived, and .env.example documents the same
@@ -1824,6 +1847,38 @@ def test_a_genuinely_relative_configured_path_naming_our_sidecar_is_ours(
         storage.flush()
 
 
+def test_a_genuinely_relative_configured_path_naming_a_foreign_file_is_not_ours(
+    tmpdir_path, monkeypatch
+):
+    """The mirror image of the test above, and the boundary it did not cover:
+    the previous test only pinned relative -> ours, so a mutation that dropped
+    `not path.is_absolute() or <original>` into the ownership check still
+    passed everything here. scripts/generate_embeddings.py hands GraphStorage a
+    still-relative EMBEDDINGS_FILE by default, so under that mutation the app
+    would move an operator's own file aside and overwrite it."""
+    graph_path = os.path.join(tmpdir_path, "graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    monkeypatch.chdir(tmpdir_path)
+    original = b"\x80\x04\x95 a legacy pickle, named relatively"
+    with open("embeddings.pkl", "wb") as f:
+        f.write(original)
+
+    storage = GraphStorage(json_path=graph_path, embeddings_path="embeddings.pkl")
+    storage.vector_store.model = _FakeEncoder()
+    try:
+        assert storage._embedding_sidecar.owns_path is False
+        storage.add_nodes(_sample_nodes(), [])
+        storage.flush()
+
+        with open("embeddings.pkl", "rb") as f:
+            assert f.read() == original, "a relatively-named foreign file was overwritten"
+        assert not os.path.exists("embeddings.pkl.corrupt")
+        assert storage.vectors_persisted is False
+    finally:
+        storage.flush()
+
+
 def test_a_relative_graph_path_still_owns_its_absolutely_configured_sidecar(
     tmpdir_path, monkeypatch
 ):
@@ -1854,7 +1909,7 @@ def test_a_relative_graph_path_still_owns_its_absolutely_configured_sidecar(
         storage.flush()
 
 
-def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path):
+def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path, capsys):
     """Ownership is the whole path, not the basename. No test configured an
     operator path with our own file's NAME in a different directory, so
     comparing only the last component passed every one of them - while
@@ -1879,7 +1934,13 @@ def test_a_same_named_file_in_another_directory_is_not_ours(tmpdir_path):
         assert theirs.read_bytes() == original, "a same-named file was overwritten"
         assert not theirs.with_name(theirs.name + ".corrupt").exists()
         assert storage.vectors_persisted is False
-        assert storage.vector_store.export_vectors(), "the refusal was never reached"
+        # vectors_persisted is False whenever vectors exist and nothing was
+        # written, so on its own it cannot distinguish "refused" from "never
+        # attempted" - that is why the byte-identical file above is asserted
+        # separately. The refusal warning itself is the only direct evidence
+        # the write was attempted and rejected.
+        assert storage.vector_store.export_vectors()
+        assert "refusing to overwrite" in capsys.readouterr().out
     finally:
         storage.flush()
 
@@ -1972,6 +2033,31 @@ def test_a_path_that_only_resolves_to_the_graph_file_is_still_refused(
         assert storage.embeddings_path.resolve() != Path(graph_path).resolve(), (
             f"a {spelling} spelling of the graph file was accepted as its sidecar"
         )
+    finally:
+        storage.flush()
+
+
+def test_a_symlinked_graph_directory_still_owns_its_real_path_sidecar(tmpdir_path):
+    """The existing symlink coverage (test_a_path_that_only_resolves_to_the_graph_file_is_still_refused)
+    only exercises the graph-FILE collision. Here the GRAPH DIRECTORY itself is
+    a symlink and EMBEDDINGS_FILE names the derived sidecar at the REAL,
+    non-symlinked path: `derived` is built from the un-resolved json_path, so a
+    mutation that compared `derived` as written instead of `derived.resolve()`
+    would call this file foreign and refuse to heal it, going dark exactly
+    where the deployment is a symlinked volume mount."""
+    real_dir = Path(tmpdir_path) / "real"
+    real_dir.mkdir()
+    link_dir = Path(tmpdir_path) / "link"
+    os.symlink(real_dir, link_dir)
+
+    graph_path = link_dir / "graph.json"
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": [], "edges": [], "metadata": {"version": "1.0"}}, f)
+    real_sidecar = real_dir / "graph.embeddings.bin"
+
+    storage = GraphStorage(json_path=str(graph_path), embeddings_path=str(real_sidecar))
+    try:
+        assert storage._embedding_sidecar.owns_path is True
     finally:
         storage.flush()
 

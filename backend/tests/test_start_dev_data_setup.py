@@ -72,12 +72,16 @@ def _run(
     env=None,
     resolution: str = "",
     profile_graph: str = "",
-) -> str:
+) -> subprocess.CompletedProcess:
     """Run the extracted block against a temp DATA_DIR.
 
     `resolution` is the script's own EMBEDDINGS_FILE block; passing it means the
     path the cleanup targets is derived exactly as the shipped script derives
     it, rather than by the harness deciding for it.
+
+    Returns the `CompletedProcess` so callers can check `returncode` as well
+    as output — a failed download that reported success would only show up
+    in the exit status, not in anything printed.
     """
     fallback = (
         "" if resolution else 'ACTIVE_DATA_EMBEDDINGS="$DEFAULT_ACTIVE_DATA_EMBEDDINGS"'
@@ -105,7 +109,8 @@ resolve_config() {{ echo "{profile_graph}"; }}
         text=True,
         env={**os.environ, **(env or {})},
     )
-    return result.stdout + result.stderr
+    result.output = result.stdout + result.stderr
+    return result
 
 
 @pytest.fixture
@@ -184,11 +189,11 @@ def test_replacing_the_graph_drops_the_sidecar(data_setup_block, workspace):
 def test_a_missing_data_source_leaves_the_sidecar_alone(data_setup_block, workspace):
     """The graph was not replaced, so its vectors are still the right ones.
     Deleting before validating the source would lose them for nothing."""
-    output = _run(
+    result = _run(
         data_setup_block, workspace, data_source=str(workspace / "does-not-exist.json")
     )
 
-    assert "Data file not found" in output
+    assert "Data file not found" in result.output
     assert _sidecar(workspace).exists()
     assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
 
@@ -344,13 +349,14 @@ def test_a_failed_download_leaves_the_sidecar_alone(data_setup_block, workspace)
     """The graph was not replaced, so its vectors are still the right ones.
     Dropping them before the transfer succeeds loses them for nothing — and a
     download fails far more often than a local copy does."""
-    output = _run(
+    result = _run(
         data_setup_block,
         workspace,
         data_source="http://127.0.0.1:1/does-not-exist.json",
     )
 
-    assert _sidecar(workspace).exists(), output
+    assert result.returncode != 0, "a refused connection was reported as success"
+    assert _sidecar(workspace).exists(), result.output
     assert _sidecar(workspace).read_bytes() == SIDECAR_BYTES
 
 
@@ -376,7 +382,10 @@ def path_without(tmp_path):
                 if tool.name in seen or not os.access(tool, os.X_OK):
                     continue
                 seen.add(tool.name)
-                (shim / tool.name).symlink_to(tool)
+                # A relative PATH entry would otherwise be symlinked
+                # unresolved, dangling once followed from inside `shim`
+                # rather than from the original working directory.
+                (shim / tool.name).symlink_to(tool.resolve())
         return str(shim)
 
     return _build
@@ -429,13 +438,16 @@ def test_an_http_error_response_leaves_the_graph_and_sidecar_alone(
     target before the request, so a 404 empties the graph to zero bytes and
     THEN fails. A connection refusal is not the same test - that one fails the
     transport, so set -e stops the script before either can do harm."""
-    _run(
+    result = _run(
         data_setup_block,
         workspace,
         data_source=http_404_url,
         env=_downloader_env(path_without, downloader),
     )
 
+    assert result.returncode != 0, (
+        f"{downloader} reported a failed download as a successful exit"
+    )
     assert _sidecar(workspace).exists(), (
         "an HTTP error was treated as a successful download and the sidecar was dropped"
     )
@@ -445,9 +457,13 @@ def test_an_http_error_response_leaves_the_graph_and_sidecar_alone(
     assert body, f"{downloader} emptied the graph before its request failed"
     graph = json.loads(body)
     assert graph["nodes"] == [], "the 404 body was written over the graph"
-    assert not list((workspace / "data" / "active").glob("*.download")), (
-        "a failed transfer left its partial file behind"
-    )
+    # Exact listing, not a glob for "*.download": a temp artifact under any
+    # other name (e.g. a renamed ".part") would pass a glob check silently.
+    assert sorted(p.name for p in (workspace / "data" / "active").iterdir()) == [
+        "graph.embeddings.bin",
+        "graph.journal.ndjson",
+        "graph.json",
+    ], "a failed transfer left an unexpected file behind in the data directory"
 
 
 @pytest.mark.parametrize(
@@ -491,7 +507,7 @@ def test_the_cleanup_refuses_to_delete_a_file_that_is_not_a_sidecar(
     original = b"\x80\x04\x95 a pickle, not a sidecar"
     foreign.write_bytes(original)
 
-    output = _run(
+    result = _run(
         data_setup_block,
         workspace,
         data_source=str(workspace / "replacement.json"),
@@ -499,9 +515,9 @@ def test_the_cleanup_refuses_to_delete_a_file_that_is_not_a_sidecar(
         resolution=resolution_block,
     )
 
-    assert foreign.exists(), output
+    assert foreign.exists(), result.output
     assert foreign.read_bytes() == original
-    assert "not an embedding sidecar" in output
+    assert "not an embedding sidecar" in result.output
 
 
 @pytest.fixture
@@ -549,18 +565,22 @@ def test_a_successful_download_replaces_the_graph_and_drops_the_sidecar(
     download which reports success actually put the graph where the cleanup
     then assumes it is. A download landing somewhere else would still drop the
     sidecar, leaving the old graph beside no vectors."""
-    _run(
+    result = _run(
         data_setup_block,
         workspace,
         data_source=http_graph_url,
         env=_downloader_env(path_without, downloader),
     )
 
+    assert result.returncode == 0, result.output
     graph = json.loads((workspace / "data" / "active" / "graph.json").read_text())
     assert [n["id"] for n in graph["nodes"]] == ["downloaded"], (
         "the download reported success but the graph was not replaced"
     )
     assert not _sidecar(workspace).exists()
-    assert not list((workspace / "data" / "active").glob("*.download")), (
-        "the transfer was copied into place rather than moved"
-    )
+    # Exact listing: the journal is dropped alongside the sidecar on a
+    # successful replacement (both maintenance calls fire in this branch), and
+    # a glob for "*.download" would miss a leftover under any other name.
+    assert sorted(p.name for p in (workspace / "data" / "active").iterdir()) == [
+        "graph.json"
+    ], "an unexpected file was left in the data directory after a successful download"
