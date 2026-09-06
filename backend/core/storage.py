@@ -658,16 +658,24 @@ class GraphStorage:
             # erased by a snapshot that does not contain it.
             self._resync_pending = False
 
-        # Offload blocking I/O to background thread to avoid blocking event loop.
-        # Returns the Future so callers that must wait (e.g. load()) can call .result().
-        return self._io_executor.submit(
-            self._do_save_to_disk,
-            data,
-            node_count,
-            edge_count,
-            vectors,
-            vector_revision,
-        )
+            # Submitted under the same lock as the capture, like every entity
+            # write in _persist: the single-worker queue then lands snapshots
+            # in capture order. Submitted after the release, two callers
+            # could queue in the opposite order of their captures and the
+            # older image would land last. The submit is cheap and the queued
+            # work never takes the lock.
+            #
+            # Offload blocking I/O to background thread to avoid blocking event
+            # loop. Returns the Future so callers that must wait (e.g. load())
+            # can call .result().
+            return self._io_executor.submit(
+                self._do_save_to_disk,
+                data,
+                node_count,
+                edge_count,
+                vectors,
+                vector_revision,
+            )
 
     def _snapshot_data(self) -> Dict[str, Any]:
         """The whole graph as a backend snapshot. Callers must hold _lock."""
