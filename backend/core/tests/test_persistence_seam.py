@@ -718,14 +718,15 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
                 },
             ),
             # First is the widest. Its vector is adopted and the narrow one
-            # refused - and then generation comes back at the model's width,
-            # which reads as a model change and discards the adopted one. That
-            # is a real loss, and it is exactly what the per-operation path did
-            # too: first wins is not lossless, it is only better than letting
-            # the commonest width win.
+            # refused; generation then comes back at the model's width, which
+            # reads as a model change and empties the index of what was just
+            # adopted. The settle notices and generates for what was stranded,
+            # so both nodes end with a vector. The per-operation path did not:
+            # it left the first one with nothing, depending on the order the
+            # store reported them in.
             (
                 [("a", "Wide", [1.0, 2.0, 3.0]), ("b", "Narrow", [7.0, 7.0])],
-                {"a": None, "b": _generated("Narrow")},
+                {"a": _generated("Wide"), "b": _generated("Narrow")},
             ),
             # Operation order and id order disagree, and both widths decide
             # nothing on their own.
@@ -773,6 +774,123 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
                 else:
                     assert got == pytest.approx(vector), f"{node_id} is wrong"
 
+        finally:
+            storage.shutdown_events()
+
+    def test_a_model_narrower_than_the_store_strands_nobody(self):
+        """A peer running a different embedding model is the ordinary way the
+        two widths disagree. The supplied vector is adopted, generation for
+        the rest comes back at the local model's width, and the index is
+        emptied of what was adopted - so the settle looks again and generates
+        for whoever was left behind."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+
+        def wide(nodes):
+            storage.vector_store._absorb(
+                {node.id: [float(len(node.name))] * 3 for node in nodes}
+            )
+
+        storage.vector_store.update_nodes_embeddings = wide
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Alpha"), embedding=[1.0, 2.0])
+                        ),
+                    ]
+                )
+            )
+
+            # Both named, both generation-eligible, so neither is left without.
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [5.0, 5.0, 5.0]
+            )
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [5.0, 5.0, 5.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_replaced_width_still_refuses_a_wrong_one_with_no_generator(self):
+        """The anchor's own job, stated where nothing can paper over it. With
+        a generator available a refused vector is generated instead, so every
+        node ends with one either way and the refusal is invisible. Without
+        one - the ML-free install this repo supports as first class - refusing
+        is the whole observable, and accepting the wrong width would put a
+        vector of a foreign model's shape into the index."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[1.0, 0.0]),
+                Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0]),
+            ],
+            [],
+        )
+        storage.flush()
+        try:
+            # Both ids replaced, so the index empties - and the width it held
+            # is still the one to judge against.
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Renamed"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("b", "Rebeacon"),
+                                embedding=[4.0, 5.0, 6.0],
+                            )
+                        ),
+                    ]
+                )
+            )
+
+            for node_id in ("a", "b"):
+                assert storage.vector_store.get_vector_list(node_id) is None, (
+                    f"{node_id} took a vector of the wrong width"
+                )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_deleted_width_does_not_refuse_a_supplied_vector(self):
+        """The anchor exists so a batch that empties the index by replacing
+        everything is still judged against the width it replaced. A batch that
+        empties it by deleting everything is the other case: the old width
+        belongs to nobody, and defending it refuses a supplied vector for
+        disagreeing with vectors that are gone."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [Node(id="x", type=NodeType.ACTOR, name="Xeno", embedding=[1.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.delete_node("x"),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Alpha"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [1.0, 2.0, 3.0]
+            )
         finally:
             storage.shutdown_events()
 

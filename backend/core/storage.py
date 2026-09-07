@@ -1307,10 +1307,12 @@ class GraphStorage:
         No writer interleaves: every mutation path takes _lock and the whole
         batch holds it. Readers are another matter, and this is the cost of
         settling once - get_node, semantic_search_nodes and find_similar_nodes
-        take no lock at all - nor does any other path that reads the node
-        dictionary and the index together - before this change as after, so a
-        concurrent reader can see a node the batch updated while its vector is
-        still the one the batch found, until the settle lands. Settling per entity
+        take no lock at all - nor does any other query path that reads the
+        node dictionary and the index together - before this change as after,
+        so a concurrent reader can see a node the batch updated while its
+        vector is still the one the batch found, until the settle lands.
+        save() is the exception that matters, and it does hold _lock across
+        both, so a half-settled batch is never what gets written. Settling per entity
         narrowed that window to one entity rather than closing it. A system
         listener runs inside the window too, on this thread, and sees its own
         entity half applied that way: node updated, vector not.
@@ -1320,44 +1322,63 @@ class GraphStorage:
         if not touched:
             return
 
-        # Read before the eviction, because the eviction is what would
-        # destroy it. A batch naming every id in the index empties it, and an
-        # adoption anchored on what is left would then take its width from
-        # the supplied vectors - so one report of the wrong width would be
-        # accepted rather than refused, and the generated vectors that follow
-        # would look like a model change and discard the index. Every vector
-        # in the index has the same width by construction, so the width of
-        # any of them is the anchor.
-        anchor = self.vector_store.dimension
-        # Whatever these ids had described the text they used to have.
-        self.vector_store.remove_nodes_embeddings(list(touched))
-
+        # Read before the eviction destroys it, and remember whether any id
+        # this batch upserts actually held a vector - that is what makes the
+        # old width authoritative rather than a ghost. A batch that empties
+        # the index by *replacing* everything must still be judged against
+        # the width it replaced; one that empties it by *deleting* everything
+        # must not, or a supplied vector is refused for disagreeing with
+        # vectors that no longer exist.
         upserted = [
             (node, vector) for node, vector in touched.values() if node is not None
         ]
+        before = self.vector_store.dimension
+        replacing = any(
+            self.vector_store.has_embedding(node.id) for node, _ in upserted
+        )
+
+        # Whatever these ids had described the text they used to have.
+        self.vector_store.remove_nodes_embeddings(list(touched))
         if not upserted:
             return
 
         supplied = {node.id: vector for node, vector in upserted if vector is not None}
+        anchor = self.vector_store.dimension
+        if anchor is None and replacing:
+            anchor = before
         if anchor is None and supplied:
-            # An empty index anchors nothing, and a majority vote is the wrong
-            # tie-breaker here: it would adopt the commonest width and refuse
-            # the rest, and the refused ones are then generated at the model's
-            # width - which reads as a model change and discards what was just
-            # adopted, with nothing left to regenerate it. Judging every
-            # supplied vector against the first is what the per-operation path
-            # did, one node at a time.
+            # Nothing local anchors the width, so this batch establishes it.
+            # A majority vote is the wrong tie-breaker: it would adopt the
+            # commonest width and refuse the rest. Judging every supplied
+            # vector against the first is what the per-operation path did,
+            # one node at a time.
             anchor = len(next(iter(supplied.values())))
         self._adopt_vectors(supplied, anchor)
+
+        def generate(nodes) -> bool:
+            try:
+                self.vector_store.update_nodes_embeddings(nodes)
+                return True
+            except Exception as embed_error:
+                print(f"Warning: Could not update embeddings: {embed_error}")
+                return False
+
         missing = [
             node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
         ]
-        if not missing:
+        if not missing or not generate(missing):
             return
-        try:
-            self.vector_store.update_nodes_embeddings(missing)
-        except Exception as embed_error:
-            print(f"Warning: Could not update embeddings: {embed_error}")
+
+        # Generating at a width the batch did not adopt at reads as a model
+        # change, and the index is emptied of everything just adopted. Those
+        # ids were not in `missing`, so nothing above brings them back. One
+        # more pass does, and it cannot recur: this one generates at the width
+        # the index now holds.
+        stranded = [
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if stranded:
+            generate(stranded)
 
     def _settle_before_refresh(self) -> bool:
         """Wait for this instance's own writes; say whether to refresh at all.
