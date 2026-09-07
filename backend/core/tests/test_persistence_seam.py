@@ -600,6 +600,41 @@ class TestExternalRefreshLeavesNothingStale:
         finally:
             storage.shutdown_events()
 
+    def test_a_delete_drops_a_vector_the_graph_file_still_carries_inline(self):
+        """The delete half of the same bookkeeping. Left in the fallback, the
+        departed node's vector is written back out under whatever is next
+        created with that id - a dead vector resurrected into the store and
+        served by semantic search."""
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    dict(_node_payload("a", "Alpha"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("b", "Beacon"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("c", "Cedar"), embedding=[1.0]),
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert "c" in storage._inline_fallback
+
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("c")])
+            )
+            assert "c" not in storage._inline_fallback
+
+            # The id comes back as a different node. A local add does not
+            # touch the fallback map, so whatever is left in it is what gets
+            # written out for the newcomer.
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cypress")], [])
+            written = storage._serialize_node(storage.get_node("c"))["embedding"]
+            assert written is None or written != pytest.approx([1.0])
+        finally:
+            storage.shutdown_events()
+
     def test_a_change_naming_no_entities_is_not_a_reload(self):
         """`entities([])` says nothing changed. Treating it as `unknown()`
         would throw away in-memory state on a message that carries none."""
@@ -1005,12 +1040,18 @@ class TestExternalRefreshFailureModes:
             proceed.set()
             storage.shutdown_events()
 
-    def test_a_reported_payload_is_read_not_taken(self):
+    @pytest.mark.parametrize("shape", ["serialised", "legacy"])
+    def test_a_reported_payload_is_read_not_taken(self, shape):
         """The dict a report carries belongs to the backend, which may still
         be holding the record it reported - a poller's cache, a payload kept
-        to retry. Parsing it in place would rewrite its timestamps into
-        datetime objects and add defaults, and hand back something the
-        backend can no longer serialise."""
+        to retry. Parsing it in place would hand back something the backend
+        did not give.
+
+        Two shapes, because from_dict rewrites its argument two ways and one
+        payload only shows one of them: it parses string stamps, and it fills
+        in defaults for keys that are absent. A payload carrying every key
+        already - the shape this instance itself writes - can only show the
+        first."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         try:
@@ -1019,7 +1060,15 @@ class TestExternalRefreshFailureModes:
 
             node = _node_payload("b", "Beacon")
             edge = _edge_payload("ab", "a", "b")
-            kept = (json.loads(json.dumps(node)), json.loads(json.dumps(edge)))
+            if shape == "legacy":
+                # A record of the backend's own: stamps already parsed, and
+                # none of the keys from_dict would fill in.
+                stamp = datetime.now(timezone.utc)
+                node["created_at"] = node["updated_at"] = stamp
+                edge["created_at"] = stamp
+                del node["archived"], edge["archived"], edge["label"]
+            kept = (dict(node), dict(edge))
+            keys = (set(node), set(edge))
 
             backend.listener(
                 ExternalChange.entities(
@@ -1032,8 +1081,9 @@ class TestExternalRefreshFailureModes:
             assert storage.get_node("b") is not None
 
             assert (node, edge) == kept
-            json.dumps(node)  # and still the backend's to write out
-            json.dumps(edge)
+            # Nothing added either: from_dict fills in defaults, and a copy
+            # taken only when a stamp needs parsing would let that half by.
+            assert (set(node), set(edge)) == keys
         finally:
             storage.shutdown_events()
 
