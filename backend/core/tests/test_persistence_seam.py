@@ -596,6 +596,118 @@ class TestChangeNotificationWiring:
             storage.shutdown_events()
 
 
+class TestExternalRefreshSettlesTheVectorIndexOnce:
+    """The index matrix is rebuilt whole on every change to it, so the cost of
+    a refresh is decided by how many times a batch changes it, not by how big
+    the batch is."""
+
+    def _storage_with(self, backend, count):
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(
+                    id=f"n{i}",
+                    type=NodeType.ACTOR,
+                    name=f"Node {i}",
+                    embedding=[float(i), 0.5],
+                )
+                for i in range(count)
+            ],
+            [],
+        )
+        storage.flush()
+        return storage
+
+    @staticmethod
+    def _report(storage, backend, count):
+        """Report `count` node upserts as one batch; return the rebuild count."""
+        before = storage.vector_store.revision
+        backend.listener(
+            ExternalChange.entities(
+                [
+                    EntityOperation.upsert_node(
+                        dict(
+                            _node_payload(f"n{i}", f"Renamed {i}"), embedding=[9.0, 9.0]
+                        )
+                    )
+                    for i in range(count)
+                ]
+            )
+        )
+        return storage.vector_store.revision - before
+
+    def test_the_index_is_rebuilt_the_same_number_of_times_whatever_the_batch(self):
+        """The property, stated as a count rather than a clock: rebuilding per
+        reported node is linear in the index per operation, so a batch costs
+        the square of it. Two batches of very different sizes must cost the
+        index the same."""
+        small_backend = _NotifyingBackend()
+        small = self._storage_with(small_backend, 20)
+        large_backend = _NotifyingBackend()
+        large = self._storage_with(large_backend, 20)
+        try:
+            rebuilds_for_two = self._report(small, small_backend, 2)
+            rebuilds_for_twenty = self._report(large, large_backend, 20)
+
+            assert rebuilds_for_two == rebuilds_for_twenty
+            # One eviction pass and one adoption is the whole cost.
+            assert rebuilds_for_twenty <= 2
+        finally:
+            small.shutdown_events()
+            large.shutdown_events()
+
+    def test_the_batch_still_leaves_every_vector_where_it_belongs(self):
+        """Settling once must land exactly what settling per node did: the
+        reported vectors in, the replaced ones out."""
+        backend = _NotifyingBackend()
+        storage = self._storage_with(backend, 3)
+        try:
+            self._report(storage, backend, 2)
+
+            assert storage.vector_store.get_vector_list("n0") == pytest.approx(
+                [9.0, 9.0]
+            )
+            assert storage.vector_store.get_vector_list("n1") == pytest.approx(
+                [9.0, 9.0]
+            )
+            # Untouched by the batch, so untouched in the index.
+            assert storage.vector_store.get_vector_list("n2") == pytest.approx(
+                [2.0, 0.5]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_the_last_operation_for_an_id_decides_what_the_index_keeps(self):
+        """A batch can touch the same id twice, and the store applied them in
+        order. Settling at the end must land the last one, not the first."""
+        for operations, expected in (
+            (["upsert", "delete"], None),
+            (["delete", "upsert"], [9.0, 9.0]),
+        ):
+            backend = _NotifyingBackend()
+            storage = self._storage_with(backend, 2)
+            try:
+                upsert = EntityOperation.upsert_node(
+                    dict(_node_payload("n0", "Renamed"), embedding=[9.0, 9.0])
+                )
+                delete = EntityOperation.delete_node("n0")
+                backend.listener(
+                    ExternalChange.entities(
+                        [upsert if name == "upsert" else delete for name in operations]
+                    )
+                )
+
+                got = storage.vector_store.get_vector_list("n0")
+                if expected is None:
+                    assert got is None, f"{operations} left a vector behind"
+                    assert storage.get_node("n0") is None
+                else:
+                    assert got == pytest.approx(expected), f"{operations} lost it"
+                    assert storage.get_node("n0") is not None
+            finally:
+                storage.shutdown_events()
+
+
 class TestExternalRefreshLeavesNothingStale:
     def test_an_upsert_drops_a_vector_the_graph_file_still_carries_inline(self):
         """A pre-split store hands its vectors on the node objects, and

@@ -1223,6 +1223,13 @@ class GraphStorage:
             if change.operations is None:
                 self._reload_from_store()
                 return
+            # Every change to the vector index rebuilds its matrix whole,
+            # so doing that once per reported node is linear in the index per
+            # operation and quadratic over a batch. Collect what the batch
+            # touches and settle the index once, at the end - the shape
+            # add_nodes already has. A dict gives last-operation-wins per id,
+            # which is what the store applied.
+            touched: Dict[str, Optional[Node]] = {}
             try:
                 for op in change.operations:
                     # Anything this build does not recognise is a resync, not
@@ -1232,9 +1239,9 @@ class GraphStorage:
                         raise ValueError(f"unknown entity action {op.action!r}")
                     if op.kind == "node":
                         if op.action == "upsert":
-                            self._external_upsert_node(op)
+                            self._external_upsert_node(op, touched)
                         else:
-                            self._external_delete_node(op.entity_id)
+                            self._external_delete_node(op.entity_id, touched)
                     elif op.kind == "edge":
                         if op.action == "upsert":
                             self._external_upsert_edge(op)
@@ -1253,6 +1260,47 @@ class GraphStorage:
                     f"reloading the graph instead"
                 )
                 self._reload_from_store()
+            else:
+                # Only when the whole batch applied. A reload rebuilds the
+                # index from the store, so what was collected is moot.
+                self._settle_vector_index(touched)
+
+    def _settle_vector_index(self, touched: "Dict[str, Optional[Node]]") -> None:
+        """Bring the vector index in step with one batch, in one pass.
+
+        `touched` maps an entity id to the node the batch left there, or None
+        where it left nothing. Doing this per entity instead would rebuild the
+        index matrix once per operation, and the rebuild is linear in the
+        index - so a batch would cost the square of it.
+
+        Nothing observes the index between the batch's first operation and
+        this call: every read path takes _lock and the whole batch holds it.
+        A system listener does run inside that window, on this thread, and
+        sees the index as the batch found it - but it already sees the graph
+        half applied, since the operations after its own have not run either.
+
+        Callers must hold _lock.
+        """
+        if not touched:
+            return
+
+        # Whatever these ids had described the text they used to have.
+        self.vector_store.remove_nodes_embeddings(list(touched))
+
+        upserted = [node for node in touched.values() if node is not None]
+        if not upserted:
+            return
+
+        self._adopt_supplied_vectors(upserted)
+        missing = [
+            node for node in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if not missing:
+            return
+        try:
+            self.vector_store.update_nodes_embeddings(missing)
+        except Exception as embed_error:
+            print(f"Warning: Could not update embeddings: {embed_error}")
 
     def _settle_before_refresh(self) -> bool:
         """Wait for this instance's own writes; say whether to refresh at all.
@@ -1354,8 +1402,10 @@ class GraphStorage:
         value = getattr(entity, "type", None)
         return value.value if hasattr(value, "value") else str(value)
 
-    def _external_upsert_node(self, op: EntityOperation) -> None:
-        """Callers must hold _lock."""
+    def _external_upsert_node(
+        self, op: EntityOperation, touched: "Dict[str, Optional[Node]]"
+    ) -> None:
+        """Callers must hold _lock, and settle `touched` when the batch ends."""
         # from_dict rewrites its argument in place - timestamps parsed,
         # defaults filled in - and the argument here belongs to the backend,
         # which may still be holding the record it reported. Read it, do not
@@ -1378,11 +1428,12 @@ class GraphStorage:
             return
         before = existing.to_dict() if existing is not None else None
 
-        # The vector described the text this node used to have. Keeping it
-        # would let semantic search go on matching a description that is gone,
-        # so it goes first and is replaced below by whatever the store carried
-        # or by a fresh one.
-        self.vector_store.remove_node_embedding(node.id)
+        # The vector describes the text this node used to have, and keeping
+        # it would let semantic search go on matching a description that is
+        # gone. The index is settled for the whole batch at the end; the
+        # graph file's own inline copy is dropped here, since that costs a
+        # dict pop rather than a matrix rebuild.
+        touched[node.id] = node
         self._inline_fallback.pop(node.id, None)
 
         self.nodes[node.id] = node
@@ -1391,13 +1442,6 @@ class GraphStorage:
         # graph would otherwise still hand out the old one.
         self.graph.add_node(node.id, data=node)
         self._searchable_text_cache[node.id] = self._build_searchable_text(node)
-
-        self._adopt_supplied_vectors([node])
-        if not self.vector_store.has_embedding(node.id):
-            try:
-                self.vector_store.update_node_embedding(node)
-            except Exception as embed_error:
-                print(f"Warning: Could not update embedding: {embed_error}")
 
         self._emit_event(
             event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
@@ -1409,7 +1453,9 @@ class GraphStorage:
             context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
         )
 
-    def _external_delete_node(self, node_id: str) -> None:
+    def _external_delete_node(
+        self, node_id: str, touched: "Dict[str, Optional[Node]]"
+    ) -> None:
         """Callers must hold _lock."""
         node = self.nodes.get(node_id)
         if node is None:
@@ -1430,7 +1476,10 @@ class GraphStorage:
             self.graph.remove_node(node_id)
         del self.nodes[node_id]
         self._searchable_text_cache.pop(node_id, None)
-        self.vector_store.remove_node_embedding(node_id)
+        # Settled with the rest of the batch; see _settle_vector_index. The
+        # inline copy goes now - a dict pop, not a matrix rebuild - or an id
+        # created again later would inherit the departed node's vector.
+        touched[node_id] = None
         self._inline_fallback.pop(node_id, None)
 
         self._emit_event(
