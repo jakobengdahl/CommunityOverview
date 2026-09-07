@@ -282,10 +282,12 @@ class PersistenceBackendContract:
 
         A backend reports from a thread of its own (ChangeNotifyingBackend),
         so a clause that writes through one instance and then reads another
-        has to wait for that thread first. The default does nothing, which
-        suits a backend whose reports are delivered before the write returns;
-        one that dispatches them has to override this, or every clause below
-        is a race.
+        has to wait for that thread first. Assume you must override this:
+        the default does nothing, and it only suits a backend that has
+        somehow finished delivering before the write returns. Handing the
+        report to another thread and joining it inside the write is not that
+        - it is the shape *Which thread reports* rules out, because two
+        instances doing it wait for each other for good.
         """
 
     # -- helpers --------------------------------------------------------------

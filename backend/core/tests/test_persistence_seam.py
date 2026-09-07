@@ -1067,9 +1067,9 @@ class TestExternalRefreshFailureModes:
             storage.shutdown_events()
 
     def test_a_refresh_holds_the_lock_against_local_writes(self):
-        """The listener is called from a thread of the backend's own, which is
-        a thread local mutations run on too, so a refresh interleaved with
-        them must not tear the model."""
+        """The listener is called from a thread of the backend's own - never
+        the thread local mutations are issued on - so a refresh runs
+        alongside them and must not tear the model."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         errors = []
