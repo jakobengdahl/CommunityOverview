@@ -292,6 +292,36 @@ have a thread of their own.
 is healed by re-issuing the whole graph, and answering a reporting bug that
 way would overwrite whatever the other writer had just committed.
 
+### When both instances wrote the same thing
+
+A local mutation is in memory before it is in the store: it is applied on the
+calling thread and written in the background. So when two instances write the
+same node, the store settles on whichever write reached it last — and the
+instance whose write *won* is the one at risk, because it is never told about
+its own write. Applying a report that predates it would leave that instance
+serving a value the store does not hold, and nothing would put it right: there
+is no later change to report.
+
+`GraphStorage` resolves it as **last writer wins, by `updated_at`**. A reported
+node upsert is ignored when the node held in memory carries a later
+`updated_at` than the payload; a warning names the node. Consequences worth
+knowing before you build on it:
+
+- It is a wall clock. The instances share no other ordering, so their clocks
+  have to be roughly in step for this to mean anything.
+- A tie defers to the report. Equal stamps are unresolvable, and taking the
+  store's side is what converges the two instances.
+- A stamp that cannot be compared — missing, or one naive against one aware —
+  is not an answer, so the report is applied.
+- **Edges carry no `updated_at`**, so an edge upsert is applied as reported.
+- **Deletes carry no payload**, so an external delete is applied whatever this
+  instance last did to the entity.
+
+A backend that can order writes itself — a log sequence number, a stream id, a
+commit timestamp the store assigns — has a better answer than a wall clock, and
+should carry it in the payload's `updated_at` rather than leaving it to the
+writing instance's clock.
+
 ### A local write that failed
 
 A failed entity write leaves a mutation in memory and nowhere else, and

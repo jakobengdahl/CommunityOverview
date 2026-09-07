@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import threading
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Sequence
 
@@ -50,7 +51,14 @@ from backend.core.storage_backends import (
 
 
 def node_payload(node_id: str, **overrides: Any) -> Dict[str, Any]:
-    """A node exactly as GraphStorage serialises one for a backend."""
+    """A node exactly as GraphStorage serialises one for a backend.
+
+    `updated_at` is stamped now, because a payload standing in for another
+    instance's write has to look like one: the refresh resolves a write to a
+    node both instances touched by last-writer-wins, and a fixed stamp in the
+    past would make every such payload the loser.
+    """
+    now = datetime.now(timezone.utc).isoformat()
     payload = {
         "id": node_id,
         "type": "Actor",
@@ -63,7 +71,7 @@ def node_payload(node_id: str, **overrides: Any) -> Dict[str, Any]:
         "metadata": {},
         "archived": False,
         "created_at": "2026-09-05T00:00:00+00:00",
-        "updated_at": "2026-09-05T00:00:00+00:00",
+        "updated_at": now,
     }
     payload.update(overrides)
     return payload

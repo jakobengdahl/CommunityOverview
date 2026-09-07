@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import threading
+from datetime import datetime, timezone
 
 import pytest
 
@@ -31,7 +32,12 @@ from backend.core.storage_backends import (
 
 
 def _node_payload(node_id: str, name: str):
-    """A node as GraphStorage serialises one, for a store to hand back."""
+    """A node as GraphStorage serialises one, for a store to hand back.
+
+    Stamped now: a payload standing in for another instance's write has to
+    look like one, and the refresh resolves a node both instances touched by
+    last-writer-wins.
+    """
     return {
         "id": node_id,
         "type": "Actor",
@@ -44,7 +50,7 @@ def _node_payload(node_id: str, name: str):
         "metadata": {},
         "archived": False,
         "created_at": "2026-09-06T00:00:00+00:00",
-        "updated_at": "2026-09-06T00:00:00+00:00",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -853,6 +859,66 @@ class TestExternalRefreshFailureModes:
             # memory, still flagged as owed.
             assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
             assert storage._resync_pending
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_write_does_not_undo_a_newer_local_one(self):
+        """Both instances wrote the same node. The store keeps whichever
+        write reached it last - ours, here - and we are never told about our
+        own, so applying a report that predates it would leave this instance
+        serving a value the store does not hold, with nothing left to report
+        that would correct it."""
+        proceed = threading.Event()
+        backend = _NotifyingBackend()
+        real_upsert = backend.upsert_node
+
+        def slow_upsert(node):
+            proceed.wait()
+            real_upsert(node)
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.upsert_node = slow_upsert
+            storage.update_node("a", {"name": "Local"})
+
+            stale = _node_payload("a", "External")
+            stale["updated_at"] = "2020-01-01T00:00:00+00:00"
+            refresh = threading.Thread(
+                target=storage.apply_external_change,
+                args=(ExternalChange.entities([EntityOperation.upsert_node(stale)]),),
+            )
+            refresh.start()
+            proceed.set()
+            refresh.join(5)
+            assert not refresh.is_alive()
+            storage.flush()
+
+            assert storage.get_node("a").name == "Local"
+            assert backend.nodes["a"]["name"] == "Local"
+            assert [n.id for n in storage.search_nodes("External")] == []
+        finally:
+            proceed.set()
+            storage.shutdown_events()
+
+    def test_an_external_write_newer_than_ours_still_applies(self):
+        """The other side of it: last writer wins, so a report that postdates
+        what we hold is applied, not treated as a conflict to keep out."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            fresh = _node_payload("a", "External")
+            fresh["updated_at"] = "2099-01-01T00:00:00+00:00"
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(fresh)])
+            )
+
+            assert storage.get_node("a").name == "External"
+            assert [n.id for n in storage.search_nodes("External")] == ["a"]
         finally:
             storage.shutdown_events()
 

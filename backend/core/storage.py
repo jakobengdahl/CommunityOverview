@@ -1329,6 +1329,23 @@ class GraphStorage:
             )
 
     @staticmethod
+    def _is_newer(held, reported) -> bool:
+        """Is the version we hold later than the one being reported?
+
+        Wall-clock last-writer-wins: the instances share no other ordering,
+        so their clocks have to be roughly in step for this to mean anything.
+        Anything that cannot be compared - a stamp missing, or one naive and
+        one aware, which a backend handing over datetime objects of its own
+        could produce - is not an answer, and the report is applied. Equal
+        stamps defer to the report too: a tie is unresolvable, and taking the
+        store's side is what converges the two instances.
+        """
+        try:
+            return bool(held > reported)
+        except TypeError:
+            return False
+
+    @staticmethod
     def _entity_type_name(entity) -> str:
         value = getattr(entity, "type", None)
         return value.value if hasattr(value, "value") else str(value)
@@ -1337,6 +1354,20 @@ class GraphStorage:
         """Callers must hold _lock."""
         node = Node.from_dict(op.payload)
         existing = self.nodes.get(node.id)
+        if existing is not None and self._is_newer(
+            existing.updated_at, node.updated_at
+        ):
+            # Both instances wrote this node. The store settles on whichever
+            # write reached it last, but this instance is never told about its
+            # own, so applying a report that predates ours would leave us
+            # serving a value the store does not hold - and nothing would put
+            # it right, because there is nothing left to report. Last writer
+            # wins, by the only ordering two instances share.
+            print(
+                f"Warning: ignoring an external change to node {node.id}: this "
+                f"instance holds a newer version of it"
+            )
+            return
         before = existing.to_dict() if existing is not None else None
 
         # The vector described the text this node used to have. Keeping it
