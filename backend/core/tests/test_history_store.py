@@ -575,14 +575,30 @@ def test_no_history_record_carries_an_embedding(storage, payload_key, expected_p
     assert inspected == expected_present
 
 
-def _update_event(before, after, patch):
+def _update_event(before, after, patch, kind=EntityKind.NODE):
+    """Build an update Event of the given kind (default NODE, as before).
+
+    Parametrised so a rule that is supposed to hold for both kinds - e.g. "an
+    empty patch keeps both snapshots whole", which is what makes an edge
+    update (which never carries a patch) still get a full before/after pair -
+    can be asserted through an actual EDGE-kind event, not only through the
+    NODE default every other caller here still gets.
+    """
+    if kind == EntityKind.EDGE:
+        event_type, entity_id, entity_type = (
+            EventType.EDGE_UPDATE,
+            "edge-1",
+            "RELATES_TO",
+        )
+    else:
+        event_type, entity_id, entity_type = EventType.NODE_UPDATE, "actor-1", "Actor"
     return Event(
-        event_type=EventType.NODE_UPDATE,
+        event_type=event_type,
         origin=EventContext(),
         entity=EntityData(
-            kind=EntityKind.NODE,
-            id="actor-1",
-            type="Actor",
+            kind=kind,
+            id=entity_id,
+            type=entity_type,
             before=before,
             after=after,
             patch=patch,
@@ -893,16 +909,23 @@ def test_subscribers_get_the_whole_event_on_a_real_update(storage, node_type):
     assert "embedding" not in record["after"]
 
 
-def test_an_empty_patch_is_no_patch_and_keeps_both_snapshots_whole():
+@pytest.mark.parametrize("kind", [EntityKind.NODE, EntityKind.EDGE])
+def test_an_empty_patch_is_no_patch_and_keeps_both_snapshots_whole(kind):
     """`{}` means nothing changed, not "everything was dropped".
 
-    Storage cannot currently produce it — a node update always bumps
-    `updated_at` — so this is asserted against the record builder, where the
-    distinction is made.
+    Storage cannot currently produce an empty patch for either kind - a node
+    update always bumps `updated_at`, and a real edge update carries no patch
+    at all (see test_edge_update_keeps_full_snapshots_so_its_diff_still_works)
+    - so this is asserted against the record builder, where the distinction is
+    made. Parametrised over both kinds: `_update_event` used to hard-code
+    kind=NODE, so this rule - which is exactly what keeps a real edge update's
+    snapshots whole - was only ever exercised through a NODE-kind event.
     """
-    whole = {"name": "A", "weight": 1, "summary": BULK}
+    whole = {"name": "A", "label": "A", "weight": 1, "summary": BULK}
 
-    record = event_to_history_record(_update_event(before=whole, after=whole, patch={}))
+    record = event_to_history_record(
+        _update_event(before=whole, after=whole, patch={}, kind=kind)
+    )
 
     assert record["before"] == whole
     assert record["after"] == whole
@@ -930,7 +953,13 @@ def test_a_record_exactly_on_the_age_cutoff_is_kept(monkeypatch):
     class _Frozen(datetime):
         @classmethod
         def now(cls, tz=None):
-            return frozen if tz is None else frozen.astimezone(tz)
+            # Honour tz like the real datetime.now(): naive when tz is None,
+            # aware in that zone otherwise. The store always calls with an
+            # explicit timezone.utc, so this branch does not change today's
+            # result - but a mock that faked an aware value for tz=None too
+            # would silently keep passing even if the call site ever dropped
+            # that argument, when the real naive/aware mismatch would raise.
+            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
 
     monkeypatch.setattr(hs, "datetime", _Frozen)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1029,34 +1058,73 @@ def _recording_locks(monkeypatch):
 def test_an_append_takes_an_exclusive_file_lock(monkeypatch):
     """The in-process lock serialises everything one process does, so a suite
     of one process cannot see the OS lock go missing. Two instances appending
-    to the same sidecar would then interleave a record."""
+    to the same sidecar would then interleave a record.
+
+    Recording the lock CALL is not enough: a store that took the exclusive
+    lock and released it before writing would also produce this call and
+    still pass. The fstat check below closes that gap by looking at what is
+    actually on disk at the moment `_unlock_file` runs - if the write really
+    happened under the lock, the new line is already there to see.
+    """
     taken = _recording_locks(monkeypatch)
+    import backend.core.history_store as hs
+
+    sizes_at_unlock = []
+    real_unlock = hs._unlock_file
+
+    def unlock(f):
+        sizes_at_unlock.append(os.fstat(f.fileno()).st_size)
+        return real_unlock(f)
+
+    monkeypatch.setattr(hs, "_unlock_file", unlock)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         store = GraphHistoryStore(os.path.join(tmpdir, "graph.history.ndjson"))
 
-        store.append_record(_record("n1", "2026-01-01T00:00:00Z"))
+        record = _record("n1", "2026-01-01T00:00:00Z")
+        store.append_record(record)
 
     assert ("graph.history.ndjson", True) in taken
+
+    expected_line = json.dumps(record, ensure_ascii=False) + "\n"
+    assert sizes_at_unlock == [
+        len(expected_line.encode("utf-8"))
+    ], "the write was not on disk yet when the lock was released"
 
 
 def test_reads_take_shared_locks_and_the_rewrite_an_exclusive_one(monkeypatch):
     """Readers must not exclude each other, and the compaction's temp file
-    must be held exclusively while it is written."""
+    must be held exclusively while it is written.
+
+    The fixture used to fill only 5 tiny records - well under one
+    `_REVERSE_CHUNK_BYTES` chunk, so the backward reader never had to cross a
+    chunk boundary to answer either query. A regression in that multi-block
+    path would not have changed the lock sequence either way, so this test
+    would have passed regardless. The fill below is asserted to exceed two
+    chunks, and the content of both reads is checked, so a boundary bug fails
+    here on wrong results rather than slipping through unseen.
+    """
+    import backend.core.history_store as hs
+
     taken = _recording_locks(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "graph.history.ndjson")
         # A long interval so the appends do not compact by themselves and the
         # explicit compact() below is the rewrite being observed.
-        store = GraphHistoryStore(
-            os.path.join(tmpdir, "graph.history.ndjson"),
-            max_events=2,
-            compaction_interval=1000,
-        )
-        _fill(store, 5)
+        n = 1000
+        store = GraphHistoryStore(path, max_events=2, compaction_interval=n + 1)
+        _fill(store, n)
+        assert (
+            os.path.getsize(path) > 2 * hs._REVERSE_CHUNK_BYTES
+        ), "fill too small to exercise the multi-block backward reader"
         taken.clear()
 
-        store.get_recent(limit=2)
-        store.get_entity_history("n-1", limit=1)
+        recent = store.get_recent(limit=2)
+        oldest = store.get_entity_history("n-1", limit=1)
         store.compact()
+
+    assert [r["entity_id"] for r in recent] == [f"n-{n - 1}", f"n-{n - 2}"]
+    assert [r["entity_id"] for r in oldest] == ["n-1"]
 
     reads = [ex for name, ex in taken if name == "graph.history.ndjson"]
     assert reads and not any(reads), "a read path took an exclusive lock"
