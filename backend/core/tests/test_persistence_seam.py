@@ -596,15 +596,26 @@ class TestChangeNotificationWiring:
             storage.shutdown_events()
 
 
-def _stub_generator(storage, vector=(7.0, 7.0)):
+def _generated(name: str):
+    """The vector `_stub_generator` produces for a node of this name."""
+    return [float(len(name)), 1.0]
+
+
+def _stub_generator(storage):
     """Stand in for the embedding model, which CI does not install.
 
     Without it every test of the settle's generation branch is vacuous: the
     real call raises ImportError and the branch does nothing.
+
+    The vector is derived from the node's name rather than being a constant,
+    so an assertion can tell which node was embedded. A constant cannot: it
+    reads the same whether the batch handed generation the node it left or
+    the one it replaced, and embedding the replaced node's text is exactly
+    the stale vector the refresh exists to prevent.
     """
 
     def generate(nodes):
-        storage.vector_store._absorb({node.id: list(vector) for node in nodes})
+        storage.vector_store._absorb({node.id: _generated(node.name) for node in nodes})
 
     storage.vector_store.update_nodes_embeddings = generate
 
@@ -643,7 +654,7 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
             ), "the store's own vector was overwritten by a generated one"
             # And the one the store said nothing about did get generated.
             assert storage.vector_store.get_vector_list("c") == pytest.approx(
-                [7.0, 7.0]
+                _generated("Cedar")
             )
         finally:
             storage.shutdown_events()
@@ -679,10 +690,10 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
 
             # The odd width is refused and both nodes fall back to generation.
             assert storage.vector_store.get_vector_list("a") == pytest.approx(
-                [7.0, 7.0]
+                _generated("Renamed")
             )
             assert storage.vector_store.get_vector_list("b") == pytest.approx(
-                [7.0, 7.0]
+                _generated("Rebeacon")
             )
         finally:
             storage.shutdown_events()
@@ -728,10 +739,63 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
                 [1.0, 1.0]
             )
             assert storage.vector_store.get_vector_list("b") == pytest.approx(
-                [7.0, 7.0]
+                _generated("Beacon")
             )
             assert storage.vector_store.get_vector_list("c") == pytest.approx(
-                [7.0, 7.0]
+                _generated("Cedar")
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_generation_embeds_the_node_the_batch_left(self):
+        """A rename with no vector of its own has to be embedded from the
+        text it now has. Handing generation the node the batch replaced
+        instead leaves the index describing text that is gone - and the
+        settle runs after the loop, so both nodes are within reach of it."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("a", "Alphabetical"))]
+                )
+            )
+
+            assert storage.get_node("a").name == "Alphabetical"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                _generated("Alphabetical")
+            )
+            assert storage.vector_store.get_vector_list("a") != pytest.approx(
+                _generated("Alpha")
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_second_upsert_without_a_vector_generates_rather_than_keeping_the_first(
+        self,
+    ):
+        """Last operation wins on the vector half too. The first operation
+        supplied one; the second says nothing, which means generate - not
+        carry the first one forward onto text it never described."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "First"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(
+                            _node_payload("a", "Second and longer")
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a").name == "Second and longer"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                _generated("Second and longer")
             )
         finally:
             storage.shutdown_events()
