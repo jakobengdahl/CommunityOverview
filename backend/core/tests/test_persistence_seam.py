@@ -189,8 +189,9 @@ class _NotifyingBackend(_IncrementalBackend):
     registered, which is how the wiring's ordering is pinned.
     """
 
-    def __init__(self, on_subscribe=None, **kwargs):
+    def __init__(self, on_subscribe=None, incremental=True, **kwargs):
         super().__init__(**kwargs)
+        self._incremental = incremental
         self.listener = None
         self.subscribes = 0
         self.unsubscribes = 0
@@ -201,7 +202,9 @@ class _NotifyingBackend(_IncrementalBackend):
 
     def capabilities(self):
         return BackendCapabilities(
-            incremental_writes=True, transactions=True, change_notification=True
+            incremental_writes=self._incremental,
+            transactions=self._incremental and self._transactions,
+            change_notification=True,
         )
 
     def start_change_notification(self, listener):
@@ -224,6 +227,10 @@ class _NotifyingBackend(_IncrementalBackend):
 
     def apply_batch(self, operations):
         super().apply_batch(operations)
+        self._report_from_write()
+
+    def save_graph_data(self, data):
+        super().save_graph_data(data)
         self._report_from_write()
 
 
@@ -563,13 +570,17 @@ class TestExternalRefreshOnTheWriterThread:
         finally:
             storage.shutdown_events()
 
-    def test_a_backend_reporting_from_inside_its_write_does_not_wedge(self):
+    @pytest.mark.parametrize("write", ["entity", "snapshot"])
+    def test_a_backend_reporting_from_inside_its_write_does_not_wedge(self, write):
         """The realistic shape of the same mistake: the report comes from
         inside the write that made it. What must not happen is the queue
         stopping forever - nor the refusal being read as the write having
         failed, which would answer a backend's reporting bug by re-issuing
-        the whole graph over a store that has another writer in it."""
-        backend = _NotifyingBackend()
+        the whole graph over a store that has another writer in it.
+
+        Both write paths, because there are two and they contain the refusal
+        separately: an entity write and a whole-graph one."""
+        backend = _NotifyingBackend(incremental=(write == "entity"))
         storage = GraphStorage(persistence_backend=backend)
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
@@ -589,10 +600,10 @@ class TestExternalRefreshOnTheWriterThread:
             # it - so nothing is owed to the store. Reading the refusal as a
             # failed write would answer a backend's reporting bug by
             # re-issuing the whole graph over a store that has another writer
-            # in it, which is why no snapshot may have been sent.
+            # in it, so no re-issue may have been queued.
             assert backend.nodes["a"]["name"] == "Renamed"
-            assert backend.snapshots == 0
             assert not storage._resync_pending
+            assert backend.snapshots == (0 if write == "entity" else 1)
         finally:
             backend.report_from_writes = None
             storage.shutdown_events()
@@ -1056,8 +1067,9 @@ class TestExternalRefreshFailureModes:
             storage.shutdown_events()
 
     def test_a_refresh_holds_the_lock_against_local_writes(self):
-        """The listener may be called from any thread the backend likes, so a
-        refresh interleaved with local mutations must not tear the model."""
+        """The listener is called from a thread of the backend's own, which is
+        a thread local mutations run on too, so a refresh interleaved with
+        them must not tear the model."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         errors = []

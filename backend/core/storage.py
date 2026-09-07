@@ -1025,6 +1025,14 @@ class GraphStorage:
             print(
                 f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
             )
+        except ExternalChangeRefused:
+            # Same reason as in _do_apply, and it has to be said in both write
+            # paths or the one without it undoes the other: this is a backend
+            # reporting on a thread it may not report on, told so out of a
+            # listener it called itself. Flagging a resync would answer that
+            # by re-issuing the whole graph over a store another writer is
+            # committing to.
+            raise
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
             # The backend's image may now lack what memory has, exactly as
