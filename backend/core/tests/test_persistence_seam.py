@@ -857,6 +857,49 @@ class TestExternalRefreshFailureModes:
             storage.shutdown_events()
 
     @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_refresh_does_not_drop_a_write_that_fails_during_the_drain(self, change):
+        """The failure lands between the two halves of the guard: the write
+        is still queued when the report arrives, so nothing is flagged yet,
+        and it fails while the refresh is already waiting for it. A guard
+        read before the drain passes on a value that stopped being true
+        before the refresh used it, and the accepted mutation is lost - from
+        memory, and from the store, which never got it."""
+        proceed = threading.Event()
+        backend = _NotifyingBackend()
+
+        def slow_refusal(node):
+            proceed.wait()
+            raise OSError("the write failed")
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.upsert_node = slow_refusal
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cedar")], [])
+            # What the other writer committed while our write was queued.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            refresh = threading.Thread(
+                target=storage.apply_external_change, args=(change(),)
+            )
+            refresh.start()
+            refresh.join(0.5)
+            assert refresh.is_alive(), "the refresh went ahead without draining"
+
+            proceed.set()
+            refresh.join(5)
+            assert not refresh.is_alive()
+
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert set(backend.nodes) == {"a", "z"}
+        finally:
+            proceed.set()
+            del backend.upsert_node
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
     def test_a_reload_does_not_drop_a_write_still_in_flight(self, change):
         """A mutation is in memory before it is in the store. Reloading over
         one still queued would take it out of memory while it goes on to
@@ -1068,8 +1111,8 @@ class TestExternalRefreshFailureModes:
 
     def test_a_refresh_holds_the_lock_against_local_writes(self):
         """The listener is called from a thread of the backend's own - never
-        the thread local mutations are issued on - so a refresh runs
-        alongside them and must not tear the model."""
+        the thread the write queue runs on - so a refresh runs alongside
+        local mutations and must not tear the model."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         errors = []

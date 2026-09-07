@@ -1218,6 +1218,8 @@ class GraphStorage:
             )
 
         with self._lock:
+            if not self._settle_before_refresh():
+                return
             if change.operations is None:
                 self._reload_from_store()
                 return
@@ -1252,18 +1254,54 @@ class GraphStorage:
                 )
                 self._reload_from_store()
 
-    def _reload_from_store(self) -> None:
-        """Re-read the whole graph. Callers must hold _lock.
+    def _settle_before_refresh(self) -> bool:
+        """Wait for this instance's own writes; say whether to refresh at all.
 
-        The write queue is drained first. A local mutation is applied in
-        memory and written in the background, so reloading over one still in
-        flight would take it out of memory while it goes on to land in the
-        store - leaving this instance permanently unable to see an entity it
-        wrote. Holding _lock is what makes the drain enough: every mutation
-        path submits under it, so nothing new can be queued while we wait,
-        and queued work never takes _lock. Waiting is safe only because a
+        A mutation is in memory before it is in the store, so a refresh that
+        overtook one still queued would leave memory holding the store's
+        value while our write goes on to land in it. Nothing would ever put
+        that right: an instance is not told about its own writes, so the
+        disagreement would outlive every later report. Both halves of a
+        refresh wait, the reload and the named operations alike.
+
+        Holding _lock is what makes the drain enough: every mutation path
+        submits under it, so nothing new can be queued while we wait, and
+        queued work never takes _lock. Waiting is safe only because the
         report arrives on a thread that is not running a write - see
         ChangeNotifyingBackend, which is where that obligation is stated.
+
+        The flag is read after the drain, not before. A write already queued
+        raises it while we are waiting, so a check made first would pass on a
+        value that stopped being true before the refresh used it.
+
+        Callers must hold _lock.
+        """
+        try:
+            self._io_executor.submit(lambda: None).result()
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
+
+        if not self._resync_pending:
+            return True
+
+        # An entity write failed, so a mutation is in memory and nowhere
+        # else. Refreshing over it drops it. Writing it first is worse: the
+        # only write that carries it is the whole graph, and re-issuing this
+        # instance's whole image over a store that by definition has another
+        # writer destroys what that writer just committed - including the
+        # change being reported. So neither: stay put and say so. The next
+        # write, flush or shutdown heals the flag, and the next report brings
+        # this instance forward.
+        print(
+            "Warning: not refreshing the graph: a local write failed and "
+            "is still only in memory. This instance stays behind the "
+            "store until that write has been re-issued."
+        )
+        return False
+
+    def _reload_from_store(self) -> None:
+        """Re-read the whole graph. Callers must hold _lock, and must have
+        settled this instance's own writes first (_settle_before_refresh).
 
         Nothing here writes. A refresh that wrote would re-assert this
         instance's image over a store whose whole point is that someone else
@@ -1275,26 +1313,6 @@ class GraphStorage:
         cannot be read at all is reported and left; nothing is raised, because
         the only thread to raise into is the backend's.
         """
-        if self._resync_pending:
-            # An entity write failed, so a mutation is in memory and nowhere
-            # else. Reloading would drop it. Writing it first is worse: the
-            # only write that carries it is the whole graph, and re-issuing
-            # this instance's whole image over a store that by definition has
-            # another writer destroys what that writer just committed -
-            # including the change being reported. So neither: stay put and
-            # say so. The next write, flush or shutdown heals the flag, and
-            # the next report brings this instance forward.
-            print(
-                "Warning: not refreshing the graph: a local write failed and "
-                "is still only in memory. This instance stays behind the "
-                "store until that write has been re-issued."
-            )
-            return
-
-        try:
-            self._io_executor.submit(lambda: None).result()
-        except RuntimeError:
-            pass  # already shut down: nothing can be queued, nothing is pending
         try:
             self.load(bootstrap_if_missing=False)
         except Exception as exc:
