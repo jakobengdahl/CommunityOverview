@@ -13,6 +13,13 @@
 # Testing
 pytest>=7.0.0
 
+# The repo-wide `timeout = 300` in the root pyproject.toml applies here too
+# (pytest walks up to find it), but only takes effect with this plugin
+# installed - without it, pytest just warns "Unknown config option: timeout"
+# and a hang runs until the CI runner itself kills the job, with no red test
+# to name.
+pytest-timeout>=2.1.0
+
 # starlette's TestClient imports the literal `httpx` package for its in-process
 # ASGI transport. The gateway's runtime HTTP client is httpx2, so plain httpx is
 # a test-only dependency and is intentionally kept out of requirements.in.
