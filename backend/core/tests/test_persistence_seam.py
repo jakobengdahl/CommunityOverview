@@ -54,8 +54,8 @@ def _node_payload(node_id: str, name: str):
     }
 
 
-def _edge_payload(edge_id: str, source: str, target: str):
-    return {
+def _edge_payload(edge_id: str, source: str, target: str, **overrides):
+    payload = {
         "id": edge_id,
         "source": source,
         "target": target,
@@ -65,6 +65,8 @@ def _edge_payload(edge_id: str, source: str, target: str):
         "archived": False,
         "created_at": "2026-09-06T00:00:00+00:00",
     }
+    payload.update(overrides)
+    return payload
 
 
 class _SnapshotBackend:
@@ -450,12 +452,34 @@ class TestChangeNotificationWiring:
             assert {e.origin.event_origin for e in seen} == {EXTERNAL_CHANGE_ORIGIN}
             assert seen[1].entity.type == "RELATES_TO"
 
+            # An edge upsert over one already there is an update carrying a
+            # real before-state, the same as the node step above. Reported as
+            # a create, or with before taken from the new edge, a subscriber
+            # filtered on the update never fires and history records no diff.
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_edge(
+                            _edge_payload("bc", "b", "c", type="DEPENDS_ON")
+                        )
+                    ]
+                )
+            )
+            assert [e.event_type for e in seen] == [EventType.EDGE_UPDATE]
+            assert seen[0].entity.before["type"] == "RELATES_TO"
+            assert seen[0].entity.after["type"] == "DEPENDS_ON"
+            assert seen[0].entity.type == "DEPENDS_ON"
+
             seen.clear()
             backend.listener(
                 ExternalChange.entities([EntityOperation.delete_edge("bc")])
             )
             assert [e.event_type for e in seen] == [EventType.EDGE_DELETE]
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.type == "DEPENDS_ON"
+            assert seen[0].entity.before["id"] == "bc"
+            assert seen[0].entity.after is None
 
             seen.clear()
             backend.listener(
@@ -464,6 +488,57 @@ class TestChangeNotificationWiring:
             assert [e.event_type for e in seen] == [EventType.NODE_DELETE]
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
             assert seen[0].entity.before["name"] == "Renamed"
+            assert seen[0].entity.type == "Actor"
+            assert seen[0].entity.after is None
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_emits_each_event_after_its_own_change_landed(self):
+        """A subscriber reads the model when it is told. An event emitted
+        before the mutation it announces hands out a graph that does not have
+        it yet - and on a delete, one that still does."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        observed = []
+
+        def observe(event):
+            observed.append(
+                (
+                    event.event_type,
+                    {n.id for n in storage.get_all_nodes()},
+                    {e.id for e in storage.get_all_edges()},
+                    storage.graph.number_of_edges(),
+                )
+            )
+
+        storage.add_system_listener(observe)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("b", "Beacon")),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_edge(_edge_payload("bc", "b", "c")),
+                    ]
+                )
+            )
+            assert observed[-1][0] == EventType.EDGE_CREATE
+            assert observed[-1][2] == {"bc"}
+            assert observed[-1][3] == 1
+
+            observed.clear()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("b")])
+            )
+            # The cascade goes first, and the edge is gone from both places
+            # by the time either event is delivered.
+            assert [step[0] for step in observed] == [
+                EventType.EDGE_DELETE,
+                EventType.NODE_DELETE,
+            ]
+            assert [step[2] for step in observed] == [set(), set()]
+            assert [step[3] for step in observed] == [0, 0]
+            assert observed[-1][1] == {"c"}
         finally:
             storage.shutdown_events()
 
@@ -632,14 +707,20 @@ class TestExternalEdgeRefresh:
         storage.flush()
         return storage, backend
 
-    def test_an_edge_with_an_absent_endpoint_is_added_nowhere(self):
+    @pytest.mark.parametrize(
+        "source, target", [("a", "ghost"), ("ghost", "a")], ids=["target", "source"]
+    )
+    def test_an_edge_with_an_absent_endpoint_is_added_nowhere(self, source, target):
         """NetworkX would invent the missing endpoint as a node with no data,
-        and every read path walking the graph would trip over it."""
+        and every read path walking the graph would trip over it.
+
+        Either end: a guard that checked only one of them would invent the
+        node whenever the edge pointed the other way."""
         storage, backend = self._storage()
         try:
             backend.listener(
                 ExternalChange.entities(
-                    [EntityOperation.upsert_edge(_edge_payload("ax", "a", "ghost"))]
+                    [EntityOperation.upsert_edge(_edge_payload("ax", source, target))]
                 )
             )
             assert storage.get_all_edges() == []
@@ -675,7 +756,12 @@ class TestExternalEdgeRefresh:
         finally:
             storage.shutdown_events()
 
-    def test_an_edge_repointed_at_an_absent_endpoint_keeps_serving_the_old_one(self):
+    @pytest.mark.parametrize(
+        "ends", [("a", "ghost"), ("ghost", "b")], ids=["target", "source"]
+    )
+    def test_an_edge_repointed_at_an_absent_endpoint_keeps_serving_the_old_one(
+        self, ends
+    ):
         """Refusing the new edge is right - inventing the endpoint would be
         worse - but the edge already there must be left whole rather than
         half removed, or reads would serve an edge the graph no longer has."""
@@ -688,7 +774,7 @@ class TestExternalEdgeRefresh:
             )
             backend.listener(
                 ExternalChange.entities(
-                    [EntityOperation.upsert_edge(_edge_payload("ab", "a", "ghost"))]
+                    [EntityOperation.upsert_edge(_edge_payload("ab", ends[0], ends[1]))]
                 )
             )
 
@@ -696,6 +782,23 @@ class TestExternalEdgeRefresh:
             assert [e.id for e in storage.get_edges_for_node("b")] == ["ab"]
             assert not storage.graph.has_node("ghost")
             assert len(storage.graph.edges) == 1
+        finally:
+            storage.shutdown_events()
+
+    def test_an_edge_from_a_node_to_itself_arrives_whole(self):
+        """A self-loop has one endpoint, not two, and both the guard and the
+        removal of a moved edge read source and target as if they differed."""
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("aa", "a", "a"))]
+                )
+            )
+
+            assert [e.id for e in storage.get_all_edges()] == ["aa"]
+            assert [e.id for e in storage.get_edges_for_node("a")] == ["aa"]
+            assert storage.graph.number_of_edges() == 1
         finally:
             storage.shutdown_events()
 
