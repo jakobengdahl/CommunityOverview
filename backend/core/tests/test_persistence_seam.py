@@ -1083,9 +1083,11 @@ class TestExternalRefreshFailureModes:
         instances."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
+        seen = []
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
             storage.flush()
+            storage.add_system_listener(seen.append)
 
             payload = _node_payload("a", "External")
             if shape == "tie":
@@ -1099,6 +1101,9 @@ class TestExternalRefreshFailureModes:
             )
 
             assert storage.get_node("a").name == "External"
+            # Applied, so announced: a branch that returned the other way
+            # would be silent here as well as wrong.
+            assert [e.event_type for e in seen] == [EventType.NODE_UPDATE]
         finally:
             storage.shutdown_events()
 
@@ -1120,6 +1125,77 @@ class TestExternalRefreshFailureModes:
             assert storage.get_node("a").name == "External"
             assert [n.id for n in storage.search_nodes("External")] == ["a"]
         finally:
+            storage.shutdown_events()
+
+    def test_a_named_operation_settles_the_same_as_a_reload(self):
+        """Both halves of a refresh go through the same settle, not just the
+        reload half. A report naming entities, applied while a local write of
+        ours had failed, takes the entity it names out of memory - where our
+        mutation is the only copy, the write having failed."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            def refuse(node):
+                raise OSError("the write failed")
+
+            backend.upsert_node = refuse
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cedar")], [])
+            storage._io_executor.submit(lambda: None).result()
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            del backend.upsert_node
+
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("c")])
+            )
+
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert set(backend.nodes) == {"a"}
+        finally:
+            storage.shutdown_events()
+
+    def test_the_settle_runs_under_the_lock(self):
+        """Waiting for the queue is only enough while nothing new can be
+        queued behind it. Settle outside the lock and a write accepted
+        between the drain and the refresh is reloaded away in memory and
+        then lands in the store - and nothing reports our own write back to
+        us, so that disagreement is for good."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        settled_without_the_lock = []
+        original = storage._settle_before_refresh
+
+        def watched():
+            def probe():
+                got = storage._lock.acquire(blocking=False)
+                settled_without_the_lock.append(got)
+                if got:
+                    storage._lock.release()
+
+            # From another thread: _lock is reentrant, so this one holds it
+            # already if the caller does.
+            elsewhere = threading.Thread(target=probe)
+            elsewhere.start()
+            elsewhere.join(5)
+            return original()
+
+        storage._settle_before_refresh = watched
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            backend.listener(ExternalChange.unknown())
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+            assert settled_without_the_lock == [False, False]
+        finally:
+            storage._settle_before_refresh = original
             storage.shutdown_events()
 
     @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
