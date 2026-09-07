@@ -5,3 +5,7 @@
 ## 2024-09-02 - Custom Dialog Accessibility
 **Learning:** Standard ARIA attributes (`role="dialog"`, `aria-modal="true"`, and `aria-labelledby` linked to an `id` on the title element) are required for custom dialog components in React to ensure they are properly identified and read by screen readers. Some legacy components like `ConfirmDialog`, `InputDialog`, and `SettingsDialog` were missing these properties.
 **Action:** When creating or updating custom dialog components in the frontend, strictly include these standard ARIA attributes.
+
+## 2024-09-02 - Accessible Chip Components
+**Learning:** Custom interactive UI elements like chips, tags, or multi-select items with symbol-only action buttons (e.g., "×" for removal) must provide both an `aria-label` and a `title` to ensure accurate accessibility for screen readers and helpful tooltips for visual users.
+**Action:** Explicitly provide both an `aria-label` and a `title` (e.g., `aria-label={"Remove ${item}"}`) when creating or updating chip components with symbol-only removal buttons.
