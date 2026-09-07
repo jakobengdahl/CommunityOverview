@@ -1307,9 +1307,10 @@ class GraphStorage:
         No writer interleaves: every mutation path takes _lock and the whole
         batch holds it. Readers are another matter, and this is the cost of
         settling once - get_node, semantic_search_nodes and find_similar_nodes
-        take no lock at all, before this change as after, so a concurrent
-        reader can see a node the batch updated while its vector is still the
-        one the batch found, until the settle lands. Settling per entity
+        take no lock at all - nor does any other path that reads the node
+        dictionary and the index together - before this change as after, so a
+        concurrent reader can see a node the batch updated while its vector is
+        still the one the batch found, until the settle lands. Settling per entity
         narrowed that window to one entity rather than closing it. A system
         listener runs inside the window too, on this thread, and sees its own
         entity half applied that way: node updated, vector not.
@@ -1337,10 +1338,17 @@ class GraphStorage:
         if not upserted:
             return
 
-        self._adopt_vectors(
-            {node.id: vector for node, vector in upserted if vector is not None},
-            anchor,
-        )
+        supplied = {node.id: vector for node, vector in upserted if vector is not None}
+        if anchor is None and supplied:
+            # An empty index anchors nothing, and a majority vote is the wrong
+            # tie-breaker here: it would adopt the commonest width and refuse
+            # the rest, and the refused ones are then generated at the model's
+            # width - which reads as a model change and discards what was just
+            # adopted, with nothing left to regenerate it. Judging every
+            # supplied vector against the first is what the per-operation path
+            # did, one node at a time.
+            anchor = len(next(iter(supplied.values())))
+        self._adopt_vectors(supplied, anchor)
         missing = [
             node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
         ]

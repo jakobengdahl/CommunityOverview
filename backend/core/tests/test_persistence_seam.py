@@ -687,6 +687,55 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
         finally:
             storage.shutdown_events()
 
+    def test_a_mixed_width_batch_into_an_empty_index_keeps_every_node(self):
+        """The same hazard with nothing to anchor on. A majority vote would
+        adopt the commonest width and refuse the rest; the refused ones are
+        then generated at the model's width, which reads as a model change
+        and discards what was just adopted - and nothing regenerates it,
+        because what was missing was decided before the discard."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        _stub_generator(storage)
+        try:
+            assert storage.vector_store.dimension is None, "the index must start empty"
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        # Two wide first, then two that are three wide: a
+                        # majority vote picks three and loses the first.
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Alpha"), embedding=[1.0, 1.0])
+                        ),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("b", "Beacon"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("c", "Cedar"),
+                                embedding=[4.0, 5.0, 6.0],
+                            )
+                        ),
+                    ]
+                )
+            )
+
+            # First wins, so the odd pair is refused and generated instead.
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [1.0, 1.0]
+            )
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [7.0, 7.0]
+            )
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [7.0, 7.0]
+            )
+        finally:
+            storage.shutdown_events()
+
     def test_generation_is_batched_too(self):
         """The rebuild bound has to hold for the generated half as well, and
         a batch whose nodes all carry vectors never reaches it."""
