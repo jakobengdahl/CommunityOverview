@@ -698,12 +698,57 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
         finally:
             storage.shutdown_events()
 
-    def test_a_mixed_width_batch_into_an_empty_index_keeps_every_node(self):
-        """The same hazard with nothing to anchor on. A majority vote would
-        adopt the commonest width and refuse the rest; the refused ones are
-        then generated at the model's width, which reads as a model change
-        and discards what was just adopted - and nothing regenerates it,
-        because what was missing was decided before the discard."""
+    @pytest.mark.parametrize(
+        "reported, expected",
+        [
+            # Three reports, so the commonest width is not the first one.
+            # With only two, a majority vote always ties and the tie resolves
+            # to first-seen - which is the answer first-wins gives anyway, so
+            # a two-report arrangement cannot tell the two rules apart at all.
+            (
+                [
+                    ("a", "Alpha", [1.0, 1.0]),
+                    ("b", "Beacon", [1.0, 2.0, 3.0]),
+                    ("c", "Cedar", [4.0, 5.0, 6.0]),
+                ],
+                {
+                    "a": [1.0, 1.0],
+                    "b": _generated("Beacon"),
+                    "c": _generated("Cedar"),
+                },
+            ),
+            # First is the widest. Its vector is adopted and the narrow one
+            # refused - and then generation comes back at the model's width,
+            # which reads as a model change and discards the adopted one. That
+            # is a real loss, and it is exactly what the per-operation path did
+            # too: first wins is not lossless, it is only better than letting
+            # the commonest width win.
+            (
+                [("a", "Wide", [1.0, 2.0, 3.0]), ("b", "Narrow", [7.0, 7.0])],
+                {"a": None, "b": _generated("Narrow")},
+            ),
+            # Operation order and id order disagree, and both widths decide
+            # nothing on their own.
+            (
+                [("z", "Zed", [7.0, 7.0]), ("a", "Ay", [1.0, 2.0, 3.0])],
+                {"z": [7.0, 7.0], "a": _generated("Ay")},
+            ),
+        ],
+        ids=[
+            "first-is-not-commonest",
+            "first-is-widest",
+            "first-is-not-lowest-id",
+        ],
+    )
+    def test_an_empty_index_takes_its_width_from_the_first_report(
+        self, reported, expected
+    ):
+        """Nothing local anchors the width, so the batch establishes it. A
+        majority vote would adopt the commonest width and refuse the rest;
+        the refused ones are then generated at the model's width, which reads
+        as a model change and discards what was just adopted, with nothing
+        left to regenerate it. First wins is what the per-operation path did,
+        one node at a time."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         _stub_generator(storage)
@@ -713,37 +758,21 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
             backend.listener(
                 ExternalChange.entities(
                     [
-                        # Two wide first, then two that are three wide: a
-                        # majority vote picks three and loses the first.
                         EntityOperation.upsert_node(
-                            dict(_node_payload("a", "Alpha"), embedding=[1.0, 1.0])
-                        ),
-                        EntityOperation.upsert_node(
-                            dict(
-                                _node_payload("b", "Beacon"),
-                                embedding=[1.0, 2.0, 3.0],
-                            )
-                        ),
-                        EntityOperation.upsert_node(
-                            dict(
-                                _node_payload("c", "Cedar"),
-                                embedding=[4.0, 5.0, 6.0],
-                            )
-                        ),
+                            dict(_node_payload(node_id, name), embedding=embedding)
+                        )
+                        for node_id, name, embedding in reported
                     ]
                 )
             )
 
-            # First wins, so the odd pair is refused and generated instead.
-            assert storage.vector_store.get_vector_list("a") == pytest.approx(
-                [1.0, 1.0]
-            )
-            assert storage.vector_store.get_vector_list("b") == pytest.approx(
-                _generated("Beacon")
-            )
-            assert storage.vector_store.get_vector_list("c") == pytest.approx(
-                _generated("Cedar")
-            )
+            for node_id, vector in expected.items():
+                got = storage.vector_store.get_vector_list(node_id)
+                if vector is None:
+                    assert got is None, f"{node_id} kept a vector it should not have"
+                else:
+                    assert got == pytest.approx(vector), f"{node_id} is wrong"
+
         finally:
             storage.shutdown_events()
 
