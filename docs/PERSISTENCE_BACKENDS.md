@@ -72,7 +72,7 @@ class BackendCapabilities:
 |---|---|---|
 | `incremental_writes` | the entity operations are implemented | mutations arrive as entity operations, not snapshots |
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
-| `change_notification` | the backend can report changes made by another instance | not yet declarable: the notification seam is a later change, and until it lands the contract suite refuses the declaration |
+| `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes after its first load and refreshes what each reported entity touches; see *Reporting external changes* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -196,6 +196,13 @@ passes against it.
    an interrupted atomic batch lands nothing), and `previous_version_store`
    if there is a store your previous release wrote. Without an override
    those clauses skip, and a skipped clause is an unverified one.
+5. If your store can have more than one writer, implement the notification
+   protocol and declare `change_notification`. The clauses that then run are
+   the ones a shared store exists for: a write made through a second backend
+   on the same store reaches a running `GraphStorage` — its node dictionary,
+   its edges, lexical search, and the vector index behind semantic search —
+   without a restart, an external delete takes the incident edges with it,
+   and the subscription ends when the storage shuts down.
 
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
@@ -208,14 +215,167 @@ IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
 which contract drives you is decided by what you declare. The one type check
 it does make is for the file backend's sidecars (above). The contract does
 check it: a backend declaring `incremental_writes` must satisfy the
-`IncrementalGraphPersistenceBackend` protocol, and no backend may declare
-`change_notification` until the notification seam exists.
+`IncrementalGraphPersistenceBackend` protocol, and one declaring
+`change_notification` the `ChangeNotifyingBackend` protocol.
+
+## Reporting external changes
+
+Every read path serves state built at load: the node and edge dictionaries,
+the NetworkX graph, the searchable-text cache behind lexical search, and the
+vector index behind semantic search. Nothing tells them another writer moved
+the store underneath. That is why one instance is the limit today, and it is
+what `change_notification` is for — it is a property of the store, not of the
+storage engine: a file lock is kernel-local and coordinates nothing between
+machines.
+
+A backend that declares it implements two methods:
+
+```python
+def start_change_notification(self, listener) -> None: ...
+def stop_change_notification(self) -> None: ...
+```
+
+`GraphStorage` subscribes once, after its first load — a change reported
+against a model that does not exist yet has nothing to refresh — and
+unsubscribes in `shutdown_events()`. The listener is called only with
+changes the store has already applied, and from a thread of the backend's own
+— which thread, and why it matters, is *Which thread reports* below. The
+refresh never writes: not the change it was told about, and not the graph it
+holds.
+
+The payload a report carries is **read, not taken**. `GraphStorage` parses a
+copy, so the dict you hand over comes back exactly as you passed it and stays
+yours to cache, log or retry with. (The obligation runs the other way too: a
+backend must copy a payload the application hands it on a write — see
+`test_the_stored_payload_is_a_copy` in the contract.)
+
+What the backend passes is an `ExternalChange`:
+
+- `ExternalChange.entities(operations)` — the same `EntityOperation`s a
+  mutation is delivered as, read the other way round, in the order the store
+  applied them. Each upsert carries the entity's new content, so the refresh
+  needs no read-back. An upsert whose payload carries an `embedding` hands
+  the vector over with it.
+- `ExternalChange.unknown()` — the backend knows only that something
+  changed. `GraphStorage` drains its own write queue and reloads the whole
+  graph. Two things it will not do: bootstrap, so a store that reports it is
+  not there (mid-restore, say) is never overwritten with this instance's
+  graph — the graph in memory is served on, with a warning — and emit
+  per-entity events, since a reload has no before-states. A backend that
+  wants subscribers to see individual changes has to report them as
+  operations.
+
+A payload this build cannot read stops the batch, and `GraphStorage` logs it
+and reloads rather than throwing into the backend's thread — where the
+instance that made the write would read it as its own write having failed.
+The operations before the unreadable one have already been applied, which is
+not a problem in itself: they are real store state, so what is in memory is
+incomplete rather than wrong, and the reload completes it. If the reload
+cannot run either — the store is being replaced as we read it — that is
+logged too and the graph in memory stays behind the store until the next
+change is reported. Nothing is raised at the backend on any of these paths.
+
+### Which thread reports
+
+Report from a thread of your own — whatever a notification channel, a poller
+or a watcher runs on. One kind of thread is forbidden: **never a thread that
+is executing a write**, whether it is the write of the application being
+refreshed or of another application sharing the store. In practice: never
+synchronously from inside a call an application made into the backend.
+
+A refresh may have to wait for the refreshed application's write queue.
+Delivered from inside that application's own write, it would be waiting for
+the call it is inside; `GraphStorage` sees that one — the report arrives on
+the thread it runs its writes on — and raises `ExternalChangeRefused` back at
+you rather than wait. Delivered from inside a *second* application's write it
+is worse and quieter: each instance's refresh waits on its own queue while
+that queue waits for the other's refresh to return, and both stop for good.
+`GraphStorage` cannot see that one. It is yours to get right, and every real
+transport already does: a listener connection, a poller and a watcher each
+have a thread of their own.
+
+`ExternalChangeRefused` is deliberately not an I/O error. A write that fails
+is healed by re-issuing the whole graph, and answering a reporting bug that
+way would overwrite whatever the other writer had just committed.
+
+### When both instances wrote the same thing
+
+A local mutation is in memory before it is in the store: it is applied on the
+calling thread and written in the background. So when two instances write the
+same node, the store settles on whichever write reached it last — and the
+instance whose write *won* is the one at risk, because it is never told about
+its own write. Applying a report that predates it would leave that instance
+serving a value the store does not hold, and nothing would put it right: there
+is no later change to report.
+
+`GraphStorage` resolves it as **last writer wins, by `updated_at`**. A reported
+node upsert is ignored when the node held in memory carries a later
+`updated_at` than the payload; a warning names the node. Consequences worth
+knowing before you build on it:
+
+- It is a wall clock. The instances share no other ordering, so their clocks
+  have to be roughly in step for this to mean anything.
+- A tie defers to the report. Equal stamps are unresolvable, and taking the
+  store's side is what converges the two instances.
+- A stamp that cannot be compared — one naive against one aware, which a
+  backend handing over `datetime` objects of its own can produce — is not an
+  answer, so the report is applied.
+- **A payload with no `updated_at` is not an unstamped payload.** The model
+  fills the field in at parse time, stamped *now*, so such a report is
+  normally the newer one and applies — but against a held stamp dated in the
+  future, which is what a clock-skewed peer produces, it loses. Send the
+  stamp. A payload whose `updated_at` is explicitly `null` does not reach the
+  comparison at all: it fails validation, and an unreadable payload is a
+  whole-graph reload.
+- **Edges carry no `updated_at`**, so an edge upsert is applied as reported.
+- **Deletes carry no payload**, so an external delete is applied whatever this
+  instance last did to the entity.
+
+A backend that can order writes itself — a log sequence number, a stream id, a
+commit timestamp the store assigns — has a better answer than a wall clock, and
+should carry it in the payload's `updated_at` rather than leaving it to the
+writing instance's clock.
+
+### A local write that failed
+
+A failed entity write leaves a mutation in memory and nowhere else, and
+`GraphStorage` heals it by re-issuing the whole graph on the next write,
+`flush()` or shutdown. On a shared store that is a last-resort recovery, not
+a routine: it re-asserts one instance's whole image over a store someone else
+is writing. A refresh arriving while such a write is outstanding therefore
+does neither thing — it does not reload (that would drop the mutation) and it
+does not heal first (that would overwrite the change being reported). It logs
+and leaves both sides intact; the instance stays behind the store until the
+write has been re-issued. A backend declaring `change_notification` should
+keep that path rare: retry a failing entity write internally rather than
+raising, where it can.
+
+Refreshed entities emit the ordinary `node.*` / `edge.*` events, with
+`event_origin` set to `external-change`, so subscriptions, agents and the
+history see them and an agent that reacts by writing can tell them from its
+own instance's work. An external edge whose endpoint this instance does not
+have is reported and skipped rather than inventing the missing node.
+
+The reference backend in `persistence_contract.py` implements the protocol:
+instances built on the same store notify each other, from one thread the
+store owns rather than from inside the write, which is what lets the contract
+prove the refresh path end to end — including two `GraphStorage` instances
+writing one store at the same time. Because it dispatches rather than
+delivers inline, the contract has a `settle_notifications` hook; any backend
+whose reports are not delivered before the write returns has to override it.
 
 ## Current state
 
 `FileGraphPersistenceBackend` is the default, needs no configuration, and
-declares `incremental_writes` and `transactions`. It keeps `graph.json` as the
-graph — written whole and atomically — and lands each mutation as one appended
+declares `incremental_writes` and `transactions` — **not**
+`change_notification`. Not an oversight: two instances writing one graph file
+would fight over the checkpoint that folds the journal back in, and the
+`journal_id` binding a journal to its graph assumes a single writer lineage.
+Declaring notification would advertise a shared store the file backend cannot
+safely be. A shared store is what the seam is there for.
+
+The file backend keeps `graph.json` as the graph — written whole and
+atomically — and lands each mutation as one appended
 line in `graph.journal.ndjson` beside it, folding the journal back into
 `graph.json` every 100 mutations, on `checkpoint()`, and on every whole-graph
 save; loading replays the journal — and refuses one written against a

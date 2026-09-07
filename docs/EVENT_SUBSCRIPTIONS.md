@@ -26,7 +26,11 @@ Agent nodes (type: `Agent`) define AI agents that react to graph events. An Agen
 ### Event Context
 
 Every mutation can include context for tracking and loop prevention:
-- `event_origin`: Source of the mutation (e.g., "web-ui", "mcp", "agent:my-agent")
+- `event_origin`: Source of the mutation (e.g., "web-ui", "mcp", "agent:my-agent").
+  `external-change` marks a mutation another instance made, replayed into this
+  one by a backend that reports external writes — see
+  `docs/PERSISTENCE_BACKENDS.md`. An agent that reacts by writing should treat
+  it as somebody else's work, or the change bounces between instances.
 - `event_session_id`: Unique session identifier
 - `event_correlation_id`: For chaining related events
 
@@ -363,7 +367,10 @@ the nodes already on the canvas.
   lost on restart. (AgentRun *history* is recorded durably — see above — but the
   delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
-- **Single process**: Works within one process only
+- **Single process**: Works within one process only. A backend declaring
+  `change_notification` refreshes a second instance's model and emits these
+  events there too, but no shipped backend declares it yet, and running
+  several instances is separate work.
 - **Simple filtering**: No complex query expressions
 
 ## Future Enhancements

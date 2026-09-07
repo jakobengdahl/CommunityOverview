@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import copy
 import threading
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Sequence
 
 import pytest
@@ -38,7 +40,9 @@ from backend.core.models import Edge, Node, NodeType
 from backend.core.storage import GraphStorage
 from backend.core.storage_backends import (
     BackendCapabilities,
+    ChangeNotifyingBackend,
     EntityOperation,
+    ExternalChange,
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
@@ -47,7 +51,14 @@ from backend.core.storage_backends import (
 
 
 def node_payload(node_id: str, **overrides: Any) -> Dict[str, Any]:
-    """A node exactly as GraphStorage serialises one for a backend."""
+    """A node exactly as GraphStorage serialises one for a backend.
+
+    `updated_at` is stamped now, because a payload standing in for another
+    instance's write has to look like one: the refresh resolves a write to a
+    node both instances touched by last-writer-wins, and a fixed stamp in the
+    past would make every such payload the loser.
+    """
+    now = datetime.now(timezone.utc).isoformat()
     payload = {
         "id": node_id,
         "type": "Actor",
@@ -60,7 +71,7 @@ def node_payload(node_id: str, **overrides: Any) -> Dict[str, Any]:
         "metadata": {},
         "archived": False,
         "created_at": "2026-09-05T00:00:00+00:00",
-        "updated_at": "2026-09-05T00:00:00+00:00",
+        "updated_at": now,
     }
     payload.update(overrides)
     return payload
@@ -116,12 +127,18 @@ class InMemoryGraphPersistenceBackend:
         store.setdefault("nodes", {})
         store.setdefault("edges", {})
         store.setdefault("metadata", {})
+        store.setdefault("listeners", {})
+        store.setdefault("dispatched", [])
         store.setdefault("written", False)
 
     def capabilities(self) -> BackendCapabilities:
         if not self._incremental:
             return BackendCapabilities()
-        return BackendCapabilities(incremental_writes=True, transactions=True)
+        return BackendCapabilities(
+            incremental_writes=True,
+            transactions=True,
+            change_notification=True,
+        )
 
     def exists(self) -> bool:
         return self._store["written"]
@@ -144,6 +161,9 @@ class InMemoryGraphPersistenceBackend:
             self._store.update(
                 nodes=nodes, edges=edges, metadata=metadata, written=True
             )
+        # A whole-graph write replaced everything; naming what changed would
+        # mean diffing it, which is the case ExternalChange.unknown() is for.
+        self._notify_others(ExternalChange.unknown())
 
     def default_graph_name(self) -> str:
         return "in-memory"
@@ -173,9 +193,79 @@ class InMemoryGraphPersistenceBackend:
             self._store["nodes"] = nodes
             self._store["edges"] = edges
             self._store["written"] = True
+        self._notify_others(ExternalChange.entities(operations))
 
     def checkpoint(self) -> None:
         pass  # nothing is deferred
+
+    # -- change notification --------------------------------------------------
+
+    def start_change_notification(self, listener) -> None:
+        with self._lock:
+            self._store["listeners"][id(self)] = listener
+
+    def stop_change_notification(self) -> None:
+        notifier = None
+        with self._lock:
+            self._store["listeners"].pop(id(self), None)
+            if not self._store["listeners"]:
+                notifier = self._store.pop("notifier", None)
+        # Outside the lock, and after the last listener is gone: a delivery
+        # still in flight refreshes an application that reads this backend
+        # straight back, and would take this lock to do it.
+        if notifier is not None:
+            notifier.shutdown(wait=True)
+
+    def settle_notifications(self) -> None:
+        """Wait for every report dispatched so far to have been delivered."""
+        with self._lock:
+            notifier = self._store.get("notifier")
+            pending, self._store["dispatched"] = self._store["dispatched"], []
+        if notifier is not None:
+            notifier.submit(lambda: None).result(timeout=30)
+        for future in pending:
+            future.result(timeout=30)
+
+    def _notify_others(self, change: ExternalChange) -> None:
+        """Report a write to every instance on this store except the writer.
+
+        The writer's own application already has the change; telling it would
+        re-apply its own work and emit a second event for it.
+
+        Delivered on a thread of this store's own, never on the thread that
+        made the write - the rule ChangeNotifyingBackend states. A listener
+        refreshes an application that may wait for its own write queue, so a
+        report handed over inside a write would have that queue wait for the
+        write it is running, and two instances reporting into each other that
+        way would wait for each other for good. One worker, so reports are
+        delivered in the order the writes happened.
+        """
+        with self._lock:
+            if not [key for key in self._store["listeners"] if key != id(self)]:
+                return  # nobody to tell: do not start a thread to say nothing
+            notifier = self._store.get("notifier")
+            if notifier is None:
+                notifier = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="in-memory-notify"
+                )
+                self._store["notifier"] = notifier
+            future = notifier.submit(self._deliver, id(self), change)
+            self._store["dispatched"].append(future)
+
+    def _deliver(self, writer_key: int, change: ExternalChange) -> None:
+        """Call the listeners registered *now*, on the notifier thread.
+
+        Read at delivery rather than at dispatch, so an instance that has
+        since shut down is not refreshed after the fact.
+        """
+        with self._lock:
+            others = [
+                listener
+                for key, listener in self._store["listeners"].items()
+                if key != writer_key
+            ]
+        for listener in others:
+            listener(change)
 
 
 # --- the contract ----------------------------------------------------------
@@ -195,7 +285,24 @@ class PersistenceBackendContract:
     def previous_version_store(self, tmp_path):
         pytest.skip("no previous-version store defined for this backend")
 
+    def settle_notifications(self, backend) -> None:
+        """Wait for the reports `backend` has dispatched to be delivered.
+
+        A backend reports from a thread of its own (ChangeNotifyingBackend),
+        so a clause that writes through one instance and then reads another
+        has to wait for that thread first. Assume you must override this:
+        the default does nothing, and it only suits a backend that has
+        somehow finished delivering before the write returns. Handing the
+        report to another thread and joining it inside the write is not that
+        - it is the shape *Which thread reports* rules out, because two
+        instances doing it wait for each other for good.
+        """
+
     # -- helpers --------------------------------------------------------------
+
+    @staticmethod
+    def _notifying(backend) -> bool:
+        return capabilities_of(backend).change_notification
 
     @staticmethod
     def _incremental(backend) -> bool:
@@ -219,10 +326,11 @@ class PersistenceBackendContract:
             pytest.skip("snapshot-only backend")
         assert isinstance(backend, IncrementalGraphPersistenceBackend)
 
-    def test_change_notification_is_not_declared_before_its_seam_exists(self, factory):
-        """The notification contract is a later change to the seam; until it
-        lands nothing can honour a declaration, so no backend may make one."""
-        assert not capabilities_of(factory()).change_notification
+    def test_a_change_notification_declaration_is_backed_by_the_protocol(self, factory):
+        backend = factory()
+        if not self._notifying(backend):
+            pytest.skip("backend does not report external changes")
+        assert isinstance(backend, ChangeNotifyingBackend)
 
     # -- the snapshot contract ------------------------------------------------
 
@@ -500,6 +608,207 @@ class PersistenceBackendContract:
 
         assert calls[0] == ("upsert" if incremental else "snapshot")
         assert by_id(factory().load_graph_data(), "nodes")["a"]["name"] == "Renamed"
+
+    # -- change notification --------------------------------------------------
+
+    def _running_storage_and_writer(self, factory):
+        """A storage on one backend, plus a second backend on the same store
+        standing in for the other instance."""
+        storage = GraphStorage(persistence_backend=factory())
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+        storage.flush()
+        return storage, factory()
+
+    def test_an_external_write_reaches_a_running_storage(self, factory):
+        """What this seam exists for: a write another instance makes to the
+        same store shows up in a running instance's reads with no restart -
+        in the structures behind search too, not just the node dictionary."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage, elsewhere = self._running_storage_and_writer(factory)
+        try:
+            elsewhere.apply_batch(
+                [
+                    EntityOperation.upsert_node(
+                        node_payload("b", name="Beacon", embedding=[0.5, 0.25])
+                    ),
+                    EntityOperation.upsert_edge(edge_payload("ab", "a", "b")),
+                ]
+            )
+            self.settle_notifications(elsewhere)
+
+            assert storage.get_node("b").name == "Beacon"
+            assert {e.id for e in storage.get_all_edges()} == {"ab"}
+            # Lexical search reads a per-node cache; a stale entry is served.
+            assert [n.id for n in storage.search_nodes("Beacon")] == ["b"]
+            # And the vector index, which semantic search reads.
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [0.5, 0.25]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_update_replaces_what_search_had(self, factory):
+        """An update is where a stale cache shows: the old text must stop
+        matching, and the vector that described it must not survive it."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage, elsewhere = self._running_storage_and_writer(factory)
+        try:
+            elsewhere.apply_batch(
+                [
+                    EntityOperation.upsert_node(
+                        node_payload("a", name="Renamed", embedding=[1.0, 0.0])
+                    )
+                ]
+            )
+            self.settle_notifications(elsewhere)
+
+            assert storage.get_node("a").name == "Renamed"
+            assert storage.search_nodes("Alpha") == []
+            assert [n.id for n in storage.search_nodes("Renamed")] == ["a"]
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [1.0, 0.0]
+            )
+            # The graph hands out node objects of its own; a refresh that
+            # repointed only the dictionary would leave the old one here.
+            assert storage.graph.nodes["a"]["data"].name == "Renamed"
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_update_does_not_leave_the_old_vector_behind(self, factory):
+        """A vector describes the text a node had. When the store hands back
+        new text and no vector, the old one is not merely unhelpful - semantic
+        search would go on matching a description this node no longer has."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage = GraphStorage(persistence_backend=factory())
+        try:
+            storage.add_nodes(
+                [
+                    Node(
+                        id="a",
+                        type=NodeType.ACTOR,
+                        name="Alpha",
+                        embedding=[0.5, 0.25],
+                    )
+                ],
+                [],
+            )
+            storage.flush()
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [0.5, 0.25]
+            )
+
+            elsewhere = factory()
+            elsewhere.apply_batch(
+                [EntityOperation.upsert_node(node_payload("a", name="Renamed"))]
+            )
+            self.settle_notifications(elsewhere)
+
+            # Either regenerated from the new text, or gone until something
+            # regenerates it. Never still the vector for "Alpha".
+            current = storage.vector_store.get_vector_list("a")
+            assert current is None or current != pytest.approx([0.5, 0.25])
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_delete_reaches_a_running_storage(self, factory):
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage, elsewhere = self._running_storage_and_writer(factory)
+        try:
+            elsewhere.apply_batch(
+                [
+                    EntityOperation.upsert_node(
+                        node_payload("b", name="Beacon", embedding=[0.5, 0.25])
+                    ),
+                    EntityOperation.upsert_edge(edge_payload("ab", "a", "b")),
+                ]
+            )
+            elsewhere.apply_batch([EntityOperation.delete_node("b")])
+            self.settle_notifications(elsewhere)
+
+            assert storage.get_node("b") is None
+            assert storage.search_nodes("Beacon") == []
+            assert storage.vector_store.get_vector_list("b") is None
+            # An edge cannot outlive an endpoint, however the store reported it.
+            assert storage.get_all_edges() == []
+            assert not storage.graph.has_node("b")
+        finally:
+            storage.shutdown_events()
+
+    def test_a_change_the_backend_cannot_describe_reloads_the_graph(self, factory):
+        """A backend that knows only that something changed says so, and the
+        application reloads rather than going on serving a stale graph."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage, elsewhere = self._running_storage_and_writer(factory)
+        try:
+            elsewhere.save_graph_data(snapshot([node_payload("z", name="Zulu")]))
+            self.settle_notifications(elsewhere)
+
+            assert {n.id for n in storage.get_all_nodes()} == {"z"}
+            assert [n.id for n in storage.search_nodes("Zulu")] == ["z"]
+        finally:
+            storage.shutdown_events()
+
+    def test_two_storages_writing_one_store_do_not_wait_on_each_other(self, factory):
+        """The shape this seam exists for, and the one that breaks when a
+        report is handed over inside a write: two instances writing the same
+        store at once. Each whole-graph write is reported to the other, whose
+        refresh waits for its own write queue - which must never be the queue
+        that is waiting for that report to return. Content is not asserted;
+        two whole-graph writers overwrite each other by design. That they
+        both finish is the property."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        first, second = factory(), factory()
+        one = GraphStorage(persistence_backend=first)
+        two = GraphStorage(persistence_backend=second)
+        errors: List[Exception] = []
+
+        def hammer(storage, prefix):
+            try:
+                for i in range(5):
+                    storage.add_nodes(
+                        [Node(id=f"{prefix}{i}", type=NodeType.ACTOR, name=prefix)],
+                        [],
+                    )
+                    storage.save().result(timeout=60)
+            except Exception as exc:  # reported, not raised off-thread
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=hammer, args=(one, "a"), daemon=True),
+            threading.Thread(target=hammer, args=(two, "b"), daemon=True),
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(120)
+            assert not [t for t in threads if t.is_alive()], (
+                "two instances writing one store waited on each other"
+            )
+            assert errors == []
+        finally:
+            one.shutdown_events()
+            two.shutdown_events()
+
+    def test_notification_stops_when_the_storage_shuts_down(self, factory):
+        """A torn-down storage must not still be refreshed: its executor is
+        gone, and what it holds is nobody's view any more."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage, elsewhere = self._running_storage_and_writer(factory)
+        storage.shutdown_events()
+
+        elsewhere.apply_batch(
+            [EntityOperation.upsert_node(node_payload("q", name="Quiet"))]
+        )
+        self.settle_notifications(elsewhere)
+        assert storage.get_node("q") is None
 
 
 __all__ = [

@@ -31,6 +31,9 @@ class TestInMemoryBackendContract(PersistenceBackendContract):
         reference applies to a copy, so nothing may have reached the store."""
         _fail_on_deepcopy(monkeypatch, call=1)
 
+    def settle_notifications(self, backend):
+        backend.settle_notifications()
+
 
 class TestSnapshotOnlyInMemoryBackendContract(PersistenceBackendContract):
     @pytest.fixture

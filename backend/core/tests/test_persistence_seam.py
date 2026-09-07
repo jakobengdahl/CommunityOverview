@@ -10,20 +10,63 @@ the graph from.
 import json
 import os
 import tempfile
+import threading
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from backend.core.events.models import EntityKind, EventType
 from backend.core.models import Edge, Node, NodeType
-from backend.core.storage import GraphStorage
+from backend.core.storage import EXTERNAL_CHANGE_ORIGIN, GraphStorage
 from backend.core.storage_backends import (
     SNAPSHOT_ONLY,
     BackendCapabilities,
     EntityOperation,
+    ExternalChange,
+    ExternalChangeRefused,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
+
+
+def _node_payload(node_id: str, name: str):
+    """A node as GraphStorage serialises one, for a store to hand back.
+
+    Stamped now: a payload standing in for another instance's write has to
+    look like one, and the refresh resolves a node both instances touched by
+    last-writer-wins.
+    """
+    return {
+        "id": node_id,
+        "type": "Actor",
+        "name": name,
+        "description": "",
+        "summary": "",
+        "tags": [],
+        "subtypes": [],
+        "aliases": [],
+        "metadata": {},
+        "archived": False,
+        "created_at": "2026-09-06T00:00:00+00:00",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _edge_payload(edge_id: str, source: str, target: str, **overrides):
+    payload = {
+        "id": edge_id,
+        "source": source,
+        "target": target,
+        "type": "RELATES_TO",
+        "label": "",
+        "metadata": {},
+        "archived": False,
+        "created_at": "2026-09-06T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
 
 
 class _SnapshotBackend:
@@ -147,6 +190,58 @@ def _kinds(backend):
     return [name for name, _ in backend.calls]
 
 
+class _NotifyingBackend(_IncrementalBackend):
+    """An incremental backend that also reports what someone else wrote.
+
+    `on_subscribe` lets a test deliver a change at the moment the listener is
+    registered, which is how the wiring's ordering is pinned.
+    """
+
+    def __init__(self, on_subscribe=None, incremental=True, **kwargs):
+        super().__init__(**kwargs)
+        self._incremental = incremental
+        self.listener = None
+        self.subscribes = 0
+        self.unsubscribes = 0
+        self._on_subscribe = on_subscribe
+        # When set, every write also reports one - from inside the write,
+        # which is the application's own writer thread.
+        self.report_from_writes = None
+
+    def capabilities(self):
+        return BackendCapabilities(
+            incremental_writes=self._incremental,
+            transactions=self._incremental and self._transactions,
+            change_notification=True,
+        )
+
+    def start_change_notification(self, listener):
+        self.listener = listener
+        self.subscribes += 1
+        if self._on_subscribe is not None:
+            self._on_subscribe(listener)
+
+    def stop_change_notification(self):
+        self.listener = None
+        self.unsubscribes += 1
+
+    def _report_from_write(self):
+        if self.report_from_writes is not None and self.listener is not None:
+            self.listener(self.report_from_writes)
+
+    def upsert_node(self, node):
+        super().upsert_node(node)
+        self._report_from_write()
+
+    def apply_batch(self, operations):
+        super().apply_batch(operations)
+        self._report_from_write()
+
+    def save_graph_data(self, data):
+        super().save_graph_data(data)
+        self._report_from_write()
+
+
 class TestCapabilityDeclaration:
     def test_a_backend_without_a_declaration_is_snapshot_only(self):
         assert capabilities_of(_SnapshotBackend()) is SNAPSHOT_ONLY
@@ -198,6 +293,1367 @@ class TestCapabilityDeclaration:
         # A pre-contract backend fails the isinstance check (no capabilities)
         # yet is still driven by GraphStorage: capabilities_of tolerates it.
         assert not isinstance(_SnapshotBackend(), GraphPersistenceBackend)
+
+
+class TestChangeNotificationWiring:
+    """What GraphStorage does about a backend that reports external changes:
+    when it subscribes, when it stops, and what a refresh must not do."""
+
+    def test_declaring_change_notification_without_the_methods_is_refused(self):
+        class Overclaims(_SnapshotBackend):
+            def capabilities(self):
+                return BackendCapabilities(change_notification=True)
+
+            def start_change_notification(self, listener):
+                pass
+
+        with pytest.raises(TypeError) as exc:
+            GraphStorage(persistence_backend=Overclaims())
+        message = str(exc.value)
+        assert "start_change_notification" not in message
+        assert "stop_change_notification" in message
+
+    def test_declaring_it_with_only_the_stop_method_is_refused_too(self):
+        class Overclaims(_SnapshotBackend):
+            def capabilities(self):
+                return BackendCapabilities(change_notification=True)
+
+            def stop_change_notification(self):
+                pass
+
+        with pytest.raises(TypeError) as exc:
+            GraphStorage(persistence_backend=Overclaims())
+        assert "start_change_notification" in str(exc.value)
+
+    def test_a_backend_that_does_not_declare_it_is_never_subscribed(self):
+        backend = _NotifyingBackend()
+        backend.capabilities = lambda: BackendCapabilities(
+            incremental_writes=True, transactions=True
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert backend.subscribes == 0
+        finally:
+            storage.shutdown_events()
+        assert backend.unsubscribes == 0
+
+    def test_the_listener_is_subscribed_once_the_graph_is_loaded(self):
+        """A change reported against a model that does not exist yet would
+        refresh nothing, and the seeded graph would be gone."""
+        delivered = []
+
+        def deliver(listener):
+            delivered.append(True)
+            listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+        backend = _NotifyingBackend(on_subscribe=deliver)
+        backend.save_graph_data(
+            {
+                "nodes": [_node_payload("a", "Alpha")],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        backend.calls.clear()
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert delivered == [True]
+            assert backend.subscribes == 1
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+        finally:
+            storage.shutdown_events()
+
+    def test_shutdown_stops_the_notification_before_tearing_down(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        assert backend.subscribes == 1
+        storage.shutdown_events()
+        assert backend.unsubscribes == 1
+        assert backend.listener is None
+
+    def test_a_refresh_is_never_written_back(self):
+        """The change is already in the store. Persisting it would hand the
+        writer that made it a second copy of its own work."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.calls.clear()
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("b", "Beacon")),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_edge(_edge_payload("bc", "b", "c")),
+                        EntityOperation.delete_edge("bc"),
+                        EntityOperation.delete_node("a"),
+                    ]
+                )
+            )
+            storage.flush()
+
+            assert backend.calls == []
+            assert {n.id for n in storage.get_all_nodes()} == {"b", "c"}
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_emits_events_marked_as_someone_else_s_write(self):
+        """Subscriptions, agents and the history see external changes too -
+        and can tell them from this instance's own work, or an agent that
+        reacts by writing would bounce the change between instances."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+            assert [e.event_type for e in seen] == [EventType.NODE_CREATE]
+            assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.after["name"] == "Beacon"
+            # The same spelling every local emit site produces, or a
+            # subscription filtered on the type silently never fires. The
+            # kind is the other half of that: EventDispatcher._matches and
+            # the history both key on it.
+            assert seen[0].entity.type == "Actor"
+            assert seen[0].entity.kind == EntityKind.NODE
+
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Renamed"))]
+                )
+            )
+            assert [e.event_type for e in seen] == [EventType.NODE_UPDATE]
+            assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.before["name"] == "Beacon"
+            assert seen[0].entity.after["name"] == "Renamed"
+
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_edge(_edge_payload("bc", "b", "c")),
+                    ]
+                )
+            )
+            assert [e.event_type for e in seen] == [
+                EventType.NODE_CREATE,
+                EventType.EDGE_CREATE,
+            ]
+            assert {e.origin.event_origin for e in seen} == {EXTERNAL_CHANGE_ORIGIN}
+            assert seen[1].entity.type == "RELATES_TO"
+            assert [e.entity.kind for e in seen] == [EntityKind.NODE, EntityKind.EDGE]
+
+            # An edge upsert over one already there is an update carrying a
+            # real before-state, the same as the node step above. Reported as
+            # a create, or with before taken from the new edge, a subscriber
+            # filtered on the update never fires and history records no diff.
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_edge(
+                            _edge_payload("bc", "b", "c", type="DEPENDS_ON")
+                        )
+                    ]
+                )
+            )
+            assert [e.event_type for e in seen] == [EventType.EDGE_UPDATE]
+            assert seen[0].entity.kind == EntityKind.EDGE
+            assert seen[0].entity.before["type"] == "RELATES_TO"
+            assert seen[0].entity.after["type"] == "DEPENDS_ON"
+            assert seen[0].entity.type == "DEPENDS_ON"
+
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_edge("bc")])
+            )
+            assert [e.event_type for e in seen] == [EventType.EDGE_DELETE]
+            assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.type == "DEPENDS_ON"
+            assert seen[0].entity.kind == EntityKind.EDGE
+            assert seen[0].entity.before["id"] == "bc"
+            assert seen[0].entity.after is None
+
+            seen.clear()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("b")])
+            )
+            assert [e.event_type for e in seen] == [EventType.NODE_DELETE]
+            assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
+            assert seen[0].entity.before["name"] == "Renamed"
+            assert seen[0].entity.type == "Actor"
+            assert seen[0].entity.kind == EntityKind.NODE
+            assert seen[0].entity.after is None
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_emits_each_event_after_its_own_change_landed(self):
+        """A subscriber reads the model when it is told. An event emitted
+        before the mutation it announces hands out a graph that does not have
+        it yet - and on a delete, one that still does."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        observed = []
+
+        def observe(event):
+            observed.append(
+                (
+                    event.event_type,
+                    {n.id for n in storage.get_all_nodes()},
+                    {e.id for e in storage.get_all_edges()},
+                    storage.graph.number_of_edges(),
+                )
+            )
+
+        storage.add_system_listener(observe)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("b", "Beacon")),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_edge(_edge_payload("bc", "b", "c")),
+                    ]
+                )
+            )
+            assert observed[-1][0] == EventType.EDGE_CREATE
+            assert observed[-1][2] == {"bc"}
+            assert observed[-1][3] == 1
+
+            observed.clear()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("b")])
+            )
+            # The cascade goes first, and the edge is gone from both places
+            # by the time either event is delivered.
+            assert [step[0] for step in observed] == [
+                EventType.EDGE_DELETE,
+                EventType.NODE_DELETE,
+            ]
+            assert [step[2] for step in observed] == [set(), set()]
+            assert [step[3] for step in observed] == [0, 0]
+            assert observed[-1][1] == {"c"}
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_takes_departed_entities_out_of_the_graph_too(self):
+        """A reload that removes things is where a graph left uncleared
+        shows: the dictionaries follow the store, and every read path that
+        walks the graph goes on serving nodes and edges that are gone."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                    Node(id="b", type=NodeType.ACTOR, name="Beacon"),
+                ],
+                [Edge(id="ab", source="a", target="b")],
+            )
+            storage.flush()
+
+            # The other writer replaced the store wholesale.
+            backend.nodes = {"z": _node_payload("z", "Zulu")}
+            backend.edges = {}
+            backend.listener(ExternalChange.unknown())
+
+            assert {n.id for n in storage.get_all_nodes()} == {"z"}
+            assert set(storage.graph.nodes) == {"z"}
+            assert storage.get_all_edges() == []
+            assert storage.graph.number_of_edges() == len(storage.get_all_edges())
+            assert set(storage._searchable_text_cache) == {"z"}
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_does_not_emit_per_entity_events(self):
+        """A backend that cannot name what changed gets a reload, and a reload
+        has no before-states to report. The docs say so; this pins it."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.nodes = {"z": _node_payload("z", "Zulu")}
+            backend.written = True
+            backend.listener(ExternalChange.unknown())
+
+            assert {n.id for n in storage.get_all_nodes()} == {"z"}
+            assert seen == []
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshLeavesNothingStale:
+    def test_an_upsert_drops_a_vector_the_graph_file_still_carries_inline(self):
+        """A pre-split store hands its vectors on the node objects, and
+        `_serialize_node` keeps writing them back until a sidecar covers
+        them. A refresh that only cleared the index would leave the vector
+        for the old text to be written out and re-adopted on the next load."""
+        backend = _NotifyingBackend()
+        # The odd width is what keeps a vector in the fallback: the index
+        # refuses it, and the graph file is then its only copy.
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    dict(_node_payload("a", "Alpha"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("b", "Beacon"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("c", "Cedar"), embedding=[1.0]),
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert "c" in storage._inline_fallback
+
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("c", "Renamed"))]
+                )
+            )
+
+            assert "c" not in storage._inline_fallback
+            # Still in the fallback, this would be written back out as the
+            # vector for "Cedar" and re-adopted on the next load. Where the ML
+            # stack is installed a fresh vector is generated for the new text
+            # instead, which is equally not the old one.
+            written = storage._serialize_node(storage.get_node("c"))["embedding"]
+            assert written is None or written != pytest.approx([1.0])
+        finally:
+            storage.shutdown_events()
+
+    def test_a_delete_drops_a_vector_the_graph_file_still_carries_inline(self):
+        """The delete half of the same bookkeeping. Left in the fallback, the
+        departed node's vector is written back out under whatever is next
+        created with that id - a dead vector resurrected into the store and
+        served by semantic search."""
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    dict(_node_payload("a", "Alpha"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("b", "Beacon"), embedding=[0.5, 0.25]),
+                    dict(_node_payload("c", "Cedar"), embedding=[1.0]),
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert "c" in storage._inline_fallback
+
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("c")])
+            )
+            assert "c" not in storage._inline_fallback
+
+            # The id comes back as a different node. A local add does not
+            # touch the fallback map, so whatever is left in it is what gets
+            # written out for the newcomer.
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cypress")], [])
+            written = storage._serialize_node(storage.get_node("c"))["embedding"]
+            assert written is None or written != pytest.approx([1.0])
+        finally:
+            storage.shutdown_events()
+
+    def test_a_change_naming_no_entities_is_not_a_reload(self):
+        """`entities([])` says nothing changed. Treating it as `unknown()`
+        would throw away in-memory state on a message that carries none."""
+        assert ExternalChange.entities([]).operations == ()
+
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            seen.clear()
+            # The store says something else entirely; only a reload would
+            # bring it in.
+            backend.nodes = {"z": _node_payload("z", "Zulu")}
+
+            backend.listener(ExternalChange.entities([]))
+
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+            assert seen == []
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshOnTheWriterThread:
+    """The one thread a change may not be reported on is the one the write
+    queue runs on. A refresh may have to wait for that queue, and waiting
+    there waits for ourselves; not waiting reloads over the write we are
+    inside; and handing it to another thread was tried and was worse - two
+    such refreshes race, and one can outlive the shutdown meant to stop it.
+    Every real transport reports from its own thread, so this is said plainly
+    rather than worked around."""
+
+    def test_a_report_from_the_write_queues_own_thread_is_refused(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            refused = storage._io_executor.submit(
+                storage.apply_external_change, ExternalChange.unknown()
+            )
+            with pytest.raises(ExternalChangeRefused, match="backend's own thread"):
+                refused.result(timeout=30)
+
+            # And the queue still works: refusing is not wedging.
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            assert storage.get_node("a") is not None
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("write", ["entity", "snapshot"])
+    def test_a_backend_reporting_from_inside_its_write_does_not_wedge(self, write):
+        """The realistic shape of the same mistake: the report comes from
+        inside the write that made it. What must not happen is the queue
+        stopping forever - nor the refusal being read as the write having
+        failed, which would answer a backend's reporting bug by re-issuing
+        the whole graph over a store that has another writer in it.
+
+        Both write paths, because there are two and they contain the refusal
+        separately: an entity write and a whole-graph one."""
+        backend = _NotifyingBackend(incremental=(write == "entity"))
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.report_from_writes = ExternalChange.unknown()
+            backend.snapshots = 0
+
+            storage.update_node("a", {"name": "Renamed"})
+            drain = threading.Thread(target=storage.flush, daemon=True)
+            drain.start()
+            drain.join(30)
+            assert not drain.is_alive(), "the write queue wedged on itself"
+
+            backend.report_from_writes = None
+            assert storage.get_node("a").name == "Renamed"
+            # The write itself landed - the backend reported after applying
+            # it - so nothing is owed to the store. Reading the refusal as a
+            # failed write would answer a backend's reporting bug by
+            # re-issuing the whole graph over a store that has another writer
+            # in it, so no re-issue may have been queued.
+            assert backend.nodes["a"]["name"] == "Renamed"
+            assert not storage._resync_pending
+            assert backend.snapshots == (0 if write == "entity" else 1)
+        finally:
+            backend.report_from_writes = None
+            storage.shutdown_events()
+
+
+class TestExternalEdgeRefresh:
+    """The edge half of the refresh path. Its failures hide from
+    `get_all_edges`, which reads `self.edges`; the graph is where they show."""
+
+    def _storage(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                Node(id="b", type=NodeType.ACTOR, name="Beacon"),
+            ],
+            [],
+        )
+        storage.flush()
+        return storage, backend
+
+    @pytest.mark.parametrize(
+        "source, target", [("a", "ghost"), ("ghost", "a")], ids=["target", "source"]
+    )
+    def test_an_edge_with_an_absent_endpoint_is_added_nowhere(self, source, target):
+        """NetworkX would invent the missing endpoint as a node with no data,
+        and every read path walking the graph would trip over it.
+
+        Either end: a guard that checked only one of them would invent the
+        node whenever the edge pointed the other way."""
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("ax", source, target))]
+                )
+            )
+            assert storage.get_all_edges() == []
+            assert storage.get_edges_for_node("a") == []
+            assert not storage.graph.has_node("ghost")
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+        finally:
+            storage.shutdown_events()
+
+    def test_an_edge_that_moves_an_endpoint_leaves_one_graph_edge(self):
+        """The graph edge is keyed on where it used to point; left in place it
+        is served to the old endpoint forever."""
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_edge(_edge_payload("ab", "a", "b")),
+                    ]
+                )
+            )
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("ab", "a", "c"))]
+                )
+            )
+
+            assert [e.id for e in storage.get_all_edges()] == ["ab"]
+            assert storage.get_edges_for_node("b") == []
+            assert [e.id for e in storage.get_edges_for_node("c")] == ["ab"]
+            assert len(storage.graph.edges) == 1
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize(
+        "ends", [("a", "ghost"), ("ghost", "b")], ids=["target", "source"]
+    )
+    def test_an_edge_repointed_at_an_absent_endpoint_keeps_serving_the_old_one(
+        self, ends
+    ):
+        """Refusing the new edge is right - inventing the endpoint would be
+        worse - but the edge already there must be left whole rather than
+        half removed, or reads would serve an edge the graph no longer has."""
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("ab", "a", "b"))]
+                )
+            )
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("ab", ends[0], ends[1]))]
+                )
+            )
+
+            assert [e.target for e in storage.get_all_edges()] == ["b"]
+            assert [e.id for e in storage.get_edges_for_node("b")] == ["ab"]
+            assert not storage.graph.has_node("ghost")
+            assert len(storage.graph.edges) == 1
+        finally:
+            storage.shutdown_events()
+
+    def test_an_edge_from_a_node_to_itself_arrives_whole(self):
+        """A self-loop has one endpoint, not two, and both the guard and the
+        removal of a moved edge read source and target as if they differed."""
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("aa", "a", "a"))]
+                )
+            )
+
+            assert [e.id for e in storage.get_all_edges()] == ["aa"]
+            assert [e.id for e in storage.get_edges_for_node("a")] == ["aa"]
+            assert storage.graph.number_of_edges() == 1
+        finally:
+            storage.shutdown_events()
+
+    def test_deleting_an_edge_takes_it_out_of_the_graph_too(self):
+        storage, backend = self._storage()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_edge(_edge_payload("ab", "a", "b"))]
+                )
+            )
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_edge("ab")])
+            )
+
+            assert storage.get_all_edges() == []
+            assert storage.get_edges_for_node("a") == []
+            assert storage.get_edges_between_nodes(["a", "b"]) == []
+            assert len(storage.graph.edges) == 0
+        finally:
+            storage.shutdown_events()
+
+    def test_a_node_and_its_edge_deleted_in_one_batch_is_harmless(self):
+        """The shape the write side itself produces: edges first, then the
+        node. Whichever order it arrives in, deleting one twice is a no-op."""
+        for operations in (
+            [EntityOperation.delete_edge("ab"), EntityOperation.delete_node("b")],
+            [EntityOperation.delete_node("b"), EntityOperation.delete_edge("ab")],
+        ):
+            storage, backend = self._storage()
+            try:
+                backend.listener(
+                    ExternalChange.entities(
+                        [EntityOperation.upsert_edge(_edge_payload("ab", "a", "b"))]
+                    )
+                )
+                backend.listener(ExternalChange.entities(operations))
+
+                assert {n.id for n in storage.get_all_nodes()} == {"a"}
+                assert storage.get_all_edges() == []
+                assert len(storage.graph.edges) == 0
+            finally:
+                storage.shutdown_events()
+
+
+def _unreadable_change():
+    """A change whose payload this build cannot read, so the refresh takes
+    its error path - the twin of the reload below, and just as bound by
+    everything a refresh may not do."""
+    return ExternalChange.entities(
+        [EntityOperation.upsert_node({"id": "bad", "type": "Nonsense"})]
+    )
+
+
+# Both ways into the resync, so neither entry point is pinned alone.
+_RESYNCING_CHANGES = [ExternalChange.unknown, _unreadable_change]
+_RESYNC_IDS = ["unknown", "unreadable-payload"]
+
+
+class TestExternalRefreshFailureModes:
+    """What a refresh must not do when the store is not in the state it
+    expects: write back, drop a local write, or throw into the caller."""
+
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_reload_does_not_write_back_over_a_missing_store(self, change):
+        """A store can stop existing - another writer emptied it, a restore is
+        in progress. Bootstrapping there would put this instance's graph over
+        it, which is a write-back, and a whole-graph one."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.written = False
+            backend.calls.clear()
+
+            backend.listener(change())
+            storage.flush()
+
+            assert backend.calls == []
+            # Nothing to reload from is not a reason to forget what we have.
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("unreadable", ["node", "edge"])
+    def test_a_reload_that_cannot_read_the_store_leaves_the_graph_whole(
+        self, unreadable
+    ):
+        """The store is readable but holds an entity this build is not: a
+        rolling upgrade. Clearing the graph and then failing to refill it
+        would leave every read path short of entities the store still has,
+        reported as merely being behind it.
+
+        The unreadable entity goes *first*, before anything this build can
+        read. Put it last and a reload that clears as it goes still ends up
+        with the right contents by accident, and the test passes against the
+        very failure it is here for."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                    Node(id="b", type=NodeType.ACTOR, name="Beacon"),
+                ],
+                [Edge(id="ab", source="a", target="b", type="RELATES_TO")],
+            )
+            storage.flush()
+            # A node the instance does not hold. Without it the store's node
+            # set equals memory's, and a swap torn between the two parse
+            # loops leaves the same model behind as one that never ran.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+            if unreadable == "node":
+                backend.nodes = {
+                    "bad": {"id": "bad", "type": "Nonsense"},
+                    **backend.nodes,
+                }
+            else:
+                backend.edges = {"bad": {"id": "bad"}, **backend.edges}
+
+            backend.listener(ExternalChange.unknown())
+
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+            # Every container moved together or none of them did.
+            assert set(storage.graph.nodes) == {"a", "b"}
+            assert set(storage._searchable_text_cache) == {"a", "b"}
+            assert [n.id for n in storage.search_nodes("Beacon")] == ["b"]
+            assert set(storage.graph.nodes) == {"a", "b"}
+            # The edge half fails out of sight of get_all_edges, which reads
+            # a dictionary; a torn reload shows as the two disagreeing.
+            assert {e.id for e in storage.get_all_edges()} == {"ab"}
+            assert storage.graph.number_of_edges() == 1
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_over_a_failed_write_neither_drops_it_nor_writes(self):
+        """The other half of the in-flight case: the write did not just not
+        land yet, it failed, so a mutation is in memory and nowhere else.
+        Reloading drops it. Writing it first is worse - the only write that
+        carries it is the whole graph, and the store being refreshed from is
+        one another writer is committing to. So the refresh does neither: it
+        stops, and leaves both sides intact."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            def refuse(node):
+                raise OSError("the write failed")
+
+            backend.upsert_node = refuse
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cedar")], [])
+            storage._io_executor.submit(lambda: None).result()
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            del backend.upsert_node
+
+            # What the other writer committed while our write was failing.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            backend.listener(ExternalChange.unknown())
+
+            # The refresh wrote nothing: what the other writer committed is
+            # intact, and our own mutation is still owed to the store.
+            assert set(backend.nodes) == {"a", "z"}
+            # And it dropped nothing: the accepted mutation is still in
+            # memory, still flagged as owed.
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert storage._resync_pending
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_write_does_not_undo_a_newer_local_one(self):
+        """Both instances wrote the same node. The store keeps whichever
+        write reached it last - ours, here - and we are never told about our
+        own, so applying a report that predates it would leave this instance
+        serving a value the store does not hold, with nothing left to report
+        that would correct it."""
+        proceed = threading.Event()
+        backend = _NotifyingBackend()
+        real_upsert = backend.upsert_node
+
+        def slow_upsert(node):
+            proceed.wait()
+            real_upsert(node)
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.upsert_node = slow_upsert
+            storage.update_node("a", {"name": "Local"})
+
+            stale = _node_payload("a", "External")
+            stale["updated_at"] = "2020-01-01T00:00:00+00:00"
+            refresh = threading.Thread(
+                target=storage.apply_external_change,
+                args=(ExternalChange.entities([EntityOperation.upsert_node(stale)]),),
+            )
+            refresh.start()
+            proceed.set()
+            refresh.join(5)
+            assert not refresh.is_alive()
+            storage.flush()
+
+            assert storage.get_node("a").name == "Local"
+            assert backend.nodes["a"]["name"] == "Local"
+            assert [n.id for n in storage.search_nodes("External")] == []
+        finally:
+            proceed.set()
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("shape", ["serialised", "legacy"])
+    def test_a_reported_payload_is_read_not_taken(self, shape):
+        """The dict a report carries belongs to the backend, which may still
+        be holding the record it reported - a poller's cache, a payload kept
+        to retry. Parsing it in place would hand back something the backend
+        did not give.
+
+        Two shapes, because from_dict rewrites its argument two ways and one
+        payload only shows one of them: it parses string stamps, and it fills
+        in defaults for keys that are absent. A payload carrying every key
+        already - the shape this instance itself writes - can only show the
+        first."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            node = _node_payload("b", "Beacon")
+            edge = _edge_payload("ab", "a", "b")
+            if shape == "legacy":
+                # A record of the backend's own: stamps already parsed, and
+                # none of the keys from_dict would fill in.
+                stamp = datetime.now(timezone.utc)
+                node["created_at"] = node["updated_at"] = stamp
+                edge["created_at"] = stamp
+                del node["archived"], edge["archived"], edge["label"]
+            kept = (dict(node), dict(edge))
+            keys = (set(node), set(edge))
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(node),
+                        EntityOperation.upsert_edge(edge),
+                    ]
+                )
+            )
+            assert storage.get_node("b") is not None
+
+            assert (node, edge) == kept
+            # Nothing added either: from_dict fills in defaults, and a copy
+            # taken only when a stamp needs parsing would let that half by.
+            assert (set(node), set(edge)) == keys
+        finally:
+            storage.shutdown_events()
+
+    def test_an_ignored_external_write_changes_nothing_and_says_nothing(self):
+        """An ignored report moved nothing, so there is nothing to announce.
+        An event for it would tell subscribers of a change this instance is
+        not serving - and would be a before equal to its own after."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            storage.add_nodes(
+                [
+                    Node(
+                        id="a",
+                        type=NodeType.ACTOR,
+                        name="Alpha",
+                        embedding=[0.5, 0.25],
+                    )
+                ],
+                [],
+            )
+            storage.flush()
+            seen.clear()
+
+            stale = _node_payload("a", "External")
+            stale["updated_at"] = "2020-01-01T00:00:00+00:00"
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(stale)])
+            )
+
+            assert seen == []
+            assert storage.get_node("a").name == "Alpha"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [0.5, 0.25]
+            )
+            assert [n.id for n in storage.search_nodes("Alpha")] == ["a"]
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("shape", ["tie", "incomparable"])
+    def test_a_report_that_cannot_be_ruled_older_is_applied(self, shape):
+        """The two directions the rule resolves toward the report: a tie is
+        unresolvable, and a pair that cannot be compared at all is not an
+        answer. Both take the store's side, which is what converges the two
+        instances."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            storage.add_system_listener(seen.append)
+
+            payload = _node_payload("a", "External")
+            if shape == "tie":
+                payload["updated_at"] = storage.get_node("a").updated_at.isoformat()
+            else:
+                # Naive against the aware stamp the model holds: a backend
+                # handing over datetime objects of its own produces this.
+                payload["updated_at"] = datetime.now().replace(tzinfo=None)
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(payload)])
+            )
+
+            assert storage.get_node("a").name == "External"
+            # Applied, so announced: a branch that returned the other way
+            # would be silent here as well as wrong.
+            assert [e.event_type for e in seen] == [EventType.NODE_UPDATE]
+        finally:
+            storage.shutdown_events()
+
+    def test_a_payload_with_no_stamp_is_stamped_now_not_treated_as_absent(self):
+        """The rule is written down as if a missing stamp were a gap the
+        comparison sees. It is not: the model fills one in at parse time,
+        stamped now. Normally that makes the report the newer one - and
+        against a held stamp dated in the future, which is what a
+        clock-skewed peer produces, it makes it the older one instead. Both
+        halves are the documented behaviour, so both are pinned."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            unstamped = _node_payload("a", "External")
+            del unstamped["updated_at"]
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(unstamped)])
+            )
+            assert storage.get_node("a").name == "External"
+
+            # Now the held stamp is ahead of any clock the report can carry.
+            storage.nodes["a"].updated_at = datetime.now(timezone.utc) + timedelta(
+                minutes=5
+            )
+            later = _node_payload("a", "Ignored")
+            del later["updated_at"]
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(later)])
+            )
+            assert storage.get_node("a").name == "External"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_payload_whose_stamp_is_null_is_unreadable_not_undated(self):
+        """The other reading of "missing". An explicit null fails validation
+        rather than reaching the comparison, and an unreadable payload is a
+        whole-graph reload - which is a different outcome from applying the
+        report, so the doc has to say which one it is."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            nulled = _node_payload("a", "External")
+            nulled["updated_at"] = None
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(nulled)])
+            )
+
+            # Reloaded from the store rather than applied: the other writer's
+            # node is here, and the unreadable payload's name is not.
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "z"}
+            assert storage.get_node("a").name == "Alpha"
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_write_newer_than_ours_still_applies(self):
+        """The other side of it: last writer wins, so a report that postdates
+        what we hold is applied, not treated as a conflict to keep out."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            fresh = _node_payload("a", "External")
+            fresh["updated_at"] = "2099-01-01T00:00:00+00:00"
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(fresh)])
+            )
+
+            assert storage.get_node("a").name == "External"
+            assert [n.id for n in storage.search_nodes("External")] == ["a"]
+        finally:
+            storage.shutdown_events()
+
+    def test_a_named_operation_settles_the_same_as_a_reload(self):
+        """Both halves of a refresh go through the same settle, not just the
+        reload half. A report naming entities, applied while a local write of
+        ours had failed, takes the entity it names out of memory - where our
+        mutation is the only copy, the write having failed."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            def refuse(node):
+                raise OSError("the write failed")
+
+            backend.upsert_node = refuse
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cedar")], [])
+            storage._io_executor.submit(lambda: None).result()
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            del backend.upsert_node
+
+            backend.listener(
+                ExternalChange.entities([EntityOperation.delete_node("c")])
+            )
+
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert set(backend.nodes) == {"a"}
+        finally:
+            storage.shutdown_events()
+
+    def test_the_settle_runs_under_the_lock(self):
+        """Waiting for the queue is only enough while nothing new can be
+        queued behind it. Settle outside the lock and a write accepted
+        between the drain and the refresh is reloaded away in memory and
+        then lands in the store - and nothing reports our own write back to
+        us, so that disagreement is for good."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        settled_without_the_lock = []
+        original = storage._settle_before_refresh
+
+        def watched():
+            def probe():
+                got = storage._lock.acquire(blocking=False)
+                settled_without_the_lock.append(got)
+                if got:
+                    storage._lock.release()
+
+            # From another thread: _lock is reentrant, so this one holds it
+            # already if the caller does.
+            elsewhere = threading.Thread(target=probe)
+            elsewhere.start()
+            elsewhere.join(5)
+            return original()
+
+        storage._settle_before_refresh = watched
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            backend.listener(ExternalChange.unknown())
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+            assert settled_without_the_lock == [False, False]
+        finally:
+            storage._settle_before_refresh = original
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_refresh_does_not_drop_a_write_that_fails_during_the_drain(self, change):
+        """The failure lands between the two halves of the guard: the write
+        is still queued when the report arrives, so nothing is flagged yet,
+        and it fails while the refresh is already waiting for it. A guard
+        read before the drain passes on a value that stopped being true
+        before the refresh used it, and the accepted mutation is lost - from
+        memory, and from the store, which never got it."""
+        proceed = threading.Event()
+        backend = _NotifyingBackend()
+
+        def slow_refusal(node):
+            proceed.wait()
+            raise OSError("the write failed")
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.upsert_node = slow_refusal
+            storage.add_nodes([Node(id="c", type=NodeType.ACTOR, name="Cedar")], [])
+            # What the other writer committed while our write was queued.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            refresh = threading.Thread(
+                target=storage.apply_external_change, args=(change(),)
+            )
+            refresh.start()
+            refresh.join(0.5)
+            assert refresh.is_alive(), "the refresh went ahead without draining"
+
+            proceed.set()
+            refresh.join(5)
+            assert not refresh.is_alive()
+
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert set(backend.nodes) == {"a", "z"}
+        finally:
+            proceed.set()
+            del backend.upsert_node
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
+    def test_a_reload_does_not_drop_a_write_still_in_flight(self, change):
+        """A mutation is in memory before it is in the store. Reloading over
+        one still queued would take it out of memory while it goes on to
+        land, leaving this instance unable to ever see what it wrote."""
+        proceed = threading.Event()
+        backend = _NotifyingBackend()
+        real_upsert = backend.upsert_node
+
+        def slow_upsert(node):
+            # Unbounded on purpose: the `finally` below always releases it, so
+            # a deadline here could only turn a slow runner into a failure
+            # about a state this test never meant to create.
+            proceed.wait()
+            real_upsert(node)
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            backend.upsert_node = slow_upsert
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+
+            refresh = threading.Thread(
+                target=storage.apply_external_change,
+                args=(change(),),
+            )
+            refresh.start()
+            # The refresh must be waiting on the queued write, not racing it.
+            refresh.join(0.5)
+            assert refresh.is_alive(), "the refresh reloaded without draining"
+
+            proceed.set()
+            refresh.join(5)
+            assert not refresh.is_alive()
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+        finally:
+            proceed.set()
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize(
+        "kind,action",
+        [
+            ("node", "archive"),
+            ("edge", "archive"),
+            ("annotation", "delete"),
+            ("annotation", "upsert"),
+        ],
+        ids=[
+            "node-action",
+            "edge-action",
+            "unknown-kind-delete",
+            "unknown-kind-upsert",
+        ],
+    )
+    def test_an_operation_this_build_does_not_know_resyncs(self, kind, action):
+        """Neither an unrecognised action nor an unrecognised kind may fall
+        through to the delete branch: the entity would go, and every
+        subscriber would be told it was deleted, on a message that said
+        nothing of the kind."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                    Node(id="b", type=NodeType.ACTOR, name="Beacon"),
+                ],
+                [Edge(id="ab", source="a", target="b")],
+            )
+            storage.flush()
+            seen.clear()
+            backend.calls.clear()
+            # The store has moved on. Without this, "skipped the operation"
+            # and "resynced from the store" leave the same model behind, and
+            # the assertions below cannot tell them apart.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation(
+                            kind=kind,
+                            action=action,
+                            entity_id="ab" if kind == "edge" else "a",
+                            payload=_node_payload("a", "Alpha"),
+                        )
+                    ]
+                )
+            )
+
+            # Reloaded, not skipped: what the other writer committed is
+            # here. Skipping the operation would leave the model exactly as
+            # it was, which is what this used to assert and could not
+            # distinguish from a resync.
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b", "z"}
+            assert [e.id for e in storage.get_all_edges()] == ["ab"]
+            assert [e.event_type for e in seen] == []
+            assert backend.calls == []
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            OSError("the store is being replaced"),
+            json.JSONDecodeError("half a file", "{", 1),
+            RuntimeError("the connection went away"),
+        ],
+        ids=["oserror", "half-written-json", "runtime"],
+    )
+    def test_a_resync_that_fails_too_does_not_escape(self, failure):
+        """The fallback has its own failure mode - the store is being replaced
+        as we read it, a read returns half a file. However it fails, throwing
+        from here puts it back in the caller's lap, which is the backend's
+        thread, and is what the fallback exists to prevent."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            def unreadable_store():
+                raise failure
+
+            backend.load_graph_data = unreadable_store
+
+            # Both ways in: the reload, and the containment fallback.
+            backend.listener(ExternalChange.unknown())
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation(
+                            kind="node", action="upsert", entity_id="bad", payload=None
+                        )
+                    ]
+                )
+            )
+
+            # Incomplete, not wrong, and nothing thrown at the backend.
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize(
+        "unreadable",
+        [
+            EntityOperation.upsert_node({"id": "bad", "type": "Nonsense"}),
+            # A backend deserialising its own store builds the operation
+            # directly, so the payload need not have survived the classmethod.
+            EntityOperation(
+                kind="node", action="upsert", entity_id="bad", payload=None
+            ),
+            EntityOperation(
+                kind="edge", action="upsert", entity_id="bad", payload="not a payload"
+            ),
+        ],
+        ids=["unknown-type", "a-node-that-is-not-a-dict", "an-edge-that-is-a-string"],
+    )
+    def test_a_payload_this_build_cannot_read_does_not_escape(self, unreadable):
+        """Two instances mid-upgrade. Half a batch is worse than none, and the
+        writing instance must not read our failure as its own. The payload
+        need not be a dict at all - a store of another vintage decides what
+        it hands over - so the containment cannot be narrowed to one family
+        of exception."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.calls.clear()
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("b", "Beacon")),
+                        unreadable,
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                    ]
+                )
+            )
+            storage.flush()
+
+            # Resynced from the store rather than left half applied, and the
+            # resync is still a refresh: it writes nothing back.
+            assert {n.id for n in storage.get_all_nodes()} == {"a"}
+            assert backend.calls == []
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_waits_for_whoever_holds_the_model(self):
+        """Deterministic half of the lock guarantee: while another thread
+        holds `_lock`, a refresh cannot be touching the model."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        done = threading.Event()
+
+        def refresh():
+            storage.apply_external_change(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+            done.set()
+
+        try:
+            with storage._lock:
+                thread = threading.Thread(target=refresh)
+                thread.start()
+                assert not done.wait(0.5), "the refresh did not take the lock"
+                assert storage.get_node("b") is None
+
+            thread.join(5)
+            assert done.is_set()
+            assert storage.get_node("b").name == "Beacon"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_refresh_holds_the_lock_against_local_writes(self):
+        """The listener is called from a thread of the backend's own - never
+        the thread the write queue runs on - so a refresh runs alongside
+        local mutations and must not tear the model."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        errors = []
+        stop = threading.Event()
+
+        def refresher():
+            try:
+                while not stop.is_set():
+                    storage.apply_external_change(
+                        ExternalChange.entities(
+                            [
+                                EntityOperation.upsert_node(
+                                    _node_payload("shared", "Shared")
+                                )
+                            ]
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                errors.append(exc)
+
+        try:
+            thread = threading.Thread(target=refresher)
+            thread.start()
+            for index in range(40):
+                storage.add_nodes(
+                    [Node(id=f"n{index}", type=NodeType.ACTOR, name=f"N{index}")], []
+                )
+            stop.set()
+            thread.join(10)
+            assert not thread.is_alive()
+            assert errors == []
+
+            ids = {n.id for n in storage.get_all_nodes()}
+            assert ids == {f"n{i}" for i in range(40)} | {"shared"}
+            # Every derived structure still agrees with the node dictionary.
+            assert set(storage.graph.nodes) == ids
+            assert set(storage._searchable_text_cache) == ids
+        finally:
+            stop.set()
+            storage.shutdown_events()
 
 
 class TestSnapshotOnlyBackends:

@@ -32,12 +32,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     runtime_checkable,
 )
 
@@ -80,8 +83,9 @@ class BackendCapabilities:
         snapshot for any mutation that touches more than one entity, since the
         snapshot write is atomic and the loop of single operations is not.
     change_notification: the backend can tell the application about changes
-        made behind its back (another instance sharing the same store). Only
-        declared here; the notification seam itself is a later change.
+        made behind its back (another instance sharing the same store). It
+        implements the notification protocol, and GraphStorage subscribes to
+        it and refreshes what the reported entities touch.
     """
 
     incremental_writes: bool = False
@@ -93,6 +97,11 @@ SNAPSHOT_ONLY = BackendCapabilities()
 
 EntityKindName = Literal["node", "edge"]
 EntityActionName = Literal["upsert", "delete"]
+
+_NOTIFICATION_METHODS = (
+    "start_change_notification",
+    "stop_change_notification",
+)
 
 _INCREMENTAL_METHODS = (
     "upsert_node",
@@ -133,6 +142,30 @@ class EntityOperation:
     @classmethod
     def delete_edge(cls, edge_id: str) -> "EntityOperation":
         return cls("edge", "delete", edge_id)
+
+
+@dataclass(frozen=True)
+class ExternalChange:
+    """What a backend reports when the store changed behind the application.
+
+    ``operations`` names the entities that changed and carries their new
+    content, in the order the store applied them - the same operations a
+    mutation is delivered as, read the other way round. A backend that learns
+    only that *something* changed, and cannot say what, reports ``unknown()``
+    instead and the application reloads the whole graph.
+    """
+
+    operations: Optional[Tuple[EntityOperation, ...]]
+
+    @classmethod
+    def entities(cls, operations: Iterable[EntityOperation]) -> "ExternalChange":
+        """Named entities changed, newest content included."""
+        return cls(tuple(operations))
+
+    @classmethod
+    def unknown(cls) -> "ExternalChange":
+        """Something changed and the backend cannot say what."""
+        return cls(None)
 
 
 @runtime_checkable
@@ -193,6 +226,64 @@ class IncrementalGraphPersistenceBackend(GraphPersistenceBackend, Protocol):
         """
 
 
+class ExternalChangeRefused(RuntimeError):
+    """Raised back at a backend that reported a change on a writing thread.
+
+    Distinct from an I/O failure on purpose. A backend that breaks the
+    threading rule below raises this out of its own write call, and the
+    application must not read that as the write having failed: a failed write
+    escalates to re-issuing the whole graph, which on a shared store would
+    overwrite what the other writer just committed.
+    """
+
+
+@runtime_checkable
+class ChangeNotifyingBackend(Protocol):
+    """A backend that can report writes another writer made to the store.
+
+    Declared with ``change_notification``. Without it the application's
+    in-memory model is only ever as current as its own writes, which is why
+    more than one instance cannot share a store.
+    """
+
+    def start_change_notification(
+        self, listener: Callable[[ExternalChange], None]
+    ) -> None:
+        """Begin reporting external changes to ``listener``.
+
+        The listener is called only with changes the store has already
+        applied - it never writes back. Called once, after the application's
+        first load, so no change can be reported against a model that does
+        not exist yet.
+
+        Report from a thread of the backend's own - the thread a notification
+        channel, a poller or a watcher runs on. One kind of thread is
+        forbidden: never a thread that is executing a write, whether it is
+        this application's write or that of another application sharing the
+        store. In practice that means never synchronously from inside a call
+        an application made into the backend.
+
+        The reason is that a refresh may have to wait for the refreshed
+        application's write queue. Delivered from inside that application's
+        own write it would be waiting for the call it is inside. Delivered
+        from inside a *second* application's write it is worse and quieter:
+        each one's refresh waits on its own queue while its queue waits for
+        the other's refresh to return, and both stop for good.
+
+        The application detects the one case it can see - a report arriving
+        on the thread it runs its own writes on - and raises
+        ExternalChangeRefused back at the backend. It cannot see a report
+        delivered from another instance's write thread. That one is the
+        backend's to get right, and every real transport does: a listener
+        connection, a poller and a watcher all have a thread of their own.
+        """
+        ...
+
+    def stop_change_notification(self) -> None:
+        """Stop reporting. The listener is not called again after this returns."""
+        ...
+
+
 def capabilities_of(backend: Any) -> BackendCapabilities:
     """The capabilities a backend declares, validated against what it implements.
 
@@ -218,6 +309,15 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
         if missing:
             raise TypeError(
                 f"{type(backend).__name__} declares incremental_writes but does "
+                f"not implement: {', '.join(missing)}"
+            )
+    if caps.change_notification:
+        missing = [
+            m for m in _NOTIFICATION_METHODS if not callable(getattr(backend, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"{type(backend).__name__} declares change_notification but does "
                 f"not implement: {', '.join(missing)}"
             )
     return caps

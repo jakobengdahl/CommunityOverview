@@ -110,6 +110,14 @@ Everything else about multi-instance scale-out (shared DB, Redis fan-out,
 account-bound history, workspace ACLs) lives behind that boundary and is out of
 scope for the open core.
 
+A seam of the same kind exists one level down, on the graph rather than the
+session: `change_notification` in the persistence seam
+(`core/storage_backends.py`). A backend whose store can have another writer
+reports what changed, and `GraphStorage` refreshes the affected entities —
+including the searchable-text cache and the vector index — without a restart.
+No shipped backend declares it: the file backend cannot be a shared store. See
+`docs/PERSISTENCE_BACKENDS.md`.
+
 The REST/ops surface is bounded to keep a single instance healthy under load:
 each op batch is capped by op count (≤ 500) and body size (≤ 256 KB → `413` —
 an op carrying a validated embedded image is budgeted separately instead, and

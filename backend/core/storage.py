@@ -39,6 +39,8 @@ from .models import (
 from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
 from .storage_backends import (
     EntityOperation,
+    ExternalChange,
+    ExternalChangeRefused,
     FileGraphPersistenceBackend,
     GraphPersistenceBackend,
     capabilities_of,
@@ -50,6 +52,10 @@ from . import storage_events
 
 # Event system imports
 from .events.models import EventType, EntityKind, EventContext
+
+# The origin stamped on events that report a change another writer made, so a
+# subscriber reacting by writing can tell them from its own instance's work.
+EXTERNAL_CHANGE_ORIGIN = "external-change"
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
@@ -190,7 +196,13 @@ class GraphStorage:
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
-        self._io_executor = ThreadPoolExecutor(max_workers=1)
+        # Identified so a change reported on it - which would be a report
+        # from inside the write it is running - is refused rather than left
+        # to wait on the queue this thread *is*.
+        self._writer_thread_id: Optional[int] = None
+        self._io_executor = ThreadPoolExecutor(
+            max_workers=1, initializer=self._mark_writer_thread
+        )
         # Set by the writer thread when an entity write failed: the backend's
         # image then lacks a mutation memory has. Consumed on the caller's
         # thread - by the next write, flush() or shutdown - which re-issues
@@ -229,6 +241,16 @@ class GraphStorage:
         self._system_listeners: List[Callable[["Event"], None]] = []
 
         self.load()
+
+        # Only after the first load: a change reported against a model that
+        # does not exist yet has nothing to refresh.
+        if self._backend_capabilities.change_notification:
+            self._persistence_backend.start_change_notification(
+                self.apply_external_change
+            )
+
+    def _mark_writer_thread(self) -> None:
+        self._writer_thread_id = threading.get_ident()
 
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
@@ -387,6 +409,13 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
+        # First, so nothing arrives to refresh a model that is being torn down.
+        if self._backend_capabilities.change_notification:
+            try:
+                self._persistence_backend.stop_change_notification()
+            except Exception as exc:
+                print(f"Warning: stopping change notification failed: {exc}")
+
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
@@ -509,14 +538,26 @@ class GraphStorage:
             self._history_store, edge_id, limit, offset
         )
 
-    def load(self) -> None:
+    def load(self, *, bootstrap_if_missing: bool = True) -> None:
         """
         Load graph from the configured persistence backend.
 
         Thread-safe: Uses lock for in-memory updates.
+
+        `bootstrap_if_missing` is what makes a first start work: a store that
+        does not exist yet is created from whatever is in memory. A refresh
+        passes False, because there the store belongs to somebody else - it
+        may be missing only for a moment, mid-restore, and writing this
+        instance's graph over it is the one thing a refresh must never do.
         """
         with self._lock:
             if not self._persistence_backend.exists():
+                if not bootstrap_if_missing:
+                    print(
+                        f"Warning: cannot refresh from {self.json_path}: it is "
+                        f"not there. Serving the graph in memory unchanged."
+                    )
+                    return
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
@@ -549,7 +590,7 @@ class GraphStorage:
 
                 metadata = data.get("metadata") if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": metadata.get("version", "1.0"),
                         "graph_name": metadata.get("graph_name")
                         or self._default_graph_name(),
@@ -560,34 +601,44 @@ class GraphStorage:
                         },
                     }
                 else:
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": "1.0",
                         "graph_name": self._default_graph_name(),
                     }
 
-                # Clear existing data
-                self.nodes.clear()
-                self.edges.clear()
-                self.graph.clear()
+                # Everything is parsed beside the live model and swapped in
+                # only once all of it parsed. Clearing first and refilling
+                # would mean an entity this build cannot read leaves the graph
+                # truncated - and a refresh, which cannot raise at its caller,
+                # would report that as merely being behind the store.
+                nodes: Dict[str, Node] = {}
+                edges: Dict[str, Edge] = {}
+                searchable: Dict[str, str] = {}
 
-                # Clear searchable text cache
-                self._searchable_text_cache.clear()
-
-                # Load nodes
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
-                    self.nodes[node.id] = node
-                    self.graph.add_node(node.id, data=node)
+                    nodes[node.id] = node
+                    searchable[node.id] = self._build_searchable_text(node)
 
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
-                        node
-                    )
-
-                # Load edges
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
-                    self.edges[edge.id] = edge
+                    edges[edge.id] = edge
+
+                # Past here nothing can fail: the containers are replaced in
+                # place, so anything holding a reference to one still sees the
+                # graph this instance serves.
+                self.graph_metadata = graph_metadata
+                self.nodes.clear()
+                self.nodes.update(nodes)
+                self.edges.clear()
+                self.edges.update(edges)
+                self._searchable_text_cache.clear()
+                self._searchable_text_cache.update(searchable)
+
+                self.graph.clear()
+                for node in nodes.values():
+                    self.graph.add_node(node.id, data=node)
+                for edge in edges.values():
                     self.graph.add_edge(
                         edge.source, edge.target, key=edge.id, data=edge
                     )
@@ -793,6 +844,32 @@ class GraphStorage:
             return None
         return raw.tolist() if hasattr(raw, "tolist") else list(raw)
 
+    def _adopt_supplied_vectors(self, nodes) -> None:
+        """Move vectors carried on node objects into the vector index.
+
+        The serialized payload no longer carries `embedding`, so a vector that
+        arrived on a node object is persisted nowhere unless it is adopted
+        here. What happens next is the caller's: `add_nodes` generates over
+        the whole batch afterwards, so generation wins there, while a refresh
+        generates only where the store supplied nothing.
+        """
+        supplied = self._take_inline_vectors(nodes)
+        if not supplied:
+            return
+        # The index already in memory anchors the dimension; a caller passing
+        # vectors of some other width must never evict the vectors that are
+        # already correct.
+        existing = self.vector_store.export_vectors()
+        dimension = dominant_dimension(existing) or dominant_dimension(supplied)
+        accepted = matching_dimension(supplied, dimension)
+        if len(accepted) != len(supplied):
+            print(
+                f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+                f"embedding(s) whose dimension is not {dimension}"
+            )
+        if accepted:
+            self.vector_store.load_vectors({**existing, **accepted})
+
     def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
         """Move any vector carried on a node object into a plain dict.
 
@@ -948,6 +1025,14 @@ class GraphStorage:
             print(
                 f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
             )
+        except ExternalChangeRefused:
+            # Same reason as in _do_apply, and it has to be said in both write
+            # paths or the one without it undoes the other: this is a backend
+            # reporting on a thread it may not report on, told so out of a
+            # listener it called itself. Flagging a resync would answer that
+            # by re-issuing the whole graph over a store another writer is
+            # committing to.
+            raise
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
             # The backend's image may now lack what memory has, exactly as
@@ -1032,6 +1117,14 @@ class GraphStorage:
                 backend.upsert_edge(op.payload)
             else:
                 backend.delete_edge(op.entity_id)
+        except ExternalChangeRefused:
+            # Not a write failure: the backend broke the reporting rule and
+            # got told so, on its own call stack, out of a listener it called
+            # itself. Flagging a resync here would answer that with a
+            # whole-graph write over a store that by definition has another
+            # writer. The Future still carries it, so the mutation is not
+            # reported as having landed.
+            raise
         except Exception as e:
             print(f"Error applying {len(operations)} entity operation(s): {e}")
             # The mutation is in memory and nowhere else now, and the backend's
@@ -1085,6 +1178,324 @@ class GraphStorage:
         if isinstance(name, str) and name.strip():
             return name.strip()
         return self._default_graph_name()
+
+    def apply_external_change(self, change: "ExternalChange") -> None:
+        """Bring the in-memory model in step with a write someone else made.
+
+        A backend that declares `change_notification` calls this, from a
+        thread of its own, when the store changed behind this instance's
+        back. Which threads count as its own is the backend's obligation and
+        is stated on ChangeNotifyingBackend; only one violation of it is
+        visible from here, and that one is refused below.
+        Nothing here is persisted: the change is already in the store, and
+        writing it back would fight the writer that made it.
+
+        Every derived structure a read path serves has to move with it, not
+        just the node dictionary: the NetworkX graph, the searchable-text
+        cache behind lexical search, and the vector index behind semantic
+        search. A stale entry in any of them is worse than a missing one,
+        because a miss is refilled on demand and a stale hit is served.
+
+        Events are emitted so subscriptions, agents and the history see the
+        change, marked with a distinct origin so an agent that reacts by
+        writing cannot bounce it between instances forever. A change the
+        backend could not describe is a reload, and a reload emits nothing:
+        a backend that wants subscribers to see individual changes has to
+        report them as operations.
+        """
+        if threading.get_ident() == self._writer_thread_id:
+            # This thread is the write queue. A refresh may have to wait for
+            # that queue, and waiting here would be waiting for ourselves;
+            # not waiting would reload over the write we are inside. Handing
+            # it to another thread was tried and is worse: two such refreshes
+            # race each other, and one can outlive the shutdown that was
+            # supposed to have stopped them. So it is a contract violation,
+            # and said plainly - every real transport reports from a thread
+            # of its own.
+            raise ExternalChangeRefused(
+                "a change was reported from the thread the application issued "
+                "a write on; report changes from the backend's own thread"
+            )
+
+        with self._lock:
+            if not self._settle_before_refresh():
+                return
+            if change.operations is None:
+                self._reload_from_store()
+                return
+            try:
+                for op in change.operations:
+                    # Anything this build does not recognise is a resync, not
+                    # a delete: reading an unknown action as one would drop
+                    # the entity and tell every subscriber it was deleted.
+                    if op.action not in ("upsert", "delete"):
+                        raise ValueError(f"unknown entity action {op.action!r}")
+                    if op.kind == "node":
+                        if op.action == "upsert":
+                            self._external_upsert_node(op)
+                        else:
+                            self._external_delete_node(op.entity_id)
+                    elif op.kind == "edge":
+                        if op.action == "upsert":
+                            self._external_upsert_edge(op)
+                        else:
+                            self._external_delete_edge(op.entity_id)
+                    else:
+                        raise ValueError(f"unknown entity kind {op.kind!r}")
+            except Exception as exc:
+                # A payload this build cannot read - two instances mid-upgrade,
+                # say - would otherwise leave the batch half applied and throw
+                # into whatever backend thread called us, where the writing
+                # instance would read it as its own write having failed.
+                # Resync instead, and keep it to ourselves.
+                print(
+                    f"Warning: could not apply an external change ({exc}); "
+                    f"reloading the graph instead"
+                )
+                self._reload_from_store()
+
+    def _settle_before_refresh(self) -> bool:
+        """Wait for this instance's own writes; say whether to refresh at all.
+
+        A mutation is in memory before it is in the store, so a refresh that
+        overtook one still queued would leave memory holding the store's
+        value while our write goes on to land in it. Nothing would ever put
+        that right: an instance is not told about its own writes, so the
+        disagreement would outlive every later report. Both halves of a
+        refresh wait, the reload and the named operations alike.
+
+        Holding _lock is what makes the drain enough: every mutation path
+        submits under it, so nothing new can be queued while we wait, and
+        queued work never takes _lock. Waiting is safe only because the
+        report arrives on a thread that is not running a write - see
+        ChangeNotifyingBackend, which is where that obligation is stated.
+
+        The flag is read after the drain, not before. A write already queued
+        raises it while we are waiting, so a check made first would pass on a
+        value that stopped being true before the refresh used it.
+
+        Callers must hold _lock.
+        """
+        try:
+            self._io_executor.submit(lambda: None).result()
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
+
+        if not self._resync_pending:
+            return True
+
+        # An entity write failed, so a mutation is in memory and nowhere
+        # else. Refreshing over it drops it. Writing it first is worse: the
+        # only write that carries it is the whole graph, and re-issuing this
+        # instance's whole image over a store that by definition has another
+        # writer destroys what that writer just committed - including the
+        # change being reported. So neither: stay put and say so. The next
+        # write, flush or shutdown heals the flag, and the next report brings
+        # this instance forward.
+        print(
+            "Warning: not refreshing the graph: a local write failed and "
+            "is still only in memory. This instance stays behind the "
+            "store until that write has been re-issued."
+        )
+        return False
+
+    def _reload_from_store(self) -> None:
+        """Re-read the whole graph. Callers must hold _lock, and must have
+        settled this instance's own writes first (_settle_before_refresh).
+
+        Nothing here writes. A refresh that wrote would re-assert this
+        instance's image over a store whose whole point is that someone else
+        is writing it too, which is why a failed local write stops the
+        refresh instead of being healed into it.
+
+        Bootstrapping is off: a store reporting that it is not there is not
+        an invitation to write this instance's graph over it. A store that
+        cannot be read at all is reported and left; nothing is raised, because
+        the only thread to raise into is the backend's.
+        """
+        try:
+            self.load(bootstrap_if_missing=False)
+        except Exception as exc:
+            # The store can be unreadable for a moment - being replaced as we
+            # read it, a network read failing. Throwing here would put that in
+            # the caller's lap, and the caller is the backend's thread, where
+            # the instance that made the write would read it as its own write
+            # having failed. What is in memory is behind, not wrong: whatever
+            # a half-applied batch already applied is real store state.
+            print(
+                f"Warning: could not reload the graph ({exc}); the graph in "
+                f"memory is unchanged and behind the store until the next "
+                f"change is reported"
+            )
+
+    @staticmethod
+    def _is_newer(held, reported) -> bool:
+        """Is the version we hold later than the one being reported?
+
+        Wall-clock last-writer-wins: the instances share no other ordering,
+        so their clocks have to be roughly in step for this to mean anything.
+        A pair that cannot be compared - one naive and one aware, which a
+        backend handing over datetime objects of its own could produce - is
+        not an answer, and the report is applied. Equal stamps defer to the
+        report too: a tie is unresolvable, and taking the store's side is
+        what converges the two instances. (A payload with no stamp at all
+        never reaches here as a gap: the model fills one in at parse time,
+        stamped now - so it is normally the newer one and applies, but it
+        loses to a held stamp dated in the future, which is what a
+        clock-skewed peer produces.)
+        """
+        try:
+            return bool(held > reported)
+        except TypeError:
+            return False
+
+    @staticmethod
+    def _entity_type_name(entity) -> str:
+        value = getattr(entity, "type", None)
+        return value.value if hasattr(value, "value") else str(value)
+
+    def _external_upsert_node(self, op: EntityOperation) -> None:
+        """Callers must hold _lock."""
+        # from_dict rewrites its argument in place - timestamps parsed,
+        # defaults filled in - and the argument here belongs to the backend,
+        # which may still be holding the record it reported. Read it, do not
+        # take it. The top level is all from_dict touches.
+        node = Node.from_dict(dict(op.payload))
+        existing = self.nodes.get(node.id)
+        if existing is not None and self._is_newer(
+            existing.updated_at, node.updated_at
+        ):
+            # Both instances wrote this node. The store settles on whichever
+            # write reached it last, but this instance is never told about its
+            # own, so applying a report that predates ours would leave us
+            # serving a value the store does not hold - and nothing would put
+            # it right, because there is nothing left to report. Last writer
+            # wins, by the only ordering two instances share.
+            print(
+                f"Warning: ignoring an external change to node {node.id}: this "
+                f"instance holds a newer version of it"
+            )
+            return
+        before = existing.to_dict() if existing is not None else None
+
+        # The vector described the text this node used to have. Keeping it
+        # would let semantic search go on matching a description that is gone,
+        # so it goes first and is replaced below by whatever the store carried
+        # or by a fresh one.
+        self.vector_store.remove_node_embedding(node.id)
+        self._inline_fallback.pop(node.id, None)
+
+        self.nodes[node.id] = node
+        # add_node on an existing id replaces the attributes, which is what
+        # repoints `data` at the new object; every read path that walks the
+        # graph would otherwise still hand out the old one.
+        self.graph.add_node(node.id, data=node)
+        self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+
+        self._adopt_supplied_vectors([node])
+        if not self.vector_store.has_embedding(node.id):
+            try:
+                self.vector_store.update_node_embedding(node)
+            except Exception as embed_error:
+                print(f"Warning: Could not update embedding: {embed_error}")
+
+        self._emit_event(
+            event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node.id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=node.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_node(self, node_id: str) -> None:
+        """Callers must hold _lock."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        before = node.to_dict()
+
+        # An edge cannot outlive an endpoint. The store may well have reported
+        # the edge deletions too; deleting one twice is a no-op.
+        incident = [
+            edge.id
+            for edge in self.edges.values()
+            if edge.source == node_id or edge.target == node_id
+        ]
+        for edge_id in incident:
+            self._external_delete_edge(edge_id)
+
+        if self.graph.has_node(node_id):
+            self.graph.remove_node(node_id)
+        del self.nodes[node_id]
+        self._searchable_text_cache.pop(node_id, None)
+        self.vector_store.remove_node_embedding(node_id)
+        self._inline_fallback.pop(node_id, None)
+
+        self._emit_event(
+            event_type=EventType.NODE_DELETE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node_id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_upsert_edge(self, op: EntityOperation) -> None:
+        """Callers must hold _lock."""
+        edge = Edge.from_dict(dict(op.payload))  # the backend's dict; see above
+        if edge.source not in self.nodes or edge.target not in self.nodes:
+            # add_edge would invent the missing endpoint as a node with no
+            # data, which every read path walking the graph would then trip
+            # over. Report it and leave the edge out of both structures.
+            absent = edge.source if edge.source not in self.nodes else edge.target
+            print(
+                f"Warning: ignoring external edge {edge.id}: "
+                f"endpoint {absent} is not present"
+            )
+            return
+
+        existing = self.edges.get(edge.id)
+        before = existing.to_dict() if existing is not None else None
+        if existing is not None and self.graph.has_edge(
+            existing.source, existing.target, key=existing.id
+        ):
+            # An endpoint may have moved; the old graph edge is keyed on where
+            # it used to point and would otherwise stay.
+            self.graph.remove_edge(existing.source, existing.target, key=existing.id)
+
+        self.edges[edge.id] = edge
+        self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+        self._emit_event(
+            event_type=EventType.EDGE_UPDATE if before else EventType.EDGE_CREATE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge.id,
+            entity_type=self._entity_type_name(edge),
+            before=before,
+            after=edge.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_edge(self, edge_id: str) -> None:
+        """Callers must hold _lock."""
+        edge = self.edges.pop(edge_id, None)
+        if edge is None:
+            return
+        if self.graph.has_edge(edge.source, edge.target, key=edge_id):
+            self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+
+        self._emit_event(
+            event_type=EventType.EDGE_DELETE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge_id,
+            entity_type=self._entity_type_name(edge),
+            before=edge.to_dict(),
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
 
     def reload(self) -> None:
         """
@@ -1320,23 +1731,7 @@ class GraphStorage:
                 # serialized payload no longer carries that field, so adopt it
                 # into the vector store or it is persisted nowhere. Generation
                 # below still wins when the ML stack is available, as before.
-                supplied = self._take_inline_vectors(nodes_to_embed)
-                if supplied:
-                    # The index already in memory anchors the dimension; a
-                    # caller passing vectors of some other width must never
-                    # evict the vectors that are already correct.
-                    existing = self.vector_store.export_vectors()
-                    dimension = dominant_dimension(existing) or dominant_dimension(
-                        supplied
-                    )
-                    accepted = matching_dimension(supplied, dimension)
-                    if len(accepted) != len(supplied):
-                        print(
-                            f"Warning: ignored {len(supplied) - len(accepted)} supplied "
-                            f"embedding(s) whose dimension is not {dimension}"
-                        )
-                    if accepted:
-                        self.vector_store.load_vectors({**existing, **accepted})
+                self._adopt_supplied_vectors(nodes_to_embed)
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
