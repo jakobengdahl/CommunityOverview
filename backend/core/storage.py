@@ -855,23 +855,28 @@ class GraphStorage:
         """
         self._adopt_vectors(self._take_inline_vectors(nodes))
 
-    def _adopt_vectors(self, supplied: Dict[str, Any]) -> None:
+    def _adopt_vectors(
+        self, supplied: Dict[str, Any], anchor: Optional[int] = None
+    ) -> None:
         """Move vectors already taken off their nodes into the index.
 
         Separate from _adopt_supplied_vectors because the refresh takes a
         vector off its node when the operation is applied - so the event it
         emits does not carry it - and adopts it only when the batch ends.
+
+        `anchor` is the width to judge the supplied vectors against, for a
+        caller that has already emptied the index of what would otherwise
+        have set it.
         """
         if not supplied:
             return
         # The index already in memory anchors the dimension; a caller passing
         # vectors of some other width must never evict the vectors that are
-        # already correct. A batch that replaced every vector in the index
-        # leaves nothing to anchor on, and the supplied width becomes the new
-        # one - which is the coherent answer where there are no survivors to
-        # protect.
+        # already correct.
         existing = self.vector_store.export_vectors()
-        dimension = dominant_dimension(existing) or dominant_dimension(supplied)
+        dimension = (
+            anchor or dominant_dimension(existing) or dominant_dimension(supplied)
+        )
         accepted = matching_dimension(supplied, dimension)
         if len(accepted) != len(supplied):
             print(
@@ -1299,19 +1304,30 @@ class GraphStorage:
         once per operation, and the rebuild is linear in the index, so a batch
         would cost the square of it.
 
-        Nothing observes the index between the batch's first operation and
-        this call: every read path takes _lock and the whole batch holds it.
-        A system listener does run inside that window, on this thread, and
-        sees the index as the batch found it - its own entity included, so
-        that entity is half applied from where it stands: node updated, vector
-        not. It already sees the graph half applied in the larger sense, since
-        the operations after its own have not run either.
+        No writer interleaves: every mutation path takes _lock and the whole
+        batch holds it. Readers are another matter, and this is the cost of
+        settling once - get_node, semantic_search_nodes and find_similar_nodes
+        take no lock at all, before this change as after, so a concurrent
+        reader can see a node the batch updated while its vector is still the
+        one the batch found, until the settle lands. Settling per entity
+        narrowed that window to one entity rather than closing it. A system
+        listener runs inside the window too, on this thread, and sees its own
+        entity half applied that way: node updated, vector not.
 
         Callers must hold _lock.
         """
         if not touched:
             return
 
+        # Read before the eviction, because the eviction is what would
+        # destroy it. A batch naming every id in the index empties it, and an
+        # adoption anchored on what is left would then take its width from
+        # the supplied vectors - so one report of the wrong width would be
+        # accepted rather than refused, and the generated vectors that follow
+        # would look like a model change and discard the index. Every vector
+        # in the index has the same width by construction, so the width of
+        # any of them is the anchor.
+        anchor = self.vector_store.dimension
         # Whatever these ids had described the text they used to have.
         self.vector_store.remove_nodes_embeddings(list(touched))
 
@@ -1322,7 +1338,8 @@ class GraphStorage:
             return
 
         self._adopt_vectors(
-            {node.id: vector for node, vector in upserted if vector is not None}
+            {node.id: vector for node, vector in upserted if vector is not None},
+            anchor,
         )
         missing = [
             node for node, _ in upserted if not self.vector_store.has_embedding(node.id)

@@ -648,6 +648,45 @@ class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
         finally:
             storage.shutdown_events()
 
+    def test_a_mixed_width_batch_does_not_lose_the_index(self):
+        """The index anchors which width is right, and the batch empties it
+        of exactly the ids being replaced. Read the anchor after that and it
+        comes from the supplied vectors instead: a report of the wrong width
+        is accepted rather than refused, and the generated vectors that
+        follow then look like a model change and discard everything."""
+        storage, backend = self._storage()
+        storage.add_nodes(
+            [Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        # Three wide, where the index is two.
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Renamed"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                        EntityOperation.upsert_node(_node_payload("b", "Rebeacon")),
+                    ]
+                )
+            )
+
+            # The odd width is refused and both nodes fall back to generation.
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [7.0, 7.0]
+            )
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [7.0, 7.0]
+            )
+        finally:
+            storage.shutdown_events()
+
     def test_generation_is_batched_too(self):
         """The rebuild bound has to hold for the generated half as well, and
         a batch whose nodes all carry vectors never reaches it."""
@@ -736,6 +775,42 @@ class TestExternalRefreshSettlesTheVectorIndexOnce:
             )
         )
         return storage.vector_store.revision - before
+
+    def test_a_batch_that_uses_every_pass_costs_exactly_three(self):
+        """The constant the docs teach a backend author. Both other counting
+        tests are built so only two of the three passes fire - one supplies a
+        vector for every node so generation never runs, the other names only
+        new ids so the eviction changes nothing - and a batch that evicts,
+        adopts and generates was never measured."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[1.0, 0.0]),
+                Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0]),
+            ],
+            [],
+        )
+        storage.flush()
+        _stub_generator(storage)
+        try:
+            before = storage.vector_store.revision
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.delete_node("b"),
+                    ]
+                )
+            )
+
+            # Eviction, adoption, generation - one pass each.
+            assert storage.vector_store.revision - before == 3
+        finally:
+            storage.shutdown_events()
 
     def test_the_index_is_rebuilt_the_same_number_of_times_whatever_the_batch(self):
         """The property, stated as a count rather than a clock: rebuilding per
@@ -863,6 +938,35 @@ class TestExternalRefreshSettlesEvenWhenTheBatchFails:
             assert current is None or current != pytest.approx([1.0, 0.0]), (
                 "the applied prefix kept the vector for the text it no longer has"
             )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_settle_that_itself_fails_is_contained_and_still_reloads(self):
+        """The settle is wrapped for the same reason the loop is: everything
+        in it reaches numpy, and a raise there would land in the backend's
+        thread, where the instance that made the write reads it as its own
+        write having failed. Containing it is only half the answer - the
+        batch is half settled, so the reload still has to run."""
+        storage, backend = self._storage()
+        try:
+
+            def explode(node_ids):
+                raise RuntimeError("the index went away")
+
+            storage.vector_store.remove_nodes_embeddings = explode
+            try:
+                backend.listener(
+                    ExternalChange.entities(
+                        [EntityOperation.upsert_node(_node_payload("a", "Renamed"))]
+                    )
+                )
+            finally:
+                del storage.vector_store.remove_nodes_embeddings
+
+            # Reloaded, so memory is the store's copy rather than the
+            # half-settled prefix - a node renamed in memory carrying the
+            # vector for the text it no longer has.
+            assert storage.get_node("a").name == "Alpha"
         finally:
             storage.shutdown_events()
 
