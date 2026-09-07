@@ -596,6 +596,107 @@ class TestChangeNotificationWiring:
             storage.shutdown_events()
 
 
+def _stub_generator(storage, vector=(7.0, 7.0)):
+    """Stand in for the embedding model, which CI does not install.
+
+    Without it every test of the settle's generation branch is vacuous: the
+    real call raises ImportError and the branch does nothing.
+    """
+
+    def generate(nodes):
+        storage.vector_store._absorb({node.id: list(vector) for node in nodes})
+
+    storage.vector_store.update_nodes_embeddings = generate
+
+
+class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
+    """The half of the settle CI cannot reach on its own."""
+
+    def _storage(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+        storage.flush()
+        return storage, backend
+
+    def test_a_supplied_vector_is_not_overwritten_by_generation(self):
+        """The asymmetry `_adopt_supplied_vectors` documents: add_nodes
+        generates over the whole batch so generation wins there, while a
+        refresh generates only where the store supplied nothing. Computing
+        what is missing before adopting rather than after inverts it."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [9.0, 9.0]
+            ), "the store's own vector was overwritten by a generated one"
+            # And the one the store said nothing about did get generated.
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [7.0, 7.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_generation_is_batched_too(self):
+        """The rebuild bound has to hold for the generated half as well, and
+        a batch whose nodes all carry vectors never reaches it."""
+        rebuilds = []
+        for count in (2, 20):
+            storage, backend = self._storage()
+            _stub_generator(storage)
+            try:
+                before = storage.vector_store.revision
+                backend.listener(
+                    ExternalChange.entities(
+                        [
+                            EntityOperation.upsert_node(
+                                _node_payload(f"g{i}", f"Gen {i}")
+                            )
+                            for i in range(count)
+                        ]
+                    )
+                )
+                rebuilds.append(storage.vector_store.revision - before)
+            finally:
+                storage.shutdown_events()
+
+        assert rebuilds[0] == rebuilds[1]
+        assert rebuilds[1] <= 2
+
+    def test_a_generator_that_fails_does_not_reach_the_backend(self):
+        """Containment is what the whole refresh path promises the backend,
+        and the absent ML stack raises ImportError - so an `except` narrowed
+        to that would look right and let everything else through."""
+        storage, backend = self._storage()
+
+        def explode(nodes):
+            raise RuntimeError("the model went away")
+
+        storage.vector_store.update_nodes_embeddings = explode
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+            # Contained: the upsert stands, and nothing was raised at us.
+            assert storage.get_node("b").name == "Beacon"
+        finally:
+            storage.shutdown_events()
+
+
 class TestExternalRefreshSettlesTheVectorIndexOnce:
     """The index matrix is rebuilt whole on every change to it, so the cost of
     a refresh is decided by how many times a batch changes it, not by how big
@@ -761,6 +862,51 @@ class TestExternalRefreshSettlesEvenWhenTheBatchFails:
             current = storage.vector_store.get_vector_list("a")
             assert current is None or current != pytest.approx([1.0, 0.0]), (
                 "the applied prefix kept the vector for the text it no longer has"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_that_does_land_is_not_undone_by_the_settle(self):
+        """The other side of the same window. When the reload lands it has
+        rebuilt the index from the store, so a settle running after it would
+        evict exactly what the reload just restored."""
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    dict(_node_payload("a", "Alpha"), embedding=[0.25, 0.5]),
+                    dict(_node_payload("c", "Cedar"), embedding=[0.75, 0.5]),
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [0.75, 0.5]
+            )
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("c", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="c",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            # The reload put the store's graph back, vectors included.
+            assert storage.get_node("c").name == "Cedar"
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [0.75, 0.5]
             )
         finally:
             storage.shutdown_events()
@@ -1587,6 +1733,24 @@ class TestExternalRefreshFailureModes:
             return original()
 
         storage._settle_before_refresh = watched
+        # The settle mutates the index, so it needs the lock for the same
+        # reason the drain does: a reader let in mid-batch sees neither the
+        # old index nor the new one.
+        settle = storage._settle_vector_index
+
+        def watched_settle(touched):
+            def probe():
+                got = storage._lock.acquire(blocking=False)
+                settled_without_the_lock.append(got)
+                if got:
+                    storage._lock.release()
+
+            elsewhere = threading.Thread(target=probe)
+            elsewhere.start()
+            elsewhere.join(5)
+            return settle(touched)
+
+        storage._settle_vector_index = watched_settle
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
             storage.flush()
@@ -1598,9 +1762,13 @@ class TestExternalRefreshFailureModes:
                 )
             )
 
-            assert settled_without_the_lock == [False, False]
+            # Three probes: the drain on each report, and the settle on the
+            # one that named entities. The reload path returns before there
+            # is anything to settle.
+            assert settled_without_the_lock == [False, False, False]
         finally:
             storage._settle_before_refresh = original
+            storage._settle_vector_index = settle
             storage.shutdown_events()
 
     @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)
