@@ -596,6 +596,770 @@ class TestChangeNotificationWiring:
             storage.shutdown_events()
 
 
+def _generated(name: str):
+    """The vector `_stub_generator` produces for a node of this name."""
+    return [float(len(name)), 1.0]
+
+
+def _stub_generator(storage):
+    """Stand in for the embedding model, which CI does not install.
+
+    Without it every test of the settle's generation branch is vacuous: the
+    real call raises ImportError and the branch does nothing.
+
+    The vector is derived from the node's name rather than being a constant,
+    so an assertion can tell which node was embedded. A constant cannot: it
+    reads the same whether the batch handed generation the node it left or
+    the one it replaced, and embedding the replaced node's text is exactly
+    the stale vector the refresh exists to prevent.
+    """
+
+    def generate(nodes):
+        storage.vector_store._absorb({node.id: _generated(node.name) for node in nodes})
+
+    storage.vector_store.update_nodes_embeddings = generate
+
+
+class TestExternalRefreshGeneratesWhatTheStoreDidNotSupply:
+    """The half of the settle CI cannot reach on its own."""
+
+    def _storage(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+        storage.flush()
+        return storage, backend
+
+    def test_a_supplied_vector_is_not_overwritten_by_generation(self):
+        """The asymmetry `_adopt_supplied_vectors` documents: add_nodes
+        generates over the whole batch so generation wins there, while a
+        refresh generates only where the store supplied nothing. Computing
+        what is missing before adopting rather than after inverts it."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [9.0, 9.0]
+            ), "the store's own vector was overwritten by a generated one"
+            # And the one the store said nothing about did get generated.
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                _generated("Cedar")
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_mixed_width_batch_does_not_lose_the_index(self):
+        """The index anchors which width is right, and the batch empties it
+        of exactly the ids being replaced. Read the anchor after that and it
+        comes from the supplied vectors instead: a report of the wrong width
+        is accepted rather than refused, and the generated vectors that
+        follow then look like a model change and discard everything."""
+        storage, backend = self._storage()
+        storage.add_nodes(
+            [Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        # Three wide, where the index is two.
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Renamed"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                        EntityOperation.upsert_node(_node_payload("b", "Rebeacon")),
+                    ]
+                )
+            )
+
+            # The odd width is refused and both nodes fall back to generation.
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                _generated("Renamed")
+            )
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                _generated("Rebeacon")
+            )
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize(
+        "reported, expected",
+        [
+            # Three reports, so the commonest width is not the first one.
+            # With only two, a majority vote always ties and the tie resolves
+            # to first-seen - which is the answer first-wins gives anyway, so
+            # a two-report arrangement cannot tell the two rules apart at all.
+            (
+                [
+                    ("a", "Alpha", [1.0, 1.0]),
+                    ("b", "Beacon", [1.0, 2.0, 3.0]),
+                    ("c", "Cedar", [4.0, 5.0, 6.0]),
+                ],
+                {
+                    "a": [1.0, 1.0],
+                    "b": _generated("Beacon"),
+                    "c": _generated("Cedar"),
+                },
+            ),
+            # First is the widest. Its vector is adopted and the narrow one
+            # refused; generation then comes back at the model's width, which
+            # reads as a model change and empties the index of what was just
+            # adopted. The settle notices and generates for what was stranded,
+            # so both nodes end with a vector. The per-operation path did not:
+            # it left the first one with nothing, depending on the order the
+            # store reported them in.
+            (
+                [("a", "Wide", [1.0, 2.0, 3.0]), ("b", "Narrow", [7.0, 7.0])],
+                {"a": _generated("Wide"), "b": _generated("Narrow")},
+            ),
+            # Operation order and id order disagree, and both widths decide
+            # nothing on their own.
+            (
+                [("z", "Zed", [7.0, 7.0]), ("a", "Ay", [1.0, 2.0, 3.0])],
+                {"z": [7.0, 7.0], "a": _generated("Ay")},
+            ),
+        ],
+        ids=[
+            "first-is-not-commonest",
+            "first-is-widest",
+            "first-is-not-lowest-id",
+        ],
+    )
+    def test_an_empty_index_takes_its_width_from_the_first_report(
+        self, reported, expected
+    ):
+        """Nothing local anchors the width, so the batch establishes it. A
+        majority vote would adopt the commonest width and refuse the rest;
+        the refused ones are then generated at the model's width, which reads
+        as a model change and discards what was just adopted, with nothing
+        left to regenerate it. First wins is what the per-operation path did,
+        one node at a time."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        _stub_generator(storage)
+        try:
+            assert storage.vector_store.dimension is None, "the index must start empty"
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload(node_id, name), embedding=embedding)
+                        )
+                        for node_id, name, embedding in reported
+                    ]
+                )
+            )
+
+            for node_id, vector in expected.items():
+                got = storage.vector_store.get_vector_list(node_id)
+                if vector is None:
+                    assert got is None, f"{node_id} kept a vector it should not have"
+                else:
+                    assert got == pytest.approx(vector), f"{node_id} is wrong"
+
+        finally:
+            storage.shutdown_events()
+
+    def test_a_model_narrower_than_the_store_strands_nobody(self):
+        """A peer running a different embedding model is the ordinary way the
+        two widths disagree. The supplied vector is adopted, generation for
+        the rest comes back at the local model's width, and the index is
+        emptied of what was adopted - so the settle looks again and generates
+        for whoever was left behind."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+
+        def wide(nodes):
+            storage.vector_store._absorb(
+                {node.id: [float(len(node.name))] * 3 for node in nodes}
+            )
+
+        storage.vector_store.update_nodes_embeddings = wide
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Alpha"), embedding=[1.0, 2.0])
+                        ),
+                    ]
+                )
+            )
+
+            # Both named, both generation-eligible, so neither is left without.
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [5.0, 5.0, 5.0]
+            )
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [5.0, 5.0, 5.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_replaced_width_still_refuses_a_wrong_one_with_no_generator(self):
+        """The anchor's own job, stated where nothing can paper over it. With
+        a generator available a refused vector is generated instead, so every
+        node ends with one either way and the refusal is invisible. Without
+        one - the ML-free install this repo supports as first class - refusing
+        is the whole observable, and accepting the wrong width would put a
+        vector of a foreign model's shape into the index."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[1.0, 0.0]),
+                Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0]),
+            ],
+            [],
+        )
+        storage.flush()
+        try:
+            # Both ids replaced, so the index empties - and the width it held
+            # is still the one to judge against.
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Renamed"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("b", "Rebeacon"),
+                                embedding=[4.0, 5.0, 6.0],
+                            )
+                        ),
+                    ]
+                )
+            )
+
+            for node_id in ("a", "b"):
+                assert storage.vector_store.get_vector_list(node_id) is None, (
+                    f"{node_id} took a vector of the wrong width"
+                )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_deleted_width_does_not_refuse_a_supplied_vector(self):
+        """The anchor exists so a batch that empties the index by replacing
+        everything is still judged against the width it replaced. A batch that
+        empties it by deleting everything is the other case: the old width
+        belongs to nobody, and defending it refuses a supplied vector for
+        disagreeing with vectors that are gone."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [Node(id="x", type=NodeType.ACTOR, name="Xeno", embedding=[1.0, 0.0])],
+            [],
+        )
+        storage.flush()
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.delete_node("x"),
+                        EntityOperation.upsert_node(
+                            dict(
+                                _node_payload("a", "Alpha"),
+                                embedding=[1.0, 2.0, 3.0],
+                            )
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [1.0, 2.0, 3.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_generation_embeds_the_node_the_batch_left(self):
+        """A rename with no vector of its own has to be embedded from the
+        text it now has. Handing generation the node the batch replaced
+        instead leaves the index describing text that is gone - and the
+        settle runs after the loop, so both nodes are within reach of it."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("a", "Alphabetical"))]
+                )
+            )
+
+            assert storage.get_node("a").name == "Alphabetical"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                _generated("Alphabetical")
+            )
+            assert storage.vector_store.get_vector_list("a") != pytest.approx(
+                _generated("Alpha")
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_second_upsert_without_a_vector_generates_rather_than_keeping_the_first(
+        self,
+    ):
+        """Last operation wins on the vector half too. The first operation
+        supplied one; the second says nothing, which means generate - not
+        carry the first one forward onto text it never described."""
+        storage, backend = self._storage()
+        _stub_generator(storage)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "First"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(
+                            _node_payload("a", "Second and longer")
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a").name == "Second and longer"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                _generated("Second and longer")
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_generation_is_batched_too(self):
+        """The rebuild bound has to hold for the generated half as well, and
+        a batch whose nodes all carry vectors never reaches it."""
+        rebuilds = []
+        for count in (2, 20):
+            storage, backend = self._storage()
+            _stub_generator(storage)
+            try:
+                before = storage.vector_store.revision
+                backend.listener(
+                    ExternalChange.entities(
+                        [
+                            EntityOperation.upsert_node(
+                                _node_payload(f"g{i}", f"Gen {i}")
+                            )
+                            for i in range(count)
+                        ]
+                    )
+                )
+                rebuilds.append(storage.vector_store.revision - before)
+            finally:
+                storage.shutdown_events()
+
+        assert rebuilds[0] == rebuilds[1]
+        assert rebuilds[1] <= 2
+
+    def test_a_generator_that_fails_does_not_reach_the_backend(self):
+        """Containment is what the whole refresh path promises the backend,
+        and the absent ML stack raises ImportError - so an `except` narrowed
+        to that would look right and let everything else through."""
+        storage, backend = self._storage()
+
+        def explode(nodes):
+            raise RuntimeError("the model went away")
+
+        storage.vector_store.update_nodes_embeddings = explode
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+
+            # Contained: the upsert stands, and nothing was raised at us.
+            assert storage.get_node("b").name == "Beacon"
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshSettlesTheVectorIndexOnce:
+    """The index matrix is rebuilt whole on every change to it, so the cost of
+    a refresh is decided by how many times a batch changes it, not by how big
+    the batch is."""
+
+    def _storage_with(self, backend, count):
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(
+                    id=f"n{i}",
+                    type=NodeType.ACTOR,
+                    name=f"Node {i}",
+                    embedding=[float(i), 0.5],
+                )
+                for i in range(count)
+            ],
+            [],
+        )
+        storage.flush()
+        return storage
+
+    @staticmethod
+    def _report(storage, backend, count):
+        """Report `count` node upserts as one batch; return the rebuild count."""
+        before = storage.vector_store.revision
+        backend.listener(
+            ExternalChange.entities(
+                [
+                    EntityOperation.upsert_node(
+                        dict(
+                            _node_payload(f"n{i}", f"Renamed {i}"), embedding=[9.0, 9.0]
+                        )
+                    )
+                    for i in range(count)
+                ]
+            )
+        )
+        return storage.vector_store.revision - before
+
+    def test_a_batch_that_uses_every_pass_costs_exactly_three(self):
+        """The constant the docs teach a backend author. Both other counting
+        tests are built so only two of the three passes fire - one supplies a
+        vector for every node so generation never runs, the other names only
+        new ids so the eviction changes nothing - and a batch that evicts,
+        adopts and generates was never measured."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(id="a", type=NodeType.ACTOR, name="Alpha", embedding=[1.0, 0.0]),
+                Node(id="b", type=NodeType.ACTOR, name="Beacon", embedding=[2.0, 0.0]),
+            ],
+            [],
+        )
+        storage.flush()
+        _stub_generator(storage)
+        try:
+            before = storage.vector_store.revision
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.upsert_node(_node_payload("c", "Cedar")),
+                        EntityOperation.delete_node("b"),
+                    ]
+                )
+            )
+
+            # Eviction, adoption, generation - one pass each.
+            assert storage.vector_store.revision - before == 3
+        finally:
+            storage.shutdown_events()
+
+    def test_the_index_is_rebuilt_the_same_number_of_times_whatever_the_batch(self):
+        """The property, stated as a count rather than a clock: rebuilding per
+        reported node is linear in the index per operation, so a batch costs
+        the square of it. Two batches of very different sizes must cost the
+        index the same."""
+        small_backend = _NotifyingBackend()
+        small = self._storage_with(small_backend, 20)
+        large_backend = _NotifyingBackend()
+        large = self._storage_with(large_backend, 20)
+        try:
+            rebuilds_for_two = self._report(small, small_backend, 2)
+            rebuilds_for_twenty = self._report(large, large_backend, 20)
+
+            assert rebuilds_for_two == rebuilds_for_twenty
+            # One eviction pass and one adoption is the whole cost.
+            assert rebuilds_for_twenty <= 2
+        finally:
+            small.shutdown_events()
+            large.shutdown_events()
+
+    def test_the_batch_still_leaves_every_vector_where_it_belongs(self):
+        """Settling once must land exactly what settling per node did: the
+        reported vectors in, the replaced ones out."""
+        backend = _NotifyingBackend()
+        storage = self._storage_with(backend, 3)
+        try:
+            self._report(storage, backend, 2)
+
+            assert storage.vector_store.get_vector_list("n0") == pytest.approx(
+                [9.0, 9.0]
+            )
+            assert storage.vector_store.get_vector_list("n1") == pytest.approx(
+                [9.0, 9.0]
+            )
+            # Untouched by the batch, so untouched in the index.
+            assert storage.vector_store.get_vector_list("n2") == pytest.approx(
+                [2.0, 0.5]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_the_last_operation_for_an_id_decides_what_the_index_keeps(self):
+        """A batch can touch the same id twice, and the store applied them in
+        order. Settling at the end must land the last one, not the first."""
+        for operations, expected in (
+            (["upsert", "delete"], None),
+            (["delete", "upsert"], [9.0, 9.0]),
+        ):
+            backend = _NotifyingBackend()
+            storage = self._storage_with(backend, 2)
+            try:
+                upsert = EntityOperation.upsert_node(
+                    dict(_node_payload("n0", "Renamed"), embedding=[9.0, 9.0])
+                )
+                delete = EntityOperation.delete_node("n0")
+                backend.listener(
+                    ExternalChange.entities(
+                        [upsert if name == "upsert" else delete for name in operations]
+                    )
+                )
+
+                got = storage.vector_store.get_vector_list("n0")
+                if expected is None:
+                    assert got is None, f"{operations} left a vector behind"
+                    assert storage.get_node("n0") is None
+                else:
+                    assert got == pytest.approx(expected), f"{operations} lost it"
+                    assert storage.get_node("n0") is not None
+            finally:
+                storage.shutdown_events()
+
+
+class TestExternalRefreshSettlesEvenWhenTheBatchFails:
+    """A reload supersedes the settle - but _reload_from_store deliberately
+    does not land in two cases, and then the applied prefix is what this
+    instance serves."""
+
+    def _storage(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(
+                    id="a",
+                    type=NodeType.ACTOR,
+                    name="Alpha",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+            [],
+        )
+        storage.flush()
+        return storage, backend
+
+    def test_a_half_applied_batch_whose_reload_cannot_land_still_settles(self):
+        """The store reports it is not there - another writer emptied it, a
+        restore is in progress - so the reload declines rather than writing
+        this instance's graph over it. What applied before the batch failed
+        stays in memory, and its vectors must describe it: a renamed node
+        left with the vector for its old text is the stale hit the refresh
+        exists to prevent."""
+        storage, backend = self._storage()
+        try:
+            backend.written = False
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="a",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a").name == "Renamed"
+            current = storage.vector_store.get_vector_list("a")
+            assert current is None or current != pytest.approx([1.0, 0.0]), (
+                "the applied prefix kept the vector for the text it no longer has"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_settle_that_itself_fails_is_contained_and_still_reloads(self):
+        """The settle is wrapped for the same reason the loop is: everything
+        in it reaches numpy, and a raise there would land in the backend's
+        thread, where the instance that made the write reads it as its own
+        write having failed. Containing it is only half the answer - the
+        batch is half settled, so the reload still has to run."""
+        storage, backend = self._storage()
+        try:
+
+            def explode(node_ids):
+                raise RuntimeError("the index went away")
+
+            storage.vector_store.remove_nodes_embeddings = explode
+            try:
+                backend.listener(
+                    ExternalChange.entities(
+                        [EntityOperation.upsert_node(_node_payload("a", "Renamed"))]
+                    )
+                )
+            finally:
+                del storage.vector_store.remove_nodes_embeddings
+
+            # Reloaded, so memory is the store's copy rather than the
+            # half-settled prefix - a node renamed in memory carrying the
+            # vector for the text it no longer has.
+            assert storage.get_node("a").name == "Alpha"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_that_does_land_is_not_undone_by_the_settle(self):
+        """The other side of the same window. When the reload lands it has
+        rebuilt the index from the store, so a settle running after it would
+        evict exactly what the reload just restored."""
+        backend = _NotifyingBackend()
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    dict(_node_payload("a", "Alpha"), embedding=[0.25, 0.5]),
+                    dict(_node_payload("c", "Cedar"), embedding=[0.75, 0.5]),
+                ],
+                "edges": [],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [0.75, 0.5]
+            )
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("c", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="c",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            # The reload put the store's graph back, vectors included.
+            assert storage.get_node("c").name == "Cedar"
+            assert storage.vector_store.get_vector_list("c") == pytest.approx(
+                [0.75, 0.5]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_deleted_node_leaves_no_vector_when_the_reload_cannot_land(self):
+        """The same window, the other operation: an orphan vector survives
+        into the sidecar on the next save and takes an over-fetch slot."""
+        storage, backend = self._storage()
+        try:
+            backend.written = False
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.delete_node("a"),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="a",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a") is None
+            assert storage.vector_store.get_vector_list("a") is None
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshEventsCarryNoVector:
+    """The history store strips `embedding` by name, because a vector belongs
+    in the sidecar rather than in every mutation record. Webhook and agent
+    payloads have no such filter, so the refresh must not hand them one."""
+
+    def test_an_external_upsert_emits_no_embedding(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        )
+                    ]
+                )
+            )
+
+            assert [e.event_type for e in seen] == [EventType.NODE_CREATE]
+            assert seen[0].entity.after.get("embedding") is None
+            # And it did land where it belongs.
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [9.0, 9.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_delete_in_the_same_batch_emits_no_embedding_either(self):
+        """`before` is built from the node the batch put there, so it carries
+        the vector too unless the upsert took it off."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.delete_node("b"),
+                    ]
+                )
+            )
+
+            assert [e.event_type for e in seen] == [
+                EventType.NODE_CREATE,
+                EventType.NODE_DELETE,
+            ]
+            assert seen[1].entity.before.get("embedding") is None
+        finally:
+            storage.shutdown_events()
+
+
 class TestExternalRefreshLeavesNothingStale:
     def test_an_upsert_drops_a_vector_the_graph_file_still_carries_inline(self):
         """A pre-split store hands its vectors on the node objects, and
@@ -1333,6 +2097,24 @@ class TestExternalRefreshFailureModes:
             return original()
 
         storage._settle_before_refresh = watched
+        # The settle mutates the index, so it needs the lock for the same
+        # reason the drain does: a reader let in mid-batch sees neither the
+        # old index nor the new one.
+        settle = storage._settle_vector_index
+
+        def watched_settle(touched):
+            def probe():
+                got = storage._lock.acquire(blocking=False)
+                settled_without_the_lock.append(got)
+                if got:
+                    storage._lock.release()
+
+            elsewhere = threading.Thread(target=probe)
+            elsewhere.start()
+            elsewhere.join(5)
+            return settle(touched)
+
+        storage._settle_vector_index = watched_settle
         try:
             storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
             storage.flush()
@@ -1344,9 +2126,13 @@ class TestExternalRefreshFailureModes:
                 )
             )
 
-            assert settled_without_the_lock == [False, False]
+            # Three probes: the drain on each report, and the settle on the
+            # one that named entities. The reload path returns before there
+            # is anything to settle.
+            assert settled_without_the_lock == [False, False, False]
         finally:
             storage._settle_before_refresh = original
+            storage._settle_vector_index = settle
             storage.shutdown_events()
 
     @pytest.mark.parametrize("change", _RESYNCING_CHANGES, ids=_RESYNC_IDS)

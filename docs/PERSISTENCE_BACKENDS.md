@@ -256,6 +256,17 @@ What the backend passes is an `ExternalChange`:
   applied them. Each upsert carries the entity's new content, so the refresh
   needs no read-back. An upsert whose payload carries an `embedding` hands
   the vector over with it.
+
+  **Report what the store applied together as one change, not one change per
+  entity.** The vector index is rebuilt whole whenever it changes, so
+  `GraphStorage` settles it a small fixed number of times per reported change
+  — one pass to evict what the change touched, one to adopt the vectors it
+  carried, one to generate for the nodes it did not, and a fourth only when
+  that generation ran at a width the batch had not adopted, which empties the
+  index and strands the adopted ones — rather than per operation. Splitting a
+  batch of a hundred into a hundred reports asks for hundreds of rebuilds
+  instead of those few, each linear in the index. The cost of a refresh is
+  decided here, by the backend, not by the size of the batch.
 - `ExternalChange.unknown()` — the backend knows only that something
   changed. `GraphStorage` drains its own write queue and reloads the whole
   graph. Two things it will not do: bootstrap, so a store that reports it is

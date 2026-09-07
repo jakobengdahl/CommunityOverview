@@ -853,14 +853,30 @@ class GraphStorage:
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
         """
-        supplied = self._take_inline_vectors(nodes)
+        self._adopt_vectors(self._take_inline_vectors(nodes))
+
+    def _adopt_vectors(
+        self, supplied: Dict[str, Any], anchor: Optional[int] = None
+    ) -> None:
+        """Move vectors already taken off their nodes into the index.
+
+        Separate from _adopt_supplied_vectors because the refresh takes a
+        vector off its node when the operation is applied - so the event it
+        emits does not carry it - and adopts it only when the batch ends.
+
+        `anchor` is the width to judge the supplied vectors against, for a
+        caller that has already emptied the index of what would otherwise
+        have set it.
+        """
         if not supplied:
             return
         # The index already in memory anchors the dimension; a caller passing
         # vectors of some other width must never evict the vectors that are
         # already correct.
         existing = self.vector_store.export_vectors()
-        dimension = dominant_dimension(existing) or dominant_dimension(supplied)
+        dimension = (
+            anchor or dominant_dimension(existing) or dominant_dimension(supplied)
+        )
         accepted = matching_dimension(supplied, dimension)
         if len(accepted) != len(supplied):
             print(
@@ -1223,6 +1239,14 @@ class GraphStorage:
             if change.operations is None:
                 self._reload_from_store()
                 return
+            # Every change to the vector index rebuilds its matrix whole,
+            # so doing that once per reported node is linear in the index per
+            # operation and quadratic over a batch. Collect what the batch
+            # touches and settle the index once, at the end - the shape
+            # add_nodes already has. A dict gives last-operation-wins per id,
+            # which is what the store applied.
+            touched: Dict[str, Tuple[Optional[Node], Any]] = {}
+            failure: Optional[Exception] = None
             try:
                 for op in change.operations:
                     # Anything this build does not recognise is a resync, not
@@ -1232,9 +1256,9 @@ class GraphStorage:
                         raise ValueError(f"unknown entity action {op.action!r}")
                     if op.kind == "node":
                         if op.action == "upsert":
-                            self._external_upsert_node(op)
+                            self._external_upsert_node(op, touched)
                         else:
-                            self._external_delete_node(op.entity_id)
+                            self._external_delete_node(op.entity_id, touched)
                     elif op.kind == "edge":
                         if op.action == "upsert":
                             self._external_upsert_edge(op)
@@ -1243,16 +1267,118 @@ class GraphStorage:
                     else:
                         raise ValueError(f"unknown entity kind {op.kind!r}")
             except Exception as exc:
+                failure = exc
+
+            # Whatever did apply, settled before any reload. A reload that
+            # lands supersedes this, but _reload_from_store deliberately does
+            # not land in two cases - a store reporting it is not there, and a
+            # read that fails - and then the applied prefix stays in memory.
+            # Its vectors have to match it, or a renamed node goes on matching
+            # the description it no longer has.
+            try:
+                self._settle_vector_index(touched)
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+
+            if failure is not None:
                 # A payload this build cannot read - two instances mid-upgrade,
                 # say - would otherwise leave the batch half applied and throw
                 # into whatever backend thread called us, where the writing
                 # instance would read it as its own write having failed.
                 # Resync instead, and keep it to ourselves.
                 print(
-                    f"Warning: could not apply an external change ({exc}); "
+                    f"Warning: could not apply an external change ({failure}); "
                     f"reloading the graph instead"
                 )
                 self._reload_from_store()
+
+    def _settle_vector_index(
+        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
+        """Bring the vector index in step with one batch, in one pass.
+
+        `touched` maps an entity id to the node the batch left there and the
+        vector the store carried for it - (None, None) where the batch left
+        nothing. Doing this per entity instead would rebuild the index matrix
+        once per operation, and the rebuild is linear in the index, so a batch
+        would cost the square of it.
+
+        No writer interleaves: every mutation path takes _lock and the whole
+        batch holds it. Readers are another matter, and this is the cost of
+        settling once - get_node, semantic_search_nodes and find_similar_nodes
+        take no lock at all - nor does any other query path that reads the
+        node dictionary and the index together - before this change as after,
+        so a concurrent reader can see a node the batch updated while its
+        vector is still the one the batch found, until the settle lands.
+        save() is the exception that matters, and it does hold _lock across
+        both, so a half-settled batch is never what gets written. Settling per entity
+        narrowed that window to one entity rather than closing it. A system
+        listener runs inside the window too, on this thread, and sees its own
+        entity half applied that way: node updated, vector not.
+
+        Callers must hold _lock.
+        """
+        if not touched:
+            return
+
+        # Read before the eviction destroys it, and remember whether any id
+        # this batch upserts actually held a vector - that is what makes the
+        # old width authoritative rather than a ghost. A batch that empties
+        # the index by *replacing* everything must still be judged against
+        # the width it replaced; one that empties it by *deleting* everything
+        # must not, or a supplied vector is refused for disagreeing with
+        # vectors that no longer exist.
+        upserted = [
+            (node, vector) for node, vector in touched.values() if node is not None
+        ]
+        before = self.vector_store.dimension
+        replacing = any(
+            self.vector_store.has_embedding(node.id) for node, _ in upserted
+        )
+
+        # Whatever these ids had described the text they used to have.
+        self.vector_store.remove_nodes_embeddings(list(touched))
+        if not upserted:
+            return
+
+        supplied = {node.id: vector for node, vector in upserted if vector is not None}
+        anchor = self.vector_store.dimension
+        if anchor is None and replacing:
+            anchor = before
+        if anchor is None and supplied:
+            # Nothing local anchors the width, so this batch establishes it.
+            # A majority vote is the wrong tie-breaker: it would adopt the
+            # commonest width and refuse the rest. Judging every supplied
+            # vector against the first is what the per-operation path did,
+            # one node at a time.
+            anchor = len(next(iter(supplied.values())))
+        self._adopt_vectors(supplied, anchor)
+
+        def generate(nodes) -> bool:
+            try:
+                self.vector_store.update_nodes_embeddings(nodes)
+                return True
+            except Exception as embed_error:
+                print(f"Warning: Could not update embeddings: {embed_error}")
+                return False
+
+        missing = [
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if not missing or not generate(missing):
+            return
+
+        # Generating at a width the batch did not adopt reads as a model
+        # change, and the index is emptied of everything just adopted. Those
+        # ids were not in `missing`, so nothing above brings them back. One
+        # more pass does, and it cannot recur: this one generates at the width
+        # the index now holds.
+        stranded = [
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if stranded:
+            generate(stranded)
 
     def _settle_before_refresh(self) -> bool:
         """Wait for this instance's own writes; say whether to refresh at all.
@@ -1354,8 +1480,10 @@ class GraphStorage:
         value = getattr(entity, "type", None)
         return value.value if hasattr(value, "value") else str(value)
 
-    def _external_upsert_node(self, op: EntityOperation) -> None:
-        """Callers must hold _lock."""
+    def _external_upsert_node(
+        self, op: EntityOperation, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
+        """Callers must hold _lock, and settle `touched` when the batch ends."""
         # from_dict rewrites its argument in place - timestamps parsed,
         # defaults filled in - and the argument here belongs to the backend,
         # which may still be holding the record it reported. Read it, do not
@@ -1378,11 +1506,18 @@ class GraphStorage:
             return
         before = existing.to_dict() if existing is not None else None
 
-        # The vector described the text this node used to have. Keeping it
-        # would let semantic search go on matching a description that is gone,
-        # so it goes first and is replaced below by whatever the store carried
-        # or by a fresh one.
-        self.vector_store.remove_node_embedding(node.id)
+        # The vector describes the text this node used to have, and keeping
+        # it would let semantic search go on matching a description that is
+        # gone. The index is settled for the whole batch at the end; the
+        # graph file's own inline copy is dropped here, since that costs a
+        # dict pop rather than a matrix rebuild.
+        # Taken here, not at the settle: _emit_event below builds `after`
+        # from the node, and every other mutation path has already moved the
+        # vector into the index by then. Leaving it on would put a raw
+        # embedding into every webhook and agent payload - the one thing the
+        # history store strips by name, on the one path that has no such
+        # filter.
+        touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
         self._inline_fallback.pop(node.id, None)
 
         self.nodes[node.id] = node
@@ -1391,13 +1526,6 @@ class GraphStorage:
         # graph would otherwise still hand out the old one.
         self.graph.add_node(node.id, data=node)
         self._searchable_text_cache[node.id] = self._build_searchable_text(node)
-
-        self._adopt_supplied_vectors([node])
-        if not self.vector_store.has_embedding(node.id):
-            try:
-                self.vector_store.update_node_embedding(node)
-            except Exception as embed_error:
-                print(f"Warning: Could not update embedding: {embed_error}")
 
         self._emit_event(
             event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
@@ -1409,7 +1537,9 @@ class GraphStorage:
             context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
         )
 
-    def _external_delete_node(self, node_id: str) -> None:
+    def _external_delete_node(
+        self, node_id: str, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
         """Callers must hold _lock."""
         node = self.nodes.get(node_id)
         if node is None:
@@ -1430,7 +1560,10 @@ class GraphStorage:
             self.graph.remove_node(node_id)
         del self.nodes[node_id]
         self._searchable_text_cache.pop(node_id, None)
-        self.vector_store.remove_node_embedding(node_id)
+        # Settled with the rest of the batch; see _settle_vector_index. The
+        # inline copy goes now - a dict pop, not a matrix rebuild - or an id
+        # created again later would inherit the departed node's vector.
+        touched[node_id] = (None, None)
         self._inline_fallback.pop(node_id, None)
 
         self._emit_event(
