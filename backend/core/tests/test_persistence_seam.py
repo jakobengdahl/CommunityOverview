@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.core.events.models import EventType
+from backend.core.events.models import EntityKind, EventType
 from backend.core.models import Edge, Node, NodeType
 from backend.core.storage import EXTERNAL_CHANGE_ORIGIN, GraphStorage
 from backend.core.storage_backends import (
@@ -422,8 +422,11 @@ class TestChangeNotificationWiring:
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
             assert seen[0].entity.after["name"] == "Beacon"
             # The same spelling every local emit site produces, or a
-            # subscription filtered on the type silently never fires.
+            # subscription filtered on the type silently never fires. The
+            # kind is the other half of that: EventDispatcher._matches and
+            # the history both key on it.
             assert seen[0].entity.type == "Actor"
+            assert seen[0].entity.kind == EntityKind.NODE
 
             seen.clear()
             backend.listener(
@@ -451,6 +454,7 @@ class TestChangeNotificationWiring:
             ]
             assert {e.origin.event_origin for e in seen} == {EXTERNAL_CHANGE_ORIGIN}
             assert seen[1].entity.type == "RELATES_TO"
+            assert [e.entity.kind for e in seen] == [EntityKind.NODE, EntityKind.EDGE]
 
             # An edge upsert over one already there is an update carrying a
             # real before-state, the same as the node step above. Reported as
@@ -467,6 +471,7 @@ class TestChangeNotificationWiring:
                 )
             )
             assert [e.event_type for e in seen] == [EventType.EDGE_UPDATE]
+            assert seen[0].entity.kind == EntityKind.EDGE
             assert seen[0].entity.before["type"] == "RELATES_TO"
             assert seen[0].entity.after["type"] == "DEPENDS_ON"
             assert seen[0].entity.type == "DEPENDS_ON"
@@ -478,6 +483,7 @@ class TestChangeNotificationWiring:
             assert [e.event_type for e in seen] == [EventType.EDGE_DELETE]
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
             assert seen[0].entity.type == "DEPENDS_ON"
+            assert seen[0].entity.kind == EntityKind.EDGE
             assert seen[0].entity.before["id"] == "bc"
             assert seen[0].entity.after is None
 
@@ -489,6 +495,7 @@ class TestChangeNotificationWiring:
             assert seen[0].origin.event_origin == EXTERNAL_CHANGE_ORIGIN
             assert seen[0].entity.before["name"] == "Renamed"
             assert seen[0].entity.type == "Actor"
+            assert seen[0].entity.kind == EntityKind.NODE
             assert seen[0].entity.after is None
         finally:
             storage.shutdown_events()
@@ -539,6 +546,35 @@ class TestChangeNotificationWiring:
             assert [step[2] for step in observed] == [set(), set()]
             assert [step[3] for step in observed] == [0, 0]
             assert observed[-1][1] == {"c"}
+        finally:
+            storage.shutdown_events()
+
+    def test_a_reload_takes_departed_entities_out_of_the_graph_too(self):
+        """A reload that removes things is where a graph left uncleared
+        shows: the dictionaries follow the store, and every read path that
+        walks the graph goes on serving nodes and edges that are gone."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="Alpha"),
+                    Node(id="b", type=NodeType.ACTOR, name="Beacon"),
+                ],
+                [Edge(id="ab", source="a", target="b")],
+            )
+            storage.flush()
+
+            # The other writer replaced the store wholesale.
+            backend.nodes = {"z": _node_payload("z", "Zulu")}
+            backend.edges = {}
+            backend.listener(ExternalChange.unknown())
+
+            assert {n.id for n in storage.get_all_nodes()} == {"z"}
+            assert set(storage.graph.nodes) == {"z"}
+            assert storage.get_all_edges() == []
+            assert storage.graph.number_of_edges() == len(storage.get_all_edges())
+            assert set(storage._searchable_text_cache) == {"z"}
         finally:
             storage.shutdown_events()
 
@@ -943,6 +979,10 @@ class TestExternalRefreshFailureModes:
                 [Edge(id="ab", source="a", target="b", type="RELATES_TO")],
             )
             storage.flush()
+            # A node the instance does not hold. Without it the store's node
+            # set equals memory's, and a swap torn between the two parse
+            # loops leaves the same model behind as one that never ran.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
             if unreadable == "node":
                 backend.nodes = {
                     "bad": {"id": "bad", "type": "Nonsense"},
@@ -954,6 +994,9 @@ class TestExternalRefreshFailureModes:
             backend.listener(ExternalChange.unknown())
 
             assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+            # Every container moved together or none of them did.
+            assert set(storage.graph.nodes) == {"a", "b"}
+            assert set(storage._searchable_text_cache) == {"a", "b"}
             assert [n.id for n in storage.search_nodes("Beacon")] == ["b"]
             assert set(storage.graph.nodes) == {"a", "b"}
             # The edge half fails out of sight of get_all_edges, which reads
@@ -1422,6 +1465,10 @@ class TestExternalRefreshFailureModes:
             storage.flush()
             seen.clear()
             backend.calls.clear()
+            # The store has moved on. Without this, "skipped the operation"
+            # and "resynced from the store" leave the same model behind, and
+            # the assertions below cannot tell them apart.
+            backend.nodes["z"] = _node_payload("z", "Zulu")
 
             backend.listener(
                 ExternalChange.entities(
@@ -1436,7 +1483,11 @@ class TestExternalRefreshFailureModes:
                 )
             )
 
-            assert {n.id for n in storage.get_all_nodes()} == {"a", "b"}
+            # Reloaded, not skipped: what the other writer committed is
+            # here. Skipping the operation would leave the model exactly as
+            # it was, which is what this used to assert and could not
+            # distinguish from a resync.
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "b", "z"}
             assert [e.id for e in storage.get_all_edges()] == ["ab"]
             assert [e.event_type for e in seen] == []
             assert backend.calls == []
