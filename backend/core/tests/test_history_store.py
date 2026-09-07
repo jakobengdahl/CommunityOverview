@@ -959,7 +959,9 @@ def test_a_record_exactly_on_the_age_cutoff_is_kept(monkeypatch):
             # result - but a mock that faked an aware value for tz=None too
             # would silently keep passing even if the call site ever dropped
             # that argument, when the real naive/aware mismatch would raise.
-            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
+            return (
+                frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
+            )
 
     monkeypatch.setattr(hs, "datetime", _Frozen)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1087,9 +1089,9 @@ def test_an_append_takes_an_exclusive_file_lock(monkeypatch):
     assert ("graph.history.ndjson", True) in taken
 
     expected_line = json.dumps(record, ensure_ascii=False) + "\n"
-    assert sizes_at_unlock == [
-        len(expected_line.encode("utf-8"))
-    ], "the write was not on disk yet when the lock was released"
+    assert sizes_at_unlock == [len(expected_line.encode("utf-8"))], (
+        "the write was not on disk yet when the lock was released"
+    )
 
 
 def test_reads_take_shared_locks_and_the_rewrite_an_exclusive_one(monkeypatch):
@@ -1103,6 +1105,18 @@ def test_reads_take_shared_locks_and_the_rewrite_an_exclusive_one(monkeypatch):
     would have passed regardless. The fill below is asserted to exceed two
     chunks, and the content of both reads is checked, so a boundary bug fails
     here on wrong results rather than slipping through unseen.
+
+    ``recent`` and ``oldest`` only probe the two extremes of the file (the
+    tail and one entity near the head), so a bug confined to the interior -
+    e.g. dropping or reordering exactly the records that straddle a chunk
+    boundary - would not move either result. ``full`` asks for every record
+    in one read instead, and its assertion checks the complete, in-order id
+    sequence, so any record lost or misplaced anywhere in the file, chunk
+    boundaries included, fails this test. (Verified by mutation: dropping the
+    reverse reader's cross-chunk carry-over of a split line - the ``pending``
+    bytes in ``_iter_lines_reverse`` - makes this fill lose exactly the
+    records that straddle each boundary while leaving ``recent`` and
+    ``oldest`` unchanged; the ``full`` assertion below is what catches it.)
     """
     import backend.core.history_store as hs
 
@@ -1114,17 +1128,22 @@ def test_reads_take_shared_locks_and_the_rewrite_an_exclusive_one(monkeypatch):
         n = 1000
         store = GraphHistoryStore(path, max_events=2, compaction_interval=n + 1)
         _fill(store, n)
-        assert (
-            os.path.getsize(path) > 2 * hs._REVERSE_CHUNK_BYTES
-        ), "fill too small to exercise the multi-block backward reader"
+        assert os.path.getsize(path) > 2 * hs._REVERSE_CHUNK_BYTES, (
+            "fill too small to exercise the multi-block backward reader"
+        )
         taken.clear()
 
         recent = store.get_recent(limit=2)
         oldest = store.get_entity_history("n-1", limit=1)
+        full = store.get_recent(limit=n)
         store.compact()
 
     assert [r["entity_id"] for r in recent] == [f"n-{n - 1}", f"n-{n - 2}"]
     assert [r["entity_id"] for r in oldest] == ["n-1"]
+    assert [r["entity_id"] for r in full] == [f"n-{i}" for i in range(n - 1, -1, -1)], (
+        "a full backward read must return every record exactly once, in order, "
+        "including the ones that straddle a chunk boundary"
+    )
 
     reads = [ex for name, ex in taken if name == "graph.history.ndjson"]
     assert reads and not any(reads), "a read path took an exclusive lock"
