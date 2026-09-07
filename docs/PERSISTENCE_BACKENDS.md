@@ -259,11 +259,12 @@ What the backend passes is an `ExternalChange`:
 
   **Report what the store applied together as one change, not one change per
   entity.** The vector index is rebuilt whole whenever it changes, so
-  `GraphStorage` settles it once per reported change rather than once per
-  operation, and every read is blocked while it does. Splitting a batch of a
-  hundred into a hundred reports asks for a hundred rebuilds instead of one,
-  each linear in the index — the whole cost of the refresh is decided here,
-  by the backend, not by the size of the batch.
+  `GraphStorage` settles it at most twice per reported change — one eviction
+  pass and one adoption — rather than per operation, and every read is
+  blocked while it does. Splitting a batch of a hundred into a hundred
+  reports asks for two hundred rebuilds instead of two, each linear in the
+  index. The cost of a refresh is decided here, by the backend, not by the
+  size of the batch.
 - `ExternalChange.unknown()` — the backend knows only that something
   changed. `GraphStorage` drains its own write queue and reloads the whole
   graph. Two things it will not do: bootstrap, so a store that reports it is

@@ -853,12 +853,23 @@ class GraphStorage:
         the whole batch afterwards, so generation wins there, while a refresh
         generates only where the store supplied nothing.
         """
-        supplied = self._take_inline_vectors(nodes)
+        self._adopt_vectors(self._take_inline_vectors(nodes))
+
+    def _adopt_vectors(self, supplied: Dict[str, Any]) -> None:
+        """Move vectors already taken off their nodes into the index.
+
+        Separate from _adopt_supplied_vectors because the refresh takes a
+        vector off its node when the operation is applied - so the event it
+        emits does not carry it - and adopts it only when the batch ends.
+        """
         if not supplied:
             return
         # The index already in memory anchors the dimension; a caller passing
         # vectors of some other width must never evict the vectors that are
-        # already correct.
+        # already correct. A batch that replaced every vector in the index
+        # leaves nothing to anchor on, and the supplied width becomes the new
+        # one - which is the coherent answer where there are no survivors to
+        # protect.
         existing = self.vector_store.export_vectors()
         dimension = dominant_dimension(existing) or dominant_dimension(supplied)
         accepted = matching_dimension(supplied, dimension)
@@ -1229,7 +1240,8 @@ class GraphStorage:
             # touches and settle the index once, at the end - the shape
             # add_nodes already has. A dict gives last-operation-wins per id,
             # which is what the store applied.
-            touched: Dict[str, Optional[Node]] = {}
+            touched: Dict[str, Tuple[Optional[Node], Any]] = {}
+            failure: Optional[Exception] = None
             try:
                 for op in change.operations:
                     # Anything this build does not recognise is a resync, not
@@ -1250,34 +1262,50 @@ class GraphStorage:
                     else:
                         raise ValueError(f"unknown entity kind {op.kind!r}")
             except Exception as exc:
+                failure = exc
+
+            # Whatever did apply, settled before any reload. A reload that
+            # lands supersedes this, but _reload_from_store deliberately does
+            # not land in two cases - a store reporting it is not there, and a
+            # read that fails - and then the applied prefix stays in memory.
+            # Its vectors have to match it, or a renamed node goes on matching
+            # the description it no longer has.
+            try:
+                self._settle_vector_index(touched)
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+
+            if failure is not None:
                 # A payload this build cannot read - two instances mid-upgrade,
                 # say - would otherwise leave the batch half applied and throw
                 # into whatever backend thread called us, where the writing
                 # instance would read it as its own write having failed.
                 # Resync instead, and keep it to ourselves.
                 print(
-                    f"Warning: could not apply an external change ({exc}); "
+                    f"Warning: could not apply an external change ({failure}); "
                     f"reloading the graph instead"
                 )
                 self._reload_from_store()
-            else:
-                # Only when the whole batch applied. A reload rebuilds the
-                # index from the store, so what was collected is moot.
-                self._settle_vector_index(touched)
 
-    def _settle_vector_index(self, touched: "Dict[str, Optional[Node]]") -> None:
+    def _settle_vector_index(
+        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
         """Bring the vector index in step with one batch, in one pass.
 
-        `touched` maps an entity id to the node the batch left there, or None
-        where it left nothing. Doing this per entity instead would rebuild the
-        index matrix once per operation, and the rebuild is linear in the
-        index - so a batch would cost the square of it.
+        `touched` maps an entity id to the node the batch left there and the
+        vector the store carried for it - (None, None) where the batch left
+        nothing. Doing this per entity instead would rebuild the index matrix
+        once per operation, and the rebuild is linear in the index, so a batch
+        would cost the square of it.
 
         Nothing observes the index between the batch's first operation and
         this call: every read path takes _lock and the whole batch holds it.
         A system listener does run inside that window, on this thread, and
-        sees the index as the batch found it - but it already sees the graph
-        half applied, since the operations after its own have not run either.
+        sees the index as the batch found it - its own entity included, so
+        that entity is half applied from where it stands: node updated, vector
+        not. It already sees the graph half applied in the larger sense, since
+        the operations after its own have not run either.
 
         Callers must hold _lock.
         """
@@ -1287,13 +1315,17 @@ class GraphStorage:
         # Whatever these ids had described the text they used to have.
         self.vector_store.remove_nodes_embeddings(list(touched))
 
-        upserted = [node for node in touched.values() if node is not None]
+        upserted = [
+            (node, vector) for node, vector in touched.values() if node is not None
+        ]
         if not upserted:
             return
 
-        self._adopt_supplied_vectors(upserted)
+        self._adopt_vectors(
+            {node.id: vector for node, vector in upserted if vector is not None}
+        )
         missing = [
-            node for node in upserted if not self.vector_store.has_embedding(node.id)
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
         ]
         if not missing:
             return
@@ -1403,7 +1435,7 @@ class GraphStorage:
         return value.value if hasattr(value, "value") else str(value)
 
     def _external_upsert_node(
-        self, op: EntityOperation, touched: "Dict[str, Optional[Node]]"
+        self, op: EntityOperation, touched: "Dict[str, Tuple[Optional[Node], Any]]"
     ) -> None:
         """Callers must hold _lock, and settle `touched` when the batch ends."""
         # from_dict rewrites its argument in place - timestamps parsed,
@@ -1433,7 +1465,13 @@ class GraphStorage:
         # gone. The index is settled for the whole batch at the end; the
         # graph file's own inline copy is dropped here, since that costs a
         # dict pop rather than a matrix rebuild.
-        touched[node.id] = node
+        # Taken here, not at the settle: _emit_event below builds `after`
+        # from the node, and every other mutation path has already moved the
+        # vector into the index by then. Leaving it on would put a raw
+        # embedding into every webhook and agent payload - the one thing the
+        # history store strips by name, on the one path that has no such
+        # filter.
+        touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
         self._inline_fallback.pop(node.id, None)
 
         self.nodes[node.id] = node
@@ -1454,7 +1492,7 @@ class GraphStorage:
         )
 
     def _external_delete_node(
-        self, node_id: str, touched: "Dict[str, Optional[Node]]"
+        self, node_id: str, touched: "Dict[str, Tuple[Optional[Node], Any]]"
     ) -> None:
         """Callers must hold _lock."""
         node = self.nodes.get(node_id)
@@ -1479,7 +1517,7 @@ class GraphStorage:
         # Settled with the rest of the batch; see _settle_vector_index. The
         # inline copy goes now - a dict pop, not a matrix rebuild - or an id
         # created again later would inherit the departed node's vector.
-        touched[node_id] = None
+        touched[node_id] = (None, None)
         self._inline_fallback.pop(node_id, None)
 
         self._emit_event(

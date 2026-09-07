@@ -708,6 +708,148 @@ class TestExternalRefreshSettlesTheVectorIndexOnce:
                 storage.shutdown_events()
 
 
+class TestExternalRefreshSettlesEvenWhenTheBatchFails:
+    """A reload supersedes the settle - but _reload_from_store deliberately
+    does not land in two cases, and then the applied prefix is what this
+    instance serves."""
+
+    def _storage(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes(
+            [
+                Node(
+                    id="a",
+                    type=NodeType.ACTOR,
+                    name="Alpha",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+            [],
+        )
+        storage.flush()
+        return storage, backend
+
+    def test_a_half_applied_batch_whose_reload_cannot_land_still_settles(self):
+        """The store reports it is not there - another writer emptied it, a
+        restore is in progress - so the reload declines rather than writing
+        this instance's graph over it. What applied before the batch failed
+        stays in memory, and its vectors must describe it: a renamed node
+        left with the vector for its old text is the stale hit the refresh
+        exists to prevent."""
+        storage, backend = self._storage()
+        try:
+            backend.written = False
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("a", "Renamed"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="a",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a").name == "Renamed"
+            current = storage.vector_store.get_vector_list("a")
+            assert current is None or current != pytest.approx([1.0, 0.0]), (
+                "the applied prefix kept the vector for the text it no longer has"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_deleted_node_leaves_no_vector_when_the_reload_cannot_land(self):
+        """The same window, the other operation: an orphan vector survives
+        into the sidecar on the next save and takes an over-fetch slot."""
+        storage, backend = self._storage()
+        try:
+            backend.written = False
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.delete_node("a"),
+                        EntityOperation(
+                            kind="node",
+                            action="nonsense",
+                            entity_id="a",
+                            payload=None,
+                        ),
+                    ]
+                )
+            )
+
+            assert storage.get_node("a") is None
+            assert storage.vector_store.get_vector_list("a") is None
+        finally:
+            storage.shutdown_events()
+
+
+class TestExternalRefreshEventsCarryNoVector:
+    """The history store strips `embedding` by name, because a vector belongs
+    in the sidecar rather than in every mutation record. Webhook and agent
+    payloads have no such filter, so the refresh must not hand them one."""
+
+    def test_an_external_upsert_emits_no_embedding(self):
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        )
+                    ]
+                )
+            )
+
+            assert [e.event_type for e in seen] == [EventType.NODE_CREATE]
+            assert seen[0].entity.after.get("embedding") is None
+            # And it did land where it belongs.
+            assert storage.vector_store.get_vector_list("b") == pytest.approx(
+                [9.0, 9.0]
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_delete_in_the_same_batch_emits_no_embedding_either(self):
+        """`before` is built from the node the batch put there, so it carries
+        the vector too unless the upsert took it off."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            dict(_node_payload("b", "Beacon"), embedding=[9.0, 9.0])
+                        ),
+                        EntityOperation.delete_node("b"),
+                    ]
+                )
+            )
+
+            assert [e.event_type for e in seen] == [
+                EventType.NODE_CREATE,
+                EventType.NODE_DELETE,
+            ]
+            assert seen[1].entity.before.get("embedding") is None
+        finally:
+            storage.shutdown_events()
+
+
 class TestExternalRefreshLeavesNothingStale:
     def test_an_upsert_drops_a_vector_the_graph_file_still_carries_inline(self):
         """A pre-split store hands its vectors on the node objects, and
