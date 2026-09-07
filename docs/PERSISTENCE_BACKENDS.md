@@ -243,6 +243,12 @@ changes the store has already applied, and from a thread of the backend's own
 refresh never writes: not the change it was told about, and not the graph it
 holds.
 
+The payload a report carries is **read, not taken**. `GraphStorage` parses a
+copy, so the dict you hand over comes back exactly as you passed it and stays
+yours to cache, log or retry with. (The obligation runs the other way too: a
+backend must copy a payload the application hands it on a write — see
+`test_the_stored_payload_is_a_copy` in the contract.)
+
 What the backend passes is an `ExternalChange`:
 
 - `ExternalChange.entities(operations)` — the same `EntityOperation`s a

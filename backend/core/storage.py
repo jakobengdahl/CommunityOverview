@@ -1334,11 +1334,13 @@ class GraphStorage:
 
         Wall-clock last-writer-wins: the instances share no other ordering,
         so their clocks have to be roughly in step for this to mean anything.
-        Anything that cannot be compared - a stamp missing, or one naive and
-        one aware, which a backend handing over datetime objects of its own
-        could produce - is not an answer, and the report is applied. Equal
-        stamps defer to the report too: a tie is unresolvable, and taking the
-        store's side is what converges the two instances.
+        A pair that cannot be compared - one naive and one aware, which a
+        backend handing over datetime objects of its own could produce - is
+        not an answer, and the report is applied. Equal stamps defer to the
+        report too: a tie is unresolvable, and taking the store's side is
+        what converges the two instances. (A payload with no stamp at all
+        never reaches here as a gap: the model fills one in at parse time,
+        stamped now, so such a report is the newer one and applies.)
         """
         try:
             return bool(held > reported)
@@ -1352,7 +1354,11 @@ class GraphStorage:
 
     def _external_upsert_node(self, op: EntityOperation) -> None:
         """Callers must hold _lock."""
-        node = Node.from_dict(op.payload)
+        # from_dict rewrites its argument in place - timestamps parsed,
+        # defaults filled in - and the argument here belongs to the backend,
+        # which may still be holding the record it reported. Read it, do not
+        # take it. The top level is all from_dict touches.
+        node = Node.from_dict(dict(op.payload))
         existing = self.nodes.get(node.id)
         if existing is not None and self._is_newer(
             existing.updated_at, node.updated_at
@@ -1437,7 +1443,7 @@ class GraphStorage:
 
     def _external_upsert_edge(self, op: EntityOperation) -> None:
         """Callers must hold _lock."""
-        edge = Edge.from_dict(op.payload)
+        edge = Edge.from_dict(dict(op.payload))  # the backend's dict; see above
         if edge.source not in self.nodes or edge.target not in self.nodes:
             # add_edge would invent the missing endpoint as a node with no
             # data, which every read path walking the graph would then trip

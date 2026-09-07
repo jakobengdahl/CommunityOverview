@@ -1005,6 +1005,103 @@ class TestExternalRefreshFailureModes:
             proceed.set()
             storage.shutdown_events()
 
+    def test_a_reported_payload_is_read_not_taken(self):
+        """The dict a report carries belongs to the backend, which may still
+        be holding the record it reported - a poller's cache, a payload kept
+        to retry. Parsing it in place would rewrite its timestamps into
+        datetime objects and add defaults, and hand back something the
+        backend can no longer serialise."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            node = _node_payload("b", "Beacon")
+            edge = _edge_payload("ab", "a", "b")
+            kept = (json.loads(json.dumps(node)), json.loads(json.dumps(edge)))
+
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(node),
+                        EntityOperation.upsert_edge(edge),
+                    ]
+                )
+            )
+            assert storage.get_node("b") is not None
+
+            assert (node, edge) == kept
+            json.dumps(node)  # and still the backend's to write out
+            json.dumps(edge)
+        finally:
+            storage.shutdown_events()
+
+    def test_an_ignored_external_write_changes_nothing_and_says_nothing(self):
+        """An ignored report moved nothing, so there is nothing to announce.
+        An event for it would tell subscribers of a change this instance is
+        not serving - and would be a before equal to its own after."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        seen = []
+        storage.add_system_listener(seen.append)
+        try:
+            storage.add_nodes(
+                [
+                    Node(
+                        id="a",
+                        type=NodeType.ACTOR,
+                        name="Alpha",
+                        embedding=[0.5, 0.25],
+                    )
+                ],
+                [],
+            )
+            storage.flush()
+            seen.clear()
+
+            stale = _node_payload("a", "External")
+            stale["updated_at"] = "2020-01-01T00:00:00+00:00"
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(stale)])
+            )
+
+            assert seen == []
+            assert storage.get_node("a").name == "Alpha"
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [0.5, 0.25]
+            )
+            assert [n.id for n in storage.search_nodes("Alpha")] == ["a"]
+        finally:
+            storage.shutdown_events()
+
+    @pytest.mark.parametrize("shape", ["tie", "incomparable"])
+    def test_a_report_that_cannot_be_ruled_older_is_applied(self, shape):
+        """The two directions the rule resolves toward the report: a tie is
+        unresolvable, and a pair that cannot be compared at all is not an
+        answer. Both take the store's side, which is what converges the two
+        instances."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            payload = _node_payload("a", "External")
+            if shape == "tie":
+                payload["updated_at"] = storage.get_node("a").updated_at.isoformat()
+            else:
+                # Naive against the aware stamp the model holds: a backend
+                # handing over datetime objects of its own produces this.
+                payload["updated_at"] = datetime.now().replace(tzinfo=None)
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(payload)])
+            )
+
+            assert storage.get_node("a").name == "External"
+        finally:
+            storage.shutdown_events()
+
     def test_an_external_write_newer_than_ours_still_applies(self):
         """The other side of it: last writer wins, so a report that postdates
         what we hold is applied, not treated as a conflict to keep out."""
