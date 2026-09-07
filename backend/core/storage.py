@@ -1369,7 +1369,7 @@ class GraphStorage:
         if not missing or not generate(missing):
             return
 
-        # Generating at a width the batch did not adopt at reads as a model
+        # Generating at a width the batch did not adopt reads as a model
         # change, and the index is emptied of everything just adopted. Those
         # ids were not in `missing`, so nothing above brings them back. One
         # more pass does, and it cannot recur: this one generates at the width
