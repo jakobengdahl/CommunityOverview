@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1104,6 +1104,64 @@ class TestExternalRefreshFailureModes:
             # Applied, so announced: a branch that returned the other way
             # would be silent here as well as wrong.
             assert [e.event_type for e in seen] == [EventType.NODE_UPDATE]
+        finally:
+            storage.shutdown_events()
+
+    def test_a_payload_with_no_stamp_is_stamped_now_not_treated_as_absent(self):
+        """The rule is written down as if a missing stamp were a gap the
+        comparison sees. It is not: the model fills one in at parse time,
+        stamped now. Normally that makes the report the newer one - and
+        against a held stamp dated in the future, which is what a
+        clock-skewed peer produces, it makes it the older one instead. Both
+        halves are the documented behaviour, so both are pinned."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+
+            unstamped = _node_payload("a", "External")
+            del unstamped["updated_at"]
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(unstamped)])
+            )
+            assert storage.get_node("a").name == "External"
+
+            # Now the held stamp is ahead of any clock the report can carry.
+            storage.nodes["a"].updated_at = datetime.now(timezone.utc) + timedelta(
+                minutes=5
+            )
+            later = _node_payload("a", "Ignored")
+            del later["updated_at"]
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(later)])
+            )
+            assert storage.get_node("a").name == "External"
+        finally:
+            storage.shutdown_events()
+
+    def test_a_payload_whose_stamp_is_null_is_unreadable_not_undated(self):
+        """The other reading of "missing". An explicit null fails validation
+        rather than reaching the comparison, and an unreadable payload is a
+        whole-graph reload - which is a different outcome from applying the
+        report, so the doc has to say which one it is."""
+        backend = _NotifyingBackend()
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            nulled = _node_payload("a", "External")
+            nulled["updated_at"] = None
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(nulled)])
+            )
+
+            # Reloaded from the store rather than applied: the other writer's
+            # node is here, and the unreadable payload's name is not.
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "z"}
+            assert storage.get_node("a").name == "Alpha"
         finally:
             storage.shutdown_events()
 

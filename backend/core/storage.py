@@ -1340,7 +1340,9 @@ class GraphStorage:
         report too: a tie is unresolvable, and taking the store's side is
         what converges the two instances. (A payload with no stamp at all
         never reaches here as a gap: the model fills one in at parse time,
-        stamped now, so such a report is the newer one and applies.)
+        stamped now - so it is normally the newer one and applies, but it
+        loses to a held stamp dated in the future, which is what a
+        clock-skewed peer produces.)
         """
         try:
             return bool(held > reported)

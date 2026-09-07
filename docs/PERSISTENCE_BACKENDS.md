@@ -317,8 +317,16 @@ knowing before you build on it:
   have to be roughly in step for this to mean anything.
 - A tie defers to the report. Equal stamps are unresolvable, and taking the
   store's side is what converges the two instances.
-- A stamp that cannot be compared — missing, or one naive against one aware —
-  is not an answer, so the report is applied.
+- A stamp that cannot be compared — one naive against one aware, which a
+  backend handing over `datetime` objects of its own can produce — is not an
+  answer, so the report is applied.
+- **A payload with no `updated_at` is not an unstamped payload.** The model
+  fills the field in at parse time, stamped *now*, so such a report is
+  normally the newer one and applies — but against a held stamp dated in the
+  future, which is what a clock-skewed peer produces, it loses. Send the
+  stamp. A payload whose `updated_at` is explicitly `null` does not reach the
+  comparison at all: it fails validation, and an unreadable payload is a
+  whole-graph reload.
 - **Edges carry no `updated_at`**, so an edge upsert is applied as reported.
 - **Deletes carry no payload**, so an external delete is applied whatever this
   instance last did to the entity.
