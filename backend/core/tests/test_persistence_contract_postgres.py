@@ -242,15 +242,14 @@ def _wait_until_blocking(pid, timeout=15.0):
 
     Attributed on purpose. A fixed sleep plus `thread.is_alive()` cannot
     tell "blocked on the lock" from "has not reached it yet", so under
-    load it passes while the interleaving never happened - but asking
-    only whether *something* in this database waits on a lock is worse,
-    not better: one unrelated blocked session anywhere in the database
-    satisfies it, including one this test never created. Measured: with a
-    stray blocked session present, that question answers yes in 0.3s for
-    a run in which the writer provably never waited.
+    load it passes while the interleaving never happened. Asking only
+    whether *something* in this database waits on a lock replaces that
+    weakness with a worse one: any unrelated blocked session satisfies
+    it, including one no test created - two suite runs against one
+    database, or a developer with a psql parked in an open transaction.
 
-    `pg_blocking_pids` names the session doing the blocking, which is the
-    one the caller holds open and can therefore vouch for.
+    `pg_blocking_pids` names the sessions doing the blocking, so the
+    caller can ask about the one it holds open and can vouch for.
     """
     deadline = time.monotonic() + timeout
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -1116,7 +1115,9 @@ class TestPostgresEntityWritesTouchOneRow:
             "deleting a node removed an edge no operation named"
         )
 
-    @pytest.mark.parametrize("write", ["upsert_node", "upsert_edge", "batch"])
+    @pytest.mark.parametrize(
+        "write", ["upsert_node", "upsert_edge", "batch", "batch_many"]
+    )
     def test_an_entity_write_does_not_lose_a_row_written_while_it_runs(
         self, schema, backends, write
     ):
@@ -1166,11 +1167,22 @@ class TestPostgresEntityWritesTouchOneRow:
                 backend.upsert_node(node_payload("n0", name="Renamed"))
             elif write == "upsert_edge":
                 backend.upsert_edge(edge_payload("e0", "n0", "n0", name="Renamed"))
+            elif write == "batch":
+                backend.apply_batch(
+                    [
+                        EntityOperation.upsert_node(node_payload("n0", name="Renamed")),
+                        EntityOperation.upsert_node(node_payload("n1", name="Renamed")),
+                    ]
+                )
             else:
                 backend.apply_batch(
                     [
                         EntityOperation.upsert_node(node_payload("n0", name="Renamed")),
                         EntityOperation.upsert_node(node_payload("n1", name="Renamed")),
+                        EntityOperation.upsert_node(node_payload("n2", name="Renamed")),
+                        EntityOperation.upsert_edge(
+                            edge_payload("e0", "n0", "n1", name="Renamed")
+                        ),
                     ]
                 )
         finally:
@@ -1196,6 +1208,9 @@ class TestPostgresEntityWritesTouchOneRow:
             nodes = by_id(loaded, "nodes")
             assert nodes["n0"]["name"] == "Renamed"
             assert nodes["n1"]["name"] == "Renamed"
+            if write == "batch_many":
+                assert nodes["n2"]["name"] == "Renamed"
+                assert by_id(loaded, "edges")["e0"]["name"] == "Renamed"
 
     def test_a_checkpoint_writes_nothing(self, schema, backends):
         """The docstring's claim, as an assertion.
@@ -1458,7 +1473,9 @@ class TestPostgresBatchesSurviveADeadlock:
         backend.save_graph_data(snapshot())
 
         real_apply = backend._apply_batch_once
+        real_apply_one = backend._apply_one
         attempts = []
+        applied = []
 
         def flaky(operations):
             attempts.append(1)
@@ -1468,31 +1485,39 @@ class TestPostgresBatchesSurviveADeadlock:
                 raise psycopg.errors.DeadlockDetected("injected")
             return real_apply(operations)
 
+        def record(conn, operation):
+            applied.append((operation.action, operation.kind, operation.entity_id))
+            real_apply_one(conn, operation)
+
         backend._apply_batch_once = flaky
-        backend.apply_batch(
-            [
-                EntityOperation.upsert_node(node_payload("z")),
-                EntityOperation.upsert_node(node_payload("a")),
-                EntityOperation.upsert_edge(edge_payload("e", "z", "z")),
-                EntityOperation.delete_node("a"),
-            ]
-        )
+        backend._apply_one = record
+        ordered = [
+            EntityOperation.upsert_node(node_payload("z")),
+            EntityOperation.upsert_node(node_payload("a")),
+            EntityOperation.upsert_edge(edge_payload("e", "z", "z")),
+            EntityOperation.delete_node("a"),
+        ]
+        backend.apply_batch(ordered)
 
         assert len(attempts) == 3, "the batch was not retried"
-        # `z` first so the batch is order-sensitive under a sort by id or
-        # by kind, not only under one that moves deletes ahead of upserts -
-        # and non-empty, so this also fails if the retried attempt applied
-        # nothing at all rather than applying it in the wrong order.
+        # The order the surviving attempt APPLIED, not the graph it left.
+        # The graph cannot answer this question: operations on distinct
+        # ids commute here - there is no foreign key between the two
+        # tables - and `sorted` is stable, so same-id operations keep
+        # their relative order. A re-sort by id or by kind is therefore
+        # invisible in the result, and only one that moves a delete ahead
+        # of a same-id upsert would show. Asking what the attempt issued
+        # catches every sort key, which is what the docstring claims.
+        # `_apply_batch_once` is stubbed for the first two attempts and
+        # never reaches the database, so what is recorded here is the
+        # third attempt alone.
+        assert applied == [(o.action, o.kind, o.entity_id) for o in ordered], (
+            "the retry reordered or dropped the caller's batch"
+        )
+
         loaded = backend.load_graph_data()
-        assert set(by_id(loaded, "nodes")) == {"z"}, (
-            "the retry reordered or dropped the batch: a delete ran before "
-            "the upsert it was meant to undo, or nothing was applied"
-        )
-        # Dropping the first operation on a retry leaves `z` missing and
-        # would otherwise look the same as reordering.
-        assert set(by_id(loaded, "edges")) == {"e"}, (
-            "the retry dropped an operation rather than replaying the batch"
-        )
+        assert set(by_id(loaded, "nodes")) == {"z"}
+        assert set(by_id(loaded, "edges")) == {"e"}
 
     def test_a_batch_that_keeps_deadlocking_raises_rather_than_vanishing(
         self, schema, backends
@@ -1529,6 +1554,9 @@ class TestPostgresBatchesSurviveADeadlock:
             "exhaustion must propagate after exactly one attempt per retry: "
             "swallowing it tells the caller a mutation was stored when none was"
         )
+        # Not an atomicity check: `_apply_batch_once` is stubbed here and
+        # never reaches the database, so this can only fail if apply_batch
+        # itself writes something outside it.
         loaded = backend.load_graph_data()
         assert by_id(loaded, "nodes") == {} and by_id(loaded, "edges") == {}
 
