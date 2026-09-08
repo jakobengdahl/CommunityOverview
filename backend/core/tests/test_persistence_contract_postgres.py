@@ -965,9 +965,12 @@ class TestPostgresEntityWritesTouchOneRow:
     while destroying exactly the property this slice exists for. These check
     the cost and the blast radius rather than the outcome.
 
-    Every case runs for edges as well as nodes, and for a multi-operation
-    batch as well as the single-operation wrappers. That is not symmetry
-    for its own sake: `GraphStorage._do_apply` reaches `apply_batch` only
+    The two cost-and-blast-radius cases below - the single-write one and
+    the batch one - run for edges as well as nodes, and for
+    multi-operation batches as well as the single-operation wrappers. The
+    rest of the class is narrower and says so in its own name. That
+    breadth is not symmetry for its own sake: `GraphStorage._do_apply`
+    reaches `apply_batch` only
     when there is more than one operation, and `delete_nodes` builds
     exactly that - edge deletes followed by node deletes - so the wrappers
     these tests once covered alone are the ones production uses least.
@@ -1021,8 +1024,9 @@ class TestPostgresEntityWritesTouchOneRow:
     #
     # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
     # node delete per node, so the length is whatever the caller deleted.
-    # The values below straddle the boundaries the other tests use (1, 6,
-    # 41, 43) rather than clustering with them.
+    # 2 and 7 sit away from the lengths the other tests use (1, 5, 6, 12,
+    # 40, 41, 43); 41 deliberately coincides with the lock probe's, so the
+    # region above 40 is walked by more than one test rather than by one.
     BATCH_LENGTHS = (2, 7, 41)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
@@ -1032,7 +1036,7 @@ class TestPostgresEntityWritesTouchOneRow:
     # shape - and a backend that merged adjacent ones into a single
     # statement would be invisible to a batch that never has two in a row.
     # Both actions appear from length 5; a shorter length truncates the
-    # cycle, which is what makes 2 worth running as well as 40.
+    # cycle, which is what makes 2 worth running as well as 41.
     _RUN = 2
 
     @classmethod
@@ -1899,8 +1903,11 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
                 EntityOperation.upsert_edge(edge_payload("e", "held", "free")),
             ]
         ),
-        # Long, and built rather than written out: a mutation gated just
-        # above whatever length happens to be spelled here walks past it.
+        # Long - 41 operations - because the short holders above cannot
+        # see a lock made exclusive only for longer batches. It is still
+        # one length: a gate that opens between it and the next-longest
+        # holder walks past this too, which is why the follow-up asks for
+        # one shared length source rather than more hand-picked values.
         "batch_many": lambda b: b.apply_batch(
             [EntityOperation.upsert_node(node_payload("held", name="Held"))]
             + [
@@ -2117,11 +2124,17 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
                 elif operation == "delete_edge":
                     writer.delete_edge("e")
                 elif operation == "batch_many":
-                    # The length production issues, and long enough that a
-                    # save lock skipped above some threshold has nowhere
-                    # plausible to hide. The filler ids are absent, which
-                    # is not an error and keeps the assertion about the
-                    # three that matter.
+                    # A length production issues. It is ONE length, not a
+                    # spread, so it says nothing about thresholds either
+                    # side of it: a save lock skipped for batches of 2 to
+                    # 42 survives this and the whole suite - measured. An
+                    # earlier version of this comment claimed the
+                    # opposite, in the same words the length comment on
+                    # TestPostgresEntityWritesTouchOneRow had to withdraw.
+                    # What this case buys is that the interleaving is
+                    # exercised for a batch at all. The filler ids are
+                    # absent, which is not an error and keeps the
+                    # assertion about the three that matter.
                     writer.apply_batch(
                         [
                             EntityOperation.delete_edge("e"),
