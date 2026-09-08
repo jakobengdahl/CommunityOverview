@@ -46,6 +46,7 @@ else:
 from psycopg_pool import ConnectionPool  # noqa: E402  (after importorskip)
 
 from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
+    DEFAULT_POOL_SIZE,
     MIGRATION_LOCK_KEY,
     PostgresGraphPersistenceBackend,
 )
@@ -1540,6 +1541,11 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
 
         opened = []
         real_module = psycopg.connect
+        # The descriptor out of the class dict, not the bound method that
+        # attribute access returns: assigning the latter back would leave
+        # `Connection.connect` a plain bound method for the rest of the
+        # process, so a subclass would silently get `Connection` objects.
+        real_class_attr = psycopg.Connection.__dict__["connect"]
         real_class = psycopg.Connection.connect
 
         def spy_module(conninfo="", **kwargs):
@@ -1565,7 +1571,7 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
                 backend.upsert_node(node_payload(f"n{i}"))
         finally:
             psycopg.connect = real_module
-            psycopg.Connection.connect = real_class
+            psycopg.Connection.connect = real_class_attr
             ConnectionPool.__init__ = real_pool_init
 
         # A second pool of its own would be warmed by the same write that
@@ -1576,9 +1582,21 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
         )
         assert opened == [], (
             f"entity writes opened {len(opened)} connection(s) rather than "
-            "taking one from the pool: the documented pool size, and the "
-            "connection budget derived from it, no longer bound what one "
-            "instance costs"
+            "taking one from the pool, so what one instance costs is no "
+            "longer bounded by the pool it declares"
+        )
+        # The ceiling itself, because the assertions above only watch what
+        # is opened. A write that widened the pool instead of going around
+        # it would pass them while making the same claim false - and that
+        # claim is what the connection budget in the module docstring is
+        # derived from.
+        assert (backend._pool.max_size, backend._pool.min_size) == (
+            DEFAULT_POOL_SIZE,
+            0,
+        ), (
+            "an entity write changed the pool's own bounds "
+            f"(max {backend._pool.max_size}, min {backend._pool.min_size}), "
+            f"where the backend declared max {DEFAULT_POOL_SIZE} and min 0"
         )
 
     def test_a_failed_batch_gives_its_connection_back(self, schema, backends):
@@ -1923,6 +1941,14 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
         "batch_deletes_first": lambda b: b.apply_batch(
             [EntityOperation.delete_edge(f"gone{i}") for i in range(8)]
             + [EntityOperation.upsert_node(node_payload("held", name="Held"))]
+        ),
+        # Deletes and nothing else, which is what `delete_nodes` emits:
+        # a lock keyed on "no operation in this batch is an upsert" is
+        # invisible to every other holder here, the delete-leading one
+        # included, because they all end with an upsert.
+        "batch_all_deletes": lambda b: b.apply_batch(
+            [EntityOperation.delete_edge(f"gone{i}") for i in range(6)]
+            + [EntityOperation.delete_node(f"absent{i}") for i in range(6)]
         ),
     }
 
