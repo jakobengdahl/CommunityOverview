@@ -123,12 +123,23 @@ class PostgresGraphPersistenceBackend:
     def _create_missing(self, conn, table: str, columns: str) -> None:
         """Create one table, asking only when it is not already there.
 
-        `to_regclass` is readable by a role with nothing but DML, so this
-        answers for a least-privilege role where a bare
-        `CREATE TABLE IF NOT EXISTS` would raise instead.
+        The catalog answers this for a role with nothing but DML, where a
+        bare `CREATE TABLE IF NOT EXISTS` would raise instead - it checks
+        CREATE on the schema before it checks whether the table is there.
+
+        An exact match on the two catalog columns, not `to_regclass`: that
+        function *parses* its argument as an SQL name, so it case-folds an
+        unquoted part and splits on a dot. It answers "missing" for a table
+        that exists under a mixed-case schema - dropping this guard for
+        exactly the least-privilege role it was written for - and raises
+        outright on a schema name containing a dot. The schema guard below
+        matches `pg_namespace.nspname` for the same reason.
         """
-        qualified = f"{self.schema}.{table}"
-        if conn.execute("SELECT to_regclass(%s)", (qualified,)).fetchone()[0]:
+        if conn.execute(
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = %s AND c.relname = %s",
+            (self.schema, table),
+        ).fetchone():
             return
         conn.execute(
             sql.SQL("CREATE TABLE IF NOT EXISTS {} ({})").format(

@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
 import uuid
 
 import pytest
@@ -144,9 +145,18 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         threads = [threading.Thread(target=boot) for _ in range(10)]
         for thread in threads:
             thread.start()
+        # Joined against one shared deadline rather than a timeout each: ten
+        # hung boots at sixty seconds apiece would blow the suite's own
+        # per-test ceiling first, and a killed test says far less than the
+        # assertion below.
+        deadline = time.monotonic() + 60
         for thread in threads:
-            thread.join(60)
+            thread.join(max(0.0, deadline - time.monotonic()))
 
+        # A boot that blocks forever adds to neither list, and join() with a
+        # timeout returns either way - so without this the test is green on
+        # exactly the migration bug that hangs rather than raises.
+        assert not [t for t in threads if t.is_alive()], "a boot never finished"
         assert failures == [], f"instances failed to boot: {failures}"
         assert not [t for t in threads if t.is_alive()]
 
@@ -209,9 +219,18 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         threads = [threading.Thread(target=boot) for _ in range(10)]
         for thread in threads:
             thread.start()
+        # Joined against one shared deadline rather than a timeout each: ten
+        # hung boots at sixty seconds apiece would blow the suite's own
+        # per-test ceiling first, and a killed test says far less than the
+        # assertion below.
+        deadline = time.monotonic() + 60
         for thread in threads:
-            thread.join(60)
+            thread.join(max(0.0, deadline - time.monotonic()))
 
+        # A boot that blocks forever adds to neither list, and join() with a
+        # timeout returns either way - so without this the test is green on
+        # exactly the migration bug that hangs rather than raises.
+        assert not [t for t in threads if t.is_alive()], "a boot never finished"
         assert failures == [], f"instances failed to boot: {failures}"
 
     def test_a_second_thread_waits_for_the_migration_rather_than_the_memo(
@@ -253,6 +272,10 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         finally:
             blocker.close()
 
+        assert not first.is_alive() and not second.is_alive(), (
+            "a thread never finished - a migration that hangs rather than "
+            "raises would otherwise pass here"
+        )
         assert errors == [], (
             f"a thread reached the tables before the migration created them: {errors}"
         )
@@ -354,33 +377,93 @@ class TestPostgresBootsForALeastPrivilegeRole:
     role - at boot, against a store it has every permission it needs on.
     """
 
-    @pytest.fixture
-    def lowpriv(self):
-        """A role with no CREATE anywhere, and a schema it does not own."""
-        name = f"co_low_{uuid.uuid4().hex[:12]}"
-        schema = f"{name}_sch"
+    @pytest.fixture(params=["plain", "MixedCase"], ids=["plain", "needs-quoting"])
+    def lowpriv(self, request):
+        """A role with no CREATE anywhere, and a schema it does not own.
+
+        Parametrised over the schema's *name*, not for completeness: a name
+        that only survives quoted is what tells an exact catalog lookup apart
+        from one that parses the name and case-folds it. The parsing kind
+        reports a table that exists as missing, which drops the guard for
+        precisely this role.
+        """
+        suffix = uuid.uuid4().hex[:12]
+        name = f"co_low_{suffix}"
+        schema = (
+            f"co_low_{suffix}_sch" if request.param == "plain" else f"CoLow_{suffix}"
+        )
         # Generated per run rather than written down: the role lives for one
         # test, and a fixed one would be a credential in the source tree.
         password = secrets.token_hex(16)
-        with psycopg.connect(DSN, autocommit=True) as conn:
-            try:
+        database = psycopg.sql.Identifier(_dbname())
+        created_role = False
+        public_had_create = False
+        try:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                try:
+                    conn.execute(
+                        psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                            psycopg.sql.Identifier(name),
+                            psycopg.sql.Literal(password),
+                        )
+                    )
+                except psycopg.errors.InsufficientPrivilege:
+                    pytest.skip("the test role may not create roles")
+                created_role = True
+                # The fixture's whole premise is a role that cannot CREATE.
+                # PUBLIC may hold CREATE on this database, in which case the
+                # role inherits it and the guard under test is never reached
+                # - the test would pass while covering nothing.
+                public_had_create = conn.execute(
+                    "SELECT has_database_privilege('public', %s, 'CREATE')",
+                    (_dbname(),),
+                ).fetchone()[0]
+                if public_had_create:
+                    conn.execute(
+                        psycopg.sql.SQL(
+                            "REVOKE CREATE ON DATABASE {} FROM PUBLIC"
+                        ).format(database)
+                    )
+                if conn.execute(
+                    "SELECT has_database_privilege(%s, %s, 'CREATE')",
+                    (name, _dbname()),
+                ).fetchone()[0]:
+                    pytest.skip("cannot take CREATE on the database from the role")
                 conn.execute(
-                    psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                        psycopg.sql.Identifier(name),
-                        psycopg.sql.Literal(password),
+                    psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                        psycopg.sql.Identifier(schema)
                     )
                 )
-            except psycopg.errors.InsufficientPrivilege:
-                pytest.skip("the test role may not create roles")
-            conn.execute(f'CREATE SCHEMA "{schema}"')
-            conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{name}"')
-        try:
+                conn.execute(
+                    psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name)
+                    )
+                )
             yield name, schema, password
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:
-                conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-                conn.execute(f'REVOKE ALL ON DATABASE {_dbname()} FROM "{name}"')
-                conn.execute(f'DROP ROLE IF EXISTS "{name}"')
+                conn.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(schema)
+                    )
+                )
+                if public_had_create:
+                    conn.execute(
+                        psycopg.sql.SQL("GRANT CREATE ON DATABASE {} TO PUBLIC").format(
+                            database
+                        )
+                    )
+                if created_role:
+                    conn.execute(
+                        psycopg.sql.SQL("REVOKE ALL ON DATABASE {} FROM {}").format(
+                            database, psycopg.sql.Identifier(name)
+                        )
+                    )
+                    conn.execute(
+                        psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                            psycopg.sql.Identifier(name)
+                        )
+                    )
 
     def test_a_role_with_only_dml_on_existing_tables_can_boot(self, lowpriv, backends):
         name, schema, password = lowpriv
@@ -395,10 +478,18 @@ class TestPostgresBootsForALeastPrivilegeRole:
                     " doc jsonb NOT NULL",
                 ),
             ):
-                conn.execute(f'CREATE TABLE "{schema}"."{table}" ({columns})')
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(columns),
+                    )
+                )
             conn.execute(
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
-                f'IN SCHEMA "{schema}" TO "{name}"'
+                psycopg.sql.SQL(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE"
+                    " ON ALL TABLES IN SCHEMA {} TO {}"
+                ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
             )
 
         low_dsn = _dsn_as_role(name, password)
@@ -482,6 +573,70 @@ class TestPostgresLoadIsOneMomentInTime:
         assert torn == [], f"load returned a graph that never existed: {torn[:3]}"
 
 
+class TestPostgresLoadIsolation:
+    """The load's isolation level, asserted rather than inferred.
+
+    The tearing test infers it: if the level were wrong, some load would
+    tear. That is true but weak. `SET SESSION CHARACTERISTICS` in place of
+    `SET TRANSACTION` sets the default for *future* transactions and leaves
+    the current one alone, so only the first load on each pooled connection
+    is exposed - and a test that loads forty times through one connection
+    gets no extra chances at it. Asserting the level directly kills that
+    whole family in one go, and pins the docstring's claim that nothing is
+    left on the connection afterwards.
+    """
+
+    def test_the_load_runs_repeatable_read_and_leaves_nothing_behind(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        seen = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if not seen:
+                seen.append(
+                    real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
+                )
+            return result
+
+        psycopg.Connection.execute = spy
+        try:
+            backend.load_graph_data()
+        finally:
+            psycopg.Connection.execute = real_execute
+
+        assert seen == ["repeatable read"], (
+            f"the load did not run at REPEATABLE READ: {seen}"
+        )
+
+        # The same pooled connection, next transaction: back to the default.
+        with backend._pool.connection() as conn:
+            after = conn.execute("SHOW transaction_isolation").fetchone()[0]
+        assert after == "read committed", (
+            f"the isolation level leaked onto the pooled connection: {after}"
+        )
+
+
+class TestPostgresLoadOnAVirginStore:
+    def test_loading_before_anything_else_migrates_first(self, schema, backends):
+        """A read-only instance's first call is a load, not an exists().
+
+        Every other test reaches `exists()` or a save before it loads, so a
+        backend that migrated only on those paths would look fine here while
+        raising UndefinedTable for an export script or an instance booting
+        read-only against a store it expects to be there.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        assert backend.load_graph_data() == {"nodes": [], "edges": [], "metadata": {}}
+
+
 class TestPostgresStoreIdentity:
     def test_the_tables_existing_is_not_a_graph_existing(self, schema, backends):
         """`exists()` must answer for the graph, not for the migration.
@@ -494,7 +649,10 @@ class TestPostgresStoreIdentity:
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         assert not backend.exists()
-        backend.save_graph_data(snapshot([node_payload("a")]))
+        # An EMPTY graph, deliberately: with a node saved, an exists() that
+        # wrongly read graph_nodes would pass this too, and the test would
+        # not carry its own name.
+        backend.save_graph_data(snapshot())
         assert backend.exists()
 
     def test_two_schemas_are_two_stores(self, schema, backends):
