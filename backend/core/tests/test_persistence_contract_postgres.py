@@ -35,9 +35,12 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     PostgresGraphPersistenceBackend,
 )
 
-DSN = os.environ.get(
-    "CO_TEST_POSTGRES_DSN", "host=127.0.0.1 user=postgres dbname=postgres"
-)
+# Deliberately no default. This module creates and drops roles and schemas
+# and, where PUBLIC holds it, revokes CREATE on the database - so a default
+# pointing at a local server would do all of that to whatever a developer
+# happens to be running, on a plain `pytest backend/ -q`. Opt in by naming
+# the server; CI names it.
+DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
 
 def _dbname() -> str:
@@ -52,6 +55,8 @@ def _dsn_as_role(user: str, password: str) -> str:
 
 
 def _server_reachable() -> bool:
+    if not DSN:
+        return False
     try:
         with psycopg.connect(DSN, connect_timeout=3):
             return True
@@ -61,7 +66,11 @@ def _server_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _server_reachable(),
-    reason=f"no PostgreSQL server reachable at CO_TEST_POSTGRES_DSN ({DSN})",
+    reason=(
+        "set CO_TEST_POSTGRES_DSN to a PostgreSQL server to run these"
+        if not DSN
+        else f"no PostgreSQL server reachable at CO_TEST_POSTGRES_DSN ({DSN})"
+    ),
 )
 
 
@@ -158,7 +167,6 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         # exactly the migration bug that hangs rather than raises.
         assert not [t for t in threads if t.is_alive()], "a boot never finished"
         assert failures == [], f"instances failed to boot: {failures}"
-        assert not [t for t in threads if t.is_alive()]
 
     def test_the_migration_holds_the_advisory_lock(self, schema, backends):
         """The lock is what makes the test above pass rather than luck.

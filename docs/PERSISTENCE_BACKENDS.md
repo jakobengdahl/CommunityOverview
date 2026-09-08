@@ -207,8 +207,11 @@ passes against it.
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
-declared and as snapshot-only. `test_persistence_seam.py` covers the other
-half — which shape `GraphStorage` hands a backend for each mutation.
+declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
+worked example of stopping at step 2 — a real backend that declares
+`SNAPSHOT_ONLY` and lets the entity and notification clauses skip.
+`test_persistence_seam.py` covers the other half — which shape `GraphStorage`
+hands a backend for each mutation.
 
 The protocols are `runtime_checkable`, so `isinstance(backend,
 IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
@@ -450,10 +453,12 @@ writing a backend of your own against a shared server:
   cannot exceed 256 MB, and a save has no such limit because it writes a row
   per entity. A store would grow past that line and become permanently
   unloadable by the instance that wrote it, and with vectors carried inline
-  the ceiling arrives at a few tens of thousands of nodes. The limit is on
-  the uncompressed value, so the store's size on disk gives no warning: a
-  table measured at 4 MB, its rows compressed by TOAST, was already past the
-  aggregate's limit.
+  the ceiling arrives in the tens of thousands of nodes — measured on nodes
+  carrying a 384-dimension vector, about 65 000 of them. The limit is on the
+  uncompressed value while the table is TOAST-compressed on disk, but the
+  gap is not the alarming one it might sound like: a vector is high-entropy,
+  so the measured ratio was 1.4×, and 256 MB of aggregate showed up as about
+  190 MB on disk. Disk size does warn you here — it just warns late.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
@@ -471,17 +476,47 @@ writes.
 
 Both `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` check the
 caller's `CREATE` privilege *before* the existence short-circuit, so each is
-asked for only when a catalog lookup says it is missing. Without that, an app
-role that owns nothing but DML on tables an operator provisioned — the
+asked for only when a catalog lookup says it is missing (an exact match on
+`pg_namespace` / `pg_class` — `to_regclass` would not do, because it parses
+its argument as a name and so case-folds an unquoted schema). Without that, an
+app role that owns nothing but DML on tables an operator provisioned — the
 ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
 store it has every permission it actually needs on.
 
-One payload restriction is worth knowing before pointing an existing graph at
-this backend, because it is **not** shared with the file backend: a string
-containing a NUL (`\u0000`) is valid JSON and round-trips through
-`graph.json`, but PostgreSQL cannot store it in a `jsonb` column. A graph
-carrying one cannot be saved here at all, and because writes are whole-graph,
-one such value stops the whole graph from persisting rather than one node.
+To provision it that way, create these three tables and grant the app role
+`USAGE` on the schema plus `SELECT, INSERT, UPDATE, DELETE` on them. The
+primary key on `graph_metadata.only_row` is not decoration: the save upserts
+that row `ON CONFLICT (only_row)`, so a table without it boots cleanly and
+then fails on **every** save.
+
+```sql
+CREATE TABLE <schema>.graph_nodes (
+  id text PRIMARY KEY,
+  doc jsonb NOT NULL
+);
+CREATE TABLE <schema>.graph_edges (
+  id text PRIMARY KEY,
+  doc jsonb NOT NULL
+);
+CREATE TABLE <schema>.graph_metadata (
+  only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
+  doc jsonb NOT NULL
+);
+```
+
+**Two payload restrictions** are worth knowing before pointing an existing
+graph at this backend, because neither is shared with the file backend, and
+because writes are whole-graph: one offending value stops the entire graph
+from persisting, not one node.
+
+- **Non-finite floats.** `NaN` and `Infinity` are not JSON, but Python's
+  `json` module writes them bare and reads them back, so `graph.json` holds
+  them happily; `jsonb` rejects them. This is the likelier of the two,
+  because a backend with no vector sidecar receives every node's embedding
+  inline (see *Vectors and history*) — one degenerate vector is enough.
+- **NUL in a string.** `\u0000` is valid JSON and round-trips through
+  `graph.json`; PostgreSQL cannot store it in a `jsonb` column. This one
+  needs a hostile or corrupted string rather than an arithmetic accident.
 
 The backend currently declares `SNAPSHOT_ONLY`, and that bounds what it can
 promise. Serialising the race above stops the store holding a graph nobody

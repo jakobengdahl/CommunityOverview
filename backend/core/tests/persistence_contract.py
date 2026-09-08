@@ -3,9 +3,10 @@
 `docs/PERSISTENCE_BACKENDS.md` describes the seam in prose; this module is
 what a backend is actually held to. Subclass `PersistenceBackendContract` in
 a test module, provide a `factory` fixture, and every test here runs against
-your backend. The file backend and the in-memory reference backend below are
-the two implementations shipped with the repo; a future SQL or SQLite backend
-is developed against exactly this class.
+your backend. Three implementations are held to it in this repo: the file
+backend, the in-memory reference backend below, and the optional PostgreSQL
+backend, which is developed against exactly this class and stops at the
+snapshot contract.
 
 What a subclass provides:
 

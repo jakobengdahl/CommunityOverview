@@ -38,7 +38,7 @@ graph carrying one cannot be saved here at all.
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import psycopg
 from psycopg import sql
@@ -96,7 +96,6 @@ class PostgresGraphPersistenceBackend:
         schema: str = "public",
         pool_size: int = DEFAULT_POOL_SIZE,
         graph_name: str = "graph",
-        pool: Optional[ConnectionPool] = None,
     ):
         if pool_size < 1:
             raise ValueError("pool_size must be at least 1")
@@ -106,10 +105,7 @@ class PostgresGraphPersistenceBackend:
         # min_size 0: a backend that is constructed and never used holds no
         # connection. The contract creates backends freely, and so does an
         # instance that boots against a store it turns out not to read.
-        self._pool = pool or ConnectionPool(
-            conninfo, min_size=0, max_size=pool_size, open=True
-        )
-        self._owns_pool = pool is None
+        self._pool = ConnectionPool(conninfo, min_size=0, max_size=pool_size, open=True)
         self._migrated = False
         self._migrate_lock = threading.Lock()
 
@@ -345,8 +341,7 @@ class PostgresGraphPersistenceBackend:
         (tests, a script) should close them; a long-lived application
         instance holds one for its lifetime by design.
         """
-        if self._owns_pool:
-            self._pool.close()
+        self._pool.close()
 
 
 __all__ = [
