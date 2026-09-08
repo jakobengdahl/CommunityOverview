@@ -352,8 +352,12 @@ class PostgresGraphPersistenceBackend:
 
     # A deadlock is transient by nature and the batch is atomic, so a retry
     # starts from the state the aborted one left - which is the state it
-    # found. Small: the contention it resolves is between two writers, not a
-    # queue of them.
+    # found. Bounded rather than unbounded because a cycle that keeps
+    # re-forming is a signal, not something to absorb silently. Under heavy
+    # contention from many instances a batch can still exhaust the bound:
+    # measured at roughly one in fifty with eight writers hammering twelve
+    # ids with no think time, the server reporting three-process cycles
+    # rather than two. What happens then is written down at apply_batch.
     DEADLOCK_RETRIES = 3
 
     def upsert_node(self, node: Dict[str, Any]) -> None:
@@ -391,8 +395,12 @@ class PostgresGraphPersistenceBackend:
         the new row, which is why the anomaly is easy to miss.
 
         The economy the entity path exists for is intact: two instances
-        editing different entities still never wait for each other, because
-        SHARE mode is only incompatible with the save's EXCLUSIVE mode.
+        editing different entities do not wait for each other, because SHARE
+        conflicts only with the save's EXCLUSIVE mode. One exception, and it
+        is a feature rather than a leak: PostgreSQL makes a new request queue
+        behind a conflicting waiter, so once a save is queued for the
+        exclusive lock the entity writes behind it wait too. That is what
+        stops a stream of them starving the save indefinitely.
 
         A batch takes one row lock per operation and holds them to commit,
         so two batches touching the same entities in opposite orders
@@ -400,9 +408,13 @@ class PostgresGraphPersistenceBackend:
         followed by an upsert of one id is not the same batch reordered - so
         the deadlock is retried instead. That is safe precisely because the
         batch is atomic: the aborted transaction left nothing behind. Left
-        to propagate it would be worse than one lost mutation, because
-        GraphStorage answers a failed entity write by re-issuing the whole
-        graph, which is the overwrite this slice exists to eliminate.
+        to propagate on the first cycle it would be worse than one lost
+        mutation, because GraphStorage answers a failed entity write by
+        re-issuing the whole graph, which is the overwrite this slice exists
+        to eliminate. Exhausting the bound reaches that same path: the error
+        propagates and the next write is a whole-graph one. That is the
+        behaviour this backend had before entity writes existed, so the
+        worst case degrades rather than corrupts.
         """
         self._ensure_schema()
         for attempt in range(self.DEADLOCK_RETRIES + 1):

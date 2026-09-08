@@ -208,8 +208,10 @@ passes against it.
 against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
-worked example of stopping at step 2 — a real backend that declares
-`SNAPSHOT_ONLY` and lets the entity and notification clauses skip.
+worked example of a backend built up one step at a time: it declares
+`incremental_writes` and `transactions` and lets only the notification
+clauses skip, having landed first as `SNAPSHOT_ONLY` with the entity
+clauses skipping too.
 `test_persistence_seam.py` covers the other half — which shape `GraphStorage`
 hands a backend for each mutation.
 
@@ -543,12 +545,34 @@ last-writer-wins on the row, which is why the entity path states
 `READ COMMITTED` as the save does: under `REPEATABLE READ` the second writer
 would abort rather than wait.
 
-An entity operation takes no advisory lock, and the asymmetry with the save
-is deliberate. The save's lock exists because its `DELETE` reads the store
-before replacing it, so two of them interleave into a graph neither wrote.
-An entity operation names its row and reads nothing, so row locks are the
-whole story — and taking the save's lock there would serialise every
-mutation in the deployment against every other for no gain.
+An entity operation takes the save's lock too, but in **SHARE** mode where
+the save takes it exclusively. Row locks alone are not enough, and the case
+that proves it is a delete: a save *replaces* a row rather than updating it,
+so a `DELETE ... WHERE id` that waited on the save's row lock unblocks to
+find its target tuple dead and the replacement outside its own statement
+snapshot. It removes nothing, raises nothing, and the caller is told the
+entity is gone while it is still there. An upsert survives the same
+interleaving because `ON CONFLICT` sees the new row — which is why the
+anomaly is easy to miss, and why an earlier version of this backend shipped
+with the delete broken. The same window has a second face: an entity write
+inserting a *new* id into it makes the save itself abort on a duplicate key.
+
+SHARE keeps the economy the entity path exists for. Two instances editing
+different entities do not wait for each other — except behind a whole-graph
+save already queued for the exclusive lock, since PostgreSQL makes a new
+request queue behind a conflicting waiter. That exception is not a
+regression to work around: it is what stops a stream of entity writes
+starving the save indefinitely.
+
+A batch holds one row lock per operation until it commits, so two batches
+touching the same entities in opposite orders deadlock. The order is the
+caller's and cannot be sorted away — a delete followed by an upsert of one
+id is not the same batch reordered — so a deadlocked batch is retried
+(`DEADLOCK_RETRIES`, three times), which is safe precisely because the batch
+is atomic: the aborted transaction left nothing behind. Retries are bounded, and under
+heavy contention from many instances a batch can still exhaust them; the
+error then propagates and `GraphStorage` heals by re-issuing the whole
+graph, which is the pre-entity behaviour rather than a new hazard.
 
 `checkpoint()` is a no-op here. The file backend needs it because it appends
 to a journal and rewrites the graph only periodically; a database has no

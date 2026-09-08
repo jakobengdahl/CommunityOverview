@@ -60,6 +60,16 @@ from backend.core.storage_backends import (  # noqa: E402
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
 
+# The bound `docs/PERSISTENCE_BACKENDS.md` publishes, restated here so the
+# tests below pin it from both sides rather than following it wherever it
+# is moved.
+DOCUMENTED_DEADLOCK_RETRIES = 3
+
+
+class _RetryBoundExceeded(BaseException):
+    """Raised by a test when a bounded retry loop turns out unbounded."""
+
+
 def _dbname() -> str:
     return psycopg.conninfo.conninfo_to_dict(DSN).get("dbname", "postgres")
 
@@ -1071,7 +1081,7 @@ class TestPostgresConcurrentEntityWrites:
 
 
 class TestPostgresBatchesSurviveADeadlock:
-    """Two batches touching the same entities in opposite orders.
+    """The retry bound, pinned by injection rather than by hammering.
 
     A batch holds one row lock per operation until it commits, so opposite
     orderings deadlock - and the order is the caller's, which cannot be
@@ -1080,11 +1090,73 @@ class TestPostgresBatchesSurviveADeadlock:
     lost mutation, because GraphStorage answers a failed entity write by
     re-issuing the whole graph: a transient, retryable error would turn into
     the overwrite this slice exists to eliminate.
+
+    Real contention is exercised below, but it cannot pin the bound: two
+    threads racing produce a server-side cycle only sometimes, so the
+    hammering test passed with the retry removed in 5 runs out of 12 -
+    measured, and the same shape as the probabilistic detector removed
+    earlier in this work. The two injected cases below pin what the
+    hammering cannot: that a deadlock is retried, that exhaustion *raises*
+    rather than returning as if it had written, and that the retry is
+    bounded at all.
     """
 
-    def test_opposite_orderings_both_land_rather_than_deadlocking(
+    def test_a_deadlocked_batch_is_retried_and_then_lands(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        real_apply = backend._apply_batch_once
+        attempts = []
+
+        def flaky(operations):
+            attempts.append(1)
+            # The documented count, not `backend.DEADLOCK_RETRIES`: a test
+            # that reads the bound off the thing it is pinning passes for
+            # every value of it, including zero.
+            if len(attempts) <= DOCUMENTED_DEADLOCK_RETRIES:
+                raise psycopg.errors.DeadlockDetected("injected")
+            return real_apply(operations)
+
+        backend._apply_batch_once = flaky
+        backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == DOCUMENTED_DEADLOCK_RETRIES + 1
+        assert "a" in by_id(backend.load_graph_data(), "nodes"), (
+            "the retry returned without applying the batch"
+        )
+
+    def test_a_batch_that_keeps_deadlocking_raises_rather_than_vanishing(
         self, schema, backends
     ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        cap = DOCUMENTED_DEADLOCK_RETRIES + 5
+        attempts = []
+
+        def always(operations):
+            attempts.append(1)
+            if len(attempts) > cap:
+                # BaseException on purpose: an `except Exception` in the
+                # retry loop would swallow this and hang the suite instead
+                # of failing it.
+                raise _RetryBoundExceeded("apply_batch retried without a bound")
+            raise psycopg.errors.DeadlockDetected("injected")
+
+        backend._apply_batch_once = always
+        with pytest.raises(psycopg.errors.DeadlockDetected):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == DOCUMENTED_DEADLOCK_RETRIES + 1, (
+            "exhaustion must propagate after exactly one attempt per retry: "
+            "swallowing it tells the caller a mutation was stored when none was"
+        )
+        assert by_id(backend.load_graph_data(), "nodes") == {}
+
+    def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
+        """The real path, opportunistically: a cycle may or may not form."""
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
         second = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([first, second])
@@ -1126,6 +1198,96 @@ class TestPostgresBatchesSurviveADeadlock:
         assert set(landed) == {"x", "y"}
 
 
+class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
+    """The lock's *mode*, which nothing else in the suite pins.
+
+    Substituting the exclusive `pg_advisory_xact_lock` for the shared form
+    leaves every other test here green: writes that serialise still land,
+    and still land last-writer-wins. What it destroys is the reason the
+    entity path exists at all - one instance's open batch would make every
+    other instance's write wait, whatever entity it touched, so ten
+    instances would write no faster than one.
+    """
+
+    def test_a_second_instance_writes_while_another_batch_is_open(
+        self, schema, backends
+    ):
+        holder = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        other = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([holder, other])
+        holder.save_graph_data(snapshot([node_payload("held"), node_payload("free")]))
+        other.exists()  # migrate before the timing matters
+
+        paused, release = threading.Event(), threading.Event()
+        real_apply_one = holder._apply_one
+
+        def hold_open(conn, operation):
+            real_apply_one(conn, operation)
+            paused.set()
+            release.wait(30)
+
+        holder._apply_one = hold_open
+        holding = threading.Thread(
+            target=lambda: holder.upsert_node(node_payload("held", name="Held")),
+            daemon=True,
+        )
+        holding.start()
+        assert paused.wait(30), "the holder never reached its first operation"
+
+        done = threading.Event()
+
+        def write_elsewhere():
+            other.upsert_node(node_payload("free", name="Free"))
+            done.set()
+
+        writing = threading.Thread(target=write_elsewhere, daemon=True)
+        writing.start()
+        landed = done.wait(10)
+
+        assert holding.is_alive(), "the holder let go before the probe could run"
+        release.set()
+        holding.join(30)
+        writing.join(30)
+
+        assert landed, (
+            "a write to a different entity waited for an open batch: the "
+            "batch lock is exclusive rather than shared, so every instance's "
+            "entity writes serialise against every other instance's"
+        )
+        assert by_id(other.load_graph_data(), "nodes")["free"]["name"] == "Free"
+
+
+class TestPostgresEntityWritesLeaveNoLockBehind:
+    """`pg_advisory_lock_shared` for `pg_advisory_xact_lock_shared`.
+
+    Five characters apart in the source (`xact_`) and a permanent outage in
+    operation: the session-scoped form is never released, so the lock
+    stays on the pooled connection for the life of the process and the
+    next whole-graph save waits for it forever. Measured. The whole suite
+    stays green under that substitution, because no other test does an
+    entity write and *then* a save on a different connection.
+    """
+
+    def test_no_advisory_lock_survives_an_entity_write(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+        backend.upsert_node(node_payload("a"))
+
+        with psycopg.connect(DSN) as conn:
+            held = conn.execute(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                " AND database = (SELECT oid FROM pg_database"
+                " WHERE datname = current_database())"
+            ).fetchone()[0]
+
+        assert held == 0, (
+            f"{held} advisory lock(s) outlived the entity write: a "
+            "session-scoped lock on a pooled connection blocks the next "
+            "whole-graph save for the life of the process"
+        )
+
+
 class TestPostgresEntityWritesAgainstAWholeGraphSave:
     """The interleaving no contract clause reaches, and where a delete broke.
 
@@ -1133,12 +1295,17 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
     that waited on the save's row lock unblocks to find its target tuple dead
     and the replacement outside its own statement snapshot. It removes
     nothing and raises nothing, and the caller is told the entity is gone
-    while it is still there. An upsert survives the same interleaving,
-    because `ON CONFLICT` sees the new row - which is exactly why testing
-    only upserts missed it.
+    while it is still there. An upsert of an existing id survives the same
+    interleaving, because `ON CONFLICT` sees the new row - which is exactly
+    why testing only that missed it.
+
+    The second face is the save's: an entity write that inserts an id the
+    save is about to insert lands between the save's DELETEs and its
+    INSERTs, and the save aborts on the duplicate key. Same missing lock,
+    the other party paying.
     """
 
-    def _save_paused_before_commit(self, backend, graph, paused, release):
+    def _save_paused_before_commit(self, backend, graph, paused, release, errors):
         """Run a whole-graph save, held open after its DELETEs."""
         real_execute = psycopg.Connection.execute
 
@@ -1154,6 +1321,8 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
             psycopg.Connection.execute = spy
             try:
                 backend.save_graph_data(graph)
+            except Exception as exc:
+                errors.append(f"save: {type(exc).__name__}: {exc}")
             finally:
                 psycopg.Connection.execute = real_execute
 
@@ -1162,7 +1331,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         assert paused.wait(30), "the save never reached its DELETEs"
         return thread
 
-    @pytest.mark.parametrize("operation", ["delete", "upsert"])
+    @pytest.mark.parametrize("operation", ["delete", "upsert", "insert_new"])
     def test_an_entity_write_committing_after_a_save_is_not_swallowed(
         self, schema, backends, operation
     ):
@@ -1172,29 +1341,37 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         saver.save_graph_data(snapshot([node_payload("a")]))
         writer.exists()  # migrate before the timing matters
 
+        errors = []
         paused, release = threading.Event(), threading.Event()
         saving = self._save_paused_before_commit(
             saver,
             snapshot([node_payload("a", name="Saved"), node_payload("c")]),
             paused,
             release,
+            errors,
         )
-
-        errors = []
 
         def write():
             try:
                 if operation == "delete":
                     writer.delete_node("a")
-                else:
+                elif operation == "upsert":
                     writer.upsert_node(node_payload("a", name="Written"))
+                else:
+                    # An id the paused save is about to insert: without the
+                    # lock this lands first and the save dies on the key.
+                    writer.upsert_node(node_payload("c", name="Written"))
             except Exception as exc:
-                errors.append(f"{type(exc).__name__}: {exc}")
+                errors.append(f"write: {type(exc).__name__}: {exc}")
 
         writing = threading.Thread(target=write, daemon=True)
         writing.start()
         # Long enough for it to reach the lock and block behind the save.
         threading.Event().wait(1.0)
+        assert writing.is_alive(), (
+            "the entity write finished before the save released: it never "
+            "waited, so this proves nothing about the interleaving"
+        )
         release.set()
         saving.join(30)
         writing.join(30)
@@ -1202,7 +1379,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         assert not saving.is_alive() and not writing.is_alive(), (
             "a thread never finished"
         )
-        assert errors == [], f"the entity write failed: {errors}"
+        assert errors == [], f"a writer failed: {errors}"
 
         nodes = by_id(writer.load_graph_data(), "nodes")
         if operation == "delete":
@@ -1210,9 +1387,14 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
                 "a delete that committed after the save was swallowed: the "
                 "caller was told the node was gone and it is still there"
             )
-        else:
+        elif operation == "upsert":
             assert nodes["a"]["name"] == "Written", (
                 "an upsert that committed after the save was swallowed"
+            )
+        else:
+            assert nodes["a"]["name"] == "Saved", "the save did not land whole"
+            assert nodes["c"]["name"] == "Written", (
+                "an insert of an id the save also wrote was swallowed"
             )
 
 
