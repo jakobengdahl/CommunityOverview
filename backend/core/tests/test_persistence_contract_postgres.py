@@ -43,6 +43,8 @@ if REQUIRE:
 else:
     psycopg = pytest.importorskip("psycopg", reason="psycopg is an optional dependency")
 
+from psycopg_pool import ConnectionPool  # noqa: E402  (after importorskip)
+
 from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     MIGRATION_LOCK_KEY,
     PostgresGraphPersistenceBackend,
@@ -1005,15 +1007,23 @@ class TestPostgresEntityWritesTouchOneRow:
         ),
     }
 
-    # Lengths, not a length. Pinning one batch size pins a fencepost: this
-    # suite has now been extended from one operation to two and from two
-    # to five, and each time a mutation gated just above the new size
-    # walked past every case. `GraphStorage.delete_nodes` builds one edge
-    # delete per edge plus one node delete per node, so the length is
-    # whatever the caller deleted - a property, not a number. Testing a
-    # spread of them means a threshold gate has nowhere plausible to hide;
-    # it cannot make "gated above 40" impossible, only absurd.
-    BATCH_LENGTHS = (2, 5, 40)
+    # Several lengths, and no claim that this pins a property. An earlier
+    # version of this comment said driving (2, 5, 40) meant a threshold
+    # gate "has nowhere plausible to hide". That was measured and it is
+    # false: six of seven length-gated mutations survived it, `6 <= len
+    # <= 39` among them, because three points are three fenceposts and
+    # the gaps between them are as wide as the gap above them. What a
+    # spread buys is that a *single* threshold has to fall in a gap
+    # every one of these tests leaves - it lowers the odds, it does not
+    # close the family. Closing it would need one shared length source,
+    # randomised per run, driving every length-sensitive test; that is
+    # recorded as follow-up rather than done here.
+    #
+    # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
+    # node delete per node, so the length is whatever the caller deleted.
+    # The values below straddle the boundaries the other tests use (1, 6,
+    # 41, 43) rather than clustering with them.
+    BATCH_LENGTHS = (2, 7, 41)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
     # node-upsert. Runs rather than strict alternation because
@@ -1536,21 +1546,69 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
             opened.append(("Connection.connect", conninfo))
             return real_class(conninfo, **kwargs)
 
+        pools = []
+        real_pool_init = ConnectionPool.__init__
+
+        def spy_pool(self, *args, **kwargs):
+            pools.append(args[0] if args else kwargs.get("conninfo"))
+            return real_pool_init(self, *args, **kwargs)
+
         psycopg.connect = spy_module
         psycopg.Connection.connect = spy_class
+        ConnectionPool.__init__ = spy_pool
         try:
             for i in range(12):
                 backend.upsert_node(node_payload(f"n{i}"))
         finally:
             psycopg.connect = real_module
             psycopg.Connection.connect = real_class
+            ConnectionPool.__init__ = real_pool_init
 
+        # A second pool of its own would be warmed by the same write that
+        # warms the first, so the connect spies alone cannot see it.
+        assert pools == [], (
+            f"an entity write built {len(pools)} further connection pool(s); "
+            "one instance then costs a multiple of its documented pool size"
+        )
         assert opened == [], (
             f"entity writes opened {len(opened)} connection(s) rather than "
             "taking one from the pool: the documented pool size, and the "
             "connection budget derived from it, no longer bound what one "
             "instance costs"
         )
+
+    def test_a_failed_batch_gives_its_connection_back(self, schema, backends):
+        """The failure path, which is where a pooled connection is lost.
+
+        Every test that fails a batch builds a fresh backend and never
+        writes through it again, so a connection returned only on the
+        success path costs nothing anywhere in this suite - and wedges a
+        real instance permanently: the pool empties one bad payload at a
+        time and the next good write blocks for ever. A pool of one makes
+        it show up on the first retry rather than the fourth.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        for attempt in range(3):
+            with pytest.raises(psycopg.Error):
+                backend.apply_batch(
+                    [
+                        EntityOperation.upsert_node(
+                            node_payload(f"bad{attempt}", embedding=[float("nan")])
+                        )
+                    ]
+                )
+            # The write after the failure is the whole test: with the
+            # connection leaked this blocks until the pool times out.
+            backend.upsert_node(node_payload(f"after{attempt}"))
+
+        assert set(by_id(backend.load_graph_data(), "nodes")) == {
+            "after0",
+            "after1",
+            "after2",
+        }
 
     def test_the_migration_is_not_re_run_on_every_call(self, schema, backends):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -1849,6 +1907,15 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
                 EntityOperation.upsert_edge(edge_payload(f"e{i}", "held", "free"))
                 for i in range(40)
             ]
+        ),
+        # Delete-leading, and of middling length. Every holder above
+        # begins with an upsert, so a lock made exclusive for batches
+        # that START with a delete - which is exactly the shape
+        # `GraphStorage.delete_nodes` builds, edges first - held open
+        # here would have been invisible.
+        "batch_deletes_first": lambda b: b.apply_batch(
+            [EntityOperation.delete_edge(f"gone{i}") for i in range(8)]
+            + [EntityOperation.upsert_node(node_payload("held", name="Held"))]
         ),
     }
 
