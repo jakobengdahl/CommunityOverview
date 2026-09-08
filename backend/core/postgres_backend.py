@@ -31,8 +31,10 @@ it.
 
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. A whole-graph save carrying one fails
-entirely; an entity write fails only its own operation, which GraphStorage
-answers by re-issuing the whole graph - so the value has to go either way:
+entirely; an entity write fails only the write that carries it - one
+operation, or the whole batch it is in, since a batch is one transaction -
+which GraphStorage answers by re-issuing the whole graph, so the value has
+to go either way:
 
 - Non-finite floats. Python's `json` writes bare `NaN` and `Infinity` and
   reads them back; `jsonb` rejects them. This is the likelier of the two,

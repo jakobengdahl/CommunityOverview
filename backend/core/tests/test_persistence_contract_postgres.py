@@ -1243,12 +1243,16 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
         writing = threading.Thread(target=write_elsewhere, daemon=True)
         writing.start()
         landed = done.wait(10)
-
-        assert holding.is_alive(), "the holder let go before the probe could run"
+        # Release before asserting anything. A guard that fails while the
+        # holder is still parked leaves it holding a pooled connection, an
+        # open transaction and the advisory lock for the rest of its wait,
+        # which reddens the next test with an unrelated message.
+        still_holding = holding.is_alive()
         release.set()
         holding.join(30)
         writing.join(30)
 
+        assert still_holding, "the holder let go before the probe could run"
         assert landed, (
             "a write to a different entity waited for an open batch: the "
             "batch lock is exclusive rather than shared, so every instance's "
@@ -1368,16 +1372,21 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
         writing.start()
         # Long enough for it to reach the lock and block behind the save.
         threading.Event().wait(1.0)
-        assert writing.is_alive(), (
-            "the entity write finished before the save released: it never "
-            "waited, so this proves nothing about the interleaving"
-        )
+        # Sampled here, asserted after the release: failing while the save
+        # is still parked would leave `psycopg.Connection.execute` globally
+        # replaced by its spy for the rest of the wait, and the next
+        # parametrization would fail on that instead of on its own subject.
+        still_blocked = writing.is_alive()
         release.set()
         saving.join(30)
         writing.join(30)
 
         assert not saving.is_alive() and not writing.is_alive(), (
             "a thread never finished"
+        )
+        assert still_blocked, (
+            "the entity write finished before the save released: it never "
+            "waited, so this proves nothing about the interleaving"
         )
         assert errors == [], f"a writer failed: {errors}"
 

@@ -209,9 +209,12 @@ against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares
-`incremental_writes` and `transactions` and lets only the notification
-clauses skip, having landed first as `SNAPSHOT_ONLY` with the entity
-clauses skipping too.
+`incremental_writes` and `transactions`, having landed first as
+`SNAPSHOT_ONLY` with the entity clauses skipping too. Nine clauses still
+skip for it — the eight change-notification ones, and the
+backwards-compatibility clause, because a store written by a previous
+release of this backend does not exist yet. Count them the way step 4
+says to: a skipped clause is an unverified one whatever the reason.
 `test_persistence_seam.py` covers the other half — which shape `GraphStorage`
 hands a backend for each mutation.
 
@@ -520,10 +523,11 @@ CREATE TABLE <schema>.graph_metadata (
 **Two payload restrictions** are worth knowing before pointing an existing
 graph at this backend, because neither is shared with the file backend. A
 whole-graph save carrying one offending value fails entirely, so a graph
-holding one cannot be migrated here at all. An entity write fails only its
-own operation — but `GraphStorage` answers a failed entity write by
-re-issuing the whole graph, which then fails the same way, so the value has
-to go either way.
+holding one cannot be migrated here at all. An entity write fails only the
+write that carries it — one operation, or the whole batch it is in, since a
+batch is one transaction — but `GraphStorage` answers a failed entity write
+by re-issuing the whole graph, which then fails the same way, so the value
+has to go either way.
 
 - **Non-finite floats.** `NaN` and `Infinity` are not JSON, but Python's
   `json` module writes them bare and reads them back, so `graph.json` holds
@@ -569,10 +573,10 @@ touching the same entities in opposite orders deadlock. The order is the
 caller's and cannot be sorted away — a delete followed by an upsert of one
 id is not the same batch reordered — so a deadlocked batch is retried
 (`DEADLOCK_RETRIES`, three times), which is safe precisely because the batch
-is atomic: the aborted transaction left nothing behind. Retries are bounded, and under
-heavy contention from many instances a batch can still exhaust them; the
-error then propagates and `GraphStorage` heals by re-issuing the whole
-graph, which is the pre-entity behaviour rather than a new hazard.
+is atomic: the aborted transaction left nothing behind. Retries are bounded,
+and under heavy contention from many instances a batch can still exhaust
+them; the error then propagates and `GraphStorage` heals by re-issuing the
+whole graph, which is the pre-entity behaviour rather than a new hazard.
 
 `checkpoint()` is a no-op here. The file backend needs it because it appends
 to a journal and rewrites the graph only periodically; a database has no

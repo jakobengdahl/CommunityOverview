@@ -6,7 +6,9 @@ a test module, provide a `factory` fixture, and every test here runs against
 your backend. Three implementations are held to it in this repo: the file
 backend, the in-memory reference backend below, and the optional PostgreSQL
 backend, which is developed against exactly this class and meets everything
-here but the change-notification clauses.
+here but the change-notification clauses and the backwards-compatibility
+one - the latter because a store written by a previous release of that
+backend does not exist yet.
 
 What a subclass provides:
 
