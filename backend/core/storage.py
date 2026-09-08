@@ -203,12 +203,12 @@ class GraphStorage:
         self._io_executor = ThreadPoolExecutor(
             max_workers=1, initializer=self._mark_writer_thread
         )
-        # Set by the writer thread when an entity write failed: the backend's
-        # image then lacks a mutation memory has. Consumed on the caller's
-        # thread - by the next write, flush() or shutdown - which re-issues
-        # the whole graph. The writer never takes _lock itself: load() and
-        # save() wait on the queue while holding it, so a writer that did
-        # would deadlock the process.
+        # Set when an entity write or a whole-graph write failed: the
+        # backend's image then lacks what memory has. Consumed on the
+        # caller's thread - by the next write, flush() or shutdown - which
+        # re-issues the whole graph. The writer never takes _lock itself:
+        # load() and save() wait on the queue while holding it, so a writer
+        # that did would deadlock the process.
         self._resync_pending = False
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
@@ -1063,11 +1063,11 @@ class GraphStorage:
         """Persist a mutation, as entity operations where the backend takes them.
 
         Callers must hold _lock and pass the operations that describe exactly
-        what they changed. After a failed entity write the next write here is
-        the whole graph, whatever its own shape would have been, so the
-        backend's image catches up with memory (see _do_apply). Otherwise
-        which shape reaches the backend is decided by its declared
-        capabilities:
+        what they changed. After a failed entity write - or a failed
+        whole-graph write - the next write here is the whole graph, whatever
+        its own shape would have been, so the backend's image catches up
+        with memory (see _do_apply and _do_save_to_disk). Otherwise which
+        shape reaches the backend is decided by its declared capabilities:
 
         - no incremental support: the whole graph, exactly as before the
           entity contract existed;
@@ -1178,7 +1178,8 @@ class GraphStorage:
         self._io_executor.submit(lambda: None).result()
 
     def _heal_if_needed(self) -> "Optional[Future[None]]":
-        """Re-issue the whole graph after a failed entity write, if one failed.
+        """Re-issue the whole graph after a failed entity write or a failed
+        whole-graph write, if one failed.
 
         Runs on the caller's thread. save() clears the flag; the write it
         queues carries every mutation in memory, including the failed one.

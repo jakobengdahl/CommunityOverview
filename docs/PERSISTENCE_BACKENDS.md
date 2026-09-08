@@ -349,9 +349,10 @@ writing instance's clock.
 
 ### A local write that failed
 
-A failed entity write leaves a mutation in memory and nowhere else, and
-`GraphStorage` heals it by re-issuing the whole graph on the next write,
-`flush()` or shutdown. On a shared store that is a last-resort recovery, not
+A failed entity write - or a failed whole-graph write, the same way - leaves
+the backend's on-disk image behind what memory holds, and `GraphStorage`
+heals the gap by re-issuing the whole graph on the next write, `flush()` or
+shutdown. On a shared store that is a last-resort recovery, not
 a routine: it re-asserts one instance's whole image over a store someone else
 is writing. A refresh arriving while such a write is outstanding therefore
 does neither thing — it does not reload (that would drop the mutation) and it

@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1435,3 +1436,385 @@ class TestJournalIdentity:
         assert _graph_metadata(tmp / "g.json")["journal_id"] == "given"
         backend.upsert_node(_payload("b"))
         assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == "given"
+
+
+class TestShortWriteBoundary:
+    """The suite already covers a write cut roughly in half. These pin the
+    boundary: a shortfall of exactly one byte, and what a live process' own
+    mirror looks like right after."""
+
+    def test_a_write_missing_only_the_trailing_newline_still_raises(
+        self, backend, monkeypatch
+    ):
+        """The byte-count check does not need a large shortfall to trip: one
+        byte short - the newline that says the append completed - is enough
+        to raise, exactly as a half-written line does."""
+        import backend.core.storage_backends as sb
+
+        real_open = open
+
+        class DropLastByte:
+            def __init__(self, f):
+                self._f = f
+
+            def write(self, data):
+                return self._f.write(data[:-1])
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self._f.__exit__(*exc)
+
+        def half_open(path, mode="r", *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            if mode == "ab":
+                monkeypatch.setattr(sb, "open", real_open, raising=False)
+                return DropLastByte(f)
+            return f
+
+        before = (
+            backend.journal_path.stat().st_size if backend.journal_path.exists() else 0
+        )
+        monkeypatch.setattr(sb, "open", half_open, raising=False)
+        with pytest.raises(OSError, match="short journal write"):
+            backend.upsert_node(_payload("c"))
+
+        assert (
+            backend.journal_path.stat().st_size if backend.journal_path.exists() else 0
+        ) == before
+
+    def test_a_short_write_leaves_the_failed_node_out_of_the_next_checkpoint(
+        self, backend, monkeypatch
+    ):
+        """The mirror only applies an op after the append that carries it
+        actually completes - so a checkpoint taken on the SAME instance right
+        after a short write must not write the node the failed append never
+        landed."""
+        import backend.core.storage_backends as sb
+
+        real_open = open
+
+        class DropLastByte:
+            def __init__(self, f):
+                self._f = f
+
+            def write(self, data):
+                return self._f.write(data[:-1])
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self._f.__exit__(*exc)
+
+        def half_open(path, mode="r", *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            if mode == "ab":
+                monkeypatch.setattr(sb, "open", real_open, raising=False)
+                return DropLastByte(f)
+            return f
+
+        monkeypatch.setattr(sb, "open", half_open, raising=False)
+        with pytest.raises(OSError, match="short journal write"):
+            backend.upsert_node(_payload("c"))
+
+        backend.checkpoint()
+        data = json.loads(backend.json_path.read_text())
+        assert "c" not in _ids(data)
+
+        backend.upsert_node(_payload("d"))
+        assert _ids(
+            FileGraphPersistenceBackend(backend.json_path).load_graph_data()
+        ) == {"a", "b", "d"}
+
+
+class TestFlushHealOrdering:
+    def test_flush_drains_the_write_before_deciding_whether_to_heal(self, tmp):
+        """flush() must let every queued write finish - including one that
+        fails and asks for a heal - before it checks the flag. Checking the
+        flag first would race a write still in flight and skip the heal that
+        would have fixed it, because the flag would not be raised yet."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+            gate = threading.Event()
+
+            def blocked_then_fails(node):
+                assert gate.wait(5), "the test itself deadlocked"
+                raise OSError("transient append failure")
+
+            backend.upsert_node = blocked_then_fails
+            storage.update_node("a", {"name": "Renamed"})  # queued behind the gate
+
+            result = {}
+
+            def run_flush():
+                storage.flush()
+                result["done"] = True
+
+            t = threading.Thread(target=run_flush, daemon=True)
+            t.start()
+            # Give flush() a chance to reach its first blocking step. If the
+            # order regressed (heal checked before the drain), flush() would
+            # not need to wait here at all - the flag would still read False.
+            time.sleep(0.1)
+            assert "done" not in result, (
+                "flush() returned before the blocked write could even run"
+            )
+
+            gate.set()
+            t.join(timeout=5)
+            assert result.get("done"), "flush() never returned"
+
+            data = json.loads(Path(path).read_text())
+            assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+        finally:
+            storage.flush()
+
+
+class TestResyncFlagLockDiscipline:
+    def test_the_flag_is_cleared_only_while_save_holds_the_lock(self, tmp, monkeypatch):
+        """save()'s comment says the flag is cleared under the same lock as
+        the capture, precisely so a write issued after the clear is only
+        reachable once the lock is released - never able to race in before
+        it. Moving the clear outside the `with self._lock:` block would keep
+        every other assertion in this suite passing while breaking exactly
+        that guarantee, so check the guarantee itself: the lock must be held
+        at the instant the flag becomes False."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+
+            def always_fails(node):
+                raise OSError("entity path down")
+
+            backend.upsert_node = always_fails
+            storage.update_node("a", {"name": "Renamed"})
+            storage._io_executor.submit(lambda: None).result()
+            assert storage._resync_pending
+
+            observed_lock_held = []
+            real_setattr = GraphStorage.__setattr__
+
+            def spying_setattr(self, name, value):
+                if name == "_resync_pending" and value is False:
+                    observed_lock_held.append(self._lock._is_owned())
+                real_setattr(self, name, value)
+
+            monkeypatch.setattr(GraphStorage, "__setattr__", spying_setattr)
+
+            storage.save().result()
+
+            assert observed_lock_held == [True], (
+                "_resync_pending was cleared without the lock held"
+            )
+        finally:
+            storage.flush()
+
+
+class TestSaveNowFlagHandling:
+    def test_save_now_keeps_the_flag_raised_until_it_actually_succeeds(self, tmp):
+        """_save_now is the last-resort synchronous write once the executor
+        is gone. If its own write also fails, the flag it leaves must stay
+        raised - not be treated as resolved for a write that never landed -
+        so a second shutdown attempt still retries it."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+
+        backend = storage._persistence_backend
+        real_save = backend.save_graph_data
+        real_upsert = backend.upsert_node
+        failures = {"upsert": 1, "save": 2}
+
+        def flaky_upsert(node):
+            if failures["upsert"]:
+                failures["upsert"] -= 1
+                raise OSError("transient append failure")
+            return real_upsert(node)
+
+        def flaky_save(data):
+            if failures["save"]:
+                failures["save"] -= 1
+                raise OSError("disk full")
+            return real_save(data)
+
+        backend.upsert_node = flaky_upsert
+        backend.save_graph_data = flaky_save
+        storage.update_node("a", {"name": "Renamed"})
+
+        storage.shutdown_events()
+        assert storage._resync_pending, (
+            "the first shutdown's own fallback write failed too; the flag "
+            "must stay raised rather than being cleared for a write that "
+            "never landed"
+        )
+
+        storage.shutdown_events()
+        assert not storage._resync_pending
+
+        data = json.loads(Path(path).read_text())
+        assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+
+    def test_save_now_does_not_run_after_a_clean_shutdown(self, tmp):
+        """A shutdown with nothing pending must never fall back to the
+        synchronous whole-graph write - that path exists only for a write
+        that failed and has nowhere else to retry."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        storage.flush()
+
+        backend = storage._persistence_backend
+        real_save = backend.save_graph_data
+        calls = []
+
+        def spying_save(data):
+            calls.append(data)
+            return real_save(data)
+
+        backend.save_graph_data = spying_save
+        storage.update_node("a", {"name": "Renamed"})  # a normal journal append
+
+        storage.shutdown_events()
+
+        assert calls == [], "_save_now ran a whole-graph write with nothing pending"
+        data = json.loads(Path(path).read_text())
+        assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
+
+
+class TestHealWithoutFlush:
+    def test_persist_heals_on_the_next_write_without_a_flush(self, tmp):
+        """_persist checks the flag itself: the very next mutation heals,
+        not only a caller that happens to call flush() afterward."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+            real_upsert = backend.upsert_node
+            failures = {"left": 1}
+
+            def flaky(node):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise OSError("transient append failure")
+                return real_upsert(node)
+
+            backend.upsert_node = flaky
+            storage.update_node("a", {"name": "Renamed"})
+            storage._io_executor.submit(lambda: None).result()  # surface the failure
+            assert storage._resync_pending
+
+            storage.add_nodes([Node(id="b", type=NodeType.ACTOR, name="B")], [])
+            storage._io_executor.submit(lambda: None).result()  # drain the heal
+            assert not storage._resync_pending
+
+            fresh = GraphStorage(json_path=path)
+            try:
+                assert set(fresh.nodes) == {"a", "b"}
+                assert fresh.nodes["a"].name == "Renamed"
+            finally:
+                fresh.shutdown_events()
+        finally:
+            storage.shutdown_events()
+
+    def test_save_clears_the_flag_so_the_write_after_a_heal_is_a_journal_line(
+        self, tmp
+    ):
+        """A heal writes the whole graph and must clear the flag as part of
+        it - otherwise the very next mutation would ALSO be forced into a
+        whole-graph write, forever, instead of the usual one small append."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+            real_upsert = backend.upsert_node
+            failures = {"left": 1}
+
+            def flaky(node):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise OSError("transient append failure")
+                return real_upsert(node)
+
+            backend.upsert_node = flaky
+            storage.update_node("a", {"name": "Renamed"})
+            storage.flush()  # heals: a whole-graph write, journal truncated
+            assert not storage._resync_pending
+            assert backend.journal_path.read_bytes() == b""
+
+            storage.update_node("a", {"name": "Renamed again"})
+            storage._io_executor.submit(lambda: None).result()
+
+            assert len(_lines(backend.journal_path)) == 1, (
+                "the write right after a heal should be a journal append, "
+                "not another whole-graph snapshot"
+            )
+        finally:
+            storage.flush()
+
+
+class TestShutdownEndToEnd:
+    def test_shutdown_heals_through_save_now_after_two_failures(self, tmp):
+        """Two failures in a row - the entity write, then the heal's own
+        whole-graph snapshot - still leave graph.json correct after
+        shutdown: the second, successful save_graph_data call can only be
+        the synchronous _save_now fallback, since the automatic heal
+        attempt already used up its one chance to succeed."""
+        path = str(tmp / "g.json")
+        storage = GraphStorage(json_path=path)
+        storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        storage.flush()
+
+        backend = storage._persistence_backend
+        real_upsert = backend.upsert_node
+        real_save = backend.save_graph_data
+        failures = {"upsert": 1, "save": 1}
+        save_calls = []
+
+        def flaky_upsert(node):
+            if failures["upsert"]:
+                failures["upsert"] -= 1
+                raise OSError("transient append failure")
+            return real_upsert(node)
+
+        def flaky_save(data):
+            save_calls.append(dict(data))
+            if failures["save"]:
+                failures["save"] -= 1
+                raise OSError("disk full")
+            return real_save(data)
+
+        backend.upsert_node = flaky_upsert
+        backend.save_graph_data = flaky_save
+        storage.update_node("a", {"name": "Renamed"})
+
+        storage.shutdown_events()
+
+        assert len(save_calls) == 2, (
+            "expected exactly two save_graph_data calls: the automatic "
+            "heal (which failed) and _save_now's own retry (which landed)"
+        )
+        data = json.loads(Path(path).read_text())
+        assert {n["id"]: n["name"] for n in data["nodes"]}["a"] == "Renamed"
