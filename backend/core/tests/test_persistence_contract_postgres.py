@@ -26,6 +26,8 @@ import pytest
 
 from backend.core.tests.persistence_contract import (
     PersistenceBackendContract,
+    by_id,
+    edge_payload,
     node_payload,
     snapshot,
 )
@@ -45,6 +47,10 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     MIGRATION_LOCK_KEY,
     PostgresGraphPersistenceBackend,
 )
+from backend.core.storage_backends import (  # noqa: E402
+    BackendCapabilities,
+    EntityOperation,
+)
 
 # Deliberately no default. This module creates and drops roles and schemas
 # and, where PUBLIC holds it, revokes CREATE on the database - so a default
@@ -52,6 +58,16 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
 # happens to be running, on a plain `pytest backend/ -q`. Opt in by naming
 # the server; CI names it.
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
+
+
+# The bound `docs/PERSISTENCE_BACKENDS.md` publishes, restated here so the
+# tests below pin it from both sides rather than following it wherever it
+# is moved.
+DOCUMENTED_DEADLOCK_RETRIES = 3
+
+
+class _RetryBoundExceeded(BaseException):
+    """Raised by a test when a bounded retry loop turns out unbounded."""
 
 
 def _dbname() -> str:
@@ -120,6 +136,69 @@ def backends():
         backend.close()
 
 
+def _statements_issued(action):
+    """Every statement `action` issues, captured on the cursor.
+
+    The cursor, not the connection: `Connection.execute` delegates to a
+    cursor, so this sees both, where patching the connection alone would
+    miss anything a backend ran on a cursor of its own.
+    """
+    issued = []
+    real_execute = psycopg.Cursor.execute
+    real_many = psycopg.Cursor.executemany
+
+    def spy_execute(cur, query, params=None, *args, **kwargs):
+        issued.append((query, params))
+        return real_execute(cur, query, params, *args, **kwargs)
+
+    def spy_many(cur, query, params_seq, *args, **kwargs):
+        issued.append((query, None))
+        return real_many(cur, query, params_seq, *args, **kwargs)
+
+    psycopg.Cursor.execute = spy_execute
+    psycopg.Cursor.executemany = spy_many
+    try:
+        action()
+    finally:
+        psycopg.Cursor.execute = real_execute
+        psycopg.Cursor.executemany = real_many
+    return issued
+
+
+def _rendered(query):
+    """The SQL a statement actually is - str() gives a repr."""
+    if hasattr(query, "as_string"):
+        with psycopg.connect(DSN) as conn:
+            return " ".join(query.as_string(conn).split())
+    return " ".join(str(query).split())
+
+
+def _writing_statements(issued):
+    return [
+        text
+        for text in (_rendered(q) for q, _ in issued)
+        if any(verb in text.upper() for verb in ("INSERT", "UPDATE", "DELETE"))
+    ]
+
+
+def _sequential_scans(issued):
+    """(statements naming a graph table, those whose plan scans one).
+
+    EXPLAIN does not execute, so this is safe to run for every statement.
+    """
+    touched, scanning = [], []
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        for query, params in issued:
+            text = _rendered(query)
+            if "graph_nodes" not in text and "graph_edges" not in text:
+                continue
+            touched.append(text)
+            rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
+            if "Seq Scan" in "\n".join(r[0] for r in rows):
+                scanning.append(text)
+    return touched, scanning
+
+
 class TestPostgresBackendContract(PersistenceBackendContract):
     @pytest.fixture
     def factory(self, schema, backends):
@@ -155,6 +234,34 @@ class TestPostgresBackendContract(PersistenceBackendContract):
             return real(value)
 
         monkeypatch.setattr(module.psycopg.types.json, "Jsonb", exploding)
+
+    def interrupt_next_append(self, backend, monkeypatch):
+        """Fail a batch after its delete has reached the server.
+
+        Armed on the STATEMENTS the batch issues, not on when its payloads
+        happen to be serialised. Keying on the payload works only while
+        `Jsonb()` is called lazily inside the transaction: build the
+        parameter lists up front - an ordinary refactor that changes no SQL -
+        and the hook fires before any statement is sent, so the store is
+        untouched and the clause passes without having tested a rollback at
+        all. Measured: that combination shipped a non-atomic batch green.
+
+        Raising once a DELETE has been seen and an INSERT is starting is the
+        property the clause actually needs, so it is what the hook checks.
+        """
+        seen_delete = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            text = " ".join(str(query).split()).upper()
+            if "DELETE" in text:
+                seen_delete.append(text)
+            elif "INSERT" in text and seen_delete:
+                monkeypatch.setattr(psycopg.Connection, "execute", real_execute)
+                raise OSError("connection lost mid-batch")
+            return real_execute(conn, query, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
 
 
 class TestPostgresSchemaIsSafeToMigrateConcurrently:
@@ -741,6 +848,643 @@ class TestPostgresSaveIsolation:
         assert seen == ["read committed"], (
             f"the save inherited the connection's isolation level: {seen}"
         )
+
+
+class TestPostgresDeclaresWhatItImplements:
+    """Under-declaring is invisible to the contract, by construction.
+
+    Every clause reads the backend's own declaration and skips itself when
+    the flag is absent, so dropping a flag turns tests into skips and the
+    suite stays green - while GraphStorage quietly reverts to whole-graph
+    writes, which is the regression this slice exists to prevent. Only an
+    assertion outside the contract can see it.
+    """
+
+    def test_the_declaration_is_exactly_incremental_and_transactional(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert backend.capabilities() == BackendCapabilities(
+            incremental_writes=True, transactions=True
+        )
+
+    def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
+        """Migration is every other method's first act; this one too.
+
+        GraphStorage happens to call exists() before it mutates, so the
+        omission would not surface there - but the guard is uniform in this
+        class and nothing was holding it in place on the entity path.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        backend.upsert_node(node_payload("a"))
+
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+
+class TestPostgresEntityWritesTouchOneRow:
+    """What makes an entity write worth having, and what the contract misses.
+
+    Every contract clause checks the resulting graph, which a backend whose
+    `upsert_node` quietly rewrote the whole store would satisfy perfectly -
+    while destroying exactly the property this slice exists for. These check
+    the cost and the blast radius rather than the outcome.
+    """
+
+    def test_an_upsert_does_not_lose_a_row_written_while_it_runs(
+        self, schema, backends
+    ):
+        """The property a read-modify-write quietly breaks.
+
+        Writing the foreign row *before* the upsert proves nothing: a
+        backend that loaded the graph, edited it and saved it whole would
+        read that row and put it back. The lost update only appears when the
+        row lands between such a backend's read and its write - which is the
+        ordinary case on a shared store, not a contrived one. So the row is
+        inserted from another connection after the upsert's first statement.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(
+            snapshot(
+                [node_payload("a"), node_payload("b")],
+                [edge_payload("ab", "a", "b")],
+            )
+        )
+
+        real_execute = psycopg.Connection.execute
+        injected = []
+
+        def spy(conn, query, *args, **kwargs):
+            # Just before the first WRITING statement, which is the only
+            # point that separates the two shapes: a row write has done no
+            # reading by then, while a read-modify-write has already read
+            # and is about to overwrite what it read.
+            text = " ".join(str(query).split()).upper()
+            if not injected and any(
+                verb in text for verb in ("INSERT", "DELETE", "UPDATE")
+            ):
+                injected.append(text)
+                with psycopg.connect(DSN, autocommit=True) as other:
+                    other.execute(
+                        psycopg.sql.SQL(
+                            "INSERT INTO {}.graph_nodes (id, doc) VALUES (%s, %s)"
+                        ).format(psycopg.sql.Identifier(schema)),
+                        (
+                            "elsewhere",
+                            psycopg.types.json.Jsonb(node_payload("elsewhere")),
+                        ),
+                    )
+            return real_execute(conn, query, *args, **kwargs)
+
+        psycopg.Connection.execute = spy
+        try:
+            backend.upsert_node(node_payload("a", name="Renamed"))
+        finally:
+            psycopg.Connection.execute = real_execute
+
+        assert injected, "the other instance's write never happened"
+        loaded = backend.load_graph_data()
+        assert {n["id"] for n in loaded["nodes"]} == {"a", "b", "elsewhere"}, (
+            "a row written during the upsert was lost, so the upsert is not a row write"
+        )
+        assert [e["id"] for e in loaded["edges"]] == ["ab"]
+        assert by_id(loaded, "nodes")["a"]["name"] == "Renamed"
+
+    def test_an_upsert_reads_no_more_of_the_graph_as_it_grows(self, schema, backends):
+        """The economy, as the cost of the plan rather than a count of texts.
+
+        A backend that satisfied the contract by re-saving the whole graph
+        would be correct and useless, and counting statements catches that
+        shape. It does not catch every shape: one statement with constant
+        text can still carry an unbounded scan, and a read routed through a
+        cursor is invisible to a spy on the connection. So this asserts what
+        the guarantee actually says - that nothing the upsert issues reads
+        the table sequentially - and pins the shape as well.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload(f"n{i}") for i in range(40)]))
+
+        issued = _statements_issued(
+            lambda: backend.upsert_node(node_payload("n0", name="Renamed"))
+        )
+
+        writes = _writing_statements(issued)
+        assert len(writes) == 1, f"an upsert should write once: {writes}"
+        assert "ON CONFLICT" in writes[0] and "graph_nodes" in writes[0]
+        assert "DELETE" not in writes[0].upper()
+
+        touched, scanning = _sequential_scans(issued)
+        assert touched, "no statement of the upsert touched a graph table"
+        assert not scanning, (
+            "an upsert reads a graph table sequentially, so its cost grows "
+            f"with the graph: {scanning}"
+        )
+
+    def test_a_delete_reads_no_more_of_the_graph_as_it_grows(self, schema, backends):
+        """The same two questions for the other action, which had neither.
+
+        Both checks above call `upsert_node` and nothing else, and a delete
+        is where they diverge: `WHERE doc->>'id' = %s` reads the same as
+        `WHERE id = %s` and plans as a sequential scan, and a delete is the
+        natural place to write rows nobody asked for - cascading to the
+        edges that reference the node, which would eat an edge another
+        instance committed a moment earlier. The seam does not cascade:
+        `delete_node` is documented as removing one node, and GraphStorage
+        names the edges it wants gone.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(40)],
+                [edge_payload("e0", "n0", "n1")],
+            )
+        )
+
+        issued = _statements_issued(lambda: backend.delete_node("n0"))
+
+        writes = _writing_statements(issued)
+        assert len(writes) == 1, f"a delete should write once: {writes}"
+        assert "graph_nodes" in writes[0] and "graph_edges" not in writes[0]
+
+        touched, scanning = _sequential_scans(issued)
+        assert touched, "no statement of the delete touched a graph table"
+        assert not scanning, (
+            "a delete reads a graph table sequentially, so its cost grows "
+            f"with the graph: {scanning}"
+        )
+
+        loaded = backend.load_graph_data()
+        assert "n0" not in by_id(loaded, "nodes")
+        assert "n1" in by_id(loaded, "nodes")
+        assert [e["id"] for e in loaded["edges"]] == ["e0"], (
+            "deleting a node removed an edge no operation named"
+        )
+
+    def test_a_checkpoint_writes_nothing(self, schema, backends):
+        """The docstring's claim, as an assertion.
+
+        `checkpoint()` is a no-op here because a database has no deferred
+        state - but the contract only asks that entity writes survive one,
+        which a full load-and-save round trip satisfies too. That shape is
+        not merely wasteful: GraphStorage calls `checkpoint()` at shutdown,
+        so it would reintroduce the whole-graph overwrite this slice exists
+        to remove, on the one path nobody is watching.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a"), node_payload("b")]))
+        backend.upsert_node(node_payload("c"))
+
+        writes = _writing_statements(_statements_issued(backend.checkpoint))
+
+        assert writes == [], f"a checkpoint should write nothing: {writes}"
+
+    def test_an_upsert_carries_the_vector_a_snapshot_would_have_held(
+        self, schema, backends
+    ):
+        """The silent-loss shape, pinned.
+
+        A backend with no vector sidecar receives every embedding inline, in
+        the node payload, for a snapshot and an upsert alike. If an entity
+        write dropped it, vectors would survive a whole-graph save and
+        disappear on any single-node edit - with nothing failing.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        backend.upsert_node(node_payload("a", embedding=[0.5, 0.25]))
+
+        stored = by_id(backend.load_graph_data(), "nodes")["a"]
+        assert stored["embedding"] == [0.5, 0.25]
+
+
+class TestPostgresConcurrentEntityWrites:
+    def test_two_instances_writing_different_entities_both_land(self, schema, backends):
+        """The deployment this whole initiative is for.
+
+        Under whole-graph saves these two would overwrite each other by
+        design; as row writes they do not contend at all.
+        """
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        second = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([first, second])
+        first.save_graph_data(snapshot())
+
+        errors = []
+
+        def write(backend, prefix):
+            try:
+                for i in range(10):
+                    backend.upsert_node(node_payload(f"{prefix}{i}"))
+            except Exception as exc:
+                errors.append(f"{prefix}: {type(exc).__name__}: {exc}")
+
+        threads = [
+            threading.Thread(target=write, args=(first, "a"), daemon=True),
+            threading.Thread(target=write, args=(second, "b"), daemon=True),
+        ]
+        deadline = time.monotonic() + 60
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+        assert not [t for t in threads if t.is_alive()], "a writer never finished"
+        assert errors == [], f"a concurrent entity write failed: {errors}"
+        landed = {n["id"] for n in first.load_graph_data()["nodes"]}
+        assert landed == {f"a{i}" for i in range(10)} | {f"b{i}" for i in range(10)}, (
+            f"writes were lost: {sorted(landed)}"
+        )
+
+    def test_the_same_entity_from_two_instances_resolves_last_writer_wins(
+        self, schema, backends
+    ):
+        """Neither writer fails, and the row holds one of the two payloads.
+
+        Under a REPEATABLE READ default the second writer would abort with a
+        serialization failure rather than wait; the save and the batch both
+        state READ COMMITTED so that they wait and win instead.
+        """
+        parts = psycopg.conninfo.conninfo_to_dict(DSN)
+        parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
+        hostile = psycopg.conninfo.make_conninfo(**parts)
+
+        first = PostgresGraphPersistenceBackend(hostile, schema=schema)
+        second = PostgresGraphPersistenceBackend(hostile, schema=schema)
+        backends.extend([first, second])
+        first.save_graph_data(snapshot())
+
+        first.upsert_node(node_payload("contested", name="Original"))
+
+        # Forced, not hoped for. Two threads racing collide only sometimes,
+        # and measured, a regression removing the isolation statement went
+        # green on about two runs in five - which a CI re-run would then
+        # "fix". A blocker holding the row makes the second writer wait every
+        # time.
+        errors = []
+        blocker = psycopg.connect(hostile, autocommit=False)
+        try:
+            blocker.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_nodes SET doc = doc WHERE id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                ("contested",),
+            )
+
+            def write():
+                try:
+                    second.upsert_node(node_payload("contested", name="Second"))
+                except Exception as exc:
+                    errors.append(f"{type(exc).__name__}: {exc}")
+
+            writer = threading.Thread(target=write, daemon=True)
+            writer.start()
+            # Long enough that it is certainly blocked on the row lock.
+            threading.Event().wait(1.0)
+            assert writer.is_alive(), "the writer never contended for the row"
+            blocker.commit()
+            writer.join(30)
+        finally:
+            blocker.close()
+
+        assert not writer.is_alive(), "the contended write never finished"
+        assert errors == [], f"a contended entity write failed: {errors}"
+        assert by_id(first.load_graph_data(), "nodes")["contested"]["name"] == (
+            "Second"
+        )
+
+
+class TestPostgresBatchesSurviveADeadlock:
+    """The retry bound, pinned by injection rather than by hammering.
+
+    A batch holds one row lock per operation until it commits, so opposite
+    orderings deadlock - and the order is the caller's, which cannot be
+    sorted away: a delete followed by an upsert of one id is not the same
+    batch reordered. Left to propagate, the failure would be worse than one
+    lost mutation, because GraphStorage answers a failed entity write by
+    re-issuing the whole graph: a transient, retryable error would turn into
+    the overwrite this slice exists to eliminate.
+
+    Real contention is exercised below, but it cannot pin the bound: two
+    threads racing produce a server-side cycle only sometimes, so the
+    hammering test passed with the retry removed in 5 runs out of 12 -
+    measured, and the same shape as the probabilistic detector removed
+    earlier in this work. The two injected cases below pin what the
+    hammering cannot: that a deadlock is retried, that exhaustion *raises*
+    rather than returning as if it had written, and that the retry is
+    bounded at all.
+    """
+
+    def test_a_deadlocked_batch_is_retried_and_then_lands(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        real_apply = backend._apply_batch_once
+        attempts = []
+
+        def flaky(operations):
+            attempts.append(1)
+            # The documented count, not `backend.DEADLOCK_RETRIES`: a test
+            # that reads the bound off the thing it is pinning passes for
+            # every value of it, including zero.
+            if len(attempts) <= DOCUMENTED_DEADLOCK_RETRIES:
+                raise psycopg.errors.DeadlockDetected("injected")
+            return real_apply(operations)
+
+        backend._apply_batch_once = flaky
+        backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == DOCUMENTED_DEADLOCK_RETRIES + 1
+        assert "a" in by_id(backend.load_graph_data(), "nodes"), (
+            "the retry returned without applying the batch"
+        )
+
+    def test_a_batch_that_keeps_deadlocking_raises_rather_than_vanishing(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        cap = DOCUMENTED_DEADLOCK_RETRIES + 5
+        attempts = []
+
+        def always(operations):
+            attempts.append(1)
+            if len(attempts) > cap:
+                # BaseException on purpose: an `except Exception` in the
+                # retry loop would swallow this and hang the suite instead
+                # of failing it.
+                raise _RetryBoundExceeded("apply_batch retried without a bound")
+            raise psycopg.errors.DeadlockDetected("injected")
+
+        backend._apply_batch_once = always
+        with pytest.raises(psycopg.errors.DeadlockDetected):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == DOCUMENTED_DEADLOCK_RETRIES + 1, (
+            "exhaustion must propagate after exactly one attempt per retry: "
+            "swallowing it tells the caller a mutation was stored when none was"
+        )
+        assert by_id(backend.load_graph_data(), "nodes") == {}
+
+    def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
+        """The real path, opportunistically: a cycle may or may not form."""
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        second = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([first, second])
+        first.save_graph_data(snapshot([node_payload("x"), node_payload("y")]))
+
+        errors = []
+        start = threading.Barrier(2)
+
+        def hammer(backend, name, ids):
+            try:
+                start.wait(timeout=30)
+                for _ in range(15):
+                    backend.apply_batch(
+                        [
+                            EntityOperation.upsert_node(node_payload(entity, name=name))
+                            for entity in ids
+                        ]
+                    )
+            except Exception as exc:
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        threads = [
+            threading.Thread(
+                target=hammer, args=(first, "First", ["x", "y"]), daemon=True
+            ),
+            threading.Thread(
+                target=hammer, args=(second, "Second", ["y", "x"]), daemon=True
+            ),
+        ]
+        deadline = time.monotonic() + 90
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+        assert not [t for t in threads if t.is_alive()], "a batch never finished"
+        assert errors == [], f"a batch failed rather than retrying: {errors}"
+        landed = by_id(first.load_graph_data(), "nodes")
+        assert set(landed) == {"x", "y"}
+
+
+class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
+    """The lock's *mode*, which nothing else in the suite pins.
+
+    Substituting the exclusive `pg_advisory_xact_lock` for the shared form
+    leaves every other test here green: writes that serialise still land,
+    and still land last-writer-wins. What it destroys is the reason the
+    entity path exists at all - one instance's open batch would make every
+    other instance's write wait, whatever entity it touched, so ten
+    instances would write no faster than one.
+    """
+
+    def test_a_second_instance_writes_while_another_batch_is_open(
+        self, schema, backends
+    ):
+        holder = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        other = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([holder, other])
+        holder.save_graph_data(snapshot([node_payload("held"), node_payload("free")]))
+        other.exists()  # migrate before the timing matters
+
+        paused, release = threading.Event(), threading.Event()
+        real_apply_one = holder._apply_one
+
+        def hold_open(conn, operation):
+            real_apply_one(conn, operation)
+            paused.set()
+            release.wait(30)
+
+        holder._apply_one = hold_open
+        holding = threading.Thread(
+            target=lambda: holder.upsert_node(node_payload("held", name="Held")),
+            daemon=True,
+        )
+        holding.start()
+        assert paused.wait(30), "the holder never reached its first operation"
+
+        done = threading.Event()
+
+        def write_elsewhere():
+            other.upsert_node(node_payload("free", name="Free"))
+            done.set()
+
+        writing = threading.Thread(target=write_elsewhere, daemon=True)
+        writing.start()
+        landed = done.wait(10)
+        # Release before asserting anything. A guard that fails while the
+        # holder is still parked leaves it holding a pooled connection, an
+        # open transaction and the advisory lock for the rest of its wait,
+        # which reddens the next test with an unrelated message.
+        still_holding = holding.is_alive()
+        release.set()
+        holding.join(30)
+        writing.join(30)
+
+        assert still_holding, "the holder let go before the probe could run"
+        assert landed, (
+            "a write to a different entity waited for an open batch: the "
+            "batch lock is exclusive rather than shared, so every instance's "
+            "entity writes serialise against every other instance's"
+        )
+        assert by_id(other.load_graph_data(), "nodes")["free"]["name"] == "Free"
+
+
+class TestPostgresEntityWritesLeaveNoLockBehind:
+    """`pg_advisory_lock_shared` for `pg_advisory_xact_lock_shared`.
+
+    Five characters apart in the source (`xact_`) and a permanent outage in
+    operation: the session-scoped form is never released, so the lock
+    stays on the pooled connection for the life of the process and the
+    next whole-graph save waits for it forever. Measured. The whole suite
+    stays green under that substitution, because no other test does an
+    entity write and *then* a save on a different connection.
+    """
+
+    def test_no_advisory_lock_survives_an_entity_write(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+        backend.upsert_node(node_payload("a"))
+
+        with psycopg.connect(DSN) as conn:
+            held = conn.execute(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                " AND database = (SELECT oid FROM pg_database"
+                " WHERE datname = current_database())"
+            ).fetchone()[0]
+
+        assert held == 0, (
+            f"{held} advisory lock(s) outlived the entity write: a "
+            "session-scoped lock on a pooled connection blocks the next "
+            "whole-graph save for the life of the process"
+        )
+
+
+class TestPostgresEntityWritesAgainstAWholeGraphSave:
+    """The interleaving no contract clause reaches, and where a delete broke.
+
+    A save replaces a row rather than updating it, so a `DELETE ... WHERE id`
+    that waited on the save's row lock unblocks to find its target tuple dead
+    and the replacement outside its own statement snapshot. It removes
+    nothing and raises nothing, and the caller is told the entity is gone
+    while it is still there. An upsert of an existing id survives the same
+    interleaving, because `ON CONFLICT` sees the new row - which is exactly
+    why testing only that missed it.
+
+    The second face is the save's: an entity write that inserts an id the
+    save is about to insert lands between the save's DELETEs and its
+    INSERTs, and the save aborts on the duplicate key. Same missing lock,
+    the other party paying.
+    """
+
+    def _save_paused_before_commit(self, backend, graph, paused, release, errors):
+        """Run a whole-graph save, held open after its DELETEs."""
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            text = " ".join(str(query).split())
+            if "DELETE" in text.upper() and "graph_edges" in text:
+                paused.set()
+                release.wait(30)
+            return result
+
+        def run():
+            psycopg.Connection.execute = spy
+            try:
+                backend.save_graph_data(graph)
+            except Exception as exc:
+                errors.append(f"save: {type(exc).__name__}: {exc}")
+            finally:
+                psycopg.Connection.execute = real_execute
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert paused.wait(30), "the save never reached its DELETEs"
+        return thread
+
+    @pytest.mark.parametrize("operation", ["delete", "upsert", "insert_new"])
+    def test_an_entity_write_committing_after_a_save_is_not_swallowed(
+        self, schema, backends, operation
+    ):
+        saver = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([saver, writer])
+        saver.save_graph_data(snapshot([node_payload("a")]))
+        writer.exists()  # migrate before the timing matters
+
+        errors = []
+        paused, release = threading.Event(), threading.Event()
+        saving = self._save_paused_before_commit(
+            saver,
+            snapshot([node_payload("a", name="Saved"), node_payload("c")]),
+            paused,
+            release,
+            errors,
+        )
+
+        def write():
+            try:
+                if operation == "delete":
+                    writer.delete_node("a")
+                elif operation == "upsert":
+                    writer.upsert_node(node_payload("a", name="Written"))
+                else:
+                    # An id the paused save is about to insert: without the
+                    # lock this lands first and the save dies on the key.
+                    writer.upsert_node(node_payload("c", name="Written"))
+            except Exception as exc:
+                errors.append(f"write: {type(exc).__name__}: {exc}")
+
+        writing = threading.Thread(target=write, daemon=True)
+        writing.start()
+        # Long enough for it to reach the lock and block behind the save.
+        threading.Event().wait(1.0)
+        # Sampled here, asserted after the release: failing while the save
+        # is still parked would leave `psycopg.Connection.execute` globally
+        # replaced by its spy for the rest of the wait, and the next
+        # parametrization would fail on that instead of on its own subject.
+        still_blocked = writing.is_alive()
+        release.set()
+        saving.join(30)
+        writing.join(30)
+
+        assert not saving.is_alive() and not writing.is_alive(), (
+            "a thread never finished"
+        )
+        assert still_blocked, (
+            "the entity write finished before the save released: it never "
+            "waited, so this proves nothing about the interleaving"
+        )
+        assert errors == [], f"a writer failed: {errors}"
+
+        nodes = by_id(writer.load_graph_data(), "nodes")
+        if operation == "delete":
+            assert "a" not in nodes, (
+                "a delete that committed after the save was swallowed: the "
+                "caller was told the node was gone and it is still there"
+            )
+        elif operation == "upsert":
+            assert nodes["a"]["name"] == "Written", (
+                "an upsert that committed after the save was swallowed"
+            )
+        else:
+            assert nodes["a"]["name"] == "Saved", "the save did not land whole"
+            assert nodes["c"]["name"] == "Written", (
+                "an insert of an id the save also wrote was swallowed"
+            )
 
 
 class TestPostgresInstancesStayInSync:

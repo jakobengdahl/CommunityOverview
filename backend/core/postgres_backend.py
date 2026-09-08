@@ -16,22 +16,25 @@ This module is imported only by whoever chooses this backend. Nothing in the
 always-imported path touches it, so `psycopg` stays an optional dependency
 (`backend/requirements-postgres.txt`) and a base install is unaffected.
 
-This slice implements the snapshot contract only, and that bounds what it
-can promise. Whole-graph writes are serialised per store, so the store never
-ends holding a graph nobody saved - but serialising a race does not resolve
-it: two instances writing at once still means the later save discards what
-the earlier one committed, because a whole-graph write says nothing about
-what changed. **Until the per-entity slice lands, one writer at a time is
-the limit**, and this backend's value so far is a shared store several
-instances can *read* consistently, not one they can safely both write.
+The backend declares `incremental_writes` and `transactions`, so a mutation
+reaches it as the entity operations that describe it rather than as a
+rewrite of the whole graph. That is what makes several writers safe: two
+instances editing different parts of the graph now touch different rows and
+do not contend, where whole-graph saves had the later one discard the
+earlier one's work whatever it was.
 
-The per-entity operations and cross-instance change notification are the
-following slices; until then the backend declares SNAPSHOT_ONLY and
-`GraphStorage` drives it with whole-graph writes.
+What is still missing is the other direction. Nothing tells an instance that
+another one wrote, so a running instance serves what it last loaded until it
+reloads - correct, but stale. Cross-instance change notification is the next
+slice; the seam for it already exists and this backend does not yet declare
+it.
 
 Two payload restrictions come from JSONB and are shared with neither the
-file backend nor `graph.json`. Because writes are whole-graph, one offending
-value stops the entire graph from persisting rather than one node:
+file backend nor `graph.json`. A whole-graph save carrying one fails
+entirely; an entity write fails only the write that carries it - one
+operation, or the whole batch it is in, since a batch is one transaction -
+which GraphStorage answers by re-issuing the whole graph, so the value has
+to go either way:
 
 - Non-finite floats. Python's `json` writes bare `NaN` and `Infinity` and
   reads them back; `jsonb` rejects them. This is the likelier of the two,
@@ -44,13 +47,13 @@ value stops the entire graph from persisting rather than one node:
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
-from backend.core.storage_backends import SNAPSHOT_ONLY, BackendCapabilities
+from backend.core.storage_backends import BackendCapabilities, EntityOperation
 
 # Every instance runs the same migration on boot, so they race. The lock is
 # taken for the duration of the migrating transaction and released with it -
@@ -220,7 +223,7 @@ class PostgresGraphPersistenceBackend:
     # -- snapshot contract ---------------------------------------------------
 
     def capabilities(self) -> BackendCapabilities:
-        return SNAPSHOT_ONLY
+        return BackendCapabilities(incremental_writes=True, transactions=True)
 
     def exists(self) -> bool:
         self._ensure_schema()
@@ -346,6 +349,124 @@ class PostgresGraphPersistenceBackend:
 
     def default_graph_name(self) -> str:
         return self._graph_name
+
+    # -- entity contract -----------------------------------------------------
+
+    # A deadlock is transient by nature and the batch is atomic, so a retry
+    # starts from the state the aborted one left - which is the state it
+    # found. Bounded rather than unbounded because a cycle that keeps
+    # re-forming is a signal, not something to absorb silently. Under heavy
+    # contention from many instances a batch can still exhaust the bound:
+    # measured at roughly one in fifty with eight writers hammering twelve
+    # ids with no think time, the server reporting three-process cycles
+    # rather than two. What happens then is written down at apply_batch.
+    DEADLOCK_RETRIES = 3
+
+    def upsert_node(self, node: Dict[str, Any]) -> None:
+        self.apply_batch([EntityOperation.upsert_node(node)])
+
+    def delete_node(self, node_id: str) -> None:
+        self.apply_batch([EntityOperation.delete_node(node_id)])
+
+    def upsert_edge(self, edge: Dict[str, Any]) -> None:
+        self.apply_batch([EntityOperation.upsert_edge(edge)])
+
+    def delete_edge(self, edge_id: str) -> None:
+        self.apply_batch([EntityOperation.delete_edge(edge_id)])
+
+    def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
+        """Apply the operations in order, in one transaction.
+
+        This is where the shared store starts paying: a renamed node costs
+        one row rather than a rewrite of every node, so two instances
+        editing different parts of the graph stop overwriting each other.
+        Atomicity is the database's - `transactions` is declared on the
+        strength of this method, not approximated by a journal the way the
+        file backend has to.
+
+        The save's lock is taken here too, but in SHARE mode, so entity
+        operations do not wait for each other - only for a whole-graph save,
+        which takes it exclusively. Row locks alone are not enough, and the
+        case that proves it is a delete. A save replaces a row rather than
+        updating it (`DELETE` then `INSERT`), so a `DELETE ... WHERE id`
+        that waited on the save's row lock unblocks to find its target tuple
+        dead and the replacement outside its own statement snapshot: it
+        removes nothing, reports nothing, and the caller is told the entity
+        is gone while it is still there. Measured before this lock existed.
+        An upsert survives the same interleaving because `ON CONFLICT` sees
+        the new row, which is why the anomaly is easy to miss.
+
+        The economy the entity path exists for is intact: two instances
+        editing different entities do not wait for each other, because SHARE
+        conflicts only with the save's EXCLUSIVE mode. One exception, and it
+        is a feature rather than a leak: PostgreSQL makes a new request queue
+        behind a conflicting waiter, so once a save is queued for the
+        exclusive lock the entity writes behind it wait too. That is what
+        stops a stream of them starving the save indefinitely.
+
+        A batch takes one row lock per operation and holds them to commit,
+        so two batches touching the same entities in opposite orders
+        deadlock. The order is the caller's and cannot be sorted - a delete
+        followed by an upsert of one id is not the same batch reordered - so
+        the deadlock is retried instead. That is safe precisely because the
+        batch is atomic: the aborted transaction left nothing behind. Left
+        to propagate on the first cycle it would be worse than one lost
+        mutation, because GraphStorage answers a failed entity write by
+        re-issuing the whole graph, which is the overwrite this slice exists
+        to eliminate. Exhausting the bound reaches that same path: the error
+        propagates and the next write is a whole-graph one. That is the
+        behaviour this backend had before entity writes existed, so the
+        worst case degrades rather than corrupts.
+        """
+        self._ensure_schema()
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                self._apply_batch_once(operations)
+                return
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+
+    def _apply_batch_once(self, operations: Sequence[EntityOperation]) -> None:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                # Same reason as the save: last-writer-wins on a contended
+                # row is a READ COMMITTED behaviour. Under a REPEATABLE READ
+                # default the second writer would abort with a serialization
+                # failure instead of waiting and winning.
+                conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
+                for operation in operations:
+                    self._apply_one(conn, operation)
+
+    def _apply_one(self, conn, operation: EntityOperation) -> None:
+        table = "graph_nodes" if operation.kind == "node" else "graph_edges"
+        if operation.action == "delete":
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE id = %s").format(self._table(table)),
+                (operation.entity_id,),
+            )
+            return
+        conn.execute(
+            sql.SQL(
+                "INSERT INTO {} (id, doc) VALUES (%s, %s)"
+                " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
+            ).format(self._table(table)),
+            (operation.entity_id, psycopg.types.json.Jsonb(operation.payload)),
+        )
+
+    def checkpoint(self) -> None:
+        """Nothing to fold in: every write above is already committed.
+
+        The file backend needs this because it appends to a journal and only
+        periodically rewrites the graph; a database has no such deferred
+        state, so the canonical form is what is already there. Implemented
+        rather than omitted because `capabilities_of` refuses a backend that
+        declares `incremental_writes` without all six methods.
+        """
 
     # -- lifecycle -----------------------------------------------------------
 
