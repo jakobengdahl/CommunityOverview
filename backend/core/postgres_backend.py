@@ -355,11 +355,10 @@ class PostgresGraphPersistenceBackend:
     # A deadlock is transient by nature and the batch is atomic, so a retry
     # starts from the state the aborted one left - which is the state it
     # found. Bounded rather than unbounded because a cycle that keeps
-    # re-forming is a signal, not something to absorb silently. Under heavy
-    # contention from many instances a batch can still exhaust the bound:
-    # measured at roughly one in fifty with eight writers hammering twelve
-    # ids with no think time, the server reporting three-process cycles
-    # rather than two. What happens then is written down at apply_batch.
+    # re-forming is a signal, not something to absorb silently. Under
+    # sustained contention from many instances a batch can still exhaust
+    # the bound - the server forms cycles of three processes and more, not
+    # only pairs - and what happens then is written down at apply_batch.
     DEADLOCK_RETRIES = 3
 
     def upsert_node(self, node: Dict[str, Any]) -> None:
