@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.core.events.models import EntityKind, EventType
-from backend.core.models import Edge, Node, NodeType
+from backend.core.models import Edge, Node, NodeType, RelationshipType
 from backend.core.storage import EXTERNAL_CHANGE_ORIGIN, GraphStorage
 from backend.core.storage_backends import (
     SNAPSHOT_ONLY,
@@ -282,6 +282,19 @@ class TestCapabilityDeclaration:
 
         with pytest.raises(TypeError, match="BackendCapabilities"):
             capabilities_of(Wrong())
+
+    def test_a_declaration_of_the_wrong_type_is_refused_at_construction(self):
+        """The case above pins capabilities_of() in isolation; GraphStorage.
+        __init__ calls it eagerly, so the same backend must fail to
+        construct a storage at all, not just fail a direct capabilities_of()
+        call."""
+
+        class Wrong(_SnapshotBackend):
+            def capabilities(self):
+                return {"incremental_writes": True}
+
+        with pytest.raises(TypeError, match="BackendCapabilities"):
+            GraphStorage(persistence_backend=Wrong())
 
     def test_the_protocols_are_structural(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2498,6 +2511,38 @@ class TestSnapshotOnlyBackends:
             finally:
                 storage.flush()
 
+    def test_add_nodes_with_no_nodes_still_snapshots_on_a_snapshot_backend(self):
+        """A snapshot-only backend has no notion of "nothing changed" -
+        _persist() always calls save() for it, empty operations list or not.
+        add_nodes([], edges) still runs the nodes phase (empty) and the edges
+        phase, so it snapshots twice, the same as a non-empty call."""
+        backend = _SnapshotBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [])
+        storage.flush()
+        snapshots_before = backend.snapshots
+
+        result = storage.add_nodes([], [_edge("e", "a", "b")])
+        storage.flush()
+
+        assert result.success
+        assert backend.snapshots == snapshots_before + 2
+        assert {e["id"] for e in backend.data["edges"]} == {"e"}
+
+    def test_delete_edges_with_no_ids_still_snapshots_on_a_snapshot_backend(self):
+        backend = _SnapshotBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+        snapshots_before = backend.snapshots
+
+        result = storage.delete_edges([])
+        storage.flush()
+
+        assert result.success
+        assert backend.snapshots == snapshots_before + 1
+        assert {e["id"] for e in backend.data["edges"]} == {"e"}
+
 
 class TestIncrementalBackends:
     def test_a_single_node_update_is_one_upsert_and_no_snapshot(self):
@@ -2569,6 +2614,31 @@ class TestIncrementalBackends:
         assert all(op.payload is None for op in batch)
         assert set(backend.nodes) == {"b", "c"}
         assert set(backend.edges) == {"bc"}
+        assert backend.snapshots == 0
+
+    def test_deleting_several_edges_in_one_call_is_one_batch(self):
+        """The single-operation case is pinned below
+        (test_a_single_operation_uses_its_own_method_not_a_batch,
+        delete_edges-of-one); a multi-edge delete_edges call was unexercised."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes(
+            [_node("a"), _node("b")], [_edge("e", "a", "b"), _edge("f", "b", "a")]
+        )
+        storage.flush()
+        backend.calls.clear()
+
+        result = storage.delete_edges(["e", "f"])
+        storage.flush()
+
+        assert result.success
+        assert _kinds(backend) == ["apply_batch"]
+        batch = backend.calls[0][1]
+        assert [(op.kind, op.action, op.entity_id) for op in batch] == [
+            ("edge", "delete", "e"),
+            ("edge", "delete", "f"),
+        ]
+        assert backend.edges == {}
         assert backend.snapshots == 0
 
     @pytest.mark.parametrize(
@@ -2764,6 +2834,80 @@ class TestPartialFailure:
         assert set(storage.nodes) == expect_nodes == set(backend.nodes)
         assert set(storage.edges) == expect_edges == set(backend.edges)
 
+    def test_a_rejected_duplicate_node_does_not_overwrite_the_original_payload(self):
+        """The two duplicate-id cases above send a payload identical to the
+        original, so a regression that appended to unpersisted_nodes BEFORE
+        the `node.id in self.nodes` check (rather than after, as the code
+        does) would still pass: the duplicate's payload is indistinguishable
+        from what is already stored. Giving the duplicate a different name
+        closes that: if the rejected duplicate were persisted anyway, both
+        memory and the backend would show the duplicate's name, not the
+        original's."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+        backend.calls.clear()
+
+        duplicate = Node(id="a", type=NodeType.ACTOR, name="Other")
+        result = storage.add_nodes([duplicate], [])
+        storage.flush()
+
+        assert not result.success and "already exists" in result.message
+        assert backend.calls == []
+        assert storage.nodes["a"].name == "A"
+        assert backend.nodes["a"]["name"] == "A"
+
+    def test_a_rejected_duplicate_edge_does_not_overwrite_the_original_payload(self):
+        """Same gap as the node case above, for edges: the duplicate id here
+        arrives reversed (source and target swapped) rather than payload-
+        identical, so a regression that persists the rejected duplicate would
+        leave the store pointing the wrong way."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+        backend.calls.clear()
+
+        duplicate = Edge(id="e", source="b", target="a")
+        result = storage.add_nodes([], [duplicate])
+        storage.flush()
+
+        assert not result.success and "already exists" in result.message
+        assert backend.calls == []
+        assert storage.edges["e"].source == "a" and storage.edges["e"].target == "b"
+        assert backend.edges["e"]["source"] == "a" and backend.edges["e"]["target"] == "b"
+
+    def test_an_edge_rejected_by_applicability_after_a_good_one_is_never_persisted(
+        self,
+    ):
+        """No incremental-backend test exercised the applicability exit
+        (_validate_edge_applicability, raised after the edge has been
+        resolved but before it is added to self.edges/unpersisted_edges): a
+        regression that added the edge to unpersisted_edges before validating
+        it would leak the rejected edge into the store."""
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+        storage.add_nodes(
+            [
+                Node(id="i", type=NodeType.INITIATIVE, name="Init"),
+                Node(id="a", type=NodeType.ACTOR, name="Actor"),
+            ],
+            [],
+        )
+        storage.flush()
+        backend.calls.clear()
+
+        good = Edge(id="good", source="i", target="a", type=RelationshipType.RELATES_TO)
+        bad = Edge(id="bad", source="i", target="a", type=RelationshipType.IMPLEMENTS)
+        result = storage.add_nodes([], [good, bad])
+        storage.flush()
+
+        assert not result.success
+        assert set(storage.edges) == {"good"} == set(backend.edges)
+        assert _kinds(backend) == ["upsert_edge"]
+        assert backend.calls[0][1]["id"] == "good"
+
     def test_a_failure_after_the_executor_is_gone_is_still_a_failure_result(self):
         backend = _IncrementalBackend()
         storage = _storage(backend)
@@ -2789,6 +2933,63 @@ class TestPartialFailure:
         # The nodes' write, then the failure handler's write of the edge.
         assert backend.snapshots == 2
         assert [e["id"] for e in backend.data["edges"]] == ["good"]
+
+    def test_a_duplicate_first_node_writes_nothing_more_to_a_snapshot_backend(self):
+        """persist_landed's empty guard: when the very first entity in the
+        batch is itself the duplicate, nothing landed before the rejection.
+        Dropping the guard would have a snapshot backend re-save the
+        unchanged graph on every such failure."""
+        backend = _SnapshotBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a")], [])
+        storage.flush()
+        snapshots_before = backend.snapshots
+
+        result = storage.add_nodes([_node("a")], [])
+        storage.flush()
+
+        assert not result.success and "already exists" in result.message
+        assert backend.snapshots == snapshots_before
+
+    @pytest.mark.parametrize(
+        "nodes, edges, expect_nodes, expect_edges, expect_snapshots",
+        [
+            ([_node("c"), _node("a")], [], {"a", "b", "c"}, {"e"}, 1),
+            # An empty `nodes` list still triggers the nodes-phase persist
+            # call unconditionally (pinned separately in
+            # test_add_nodes_with_no_nodes_still_snapshots_on_a_snapshot_backend),
+            # so this case gets that snapshot plus persist_landed's - two,
+            # not one.
+            (
+                [],
+                [_edge("e2", "a", "b"), _edge("e", "a", "b")],
+                {"a", "b"},
+                {"e", "e2"},
+                2,
+            ),
+        ],
+        ids=["duplicate-node-id", "duplicate-edge-id"],
+    )
+    def test_a_rejected_duplicate_id_with_something_landed_saves_on_a_snapshot_backend(
+        self, nodes, edges, expect_nodes, expect_edges, expect_snapshots
+    ):
+        """The duplicate-id exits are pinned above against the incremental
+        backend only. Here something lands before the rejected duplicate, so
+        (unlike the all-duplicate case above) persist_landed's guard does not
+        apply and the snapshot backend gets what it landed."""
+        backend = _SnapshotBackend()
+        storage = _storage(backend)
+        storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+        snapshots_before = backend.snapshots
+
+        result = storage.add_nodes(nodes, edges)
+        storage.flush()
+
+        assert not result.success and "already exists" in result.message
+        assert backend.snapshots == snapshots_before + expect_snapshots
+        assert {n["id"] for n in backend.data["nodes"]} == expect_nodes
+        assert {e["id"] for e in backend.data["edges"]} == expect_edges
 
 
 class TestPayloadFidelity:
@@ -2861,3 +3062,63 @@ class TestPayloadFidelity:
 
         assert backend.calls == [("delete_node", "lone")]
         assert set(backend.nodes) == {"a"}
+
+
+class TestFaultInjectionOnlyPaths:
+    """add_nodes has two failure windows real input cannot reach on its own:
+    between a node landing in memory/unpersisted_nodes and the node-phase
+    persist call, and after the edges have already persisted successfully
+    but before add_nodes returns. Both are exercised here by forcing a raise
+    with monkeypatch, which is the only way to reach them - the guarantee in
+    both cases is the same one add_nodes documents for every failure exit:
+    whatever landed before the raise is what the store ends up holding, and
+    persist_landed() never re-sends what a persist call already sent."""
+
+    def test_a_raise_between_node_insert_and_node_persist_still_persists_what_landed(
+        self, monkeypatch
+    ):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+
+        def boom(self, node):
+            raise RuntimeError("boom-before-node-persist")
+
+        monkeypatch.setattr(GraphStorage, "_build_searchable_text", boom)
+
+        result = storage.add_nodes([_node("a")], [])
+        storage.flush()
+
+        assert not result.success and "boom-before-node-persist" in result.message
+        assert "a" in storage.nodes
+        assert "a" in backend.nodes
+        assert _kinds(backend) == ["upsert_node"]
+
+    def test_a_raise_after_the_edges_persisted_reports_failure_but_writes_nothing_twice(
+        self, monkeypatch
+    ):
+        backend = _IncrementalBackend()
+        storage = _storage(backend)
+
+        original_emit = storage._emit_event
+        calls = {"count": 0}
+
+        def flaky_emit(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("boom-after-edges")
+            return original_emit(*args, **kwargs)
+
+        monkeypatch.setattr(storage, "_emit_event", flaky_emit)
+
+        result = storage.add_nodes([_node("a"), _node("b")], [_edge("e", "a", "b")])
+        storage.flush()
+
+        assert not result.success and "boom-after-edges" in result.message
+        # The nodes and the edge were already persisted before the raise -
+        # unpersisted_nodes/unpersisted_edges were already cleared, so
+        # persist_landed() in the except handler has nothing left to send.
+        # A regression that forgot to clear one of those lists would show up
+        # here as an extra call re-sending what already landed.
+        assert set(storage.nodes) == {"a", "b"} == set(backend.nodes)
+        assert set(storage.edges) == {"e"} == set(backend.edges)
+        assert _kinds(backend) == ["apply_batch", "upsert_edge"]
