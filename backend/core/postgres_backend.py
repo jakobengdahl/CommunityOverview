@@ -29,10 +29,16 @@ The per-entity operations and cross-instance change notification are the
 following slices; until then the backend declares SNAPSHOT_ONLY and
 `GraphStorage` drives it with whole-graph writes.
 
-One payload restriction comes from JSONB and is not shared with the file
-backend: a string containing a NUL (`\u0000`) is valid JSON and round-trips
-through `graph.json`, but PostgreSQL cannot store it in a `jsonb` column. A
-graph carrying one cannot be saved here at all.
+Two payload restrictions come from JSONB and are shared with neither the
+file backend nor `graph.json`. Because writes are whole-graph, one offending
+value stops the entire graph from persisting rather than one node:
+
+- Non-finite floats. Python's `json` writes bare `NaN` and `Infinity` and
+  reads them back; `jsonb` rejects them. This is the likelier of the two,
+  because a backend with no vector sidecar receives every node's embedding
+  inline, so one degenerate vector is enough.
+- A NUL in a string. `\u0000` is valid JSON and round-trips through
+  `graph.json`; `jsonb` cannot store it.
 """
 
 from __future__ import annotations
@@ -299,6 +305,17 @@ class PostgresGraphPersistenceBackend:
         metadata = dict(data.get("metadata") or {})
         with self._pool.connection() as conn:
             with conn.transaction():
+                # Stated rather than inherited. The lock below only delivers
+                # what it promises because the DELETE that follows takes a
+                # fresh snapshot when the statement starts - a READ COMMITTED
+                # property. Under a server, database or role default of
+                # REPEATABLE READ the transaction's snapshot is taken here,
+                # at the lock, before it blocks; the writer that waited then
+                # sees the store as it was and dies on a serialization
+                # failure instead of proceeding. The load pins its own level
+                # for the opposite reason, so leaving this one to the
+                # environment was an asymmetry, not a default.
+                conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                 # Before the first statement takes its snapshot, so a writer
                 # that waited here re-reads the store the other one left.
                 conn.execute(

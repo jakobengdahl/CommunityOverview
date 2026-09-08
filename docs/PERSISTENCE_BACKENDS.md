@@ -453,12 +453,23 @@ writing a backend of your own against a shared server:
   cannot exceed 256 MB, and a save has no such limit because it writes a row
   per entity. A store would grow past that line and become permanently
   unloadable by the instance that wrote it, and with vectors carried inline
-  the ceiling arrives in the tens of thousands of nodes — measured on nodes
-  carrying a 384-dimension vector, about 65 000 of them. The limit is on the
-  uncompressed value while the table is TOAST-compressed on disk, but the
-  gap is not the alarming one it might sound like: a vector is high-entropy,
-  so the measured ratio was 1.4×, and 256 MB of aggregate showed up as about
-  190 MB on disk. Disk size does warn you here — it just warns late.
+  the ceiling arrives in the tens of thousands of nodes. The count depends
+  on how the vector serialises rather than on its dimension alone: a float32
+  widened to Python `float` prints ~17 significant digits and costs about
+  20 bytes per element in `jsonb`, while a rounded one costs about 12 — so a
+  node with a 384-element vector measured between roughly 4.6 kB and 8.0 kB
+  of aggregate, putting the limit somewhere between about 34 000 and 58 000
+  nodes. Take the low end: real embeddings arrive widened. The limit applies
+  to the uncompressed value while the table is TOAST-compressed on disk, but
+  the gap is not alarming — a vector is high-entropy, the measured ratio was
+  1.4×, and 256 MB of aggregate showed up as about 180 MB on disk. Disk size
+  does warn you here; it just warns late.
+- **The save states its own isolation level**, `READ COMMITTED`, as the load
+  states `REPEATABLE READ`. The lock below only works because the `DELETE`
+  after it takes a fresh snapshot at statement start; under a server or role
+  default of `REPEATABLE READ` the snapshot would be taken at the lock,
+  before it blocks, and the writer that waited would die on a serialization
+  failure rather than proceed. Neither level is left to the environment.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the

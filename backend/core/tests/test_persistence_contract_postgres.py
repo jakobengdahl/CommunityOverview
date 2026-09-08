@@ -14,6 +14,7 @@ is what lets one server serve the whole suite.
 
 from __future__ import annotations
 
+import itertools
 import os
 import secrets
 import threading
@@ -301,6 +302,8 @@ class TestPostgresConcurrentSavesDoNotMerge:
     they share - and sharing ids is what two instances of the same graph do.
     """
 
+    stall_errors: list = []
+
     def _stalled_save(self, backend, nodes, released):
         """Save from `backend`, holding its transaction open until released."""
         import backend.core.postgres_backend as module
@@ -318,6 +321,11 @@ class TestPostgresConcurrentSavesDoNotMerge:
             module.psycopg.types.json.Jsonb = stalling
             try:
                 backend.save_graph_data(snapshot(nodes))
+            except Exception as exc:
+                # Without this a G7 violation landing on the FIRST writer is
+                # silent: the thread dies raising, is_alive() is satisfied,
+                # and only a pytest warning records it.
+                self.stall_errors.append(f"{type(exc).__name__}: {exc}")
             finally:
                 module.psycopg.types.json.Jsonb = real
 
@@ -330,6 +338,7 @@ class TestPostgresConcurrentSavesDoNotMerge:
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
         second = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([first, second])
+        self.stall_errors = []
         first.save_graph_data(snapshot([node_payload("seed")]))
 
         released = threading.Event()
@@ -367,7 +376,8 @@ class TestPostgresConcurrentSavesDoNotMerge:
         # test reported green on that for thirty seconds.
         assert not stalled.is_alive(), "the first save never finished"
         assert not other.is_alive(), "the second save never finished"
-        assert errors == [], f"a concurrent save failed: {errors}"
+        assert errors == [], f"the second save failed: {errors}"
+        assert self.stall_errors == [], f"the first save failed: {self.stall_errors}"
         landed = {n["id"] for n in second.load_graph_data()["nodes"]}
         assert landed in (
             {"shared", "only_first"},
@@ -543,6 +553,7 @@ class TestPostgresLoadIsOneMomentInTime:
         writer.save_graph_data(graph("first"))
         stop = threading.Event()
         torn, errors = [], []
+        generations = set()
 
         def save_repeatedly():
             tag = 0
@@ -569,6 +580,7 @@ class TestPostgresLoadIsOneMomentInTime:
                 # generation into graph_name, so a load that mixes two shows
                 # up here even when the edges happen to line up.
                 generation = loaded["metadata"].get("graph_name")
+                generations.add(generation)
                 if ids and f"n_{generation}" not in ids:
                     torn.append(
                         f"metadata says {generation!r} but the nodes are {sorted(ids)}"
@@ -579,6 +591,91 @@ class TestPostgresLoadIsOneMomentInTime:
 
         assert errors == []
         assert torn == [], f"load returned a graph that never existed: {torn[:3]}"
+        # A reader frozen on its first result is maximally consistent and
+        # would satisfy every check above without ever reading the store
+        # again.
+        assert len(generations) > 1, f"the reader never advanced past {generations}"
+
+
+class TestPostgresSaveIsolation:
+    """The save states READ COMMITTED rather than inheriting it.
+
+    Asserting the level alone would prove nothing - READ COMMITTED is the
+    default, so a save with no SET at all would pass. The connection here
+    therefore carries a REPEATABLE READ default, which is what a server,
+    database or role setting looks like from the backend's side. Under it,
+    an inheriting save takes its snapshot at the advisory lock, before the
+    lock blocks, and the writer that waited dies on a serialization failure
+    instead of proceeding - the "never a failure" half of the guarantee the
+    lock exists for.
+    """
+
+    def _dsn_defaulting_to_repeatable_read(self) -> str:
+        parts = psycopg.conninfo.conninfo_to_dict(DSN)
+        parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
+        return psycopg.conninfo.make_conninfo(**parts)
+
+    def test_the_save_runs_read_committed_under_a_repeatable_read_default(
+        self, schema, backends
+    ):
+        dsn = self._dsn_defaulting_to_repeatable_read()
+        with psycopg.connect(dsn) as check:
+            assert (
+                check.execute("SHOW transaction_isolation").fetchone()[0]
+                == "repeatable read"
+            ), "the fixture did not establish a non-default level"
+
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.exists()  # migrate first, so only the save is observed
+
+        seen = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if "advisory" in str(query).lower() and not seen:
+                seen.append(
+                    real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
+                )
+            return result
+
+        psycopg.Connection.execute = spy
+        try:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        finally:
+            psycopg.Connection.execute = real_execute
+
+        assert seen == ["read committed"], (
+            f"the save inherited the connection's isolation level: {seen}"
+        )
+
+
+class TestPostgresInstancesStayInSync:
+    """Two long-lived instances, which is the whole point of a shared store.
+
+    Every other cross-instance read in the suite happens on a *fresh*
+    object's first load, so an instance that cached its first result and
+    never looked again would pass all of them - including the tearing test,
+    because a frozen reader is maximally self-consistent. That is not a
+    hypothetical shape: caching a load is an obvious optimisation, and it
+    would silently turn a shared store back into a private one.
+    """
+
+    def test_a_reader_sees_a_later_save_by_another_instance(self, schema, backends):
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([reader, writer])
+
+        writer.save_graph_data(snapshot([node_payload("first")]))
+        assert [n["id"] for n in reader.load_graph_data()["nodes"]] == ["first"]
+
+        writer.save_graph_data(snapshot([node_payload("second")]))
+        # The same reader object, not a new one.
+        assert [n["id"] for n in reader.load_graph_data()["nodes"]] == ["second"]
+
+        writer.save_graph_data(snapshot())
+        assert reader.load_graph_data()["nodes"] == []
 
 
 class TestPostgresLoadIsolation:
@@ -670,10 +767,18 @@ class TestPostgresSaveWritesMetadataLast:
         backend.exists()  # migrate first, so only the save is recorded
 
         statements = []
+        jsonb_calls = []
+        first_statement_at = None
+        clock = itertools.count()
         real_execute = psycopg.Connection.execute
         real_many = psycopg.Cursor.executemany
+        real_jsonb = psycopg.types.json.Jsonb
 
         def note(query):
+            nonlocal first_statement_at
+            tick = next(clock)
+            if first_statement_at is None:
+                first_statement_at = tick
             statements.append(" ".join(str(query).split()))
 
         def spy_execute(conn, query, *args, **kwargs):
@@ -684,16 +789,35 @@ class TestPostgresSaveWritesMetadataLast:
             note(query)
             return real_many(cur, query, *args, **kwargs)
 
+        def spy_jsonb(value):
+            jsonb_calls.append(next(clock))
+            return real_jsonb(value)
+
         psycopg.Connection.execute = spy_execute
         psycopg.Cursor.executemany = spy_many
+        psycopg.types.json.Jsonb = spy_jsonb
         try:
             backend.save_graph_data(snapshot([node_payload("a")]))
         finally:
             psycopg.Connection.execute = real_execute
             psycopg.Cursor.executemany = real_many
+            psycopg.types.json.Jsonb = real_jsonb
 
         writes = [q for q in statements if "advisory" not in q.lower()]
         assert writes, "the save issued no statements"
+        # Where the payload is serialised, not just where the statements go.
+        # Hoisting the Jsonb() construction above the transaction - an
+        # ordinary "build the parameter lists up front" refactor that changes
+        # no SQL and no statement order - moves both hooks outside the
+        # connection entirely. Measured: the interrupted save then issues
+        # zero statements, so the atomicity test becomes an assertion that
+        # cannot fail.
+        assert jsonb_calls, "no payload was serialised"
+        assert first_statement_at is not None, "the save issued no statements"
+        assert min(jsonb_calls) > first_statement_at, (
+            "a payload was serialised before the save opened its transaction, "
+            "which moves the interrupt and stall hooks outside it"
+        )
         assert "graph_metadata" in writes[-1] and "ON CONFLICT" in writes[-1], (
             "the metadata upsert is no longer the save's last statement, "
             "which is what the interrupt and stall hooks rely on to land "
@@ -758,16 +882,26 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
 
         with psycopg.connect(DSN, autocommit=True) as conn:
             keyed = {
-                row[0]
+                (row[0], row[1])
                 for row in conn.execute(
-                    "SELECT c.relname FROM pg_constraint k"
+                    "SELECT c.relname, a.attname FROM pg_constraint k"
                     " JOIN pg_class c ON c.oid = k.conrelid"
                     " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " JOIN pg_attribute a"
+                    "   ON a.attrelid = c.oid AND a.attnum = ANY(k.conkey)"
                     " WHERE n.nspname = %s AND k.contype = 'p'",
                     (schema,),
                 )
             }
-        assert keyed == {"graph_nodes", "graph_edges", "graph_metadata"}
+        # Which column, not merely that some key exists: a surrogate key
+        # added beside `id` would satisfy "a primary key is present" while
+        # removing the uniqueness that turns a lost save lock into a loud
+        # error, and would diverge from the DDL the document publishes.
+        assert keyed == {
+            ("graph_nodes", "id"),
+            ("graph_edges", "id"),
+            ("graph_metadata", "only_row"),
+        }
 
 
 class TestPostgresStoreIdentity:
