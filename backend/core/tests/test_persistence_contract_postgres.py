@@ -15,6 +15,7 @@ is what lets one server serve the whole suite.
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 import uuid
 
@@ -36,6 +37,17 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
 DSN = os.environ.get(
     "CO_TEST_POSTGRES_DSN", "host=127.0.0.1 user=postgres dbname=postgres"
 )
+
+
+def _dbname() -> str:
+    return psycopg.conninfo.conninfo_to_dict(DSN).get("dbname", "postgres")
+
+
+def _dsn_as_role(user: str, password: str) -> str:
+    parts = psycopg.conninfo.conninfo_to_dict(DSN)
+    parts["user"] = user
+    parts["password"] = password
+    return psycopg.conninfo.make_conninfo(**parts)
 
 
 def _server_reachable() -> bool:
@@ -316,12 +328,87 @@ class TestPostgresConcurrentSavesDoNotMerge:
         stalled.join(30)
         other.join(30)
 
+        # A join with a timeout returns whether or not the thread finished,
+        # and a save that hangs raises nothing - so without this the test
+        # passes just as happily when the second writer never returns. Not
+        # hypothetical: a session-scoped advisory lock in place of the
+        # transaction-scoped one hangs every writer but the first, and this
+        # test reported green on that for thirty seconds.
+        assert not stalled.is_alive(), "the first save never finished"
+        assert not other.is_alive(), "the second save never finished"
         assert errors == [], f"a concurrent save failed: {errors}"
         landed = {n["id"] for n in second.load_graph_data()["nodes"]}
         assert landed in (
             {"shared", "only_first"},
             {"shared", "only_second"},
         ), f"the store holds a graph neither writer saved: {sorted(landed)}"
+
+
+class TestPostgresBootsForALeastPrivilegeRole:
+    """The role a managed deployment actually runs as.
+
+    An operator provisions the schema and the tables and grants the app role
+    DML on them, nothing more. Both `CREATE SCHEMA IF NOT EXISTS` and
+    `CREATE TABLE IF NOT EXISTS` check the caller's CREATE privilege *before*
+    the existence short-circuit, so an unguarded migration raises for that
+    role - at boot, against a store it has every permission it needs on.
+    """
+
+    @pytest.fixture
+    def lowpriv(self):
+        """A role with no CREATE anywhere, and a schema it does not own."""
+        name = f"co_low_{uuid.uuid4().hex[:12]}"
+        schema = f"{name}_sch"
+        # Generated per run rather than written down: the role lives for one
+        # test, and a fixed one would be a credential in the source tree.
+        password = secrets.token_hex(16)
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            try:
+                conn.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        psycopg.sql.Identifier(name),
+                        psycopg.sql.Literal(password),
+                    )
+                )
+            except psycopg.errors.InsufficientPrivilege:
+                pytest.skip("the test role may not create roles")
+            conn.execute(f'CREATE SCHEMA "{schema}"')
+            conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{name}"')
+        try:
+            yield name, schema, password
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+                conn.execute(f'REVOKE ALL ON DATABASE {_dbname()} FROM "{name}"')
+                conn.execute(f'DROP ROLE IF EXISTS "{name}"')
+
+    def test_a_role_with_only_dml_on_existing_tables_can_boot(self, lowpriv, backends):
+        name, schema, password = lowpriv
+        # The operator's half: the tables exist and the role may use them.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table, columns in (
+                ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                (
+                    "graph_metadata",
+                    "only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),"
+                    " doc jsonb NOT NULL",
+                ),
+            ):
+                conn.execute(f'CREATE TABLE "{schema}"."{table}" ({columns})')
+            conn.execute(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
+                f'IN SCHEMA "{schema}" TO "{name}"'
+            )
+
+        low_dsn = _dsn_as_role(name, password)
+        backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
+        backends.append(backend)
+
+        assert not backend.exists()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        assert backend.exists()
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
 
 class TestPostgresLoadIsOneMomentInTime:
@@ -378,6 +465,14 @@ class TestPostgresLoadIsOneMomentInTime:
                 if dangling:
                     torn.append(
                         f"edges {dangling} have no endpoint among {sorted(ids)}"
+                    )
+                # Metadata is the third of the moment. Each save stamps its
+                # generation into graph_name, so a load that mixes two shows
+                # up here even when the edges happen to line up.
+                generation = loaded["metadata"].get("graph_name")
+                if ids and f"n_{generation}" not in ids:
+                    torn.append(
+                        f"metadata says {generation!r} but the nodes are {sorted(ids)}"
                     )
         finally:
             stop.set()

@@ -1,4 +1,4 @@
-"""A PostgreSQL persistence backend, for running more than one instance.
+r"""A PostgreSQL persistence backend, for running more than one instance.
 
 The file backend is the default and stays that way: clone-and-run needs no
 database. This backend exists for the deployment the file backend cannot
@@ -120,6 +120,22 @@ class PostgresGraphPersistenceBackend:
             sql.Identifier(self.schema), sql.Identifier(name)
         )
 
+    def _create_missing(self, conn, table: str, columns: str) -> None:
+        """Create one table, asking only when it is not already there.
+
+        `to_regclass` is readable by a role with nothing but DML, so this
+        answers for a least-privilege role where a bare
+        `CREATE TABLE IF NOT EXISTS` would raise instead.
+        """
+        qualified = f"{self.schema}.{table}"
+        if conn.execute("SELECT to_regclass(%s)", (qualified,)).fetchone()[0]:
+            return
+        conn.execute(
+            sql.SQL("CREATE TABLE IF NOT EXISTS {} ({})").format(
+                self._table(table), sql.SQL(columns)
+            )
+        )
+
     def _ensure_schema(self) -> None:
         """Create the tables if they are not there, safely under concurrency.
 
@@ -159,27 +175,32 @@ class PostgresGraphPersistenceBackend:
                                 sql.Identifier(self.schema)
                             )
                         )
-                    for table in ("graph_nodes", "graph_edges"):
-                        conn.execute(
-                            sql.SQL(
-                                "CREATE TABLE IF NOT EXISTS {} ("
-                                "  id text PRIMARY KEY,"
-                                "  doc jsonb NOT NULL"
-                                ")"
-                            ).format(self._table(table))
-                        )
+                    # Same guard, same reason: `CREATE TABLE IF NOT EXISTS`
+                    # also checks CREATE on the *schema* before it checks
+                    # whether the table is there. The operator who
+                    # pre-provisions the tables and grants the app role DML
+                    # only is the ordinary managed-PostgreSQL setup, and
+                    # without this the instance dies at boot against a store
+                    # it has every permission it actually needs on.
+                    self._create_missing(
+                        conn,
+                        "graph_nodes",
+                        "id text PRIMARY KEY, doc jsonb NOT NULL",
+                    )
+                    self._create_missing(
+                        conn,
+                        "graph_edges",
+                        "id text PRIMARY KEY, doc jsonb NOT NULL",
+                    )
                     # One row, enforced by the primary key on a column that
                     # can only hold true. Its presence is what `exists()`
                     # reads: the tables are created on boot, so their being
                     # there says nothing about whether a graph was ever saved.
-                    conn.execute(
-                        sql.SQL(
-                            "CREATE TABLE IF NOT EXISTS {} ("
-                            "  only_row boolean PRIMARY KEY DEFAULT true"
-                            "    CHECK (only_row),"
-                            "  doc jsonb NOT NULL"
-                            ")"
-                        ).format(self._table("graph_metadata"))
+                    self._create_missing(
+                        conn,
+                        "graph_metadata",
+                        "only_row boolean PRIMARY KEY DEFAULT true"
+                        " CHECK (only_row), doc jsonb NOT NULL",
                     )
             self._migrated = True
 
@@ -199,7 +220,7 @@ class PostgresGraphPersistenceBackend:
         return row is not None
 
     def load_graph_data(self) -> Dict[str, Any]:
-        """The whole graph as one statement, so it is one moment in time.
+        """The whole graph as one moment in time.
 
         Nodes, edges and metadata read separately are three moments, and
         another instance saving in between hands this one a graph that never
@@ -207,37 +228,54 @@ class PostgresGraphPersistenceBackend:
         not a race to engineer - an instance loading while another saves is
         the normal case for the deployment this backend exists for, and
         PostgreSQL's default isolation takes a fresh snapshot per *statement*,
-        not per connection.
+        not per transaction.
 
-        One statement is therefore the fix, and the cheapest one: every
-        subquery below sees the same snapshot by definition, with no
-        isolation level to set on a connection that goes back to a pool
-        carrying it.
+        REPEATABLE READ is what fixes it: the snapshot is taken once, at the
+        first statement, and the three reads below share it. The obvious
+        alternative - one statement with the three as subqueries - is a trap.
+        It reads as cheaper, but `jsonb_agg` builds a single jsonb value, and
+        a jsonb value cannot exceed 256 MB. Since a save writes one row per
+        entity and has no such limit, a store would grow past that line and
+        then be permanently unloadable by the instance that wrote it. With
+        vectors carried inline, as the seam requires of a backend with no
+        sidecar, that ceiling arrives at a few tens of thousands of nodes.
+
+        `SET TRANSACTION ISOLATION LEVEL` is transaction-scoped, so nothing
+        is left on the connection when it goes back to the pool.
         """
         self._ensure_schema()
         with self._pool.connection() as conn:
-            row = conn.execute(
-                sql.SQL(
-                    "SELECT"
-                    "  (SELECT coalesce(jsonb_agg(doc ORDER BY id), '[]'::jsonb)"
-                    "     FROM {nodes}),"
-                    "  (SELECT coalesce(jsonb_agg(doc ORDER BY id), '[]'::jsonb)"
-                    "     FROM {edges}),"
-                    "  (SELECT doc FROM {metadata} LIMIT 1)"
-                ).format(
-                    nodes=self._table("graph_nodes"),
-                    edges=self._table("graph_edges"),
-                    metadata=self._table("graph_metadata"),
-                )
-            ).fetchone()
-        nodes, edges, metadata = row
-        # Freshly decoded from the row on every call, so the dict is the
+            with conn.transaction():
+                # Must be the transaction's first statement.
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                nodes = [
+                    row[0]
+                    for row in conn.execute(
+                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
+                            self._table("graph_nodes")
+                        )
+                    )
+                ]
+                edges = [
+                    row[0]
+                    for row in conn.execute(
+                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
+                            self._table("graph_edges")
+                        )
+                    )
+                ]
+                row = conn.execute(
+                    sql.SQL("SELECT doc FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    )
+                ).fetchone()
+        # Freshly decoded from the rows on every call, so the dict is the
         # caller's: GraphStorage rewrites it in place (timestamps become
         # datetimes) and must not be rewriting the store.
         return {
-            "nodes": list(nodes),
-            "edges": list(edges),
-            "metadata": dict(metadata) if metadata else {},
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": dict(row[0]) if row else {},
         }
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:

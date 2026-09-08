@@ -417,7 +417,7 @@ which is the problem rather than the fix.
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Two things about it are worth knowing before
+should have an opinion about. Four things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same
@@ -436,21 +436,24 @@ writing a backend of your own against a shared server:
   connection open per instance, because a listener cannot return its
   connection to a pool and still be listening.
 
-- **A load is one statement, so it is one moment.** Nodes, edges and metadata
+- **A load is one moment, under `REPEATABLE READ`.** Nodes, edges and metadata
   read as three queries are three moments: PostgreSQL takes its snapshot per
   *statement* under the default isolation, so another instance saving in
   between hands the reader edges whose endpoints are not among the nodes it
   got — a graph that never existed. On a shared store that interleaving is
-  the normal case, not a race to engineer. One statement with the three as
-  subqueries settles it by definition, and needs no isolation level set on a
-  connection that goes back to a pool carrying it.
-
-`exists()` answers for the *graph*, not for the tables. Migration creates the
-tables on every boot, so table presence would report a store that was never
-written as existing, and `GraphStorage` would load an empty graph instead of
-bootstrapping one. What it reads is the single metadata row, which only a save
-writes.
-
+  the normal case, not a race to engineer. `REPEATABLE READ` takes the
+  snapshot once, at the transaction's first statement, and the three reads
+  share it; being transaction-scoped, it leaves nothing on the connection
+  when it returns to the pool. The tempting alternative — one statement with
+  the three as subqueries — is a trap worth naming, because it reads as
+  cheaper: `jsonb_agg` builds a single `jsonb` value, one `jsonb` value
+  cannot exceed 256 MB, and a save has no such limit because it writes a row
+  per entity. A store would grow past that line and become permanently
+  unloadable by the instance that wrote it, and with vectors carried inline
+  the ceiling arrives at a few tens of thousands of nodes. The limit is on
+  the uncompressed value, so the store's size on disk gives no warning: a
+  table measured at 4 MB, its rows compressed by TOAST, was already past the
+  aggregate's limit.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
@@ -459,6 +462,19 @@ writes.
   then ends holding the union of two saves — a graph neither instance wrote —
   or the second save dies on a duplicate key for any id they share, which is
   what two instances of the *same* graph mostly have.
+
+`exists()` answers for the *graph*, not for the tables. Migration creates the
+tables on every boot, so table presence would report a store that was never
+written as existing, and `GraphStorage` would load an empty graph instead of
+bootstrapping one. What it reads is the single metadata row, which only a save
+writes.
+
+Both `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` check the
+caller's `CREATE` privilege *before* the existence short-circuit, so each is
+asked for only when a catalog lookup says it is missing. Without that, an app
+role that owns nothing but DML on tables an operator provisioned — the
+ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
+store it has every permission it actually needs on.
 
 One payload restriction is worth knowing before pointing an existing graph at
 this backend, because it is **not** shared with the file backend: a string
