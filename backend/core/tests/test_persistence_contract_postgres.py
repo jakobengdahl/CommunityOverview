@@ -20,6 +20,7 @@ import secrets
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -55,13 +56,30 @@ def _dsn_as_role(user: str, password: str) -> str:
     return psycopg.conninfo.make_conninfo(**parts)
 
 
+# CI sets this alongside the DSN. Without it, an unreachable server is a
+# skip - the developer who set a stale variable should not be blocked. With
+# it, an unreachable server is an error: CI always sets the DSN, so a
+# service container that failed to start would otherwise leave "Backend
+# tests" green having run none of this backend at all.
+REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
+
+
 def _server_reachable() -> bool:
     if not DSN:
+        if REQUIRE:
+            raise RuntimeError(
+                "CO_REQUIRE_POSTGRES=1 but CO_TEST_POSTGRES_DSN is unset"
+            )
         return False
     try:
         with psycopg.connect(DSN, connect_timeout=3):
             return True
-    except Exception:
+    except Exception as exc:
+        if REQUIRE:
+            raise RuntimeError(
+                f"CO_REQUIRE_POSTGRES=1 but the server at {DSN} is "
+                f"unreachable: {type(exc).__name__}: {exc}"
+            ) from exc
         return False
 
 
@@ -168,6 +186,33 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         # exactly the migration bug that hangs rather than raises.
         assert not [t for t in threads if t.is_alive()], "a boot never finished"
         assert failures == [], f"instances failed to boot: {failures}"
+
+    def test_a_partly_provisioned_schema_gets_the_rest(self, schema, backends):
+        """An operator who provisioned some of the tables, not all three.
+
+        Every other existing-schema case here provisions all three together,
+        so a migration that checked one table and assumed the others would
+        look identical. It is not: the instance boots, then dies on the
+        first statement touching a table nobody created.
+        """
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_nodes"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert not backend.exists()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
     def test_the_migration_holds_the_advisory_lock(self, schema, backends):
         """The lock is what makes the test above pass rather than luck.
@@ -335,8 +380,11 @@ class TestPostgresConcurrentSavesDoNotMerge:
         return thread
 
     def test_overlapping_saves_leave_one_writers_graph(self, schema, backends):
-        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        second = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        # Different graph_name, same store: the lock must be keyed on what
+        # identifies the store - the schema - not on a constructor argument
+        # two instances of one graph need not agree on.
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
+        second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="b")
         backends.extend([first, second])
         self.stall_errors = []
         first.save_graph_data(snapshot([node_payload("seed")]))
@@ -597,6 +645,34 @@ class TestPostgresLoadIsOneMomentInTime:
         assert len(generations) > 1, f"the reader never advanced past {generations}"
 
 
+class TestPostgresSaveFailsWholeOnAnEntityWrite:
+    """Atomicity where the contract's hook cannot reach.
+
+    `interrupt_next_snapshot` keys on the payload with no `id` - the
+    metadata row - so the contract's atomicity clause only ever interrupts
+    the save's LAST statement. A failure on a node is the untested half, and
+    it is the reachable one: an unencodable value in a payload comes from
+    the graph, not from a hook.
+    """
+
+    def test_a_node_that_cannot_be_serialised_takes_the_whole_save_with_it(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("keep")]))
+
+        # A value json cannot encode, reached through the ordinary payload.
+        doomed = node_payload("doomed")
+        doomed["metadata"] = {"when": datetime.now(timezone.utc)}
+        with pytest.raises(Exception):
+            backend.save_graph_data(snapshot([node_payload("also_new"), doomed]))
+
+        # Neither new node landed, and the previous graph is intact - not
+        # "most of it", and not silently short of the node that failed.
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["keep"]
+
+
 class TestPostgresSaveIsolation:
     """The save states READ COMMITTED rather than inheriting it.
 
@@ -634,7 +710,14 @@ class TestPostgresSaveIsolation:
 
         def spy(conn, query, *args, **kwargs):
             result = real_execute(conn, query, *args, **kwargs)
-            if "advisory" in str(query).lower() and not seen:
+            # The save's own lock, told apart by its two-argument form: the
+            # migration takes a one-argument advisory lock too, so keying on
+            # "advisory" latches onto whichever fires first. That makes the
+            # test red - with an actively false message - when the migration
+            # memo is removed, which is a pure performance change. The
+            # sibling load test documents this hazard; this one had not
+            # inherited the defence.
+            if "hashtext" in str(query).lower() and not seen:
                 seen.append(
                     real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
                 )
@@ -901,6 +984,29 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
             ("graph_nodes", "id"),
             ("graph_edges", "id"),
             ("graph_metadata", "only_row"),
+        }
+
+        # And the columns themselves. An operator provisions from the DDL in
+        # docs/PERSISTENCE_BACKENDS.md; a migration that quietly built
+        # `varchar(80)` or `json` would leave the two shapes different while
+        # every key assertion above still passed - and a long node id could
+        # then never be saved.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            columns = {
+                (row[0], row[1], row[2], row[3])
+                for row in conn.execute(
+                    "SELECT table_name, column_name, data_type, is_nullable"
+                    " FROM information_schema.columns WHERE table_schema = %s",
+                    (schema,),
+                )
+            }
+        assert columns == {
+            ("graph_nodes", "id", "text", "NO"),
+            ("graph_nodes", "doc", "jsonb", "NO"),
+            ("graph_edges", "id", "text", "NO"),
+            ("graph_edges", "doc", "jsonb", "NO"),
+            ("graph_metadata", "only_row", "boolean", "NO"),
+            ("graph_metadata", "doc", "jsonb", "NO"),
         }
 
 

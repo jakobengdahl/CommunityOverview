@@ -231,6 +231,12 @@ jobs:
         run: pytest backend/ -q
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # The tests skip themselves when no server answers, which is right
+          # for a contributor and wrong here: CI always sets the DSN, so a
+          # service container that failed to start would leave this job green
+          # having run none of the PostgreSQL backend. This turns that skip
+          # into an error.
+          CO_REQUIRE_POSTGRES: "1"
           CO_TEST_POSTGRES_DSN: >-
             host=127.0.0.1 port=5432 user=postgres password=postgres
             dbname=communityoverview_test
