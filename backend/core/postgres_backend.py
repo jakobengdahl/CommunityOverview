@@ -16,18 +16,18 @@ This module is imported only by whoever chooses this backend. Nothing in the
 always-imported path touches it, so `psycopg` stays an optional dependency
 (`backend/requirements-postgres.txt`) and a base install is unaffected.
 
-This slice implements the snapshot contract only, and that bounds what it
-can promise. Whole-graph writes are serialised per store, so the store never
-ends holding a graph nobody saved - but serialising a race does not resolve
-it: two instances writing at once still means the later save discards what
-the earlier one committed, because a whole-graph write says nothing about
-what changed. **Until the per-entity slice lands, one writer at a time is
-the limit**, and this backend's value so far is a shared store several
-instances can *read* consistently, not one they can safely both write.
+The backend declares `incremental_writes` and `transactions`, so a mutation
+reaches it as the entity operations that describe it rather than as a
+rewrite of the whole graph. That is what makes several writers safe: two
+instances editing different parts of the graph now touch different rows and
+do not contend, where whole-graph saves had the later one discard the
+earlier one's work whatever it was.
 
-The per-entity operations and cross-instance change notification are the
-following slices; until then the backend declares SNAPSHOT_ONLY and
-`GraphStorage` drives it with whole-graph writes.
+What is still missing is the other direction. Nothing tells an instance that
+another one wrote, so a running instance serves what it last loaded until it
+reloads - correct, but stale. Cross-instance change notification is the next
+slice; the seam for it already exists and this backend does not yet declare
+it.
 
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. Because writes are whole-graph, one offending
@@ -44,13 +44,13 @@ value stops the entire graph from persisting rather than one node:
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
-from backend.core.storage_backends import SNAPSHOT_ONLY, BackendCapabilities
+from backend.core.storage_backends import BackendCapabilities, EntityOperation
 
 # Every instance runs the same migration on boot, so they race. The lock is
 # taken for the duration of the migrating transaction and released with it -
@@ -220,7 +220,7 @@ class PostgresGraphPersistenceBackend:
     # -- snapshot contract ---------------------------------------------------
 
     def capabilities(self) -> BackendCapabilities:
-        return SNAPSHOT_ONLY
+        return BackendCapabilities(incremental_writes=True, transactions=True)
 
     def exists(self) -> bool:
         self._ensure_schema()
@@ -346,6 +346,82 @@ class PostgresGraphPersistenceBackend:
 
     def default_graph_name(self) -> str:
         return self._graph_name
+
+    # -- entity contract -----------------------------------------------------
+
+    def upsert_node(self, node: Dict[str, Any]) -> None:
+        self.apply_batch([EntityOperation.upsert_node(node)])
+
+    def delete_node(self, node_id: str) -> None:
+        self.apply_batch([EntityOperation.delete_node(node_id)])
+
+    def upsert_edge(self, edge: Dict[str, Any]) -> None:
+        self.apply_batch([EntityOperation.upsert_edge(edge)])
+
+    def delete_edge(self, edge_id: str) -> None:
+        self.apply_batch([EntityOperation.delete_edge(edge_id)])
+
+    def apply_batch(self, operations: Sequence[EntityOperation]) -> None:
+        """Apply the operations in order, in one transaction.
+
+        This is where the shared store starts paying: a renamed node costs
+        one row rather than a rewrite of every node, so two instances
+        editing different parts of the graph stop overwriting each other.
+        Atomicity is the database's - `transactions` is declared on the
+        strength of this method, not approximated by a journal the way the
+        file backend has to.
+
+        No advisory lock, unlike a whole-graph save, and the asymmetry is
+        deliberate. The save's lock exists because its `DELETE` reads the
+        store before replacing it, so two of them interleave into a graph
+        neither wrote. An entity operation names its row and reads nothing,
+        so PostgreSQL's own row locks are the whole story: concurrent writes
+        to one entity resolve last-writer-wins, and writes to different
+        entities do not contend at all. Taking the save lock here would
+        serialise every mutation in the deployment against every other for
+        no gain.
+
+        Ordered against a concurrent whole-graph save by the same row locks.
+        Landing before one means the save replaces it, which is what a whole
+        graph means; landing after means it survives on top. Neither leaves
+        a state nobody wrote.
+        """
+        self._ensure_schema()
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                # Same reason as the save: last-writer-wins on a contended
+                # row is a READ COMMITTED behaviour. Under a REPEATABLE READ
+                # default the second writer would abort with a serialization
+                # failure instead of waiting and winning.
+                conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                for operation in operations:
+                    self._apply_one(conn, operation)
+
+    def _apply_one(self, conn, operation: EntityOperation) -> None:
+        table = "graph_nodes" if operation.kind == "node" else "graph_edges"
+        if operation.action == "delete":
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE id = %s").format(self._table(table)),
+                (operation.entity_id,),
+            )
+            return
+        conn.execute(
+            sql.SQL(
+                "INSERT INTO {} (id, doc) VALUES (%s, %s)"
+                " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
+            ).format(self._table(table)),
+            (operation.entity_id, psycopg.types.json.Jsonb(operation.payload)),
+        )
+
+    def checkpoint(self) -> None:
+        """Nothing to fold in: every write above is already committed.
+
+        The file backend needs this because it appends to a journal and only
+        periodically rewrites the graph; a database has no such deferred
+        state, so the canonical form is what is already there. Implemented
+        rather than omitted because `capabilities_of` refuses a backend that
+        declares `incremental_writes` without all six methods.
+        """
 
     # -- lifecycle -----------------------------------------------------------
 

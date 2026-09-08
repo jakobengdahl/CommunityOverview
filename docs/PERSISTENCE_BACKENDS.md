@@ -529,12 +529,29 @@ from persisting, not one node.
   `graph.json`; PostgreSQL cannot store it in a `jsonb` column. This one
   needs a hostile or corrupted string rather than an arithmetic accident.
 
-The backend currently declares `SNAPSHOT_ONLY`, and that bounds what it can
-promise. Serialising the race above stops the store holding a graph nobody
-saved; it does not make two writers safe. A whole-graph write says nothing
-about *what* changed, so the later save still discards what the earlier one
-committed — **one writer at a time remains the limit until the entity
-operations land**, exactly as the section above says it is today. What this
-backend adds so far is a store several instances can read consistently and
-one can write, which is the foundation the next two slices build the rest
-on.
+The backend declares `incremental_writes` and `transactions`. A mutation
+therefore reaches it as the entity operations that describe it — a renamed
+node is one row, not a rewrite of every node — and that is what makes
+several writers safe rather than merely orderly: two instances editing
+different parts of the graph touch different rows and do not contend at all,
+where two whole-graph saves had the later one discard the earlier one's work
+whatever it was. Concurrent writes to the *same* entity resolve
+last-writer-wins on the row, which is why the entity path states
+`READ COMMITTED` as the save does: under `REPEATABLE READ` the second writer
+would abort rather than wait.
+
+An entity operation takes no advisory lock, and the asymmetry with the save
+is deliberate. The save's lock exists because its `DELETE` reads the store
+before replacing it, so two of them interleave into a graph neither wrote.
+An entity operation names its row and reads nothing, so row locks are the
+whole story — and taking the save's lock there would serialise every
+mutation in the deployment against every other for no gain.
+
+`checkpoint()` is a no-op here. The file backend needs it because it appends
+to a journal and rewrites the graph only periodically; a database has no
+deferred state, so what is already committed is the canonical form.
+
+What is still missing is the other direction: nothing tells an instance that
+another one wrote, so a running instance serves what it last loaded until it
+reloads — correct, but stale. `change_notification` is the next slice, and
+this backend does not declare it yet.
