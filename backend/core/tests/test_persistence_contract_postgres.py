@@ -136,6 +136,69 @@ def backends():
         backend.close()
 
 
+def _statements_issued(action):
+    """Every statement `action` issues, captured on the cursor.
+
+    The cursor, not the connection: `Connection.execute` delegates to a
+    cursor, so this sees both, where patching the connection alone would
+    miss anything a backend ran on a cursor of its own.
+    """
+    issued = []
+    real_execute = psycopg.Cursor.execute
+    real_many = psycopg.Cursor.executemany
+
+    def spy_execute(cur, query, params=None, *args, **kwargs):
+        issued.append((query, params))
+        return real_execute(cur, query, params, *args, **kwargs)
+
+    def spy_many(cur, query, params_seq, *args, **kwargs):
+        issued.append((query, None))
+        return real_many(cur, query, params_seq, *args, **kwargs)
+
+    psycopg.Cursor.execute = spy_execute
+    psycopg.Cursor.executemany = spy_many
+    try:
+        action()
+    finally:
+        psycopg.Cursor.execute = real_execute
+        psycopg.Cursor.executemany = real_many
+    return issued
+
+
+def _rendered(query):
+    """The SQL a statement actually is - str() gives a repr."""
+    if hasattr(query, "as_string"):
+        with psycopg.connect(DSN) as conn:
+            return " ".join(query.as_string(conn).split())
+    return " ".join(str(query).split())
+
+
+def _writing_statements(issued):
+    return [
+        text
+        for text in (_rendered(q) for q, _ in issued)
+        if any(verb in text.upper() for verb in ("INSERT", "UPDATE", "DELETE"))
+    ]
+
+
+def _sequential_scans(issued):
+    """(statements naming a graph table, those whose plan scans one).
+
+    EXPLAIN does not execute, so this is safe to run for every statement.
+    """
+    touched, scanning = [], []
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        for query, params in issued:
+            text = _rendered(query)
+            if "graph_nodes" not in text and "graph_edges" not in text:
+                continue
+            touched.append(text)
+            rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
+            if "Seq Scan" in "\n".join(r[0] for r in rows):
+                scanning.append(text)
+    return touched, scanning
+
+
 class TestPostgresBackendContract(PersistenceBackendContract):
     @pytest.fixture
     def factory(self, schema, backends):
@@ -905,64 +968,81 @@ class TestPostgresEntityWritesTouchOneRow:
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload(f"n{i}") for i in range(40)]))
 
-        issued = []
-        # The cursor, not the connection: Connection.execute delegates to a
-        # cursor, so this sees both, where patching the connection alone
-        # would miss anything a backend ran on a cursor of its own.
-        real_execute = psycopg.Cursor.execute
-        real_many = psycopg.Cursor.executemany
+        issued = _statements_issued(
+            lambda: backend.upsert_node(node_payload("n0", name="Renamed"))
+        )
 
-        def spy_execute(cur, query, params=None, *args, **kwargs):
-            issued.append((query, params))
-            return real_execute(cur, query, params, *args, **kwargs)
-
-        def spy_many(cur, query, params_seq, *args, **kwargs):
-            issued.append((query, None))
-            return real_many(cur, query, params_seq, *args, **kwargs)
-
-        psycopg.Cursor.execute = spy_execute
-        psycopg.Cursor.executemany = spy_many
-        try:
-            backend.upsert_node(node_payload("n0", name="Renamed"))
-        finally:
-            psycopg.Cursor.execute = real_execute
-            psycopg.Cursor.executemany = real_many
-
-        def rendered(query):
-            """The SQL a statement actually is - str() gives a repr."""
-            if hasattr(query, "as_string"):
-                with psycopg.connect(DSN) as conn:
-                    return " ".join(query.as_string(conn).split())
-            return " ".join(str(query).split())
-
-        texts = [rendered(q) for q, _ in issued]
-        writes = [
-            t
-            for t in texts
-            if any(verb in t.upper() for verb in ("INSERT", "UPDATE", "DELETE"))
-        ]
+        writes = _writing_statements(issued)
         assert len(writes) == 1, f"an upsert should write once: {writes}"
         assert "ON CONFLICT" in writes[0] and "graph_nodes" in writes[0]
         assert "DELETE" not in writes[0].upper()
 
-        # And nothing it issues may scan a table. EXPLAIN does not execute,
-        # so this is safe to run for every statement that names one of ours.
-        plans = []
-        with psycopg.connect(DSN, autocommit=True) as conn:
-            for (query, params), text in zip(issued, texts):
-                if "graph_nodes" not in text and "graph_edges" not in text:
-                    continue
-                rows = conn.execute(
-                    psycopg.sql.SQL("EXPLAIN ") + query, params
-                ).fetchall()
-                plans.append((text, "\n".join(r[0] for r in rows)))
-
-        assert plans, "no statement of the upsert touched a graph table"
-        scanning = [text for text, plan in plans if "Seq Scan" in plan]
+        touched, scanning = _sequential_scans(issued)
+        assert touched, "no statement of the upsert touched a graph table"
         assert not scanning, (
             "an upsert reads a graph table sequentially, so its cost grows "
             f"with the graph: {scanning}"
         )
+
+    def test_a_delete_reads_no_more_of_the_graph_as_it_grows(self, schema, backends):
+        """The same two questions for the other action, which had neither.
+
+        Both checks above call `upsert_node` and nothing else, and a delete
+        is where they diverge: `WHERE doc->>'id' = %s` reads the same as
+        `WHERE id = %s` and plans as a sequential scan, and a delete is the
+        natural place to write rows nobody asked for - cascading to the
+        edges that reference the node, which would eat an edge another
+        instance committed a moment earlier. The seam does not cascade:
+        `delete_node` is documented as removing one node, and GraphStorage
+        names the edges it wants gone.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(40)],
+                [edge_payload("e0", "n0", "n1")],
+            )
+        )
+
+        issued = _statements_issued(lambda: backend.delete_node("n0"))
+
+        writes = _writing_statements(issued)
+        assert len(writes) == 1, f"a delete should write once: {writes}"
+        assert "graph_nodes" in writes[0] and "graph_edges" not in writes[0]
+
+        touched, scanning = _sequential_scans(issued)
+        assert touched, "no statement of the delete touched a graph table"
+        assert not scanning, (
+            "a delete reads a graph table sequentially, so its cost grows "
+            f"with the graph: {scanning}"
+        )
+
+        loaded = backend.load_graph_data()
+        assert "n0" not in by_id(loaded, "nodes")
+        assert "n1" in by_id(loaded, "nodes")
+        assert [e["id"] for e in loaded["edges"]] == ["e0"], (
+            "deleting a node removed an edge no operation named"
+        )
+
+    def test_a_checkpoint_writes_nothing(self, schema, backends):
+        """The docstring's claim, as an assertion.
+
+        `checkpoint()` is a no-op here because a database has no deferred
+        state - but the contract only asks that entity writes survive one,
+        which a full load-and-save round trip satisfies too. That shape is
+        not merely wasteful: GraphStorage calls `checkpoint()` at shutdown,
+        so it would reintroduce the whole-graph overwrite this slice exists
+        to remove, on the one path nobody is watching.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a"), node_payload("b")]))
+        backend.upsert_node(node_payload("c"))
+
+        writes = _writing_statements(_statements_issued(backend.checkpoint))
+
+        assert writes == [], f"a checkpoint should write nothing: {writes}"
 
     def test_an_upsert_carries_the_vector_a_snapshot_would_have_held(
         self, schema, backends
