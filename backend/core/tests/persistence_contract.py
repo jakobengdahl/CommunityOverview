@@ -357,12 +357,28 @@ class PersistenceBackendContract:
             assert loaded["metadata"]["graph_name"] == "contract"
 
     def test_a_snapshot_replaces_the_previous_graph_whole(self, factory):
+        """Every part of it, metadata included.
+
+        Metadata is the third a store can quietly get wrong: a backend that
+        replaces the entities but only *inserts* the metadata leaves the
+        first save's version and graph name behind for the life of the
+        store, and every later save is a partial one. Round-tripping a
+        single save cannot tell, because with one save an insert and a
+        replace agree.
+        """
         backend = factory()
-        backend.save_graph_data(snapshot([node_payload("a"), node_payload("b")]))
+        first = snapshot([node_payload("a"), node_payload("b")])
+        first["metadata"] = {"version": "1.0", "graph_name": "before"}
+        backend.save_graph_data(first)
 
-        backend.save_graph_data(snapshot([node_payload("c")]))
+        second = snapshot([node_payload("c")])
+        second["metadata"] = {"version": "2.0", "graph_name": "after"}
+        backend.save_graph_data(second)
 
-        assert set(by_id(factory().load_graph_data(), "nodes")) == {"c"}
+        reloaded = factory().load_graph_data()
+        assert set(by_id(reloaded, "nodes")) == {"c"}
+        assert reloaded["metadata"]["graph_name"] == "after"
+        assert reloaded["metadata"]["version"] == "2.0"
 
     def test_the_loaded_dict_is_the_callers_to_mutate(self, factory):
         """GraphStorage rewrites what it loads in place (timestamps become

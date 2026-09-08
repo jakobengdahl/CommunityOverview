@@ -436,14 +436,43 @@ writing a backend of your own against a shared server:
   connection open per instance, because a listener cannot return its
   connection to a pool and still be listening.
 
+- **A load is one statement, so it is one moment.** Nodes, edges and metadata
+  read as three queries are three moments: PostgreSQL takes its snapshot per
+  *statement* under the default isolation, so another instance saving in
+  between hands the reader edges whose endpoints are not among the nodes it
+  got — a graph that never existed. On a shared store that interleaving is
+  the normal case, not a race to engineer. One statement with the three as
+  subqueries settles it by definition, and needs no isolation level set on a
+  connection that goes back to a pool carrying it.
+
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
 written as existing, and `GraphStorage` would load an empty graph instead of
 bootstrapping one. What it reads is the single metadata row, which only a save
 writes.
 
-The backend currently declares `SNAPSHOT_ONLY`. The entity operations and
-`change_notification` are the next slices; until then `GraphStorage` drives it
-with whole-graph writes, as it drives any snapshot-only backend — correct, but
-without the per-mutation economy or the cross-instance freshness that are the
-point of running it at all.
+- **Whole-graph saves are serialised per store**, by a second advisory lock
+  keyed on the schema. Without it two concurrent saves do not merely race for
+  last place: the second writer's `DELETE` takes its snapshot when the
+  statement starts, so after waiting for the first writer's commit it skips
+  the rows that writer deleted and cannot see the rows it inserted. The store
+  then ends holding the union of two saves — a graph neither instance wrote —
+  or the second save dies on a duplicate key for any id they share, which is
+  what two instances of the *same* graph mostly have.
+
+One payload restriction is worth knowing before pointing an existing graph at
+this backend, because it is **not** shared with the file backend: a string
+containing a NUL (`\u0000`) is valid JSON and round-trips through
+`graph.json`, but PostgreSQL cannot store it in a `jsonb` column. A graph
+carrying one cannot be saved here at all, and because writes are whole-graph,
+one such value stops the whole graph from persisting rather than one node.
+
+The backend currently declares `SNAPSHOT_ONLY`, and that bounds what it can
+promise. Serialising the race above stops the store holding a graph nobody
+saved; it does not make two writers safe. A whole-graph write says nothing
+about *what* changed, so the later save still discards what the earlier one
+committed — **one writer at a time remains the limit until the entity
+operations land**, exactly as the section above says it is today. What this
+backend adds so far is a store several instances can read consistently and
+one can write, which is the foundation the next two slices build the rest
+on.

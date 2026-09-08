@@ -168,6 +168,224 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         finally:
             blocker.close()
 
+    def test_instances_race_on_the_tables_when_the_schema_already_exists(
+        self, schema, backends
+    ):
+        """The race production actually runs.
+
+        Each test gets a fresh schema name, so a bare ten-way boot races on
+        `CREATE SCHEMA` and never reaches the tables. A deployment points at
+        a schema that is already there - `public` by default - where the
+        contended catalog entry is the table. Pre-creating the schema is what
+        puts the documented case under test.
+        """
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(f'CREATE SCHEMA "{schema}"')
+
+        failures = []
+        barrier = threading.Barrier(10)
+
+        def boot():
+            try:
+                backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+                backends.append(backend)
+                barrier.wait(timeout=30)
+                backend.exists()
+            except Exception as exc:
+                failures.append(f"{type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=boot) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+
+        assert failures == [], f"instances failed to boot: {failures}"
+
+    def test_a_second_thread_waits_for_the_migration_rather_than_the_memo(
+        self, schema, backends
+    ):
+        """One backend object serves many request threads.
+
+        The `_migrated` memo must be set once the tables are actually there,
+        not on the way in: set early, a thread taking the lock-free fast path
+        would sail past a migration still in progress and query a table that
+        does not exist yet. The window is exactly as wide as the migration -
+        and the migration blocks on the advisory lock whenever another
+        instance is migrating, which is the autoscale boot this guards.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        blocker = psycopg.connect(DSN, autocommit=False)
+        errors = []
+
+        def use():
+            try:
+                backend.exists()
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        try:
+            blocker.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,))
+            first = threading.Thread(target=use, daemon=True)
+            first.start()
+            # Long enough that a memo set on the way in would have released
+            # the second thread while the first is still blocked on the lock.
+            second = threading.Thread(target=use, daemon=True)
+            threading.Event().wait(1.0)
+            second.start()
+            threading.Event().wait(1.0)
+            blocker.rollback()
+            first.join(30)
+            second.join(30)
+        finally:
+            blocker.close()
+
+        assert errors == [], (
+            f"a thread reached the tables before the migration created them: {errors}"
+        )
+
+
+class TestPostgresConcurrentSavesDoNotMerge:
+    """Two whole-graph saves at once must not leave a graph neither wrote.
+
+    They race for last place by nature - that is what a whole-graph write
+    is - but the store must end holding one writer's snapshot. Without
+    serialisation it does not: the default isolation takes each statement's
+    snapshot when the statement starts, so the second writer's DELETE skips
+    the rows the first deleted and cannot see the rows it inserted. The
+    result is the union of two saves, or a duplicate-key failure on any id
+    they share - and sharing ids is what two instances of the same graph do.
+    """
+
+    def _stalled_save(self, backend, nodes, released):
+        """Save from `backend`, holding its transaction open until released."""
+        import backend.core.postgres_backend as module
+
+        real = module.psycopg.types.json.Jsonb
+        seen = threading.Event()
+
+        def stalling(value):
+            if isinstance(value, dict) and "id" not in value:  # the metadata row
+                seen.set()
+                released.wait(30)
+            return real(value)
+
+        def run():
+            module.psycopg.types.json.Jsonb = stalling
+            try:
+                backend.save_graph_data(snapshot(nodes))
+            finally:
+                module.psycopg.types.json.Jsonb = real
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert seen.wait(30), "the stalled save never reached its metadata write"
+        return thread
+
+    def test_overlapping_saves_leave_one_writers_graph(self, schema, backends):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        second = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([first, second])
+        first.save_graph_data(snapshot([node_payload("seed")]))
+
+        released = threading.Event()
+        stalled = self._stalled_save(
+            first, [node_payload("shared"), node_payload("only_first")], released
+        )
+
+        errors = []
+
+        def save_second():
+            try:
+                second.save_graph_data(
+                    snapshot([node_payload("shared"), node_payload("only_second")])
+                )
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        other = threading.Thread(target=save_second, daemon=True)
+        other.start()
+        # The second save must actually reach its first statement while the
+        # first is still holding its transaction open - that is the whole
+        # interleaving. Releasing straight away lets the first commit before
+        # the second has begun, which is two saves in sequence and proves
+        # nothing.
+        threading.Event().wait(1.5)
+        released.set()
+        stalled.join(30)
+        other.join(30)
+
+        assert errors == [], f"a concurrent save failed: {errors}"
+        landed = {n["id"] for n in second.load_graph_data()["nodes"]}
+        assert landed in (
+            {"shared", "only_first"},
+            {"shared", "only_second"},
+        ), f"the store holds a graph neither writer saved: {sorted(landed)}"
+
+
+class TestPostgresLoadIsOneMomentInTime:
+    """A load taken while another instance saves must not tear.
+
+    Nodes, edges and metadata read as three statements are three moments,
+    and PostgreSQL's default isolation takes its snapshot per statement. A
+    save landing between them hands the reader edges whose endpoints are not
+    in the nodes it got - a graph that never existed. For a backend whose
+    whole purpose is several instances on one store, that interleaving is
+    the normal case rather than a race to engineer.
+    """
+
+    def test_loading_while_another_instance_saves_never_tears(self, schema, backends):
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([reader, writer])
+
+        def graph(tag):
+            return {
+                "nodes": [node_payload(f"n_{tag}")],
+                "edges": [
+                    {
+                        "id": f"e_{tag}",
+                        "source": f"n_{tag}",
+                        "target": f"n_{tag}",
+                        "type": "RELATES_TO",
+                    }
+                ],
+                "metadata": {"version": "1.0", "graph_name": tag},
+            }
+
+        writer.save_graph_data(graph("first"))
+        stop = threading.Event()
+        torn, errors = [], []
+
+        def save_repeatedly():
+            tag = 0
+            while not stop.is_set():
+                tag += 1
+                try:
+                    writer.save_graph_data(graph(f"g{tag}"))
+                except Exception as exc:
+                    errors.append(f"writer: {type(exc).__name__}: {exc}")
+                    return
+
+        writing = threading.Thread(target=save_repeatedly, daemon=True)
+        writing.start()
+        try:
+            for _ in range(40):
+                loaded = reader.load_graph_data()
+                ids = {n["id"] for n in loaded["nodes"]}
+                dangling = [e["id"] for e in loaded["edges"] if e["source"] not in ids]
+                if dangling:
+                    torn.append(
+                        f"edges {dangling} have no endpoint among {sorted(ids)}"
+                    )
+        finally:
+            stop.set()
+            writing.join(30)
+
+        assert errors == []
+        assert torn == [], f"load returned a graph that never existed: {torn[:3]}"
+
 
 class TestPostgresStoreIdentity:
     def test_the_tables_existing_is_not_a_graph_existing(self, schema, backends):

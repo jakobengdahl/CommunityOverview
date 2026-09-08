@@ -16,10 +16,23 @@ This module is imported only by whoever chooses this backend. Nothing in the
 always-imported path touches it, so `psycopg` stays an optional dependency
 (`backend/requirements-postgres.txt`) and a base install is unaffected.
 
-This slice implements the snapshot contract only. The per-entity operations
-and cross-instance change notification are the following slices; until then
-the backend declares SNAPSHOT_ONLY and `GraphStorage` drives it with
-whole-graph writes, exactly as it drives any snapshot-only backend.
+This slice implements the snapshot contract only, and that bounds what it
+can promise. Whole-graph writes are serialised per store, so the store never
+ends holding a graph nobody saved - but serialising a race does not resolve
+it: two instances writing at once still means the later save discards what
+the earlier one committed, because a whole-graph write says nothing about
+what changed. **Until the per-entity slice lands, one writer at a time is
+the limit**, and this backend's value so far is a shared store several
+instances can *read* consistently, not one they can safely both write.
+
+The per-entity operations and cross-instance change notification are the
+following slices; until then the backend declares SNAPSHOT_ONLY and
+`GraphStorage` drives it with whole-graph writes.
+
+One payload restriction comes from JSONB and is not shared with the file
+backend: a string containing a NUL (`\u0000`) is valid JSON and round-trips
+through `graph.json`, but PostgreSQL cannot store it in a `jsonb` column. A
+graph carrying one cannot be saved here at all.
 """
 
 from __future__ import annotations
@@ -49,6 +62,18 @@ MIGRATION_LOCK_KEY = 4_872_015_733_882_119_001
 # instance count it scales to, leaving room for the cross-instance listener a
 # later slice adds - that one is held open per instance, outside the pool.
 DEFAULT_POOL_SIZE = 4
+
+# Whole-graph saves are serialised per store. Two of them running at once do
+# not merely race for last place: PostgreSQL's default isolation takes each
+# statement's snapshot when the statement starts, so a DELETE that waited for
+# another writer's commit skips the rows that writer deleted and never sees
+# the rows it inserted. The store then ends holding the union of two saves -
+# a graph neither instance ever wrote - or the second save dies on a
+# duplicate key. Keyed per schema, so two graphs in one database do not wait
+# for each other - and that two-argument form of the lock takes int4, not the
+# bigint the one-argument form above accepts, so this key is deliberately
+# smaller rather than arbitrarily so.
+SAVE_LOCK_KEY = 1_872_015_733
 
 
 class PostgresGraphPersistenceBackend:
@@ -116,11 +141,24 @@ class PostgresGraphPersistenceBackend:
                     conn.execute(
                         "SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,)
                     )
-                    conn.execute(
-                        sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                            sql.Identifier(self.schema)
+                    # Asked for only when it is actually missing. `CREATE
+                    # SCHEMA IF NOT EXISTS` checks the caller's CREATE
+                    # privilege on the *database* before it checks whether
+                    # the schema is there, so it raises for a role that owns
+                    # its own schema but holds nothing at database level -
+                    # which is the ordinary least-privilege role on managed
+                    # PostgreSQL, and it fails at boot rather than at a write.
+                    # It bites the default `public` too, so this is not an
+                    # exotic-configuration guard.
+                    if not conn.execute(
+                        "SELECT 1 FROM pg_namespace WHERE nspname = %s",
+                        (self.schema,),
+                    ).fetchone():
+                        conn.execute(
+                            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                                sql.Identifier(self.schema)
+                            )
                         )
-                    )
                     for table in ("graph_nodes", "graph_edges"):
                         conn.execute(
                             sql.SQL(
@@ -161,36 +199,45 @@ class PostgresGraphPersistenceBackend:
         return row is not None
 
     def load_graph_data(self) -> Dict[str, Any]:
+        """The whole graph as one statement, so it is one moment in time.
+
+        Nodes, edges and metadata read separately are three moments, and
+        another instance saving in between hands this one a graph that never
+        existed: edges whose endpoints are not in the nodes it got. That is
+        not a race to engineer - an instance loading while another saves is
+        the normal case for the deployment this backend exists for, and
+        PostgreSQL's default isolation takes a fresh snapshot per *statement*,
+        not per connection.
+
+        One statement is therefore the fix, and the cheapest one: every
+        subquery below sees the same snapshot by definition, with no
+        isolation level to set on a connection that goes back to a pool
+        carrying it.
+        """
         self._ensure_schema()
         with self._pool.connection() as conn:
-            nodes = [
-                row[0]
-                for row in conn.execute(
-                    sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                        self._table("graph_nodes")
-                    )
-                )
-            ]
-            edges = [
-                row[0]
-                for row in conn.execute(
-                    sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                        self._table("graph_edges")
-                    )
-                )
-            ]
             row = conn.execute(
-                sql.SQL("SELECT doc FROM {} LIMIT 1").format(
-                    self._table("graph_metadata")
+                sql.SQL(
+                    "SELECT"
+                    "  (SELECT coalesce(jsonb_agg(doc ORDER BY id), '[]'::jsonb)"
+                    "     FROM {nodes}),"
+                    "  (SELECT coalesce(jsonb_agg(doc ORDER BY id), '[]'::jsonb)"
+                    "     FROM {edges}),"
+                    "  (SELECT doc FROM {metadata} LIMIT 1)"
+                ).format(
+                    nodes=self._table("graph_nodes"),
+                    edges=self._table("graph_edges"),
+                    metadata=self._table("graph_metadata"),
                 )
             ).fetchone()
-        # Freshly decoded from the rows on every call, so the dict is the
+        nodes, edges, metadata = row
+        # Freshly decoded from the row on every call, so the dict is the
         # caller's: GraphStorage rewrites it in place (timestamps become
         # datetimes) and must not be rewriting the store.
         return {
-            "nodes": nodes,
-            "edges": edges,
-            "metadata": dict(row[0]) if row else {},
+            "nodes": list(nodes),
+            "edges": list(edges),
+            "metadata": dict(metadata) if metadata else {},
         }
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
@@ -207,6 +254,12 @@ class PostgresGraphPersistenceBackend:
         metadata = dict(data.get("metadata") or {})
         with self._pool.connection() as conn:
             with conn.transaction():
+                # Before the first statement takes its snapshot, so a writer
+                # that waited here re-reads the store the other one left.
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
                 for table in ("graph_nodes", "graph_edges"):
                     conn.execute(sql.SQL("DELETE FROM {}").format(self._table(table)))
                 conn.cursor().executemany(
@@ -249,6 +302,7 @@ class PostgresGraphPersistenceBackend:
 
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    "SAVE_LOCK_KEY",
     "DEFAULT_POOL_SIZE",
     "MIGRATION_LOCK_KEY",
 ]
