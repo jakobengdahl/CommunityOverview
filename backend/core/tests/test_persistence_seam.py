@@ -2876,7 +2876,9 @@ class TestPartialFailure:
         assert not result.success and "already exists" in result.message
         assert backend.calls == []
         assert storage.edges["e"].source == "a" and storage.edges["e"].target == "b"
-        assert backend.edges["e"]["source"] == "a" and backend.edges["e"]["target"] == "b"
+        assert (
+            backend.edges["e"]["source"] == "a" and backend.edges["e"]["target"] == "b"
+        )
 
     def test_an_edge_rejected_by_applicability_after_a_good_one_is_never_persisted(
         self,
