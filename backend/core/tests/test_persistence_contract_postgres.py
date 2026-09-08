@@ -989,31 +989,6 @@ class TestPostgresEntityWritesTouchOneRow:
             ),
             [{"graph_edges"}, {"graph_nodes"}],
         ),
-        # The shape `GraphStorage.delete_nodes` actually builds: several
-        # edge deletes, then several node deletes. A batch of exactly two
-        # is the same blind spot as a single operation, one size up - a
-        # mutation gated on length >= 3, or on the operation at index 2,
-        # walks past every case above it.
-        "batch_many": (
-            lambda b: b.apply_batch(
-                [
-                    EntityOperation.delete_edge("e0"),
-                    EntityOperation.delete_edge("e1"),
-                    EntityOperation.delete_node("n2"),
-                    EntityOperation.upsert_node(node_payload("n3", name="Renamed")),
-                    EntityOperation.upsert_edge(
-                        edge_payload("e4", "n4", "n0", name="Renamed")
-                    ),
-                ]
-            ),
-            [
-                {"graph_edges"},
-                {"graph_edges"},
-                {"graph_nodes"},
-                {"graph_nodes"},
-                {"graph_edges"},
-            ],
-        ),
         # Removing something that is not there is not an error, and is the
         # natural place for a fallback that rewrites the table.
         "delete_absent_node": (
@@ -1025,6 +1000,43 @@ class TestPostgresEntityWritesTouchOneRow:
             [{"graph_edges"}],
         ),
     }
+
+    # Lengths, not a length. Pinning one batch size pins a fencepost: this
+    # suite has now been extended from one operation to two and from two
+    # to five, and each time a mutation gated just above the new size
+    # walked past every case. `GraphStorage.delete_nodes` builds one edge
+    # delete per edge plus one node delete per node, so the length is
+    # whatever the caller deleted - a property, not a number. Testing a
+    # spread of them means a threshold gate has nowhere plausible to hide;
+    # it cannot make "gated above 40" impossible, only absurd.
+    BATCH_LENGTHS = (2, 5, 40)
+
+    @staticmethod
+    def _long_batch(length):
+        """Both kinds and both actions, at a caller-chosen length.
+
+        Mixed rather than all-delete: a mutation that rewrites an upsert
+        as DELETE plus INSERT past some index is invisible to a batch
+        that contains no upsert past it.
+        """
+        make = (
+            lambda i: EntityOperation.delete_edge(f"e{i}"),
+            lambda i: EntityOperation.delete_node(f"n{i}"),
+            lambda i: EntityOperation.upsert_edge(
+                edge_payload(f"e{i}", f"n{i}", "n0", name="Renamed")
+            ),
+            lambda i: EntityOperation.upsert_node(
+                node_payload(f"n{i}", name="Renamed")
+            ),
+        )
+        return [make[i % 4](i) for i in range(length)]
+
+    @staticmethod
+    def _long_batch_tables(length):
+        return [
+            {"graph_edges"} if i % 4 in (0, 2) else {"graph_nodes"}
+            for i in range(length)
+        ]
 
     # Large enough that the planner prefers the index whether or not the
     # table has been analysed. Measured on this server: at 40 rows an
@@ -1093,6 +1105,42 @@ class TestPostgresEntityWritesTouchOneRow:
         assert not scanning, (
             f"{write} reads a graph table sequentially, so its cost grows "
             f"with the graph: {scanning}"
+        )
+
+    @pytest.mark.parametrize("length", BATCH_LENGTHS)
+    def test_a_batch_reads_no_more_of_the_graph_as_it_grows(
+        self, schema, backends, length
+    ):
+        """The same two questions, at several batch lengths.
+
+        A mutation gated on `len(operations) >= N`, or on the operation at
+        index N, is invisible to any single fixed length. This is the one
+        test that walks the whole batch: one writing statement per
+        operation, naming that operation's own table, in the caller's
+        order, and no plan that scans.
+        """
+        backend = self._seeded(schema, backends)
+
+        issued = _statements_issued(
+            lambda: backend.apply_batch(self._long_batch(length))
+        )
+
+        writes = _writing_statements(issued)
+        named = [_tables_named(text) for text in writes]
+        assert named == self._long_batch_tables(length), (
+            f"a batch of {length} should issue one writing statement per "
+            f"operation, naming its own table, in order: {named}"
+        )
+        for index, text in enumerate(writes):
+            if index % 4 in (0, 1):
+                assert "DELETE" in text.upper(), f"operation {index}: {text}"
+            else:
+                assert "ON CONFLICT" in text.upper(), f"operation {index}: {text}"
+
+        touched, scanning = _sequential_scans(issued)
+        assert touched, "no statement of the batch touched a graph table"
+        assert not scanning, (
+            f"a batch of {length} reads a graph table sequentially: {scanning}"
         )
 
     def test_a_delete_leaves_the_edges_no_operation_named(self, schema, backends):
@@ -1212,6 +1260,39 @@ class TestPostgresEntityWritesTouchOneRow:
                 assert nodes["n2"]["name"] == "Renamed"
                 assert by_id(loaded, "edges")["e0"]["name"] == "Renamed"
 
+    def test_a_batch_carrying_an_unstorable_value_raises(self, schema, backends):
+        """The entity twin of the save's own unstorable-value test.
+
+        `save_graph_data` has one; the entity path had none, and a batch
+        is where it matters more. A backend with no vector sidecar
+        receives every embedding inline, so one degenerate vector is
+        enough - and the documented contract is that the error propagates,
+        because GraphStorage answers a failed entity write by re-issuing
+        the whole graph. Swallowing it tells the caller the mutation is
+        stored, the whole-graph fallback never fires, and the write is
+        lost with nothing failing. Several operations, with the offending
+        one in the middle: a swallow gated on batch length walks past a
+        single-operation case.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("before")]))
+
+        with pytest.raises(Exception):
+            backend.apply_batch(
+                [
+                    EntityOperation.upsert_node(node_payload("ok1")),
+                    EntityOperation.upsert_node(
+                        node_payload("bad", embedding=[float("nan")])
+                    ),
+                    EntityOperation.upsert_node(node_payload("ok2")),
+                ]
+            )
+
+        assert set(by_id(backend.load_graph_data(), "nodes")) == {"before"}, (
+            "a batch carrying an unstorable value left part of itself behind"
+        )
+
     def test_a_checkpoint_writes_nothing(self, schema, backends):
         """The docstring's claim, as an assertion.
 
@@ -1308,8 +1389,9 @@ class TestPostgresConcurrentEntityWrites:
             f"writes were lost: {sorted(landed)}"
         )
 
+    @pytest.mark.parametrize("write", ["single", "batch"])
     def test_the_same_entity_from_two_instances_resolves_last_writer_wins(
-        self, schema, backends
+        self, schema, backends, write
     ):
         """Neither writer fails, and the row holds one of the two payloads.
 
@@ -1344,13 +1426,29 @@ class TestPostgresConcurrentEntityWrites:
                 ("contested",),
             )
 
-            def write():
+            def contend():
                 try:
-                    second.upsert_node(node_payload("contested", name="Second"))
+                    if write == "single":
+                        second.upsert_node(node_payload("contested", name="Second"))
+                    else:
+                        # The isolation statement stated only for short
+                        # batches would leave this one aborting on a
+                        # serialization failure instead of waiting.
+                        second.apply_batch(
+                            [
+                                EntityOperation.upsert_node(node_payload(f"filler{i}"))
+                                for i in range(5)
+                            ]
+                            + [
+                                EntityOperation.upsert_node(
+                                    node_payload("contested", name="Second")
+                                )
+                            ]
+                        )
                 except Exception as exc:
                     errors.append(f"{type(exc).__name__}: {exc}")
 
-            writer = threading.Thread(target=write, daemon=True)
+            writer = threading.Thread(target=contend, daemon=True)
             writer.start()
             # Asked of the server about the blocker we hold, not guessed at
             # with a sleep and not asked of the database at large.
@@ -1366,6 +1464,70 @@ class TestPostgresConcurrentEntityWrites:
         assert errors == [], f"a contended entity write failed: {errors}"
         assert by_id(first.load_graph_data(), "nodes")["contested"]["name"] == (
             "Second"
+        )
+
+
+class TestPostgresEntityWritesSpendTheConnectionBudget:
+    """Connections are the scarce resource this backend is sized around.
+
+    The pool size is documented against a server's `max_connections`
+    divided by the instance count, and the migration is memoised so a
+    boot-time advisory lock is not re-taken on every call. Both are
+    load-bearing for the multi-instance case and neither was pinned: a
+    write path opening its own connection, or a memo that never sets,
+    leaves every functional test green while quietly turning the
+    connection budget into a fiction.
+    """
+
+    def test_repeated_entity_writes_take_no_new_connections(self, schema, backends):
+        """Counted by what the write asks for, not by what is open.
+
+        A write that opens its own connection and closes it again leaves
+        no trace in `pg_stat_activity` by the time anything looks, so the
+        question has to be asked of the driver: once the pool is warm, an
+        entity write must not call `psycopg.connect` at all.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+        backend.upsert_node(node_payload("warm"))  # fill the pool first
+
+        opened = []
+        real_connect = psycopg.connect
+
+        def spy(*args, **kwargs):
+            opened.append(args[0] if args else kwargs.get("conninfo"))
+            return real_connect(*args, **kwargs)
+
+        psycopg.connect = spy
+        try:
+            for i in range(12):
+                backend.upsert_node(node_payload(f"n{i}"))
+        finally:
+            psycopg.connect = real_connect
+
+        assert opened == [], (
+            f"entity writes opened {len(opened)} connection(s) outside the "
+            "pool: the documented pool size, and the connection budget "
+            "derived from it, no longer bound what one instance costs"
+        )
+
+    def test_the_migration_is_not_re_run_on_every_call(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        issued = _statements_issued(lambda: backend.upsert_node(node_payload("a")))
+        texts = [_rendered(q).upper() for q, _ in issued]
+
+        assert not [t for t in texts if "PG_NAMESPACE" in t or "PG_CLASS" in t], (
+            "an entity write re-ran the migration's catalog probes, so the "
+            "memo is not doing its job"
+        )
+        assert not [t for t in texts if str(MIGRATION_LOCK_KEY) in t], (
+            "an entity write re-took the migration advisory lock, which is "
+            "global rather than per-schema, so every instance in the "
+            "deployment serialises on it"
         )
 
 
@@ -1415,15 +1577,20 @@ class TestPostgresBatchesSurviveADeadlock:
             "the retry returned without applying the batch"
         )
 
-    def test_a_long_batch_interrupted_part_way_lands_nothing(self, schema, backends):
+    @pytest.mark.parametrize("length", [5, 12, 40])
+    def test_a_long_batch_interrupted_part_way_lands_nothing(
+        self, schema, backends, length
+    ):
         """One transaction, whatever the length.
 
         The contract's atomicity clause drives a two-operation batch
         through the `interrupt_next_append` hook. A backend that opened a
         fresh transaction every few operations - committing the first
-        chunk and failing on the second - would satisfy that clause and
+        chunk and failing on a later one - would satisfy that clause and
         still leave a partly-applied batch behind, which is G1 broken on
-        exactly the length production issues.
+        exactly the length production issues. Several lengths, and the
+        failure on the LAST operation, so a chunk boundary anywhere
+        earlier has already committed something by the time it happens.
         """
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -1432,25 +1599,22 @@ class TestPostgresBatchesSurviveADeadlock:
         real_apply_one = backend._apply_one
         applied = []
 
-        def fail_on_the_fourth(conn, operation):
+        def fail_on_the_last(conn, operation):
             applied.append(operation)
-            if len(applied) == 4:
-                raise RuntimeError("injected, part way through the batch")
+            if len(applied) == length:
+                raise RuntimeError("injected, at the end of the batch")
             real_apply_one(conn, operation)
 
-        backend._apply_one = fail_on_the_fourth
+        backend._apply_one = fail_on_the_last
         with pytest.raises(RuntimeError):
             backend.apply_batch(
                 [
-                    EntityOperation.upsert_node(node_payload("a")),
-                    EntityOperation.upsert_node(node_payload("b")),
-                    EntityOperation.upsert_edge(edge_payload("e", "a", "b")),
-                    EntityOperation.upsert_node(node_payload("c")),
-                    EntityOperation.delete_node("keep"),
+                    EntityOperation.upsert_node(node_payload(f"a{i}"))
+                    for i in range(length)
                 ]
             )
 
-        assert len(applied) == 4, "the batch stopped somewhere unexpected"
+        assert len(applied) == length, "the batch stopped somewhere unexpected"
         loaded = backend.load_graph_data()
         assert set(by_id(loaded, "nodes")) == {"keep"}, (
             "a batch that failed part way through left its earlier "
@@ -1628,12 +1792,13 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
                 EntityOperation.upsert_edge(edge_payload("e", "held", "free")),
             ]
         ),
+        # Long, and built rather than written out: a mutation gated just
+        # above whatever length happens to be spelled here walks past it.
         "batch_many": lambda b: b.apply_batch(
-            [
-                EntityOperation.upsert_node(node_payload("held", name="Held")),
-                EntityOperation.upsert_edge(edge_payload("e", "held", "free")),
-                EntityOperation.upsert_edge(edge_payload("e2", "free", "held")),
-                EntityOperation.delete_edge("e2"),
+            [EntityOperation.upsert_node(node_payload("held", name="Held"))]
+            + [
+                EntityOperation.upsert_edge(edge_payload(f"e{i}", "held", "free"))
+                for i in range(40)
             ]
         ),
     }
@@ -1714,12 +1879,7 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
             ]
         ),
         "batch_many": lambda b: b.apply_batch(
-            [
-                EntityOperation.upsert_node(node_payload("a")),
-                EntityOperation.upsert_node(node_payload("b")),
-                EntityOperation.upsert_edge(edge_payload("e", "a", "b")),
-                EntityOperation.delete_node("b"),
-            ]
+            [EntityOperation.upsert_node(node_payload(f"n{i}")) for i in range(40)]
         ),
     }
 
@@ -1841,14 +2001,18 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
                 elif operation == "delete_edge":
                     writer.delete_edge("e")
                 elif operation == "batch_many":
-                    # The length production issues. A save lock skipped
-                    # only for longer batches walks past every case above.
+                    # The length production issues, and long enough that a
+                    # save lock skipped above some threshold has nowhere
+                    # plausible to hide. The filler ids are absent, which
+                    # is not an error and keeps the assertion about the
+                    # three that matter.
                     writer.apply_batch(
                         [
                             EntityOperation.delete_edge("e"),
                             EntityOperation.delete_node("a"),
                             EntityOperation.delete_node("b"),
                         ]
+                        + [EntityOperation.delete_node(f"absent{i}") for i in range(40)]
                     )
                 else:
                     # An id the paused save is about to insert: without the
