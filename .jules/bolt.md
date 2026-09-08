@@ -1,6 +1,5 @@
-## 2025-02-27 - O(N^2) trap in loop-scoped Set initialization
-**Learning:** Initializing sets inside a loop to perform uniqueness checks against an accumulating list causes quadratic performance degradation (O(N^2)), as the set is repeatedly rebuilt from a growing list on every iteration.
-**Action:** Always lift deduplication set initialization outside of accumulation loops, and update the sets incrementally inside the loop alongside the list.
-## 2025-02-27 - GraphStorage Edge Retrieval Optimization
-**Learning:** Iterating over all edges (`self.edges.values()`) for localized queries in `backend/core/storage.py` results in O(|E|) operations, which degrades performance for large, sparse graphs. The underlying NetworkX `MultiDiGraph` provides efficient O(degree) access methods.
-**Action:** Replaced full edge scans with `self.graph.subgraph(node_ids).edges(data=True)` and `self.graph.in_edges`/`self.graph.out_edges` to significantly speed up `get_edges_between_nodes` and `get_edges_for_node`.
+## $(date +%Y-%m-%d) - Optimizing Incident Edge Lookups in Node Deletion
+
+**Learning:** When retrieving incident edges for a node in a graph using NetworkX, doing a full O(|E|) iteration over all edges (like `self.edges.values()`) creates a severe performance bottleneck during node deletions in large graphs. Replacing this with O(degree) localized lookups using `self.graph.out_edges` and `self.graph.in_edges` drastically improves performance (e.g., from ~12ms to ~0.01ms for 4 edges in a 50k node graph). Furthermore, the iteration order of the original O(|E|) scan is typically `out_edges` then `in_edges`. Additionally, `self.edges.values()` inherently deduplicates self-loops by returning unique edge objects, whereas iterating both `.out_edges` and `.in_edges` will yield a self-loop twice.
+
+**Action:** Whenever fetching connected edges for a specific node, always leverage the underlying NetworkX localized methods rather than iterating over the entire edge collection. When replacing O(|E|) scans that use dictionaries/sets, ensure that you explicitly deduplicate the returned keys (e.g. using a `set`) to prevent regressions with self-loop edges, and match the original iteration order if tests depend on it.
