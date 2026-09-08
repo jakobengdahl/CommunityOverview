@@ -189,6 +189,31 @@ jobs:
       needs.detect-changes.outputs.service_code == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
 
+    # The optional PostgreSQL backend is held to the same persistence contract
+    # as the file backend, and the properties it exists for - a transaction
+    # that rolls back, an advisory lock that serialises concurrent boots - are
+    # the server's, so a fake would only be asserting that the fake has them.
+    # No credentials are involved: the container is created by this job, lives
+    # for its duration, and is reachable from nowhere else.
+    #
+    # Its absence is not a failure. The PostgreSQL tests skip themselves when
+    # no server answers, so a contributor running `pytest backend/ -q` on a
+    # clone with no database still gets a green suite.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: communityoverview_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -206,6 +231,15 @@ jobs:
         run: pytest backend/ -q
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # The tests skip themselves when no server answers, which is right
+          # for a contributor and wrong here: CI always sets the DSN, so a
+          # service container that failed to start would leave this job green
+          # having run none of the PostgreSQL backend. This turns that skip
+          # into an error.
+          CO_REQUIRE_POSTGRES: "1"
+          CO_TEST_POSTGRES_DSN: >-
+            host=127.0.0.1 port=5432 user=postgres password=postgres
+            dbname=communityoverview_test
 
   # Gate: always runs and carries the branch-protection required-check name
   # "Backend tests". Passes when the worker succeeded, or when it was skipped

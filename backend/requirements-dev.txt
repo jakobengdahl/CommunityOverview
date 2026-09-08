@@ -4,6 +4,11 @@
 # First install core requirements
 -r requirements.txt
 
+# The optional PostgreSQL backend, so its contract tests can run. The
+# tests skip themselves when no server is reachable, so installing this
+# does not oblige anyone to run one.
+-r requirements-postgres.txt
+
 # Testing
 pytest>=7.0.0
 pytest-asyncio>=0.21.0

@@ -207,8 +207,11 @@ passes against it.
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
-declared and as snapshot-only. `test_persistence_seam.py` covers the other
-half — which shape `GraphStorage` hands a backend for each mutation.
+declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
+worked example of stopping at step 2 — a real backend that declares
+`SNAPSHOT_ONLY` and lets the entity and notification clauses skip.
+`test_persistence_seam.py` covers the other half — which shape `GraphStorage`
+hands a backend for each mutation.
 
 The protocols are `runtime_checkable`, so `isinstance(backend,
 IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
@@ -399,3 +402,139 @@ exports never see it. See
 for backups and for replacing a graph file. The constructor's
 `checkpoint_interval` and `journal_path` are the only knobs, and nothing sets
 either in the app.
+
+`PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`) is the
+second backend, and it is **optional**: nothing in the always-imported path
+touches it, `psycopg` lives in `backend/requirements-postgres.txt` rather than
+the base requirements, and the app selects it nowhere yet. It exists for the
+one deployment the file backend cannot serve — several instances sharing one
+graph — because a file is rewritten whole by whichever instance saved last,
+and on a FUSE-mounted object store its locking gives no protection at all.
+
+The property that makes a database the answer here is that it is
+*client/server*: ten autoscaled instances are ten clients of one server named
+by the connection string, not ten copies of a store. That is also why an
+embedded database is not an alternative, however good its write path —
+SQLite and DuckDB would give each instance its own writer on a shared file,
+which is the problem rather than the fix.
+
+Nodes, edges and metadata are JSONB rows, the same payloads the file backend
+writes: the graph's own schema is configuration, not something these tables
+should have an opinion about. Four things about it are worth knowing before
+writing a backend of your own against a shared server:
+
+- **Migration takes an advisory lock.** Every instance runs the same
+  `CREATE TABLE IF NOT EXISTS` on boot, and autoscaling means they run it at
+  the same moment. `IF NOT EXISTS` does not make that safe on its own: two
+  concurrent creates of the same name can still collide in the catalog, and
+  an instance that fails here fails to *start*. The lock is transaction-scoped
+  (`pg_advisory_xact_lock`), so it is released by the commit rather than by an
+  unlock that an exception could skip.
+- **Connections are the resource that scales with instance count**, and the
+  server's ceiling is shared by every instance at once — 100 on a stock
+  server, three of them reserved. The per-instance pool is therefore small by
+  default (`DEFAULT_POOL_SIZE`), and a deployment that raises it should divide
+  the server's `max_connections` by the instance count it scales to. Leave
+  room beyond the pool: cross-instance notification holds one further
+  connection open per instance, because a listener cannot return its
+  connection to a pool and still be listening.
+
+- **A load is one moment, under `REPEATABLE READ`.** Nodes, edges and metadata
+  read as three queries are three moments: PostgreSQL takes its snapshot per
+  *statement* under the default isolation, so another instance saving in
+  between hands the reader edges whose endpoints are not among the nodes it
+  got — a graph that never existed. On a shared store that interleaving is
+  the normal case, not a race to engineer. `REPEATABLE READ` takes the
+  snapshot once, at the transaction's first statement, and the three reads
+  share it; being transaction-scoped, it leaves nothing on the connection
+  when it returns to the pool. The tempting alternative — one statement with
+  the three as subqueries — is a trap worth naming, because it reads as
+  cheaper: `jsonb_agg` builds a single `jsonb` value, one `jsonb` value
+  cannot exceed 256 MB, and a save has no such limit because it writes a row
+  per entity. A store would grow past that line and become permanently
+  unloadable by the instance that wrote it, and with vectors carried inline
+  the ceiling arrives in the tens of thousands of nodes. The count depends
+  on how the vector serialises rather than on its dimension alone: a float32
+  widened to Python `float` prints ~17 significant digits and costs about
+  20 bytes per element in `jsonb`, while a rounded one costs about 12 — so a
+  node with a 384-element vector measured between roughly 4.6 kB and 8.0 kB
+  of aggregate, putting the limit somewhere between about 34 000 and 58 000
+  nodes. Take the low end: real embeddings arrive widened. The limit applies
+  to the uncompressed value while the table is TOAST-compressed on disk, but
+  the gap is not alarming — a vector is high-entropy, the measured ratio was
+  1.4×, and 256 MB of aggregate showed up as about 180 MB on disk. Disk size
+  does warn you here; it just warns late.
+- **The save states its own isolation level**, `READ COMMITTED`, as the load
+  states `REPEATABLE READ`. The lock below only works because the `DELETE`
+  after it takes a fresh snapshot at statement start; under a server or role
+  default of `REPEATABLE READ` the snapshot would be taken at the lock,
+  before it blocks, and the writer that waited would die on a serialization
+  failure rather than proceed. Neither level is left to the environment.
+- **Whole-graph saves are serialised per store**, by a second advisory lock
+  keyed on the schema. Without it two concurrent saves do not merely race for
+  last place: the second writer's `DELETE` takes its snapshot when the
+  statement starts, so after waiting for the first writer's commit it skips
+  the rows that writer deleted and cannot see the rows it inserted. The store
+  then ends holding the union of two saves — a graph neither instance wrote —
+  or the second save dies on a duplicate key for any id they share, which is
+  what two instances of the *same* graph mostly have.
+
+`exists()` answers for the *graph*, not for the tables. Migration creates the
+tables on every boot, so table presence would report a store that was never
+written as existing, and `GraphStorage` would load an empty graph instead of
+bootstrapping one. What it reads is the single metadata row, which only a save
+writes.
+
+Both `CREATE SCHEMA IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` check the
+caller's `CREATE` privilege *before* the existence short-circuit, so each is
+asked for only when a catalog lookup says it is missing (an exact match on
+`pg_namespace` / `pg_class` — `to_regclass` would not do, because it parses
+its argument as a name and so case-folds an unquoted schema). Without that, an
+app role that owns nothing but DML on tables an operator provisioned — the
+ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
+store it has every permission it actually needs on.
+
+To provision it that way, create these three tables and grant the app role
+`USAGE` on the schema plus `SELECT, INSERT, UPDATE, DELETE` on them. The
+primary key on `graph_metadata.only_row` is not decoration: the save upserts
+that row `ON CONFLICT (only_row)`, so a table without it boots cleanly and
+then fails on **every** save.
+
+```sql
+CREATE TABLE <schema>.graph_nodes (
+  id text PRIMARY KEY,
+  doc jsonb NOT NULL
+);
+CREATE TABLE <schema>.graph_edges (
+  id text PRIMARY KEY,
+  doc jsonb NOT NULL
+);
+CREATE TABLE <schema>.graph_metadata (
+  only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
+  doc jsonb NOT NULL
+);
+```
+
+**Two payload restrictions** are worth knowing before pointing an existing
+graph at this backend, because neither is shared with the file backend, and
+because writes are whole-graph: one offending value stops the entire graph
+from persisting, not one node.
+
+- **Non-finite floats.** `NaN` and `Infinity` are not JSON, but Python's
+  `json` module writes them bare and reads them back, so `graph.json` holds
+  them happily; `jsonb` rejects them. This is the likelier of the two,
+  because a backend with no vector sidecar receives every node's embedding
+  inline (see *Vectors and history*) — one degenerate vector is enough.
+- **NUL in a string.** `\u0000` is valid JSON and round-trips through
+  `graph.json`; PostgreSQL cannot store it in a `jsonb` column. This one
+  needs a hostile or corrupted string rather than an arithmetic accident.
+
+The backend currently declares `SNAPSHOT_ONLY`, and that bounds what it can
+promise. Serialising the race above stops the store holding a graph nobody
+saved; it does not make two writers safe. A whole-graph write says nothing
+about *what* changed, so the later save still discards what the earlier one
+committed — **one writer at a time remains the limit until the entity
+operations land**, exactly as the section above says it is today. What this
+backend adds so far is a store several instances can read consistently and
+one can write, which is the foundation the next two slices build the rest
+on.
