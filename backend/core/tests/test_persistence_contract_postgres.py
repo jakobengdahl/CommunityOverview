@@ -136,14 +136,18 @@ def backends():
         backend.close()
 
 
-def _statements_issued(action):
+def _statements_issued(action, into=None):
     """Every statement `action` issues, captured on the cursor.
 
     The cursor, not the connection: `Connection.execute` delegates to a
     cursor, so this sees both, where patching the connection alone would
     miss anything a backend ran on a cursor of its own.
+
+    Pass `into` when the action is expected to raise: the return value is
+    lost in that case, and what was issued before the failure is exactly
+    what a test about a partly-applied batch needs to see.
     """
-    issued = []
+    issued = [] if into is None else into
     real_execute = psycopg.Cursor.execute
     real_many = psycopg.Cursor.executemany
 
@@ -1011,14 +1015,19 @@ class TestPostgresEntityWritesTouchOneRow:
     # it cannot make "gated above 40" impossible, only absurd.
     BATCH_LENGTHS = (2, 5, 40)
 
-    @staticmethod
-    def _long_batch(length):
-        """Both kinds and both actions, at a caller-chosen length.
+    # Runs of two, cycling edge-delete, node-delete, edge-upsert,
+    # node-upsert. Runs rather than strict alternation because
+    # `GraphStorage.delete_nodes` emits every edge delete and then every
+    # node delete, so consecutive same-table operations are the ordinary
+    # shape - and a backend that merged adjacent ones into a single
+    # statement would be invisible to a batch that never has two in a row.
+    # Both actions appear from length 5; a shorter length truncates the
+    # cycle, which is what makes 2 worth running as well as 40.
+    _RUN = 2
 
-        Mixed rather than all-delete: a mutation that rewrites an upsert
-        as DELETE plus INSERT past some index is invisible to a batch
-        that contains no upsert past it.
-        """
+    @classmethod
+    def _long_batch(cls, length):
+        """Both kinds and both actions, in runs, at a caller-chosen length."""
         make = (
             lambda i: EntityOperation.delete_edge(f"e{i}"),
             lambda i: EntityOperation.delete_node(f"n{i}"),
@@ -1029,13 +1038,17 @@ class TestPostgresEntityWritesTouchOneRow:
                 node_payload(f"n{i}", name="Renamed")
             ),
         )
-        return [make[i % 4](i) for i in range(length)]
+        return [make[(i // cls._RUN) % 4](i) for i in range(length)]
 
-    @staticmethod
-    def _long_batch_tables(length):
+    @classmethod
+    def _long_batch_slots(cls, length):
+        return [(i // cls._RUN) % 4 for i in range(length)]
+
+    @classmethod
+    def _long_batch_tables(cls, length):
         return [
-            {"graph_edges"} if i % 4 in (0, 2) else {"graph_nodes"}
-            for i in range(length)
+            {"graph_edges"} if slot in (0, 2) else {"graph_nodes"}
+            for slot in cls._long_batch_slots(length)
         ]
 
     # Large enough that the planner prefers the index whether or not the
@@ -1131,8 +1144,10 @@ class TestPostgresEntityWritesTouchOneRow:
             f"a batch of {length} should issue one writing statement per "
             f"operation, naming its own table, in order: {named}"
         )
-        for index, text in enumerate(writes):
-            if index % 4 in (0, 1):
+        for index, (slot, text) in enumerate(
+            zip(self._long_batch_slots(length), writes)
+        ):
+            if slot in (0, 1):
                 assert "DELETE" in text.upper(), f"operation {index}: {text}"
             else:
                 assert "ON CONFLICT" in text.upper(), f"operation {index}: {text}"
@@ -1278,17 +1293,25 @@ class TestPostgresEntityWritesTouchOneRow:
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("before")]))
 
-        with pytest.raises(Exception):
-            backend.apply_batch(
-                [
-                    EntityOperation.upsert_node(node_payload("ok1")),
-                    EntityOperation.upsert_node(
-                        node_payload("bad", embedding=[float("nan")])
-                    ),
-                    EntityOperation.upsert_node(node_payload("ok2")),
-                ]
-            )
+        batch = [
+            EntityOperation.upsert_node(node_payload("ok1")),
+            EntityOperation.upsert_node(node_payload("bad", embedding=[float("nan")])),
+            EntityOperation.upsert_node(node_payload("ok2")),
+        ]
+        # `psycopg.Error`, not bare `Exception`: the point is that the
+        # SERVER rejected the value part way through a started batch. A
+        # client-side rejection - a serialiser configured allow_nan=False,
+        # say - would raise before any statement was issued, and "left
+        # part of itself behind" would then be asserted about a batch that
+        # never began.
+        issued = []
+        with pytest.raises(psycopg.Error):
+            _statements_issued(lambda: backend.apply_batch(batch), into=issued)
 
+        assert any("ok1" in str(params) for _, params in issued), (
+            "the batch failed before it wrote anything, so this says "
+            "nothing about a partly-applied one"
+        )
         assert set(by_id(backend.load_graph_data(), "nodes")) == {"before"}, (
             "a batch carrying an unstorable value left part of itself behind"
         )
@@ -1485,7 +1508,16 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
         A write that opens its own connection and closes it again leaves
         no trace in `pg_stat_activity` by the time anything looks, so the
         question has to be asked of the driver: once the pool is warm, an
-        entity write must not call `psycopg.connect` at all.
+        entity write must open no connection at all.
+
+        Both spellings are spied, because they are two independent
+        handles to the same function: `psycopg.connect` is a bound
+        classmethod captured at import, so replacing
+        `psycopg.Connection.connect` does not change what it calls, and
+        replacing `psycopg.connect` does not change what the pool calls.
+        Measured, in both directions: a bypass written one way survives a
+        spy on the other. The pool opens through the class method; a
+        hand-rolled bypass is likelier to use the module helper.
         """
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -1493,23 +1525,31 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
         backend.upsert_node(node_payload("warm"))  # fill the pool first
 
         opened = []
-        real_connect = psycopg.connect
+        real_module = psycopg.connect
+        real_class = psycopg.Connection.connect
 
-        def spy(*args, **kwargs):
-            opened.append(args[0] if args else kwargs.get("conninfo"))
-            return real_connect(*args, **kwargs)
+        def spy_module(conninfo="", **kwargs):
+            opened.append(("psycopg.connect", conninfo))
+            return real_module(conninfo, **kwargs)
 
-        psycopg.connect = spy
+        def spy_class(conninfo="", **kwargs):
+            opened.append(("Connection.connect", conninfo))
+            return real_class(conninfo, **kwargs)
+
+        psycopg.connect = spy_module
+        psycopg.Connection.connect = spy_class
         try:
             for i in range(12):
                 backend.upsert_node(node_payload(f"n{i}"))
         finally:
-            psycopg.connect = real_connect
+            psycopg.connect = real_module
+            psycopg.Connection.connect = real_class
 
         assert opened == [], (
-            f"entity writes opened {len(opened)} connection(s) outside the "
-            "pool: the documented pool size, and the connection budget "
-            "derived from it, no longer bound what one instance costs"
+            f"entity writes opened {len(opened)} connection(s) rather than "
+            "taking one from the pool: the documented pool size, and the "
+            "connection budget derived from it, no longer bound what one "
+            "instance costs"
         )
 
     def test_the_migration_is_not_re_run_on_every_call(self, schema, backends):
@@ -1524,7 +1564,16 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
             "an entity write re-ran the migration's catalog probes, so the "
             "memo is not doing its job"
         )
-        assert not [t for t in texts if str(MIGRATION_LOCK_KEY) in t], (
+        # The key is a *parameter*, never part of the statement text: the
+        # backend issues `pg_advisory_xact_lock(%s)`. Looking for it in the
+        # rendered SQL is a search that cannot succeed, so the assertion
+        # would hold no matter what the code did.
+        took_it = [
+            params
+            for _, params in issued
+            if isinstance(params, (tuple, list)) and MIGRATION_LOCK_KEY in params
+        ]
+        assert took_it == [], (
             "an entity write re-took the migration advisory lock, which is "
             "global rather than per-schema, so every instance in the "
             "deployment serialises on it"
