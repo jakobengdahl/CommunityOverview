@@ -399,3 +399,51 @@ exports never see it. See
 for backups and for replacing a graph file. The constructor's
 `checkpoint_interval` and `journal_path` are the only knobs, and nothing sets
 either in the app.
+
+`PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`) is the
+second backend, and it is **optional**: nothing in the always-imported path
+touches it, `psycopg` lives in `backend/requirements-postgres.txt` rather than
+the base requirements, and the app selects it nowhere yet. It exists for the
+one deployment the file backend cannot serve — several instances sharing one
+graph — because a file is rewritten whole by whichever instance saved last,
+and on a FUSE-mounted object store its locking gives no protection at all.
+
+The property that makes a database the answer here is that it is
+*client/server*: ten autoscaled instances are ten clients of one server named
+by the connection string, not ten copies of a store. That is also why an
+embedded database is not an alternative, however good its write path —
+SQLite and DuckDB would give each instance its own writer on a shared file,
+which is the problem rather than the fix.
+
+Nodes, edges and metadata are JSONB rows, the same payloads the file backend
+writes: the graph's own schema is configuration, not something these tables
+should have an opinion about. Two things about it are worth knowing before
+writing a backend of your own against a shared server:
+
+- **Migration takes an advisory lock.** Every instance runs the same
+  `CREATE TABLE IF NOT EXISTS` on boot, and autoscaling means they run it at
+  the same moment. `IF NOT EXISTS` does not make that safe on its own: two
+  concurrent creates of the same name can still collide in the catalog, and
+  an instance that fails here fails to *start*. The lock is transaction-scoped
+  (`pg_advisory_xact_lock`), so it is released by the commit rather than by an
+  unlock that an exception could skip.
+- **Connections are the resource that scales with instance count**, and the
+  server's ceiling is shared by every instance at once — 100 on a stock
+  server, three of them reserved. The per-instance pool is therefore small by
+  default (`DEFAULT_POOL_SIZE`), and a deployment that raises it should divide
+  the server's `max_connections` by the instance count it scales to. Leave
+  room beyond the pool: cross-instance notification holds one further
+  connection open per instance, because a listener cannot return its
+  connection to a pool and still be listening.
+
+`exists()` answers for the *graph*, not for the tables. Migration creates the
+tables on every boot, so table presence would report a store that was never
+written as existing, and `GraphStorage` would load an empty graph instead of
+bootstrapping one. What it reads is the single metadata row, which only a save
+writes.
+
+The backend currently declares `SNAPSHOT_ONLY`. The entity operations and
+`change_notification` are the next slices; until then `GraphStorage` drives it
+with whole-graph writes, as it drives any snapshot-only backend — correct, but
+without the per-mutation economy or the cross-instance freshness that are the
+point of running it at all.

@@ -1,0 +1,9 @@
+# PostgreSQL backend - OPTIONAL.
+#
+# Not needed to run CommunityOverview. The file backend is the default and
+# needs no database; this is only for a deployment running several instances
+# against one graph (backend/core/postgres_backend.py).
+#
+# [binary] is a prebuilt wheel, so there is no compiler and no libpq-dev to
+# install. [pool] is the connection pool the backend bounds itself with.
+psycopg[binary,pool]>=3.1,<4
