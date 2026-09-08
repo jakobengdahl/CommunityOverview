@@ -5,8 +5,8 @@ what a backend is actually held to. Subclass `PersistenceBackendContract` in
 a test module, provide a `factory` fixture, and every test here runs against
 your backend. Three implementations are held to it in this repo: the file
 backend, the in-memory reference backend below, and the optional PostgreSQL
-backend, which is developed against exactly this class and stops at the
-snapshot contract.
+backend, which is developed against exactly this class and meets everything
+here but the change-notification clauses.
 
 What a subclass provides:
 

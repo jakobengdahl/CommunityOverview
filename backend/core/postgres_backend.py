@@ -30,8 +30,9 @@ slice; the seam for it already exists and this backend does not yet declare
 it.
 
 Two payload restrictions come from JSONB and are shared with neither the
-file backend nor `graph.json`. Because writes are whole-graph, one offending
-value stops the entire graph from persisting rather than one node:
+file backend nor `graph.json`. A whole-graph save carrying one fails
+entirely; an entity write fails only its own operation, which GraphStorage
+answers by re-issuing the whole graph - so the value has to go either way:
 
 - Non-finite floats. Python's `json` writes bare `NaN` and `Infinity` and
   reads them back; `jsonb` rejects them. This is the likelier of the two,
@@ -349,6 +350,12 @@ class PostgresGraphPersistenceBackend:
 
     # -- entity contract -----------------------------------------------------
 
+    # A deadlock is transient by nature and the batch is atomic, so a retry
+    # starts from the state the aborted one left - which is the state it
+    # found. Small: the contention it resolves is between two writers, not a
+    # queue of them.
+    DEADLOCK_RETRIES = 3
+
     def upsert_node(self, node: Dict[str, Any]) -> None:
         self.apply_batch([EntityOperation.upsert_node(node)])
 
@@ -371,22 +378,42 @@ class PostgresGraphPersistenceBackend:
         strength of this method, not approximated by a journal the way the
         file backend has to.
 
-        No advisory lock, unlike a whole-graph save, and the asymmetry is
-        deliberate. The save's lock exists because its `DELETE` reads the
-        store before replacing it, so two of them interleave into a graph
-        neither wrote. An entity operation names its row and reads nothing,
-        so PostgreSQL's own row locks are the whole story: concurrent writes
-        to one entity resolve last-writer-wins, and writes to different
-        entities do not contend at all. Taking the save lock here would
-        serialise every mutation in the deployment against every other for
-        no gain.
+        The save's lock is taken here too, but in SHARE mode, so entity
+        operations do not wait for each other - only for a whole-graph save,
+        which takes it exclusively. Row locks alone are not enough, and the
+        case that proves it is a delete. A save replaces a row rather than
+        updating it (`DELETE` then `INSERT`), so a `DELETE ... WHERE id`
+        that waited on the save's row lock unblocks to find its target tuple
+        dead and the replacement outside its own statement snapshot: it
+        removes nothing, reports nothing, and the caller is told the entity
+        is gone while it is still there. Measured before this lock existed.
+        An upsert survives the same interleaving because `ON CONFLICT` sees
+        the new row, which is why the anomaly is easy to miss.
 
-        Ordered against a concurrent whole-graph save by the same row locks.
-        Landing before one means the save replaces it, which is what a whole
-        graph means; landing after means it survives on top. Neither leaves
-        a state nobody wrote.
+        The economy the entity path exists for is intact: two instances
+        editing different entities still never wait for each other, because
+        SHARE mode is only incompatible with the save's EXCLUSIVE mode.
+
+        A batch takes one row lock per operation and holds them to commit,
+        so two batches touching the same entities in opposite orders
+        deadlock. The order is the caller's and cannot be sorted - a delete
+        followed by an upsert of one id is not the same batch reordered - so
+        the deadlock is retried instead. That is safe precisely because the
+        batch is atomic: the aborted transaction left nothing behind. Left
+        to propagate it would be worse than one lost mutation, because
+        GraphStorage answers a failed entity write by re-issuing the whole
+        graph, which is the overwrite this slice exists to eliminate.
         """
         self._ensure_schema()
+        for attempt in range(self.DEADLOCK_RETRIES + 1):
+            try:
+                self._apply_batch_once(operations)
+                return
+            except psycopg.errors.DeadlockDetected:
+                if attempt == self.DEADLOCK_RETRIES:
+                    raise
+
+    def _apply_batch_once(self, operations: Sequence[EntityOperation]) -> None:
         with self._pool.connection() as conn:
             with conn.transaction():
                 # Same reason as the save: last-writer-wins on a contended
@@ -394,6 +421,10 @@ class PostgresGraphPersistenceBackend:
                 # default the second writer would abort with a serialization
                 # failure instead of waiting and winning.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
+                    (SAVE_LOCK_KEY, self.schema),
+                )
                 for operation in operations:
                     self._apply_one(conn, operation)
 

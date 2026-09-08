@@ -516,9 +516,12 @@ CREATE TABLE <schema>.graph_metadata (
 ```
 
 **Two payload restrictions** are worth knowing before pointing an existing
-graph at this backend, because neither is shared with the file backend, and
-because writes are whole-graph: one offending value stops the entire graph
-from persisting, not one node.
+graph at this backend, because neither is shared with the file backend. A
+whole-graph save carrying one offending value fails entirely, so a graph
+holding one cannot be migrated here at all. An entity write fails only its
+own operation — but `GraphStorage` answers a failed entity write by
+re-issuing the whole graph, which then fails the same way, so the value has
+to go either way.
 
 - **Non-finite floats.** `NaN` and `Infinity` are not JSON, but Python's
   `json` module writes them bare and reads them back, so `graph.json` holds
