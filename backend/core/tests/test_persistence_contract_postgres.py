@@ -606,7 +606,11 @@ class TestPostgresLoadIsolation:
 
         def spy(conn, query, *args, **kwargs):
             result = real_execute(conn, query, *args, **kwargs)
-            if not seen:
+            # Keyed on the statement, not on "the first one seen": the load's
+            # SET is only first because a preceding save memoised the
+            # migration, so removing that memo - a pure performance change -
+            # would otherwise turn this test red for the wrong reason.
+            if "ISOLATION LEVEL" in str(query).upper() and not seen:
                 seen.append(
                     real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
                 )
@@ -643,6 +647,127 @@ class TestPostgresLoadOnAVirginStore:
         backends.append(backend)
 
         assert backend.load_graph_data() == {"nodes": [], "edges": [], "metadata": {}}
+
+
+class TestPostgresSaveWritesMetadataLast:
+    """The ordering two other tests silently depend on.
+
+    `interrupt_next_snapshot` and `_stalled_save` both key on "the payload
+    dict with no id" - the metadata row - to place their hook at the end of
+    the save. Nothing asserted that it *is* the end. Move the upsert to the
+    front of the transaction and both hooks fire before any write: the
+    interrupt no longer exercises rollback, and the overlapping-save test
+    stops arming at all. Measured: with the upsert moved AND the save
+    advisory lock deleted, the whole module still passed - so the guarantee
+    the lock exists for was left undefended by an unrelated refactor.
+    """
+
+    def test_the_metadata_upsert_is_the_last_statement_of_a_save(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()  # migrate first, so only the save is recorded
+
+        statements = []
+        real_execute = psycopg.Connection.execute
+        real_many = psycopg.Cursor.executemany
+
+        def note(query):
+            statements.append(" ".join(str(query).split()))
+
+        def spy_execute(conn, query, *args, **kwargs):
+            note(query)
+            return real_execute(conn, query, *args, **kwargs)
+
+        def spy_many(cur, query, *args, **kwargs):
+            note(query)
+            return real_many(cur, query, *args, **kwargs)
+
+        psycopg.Connection.execute = spy_execute
+        psycopg.Cursor.executemany = spy_many
+        try:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        finally:
+            psycopg.Connection.execute = real_execute
+            psycopg.Cursor.executemany = real_many
+
+        writes = [q for q in statements if "advisory" not in q.lower()]
+        assert writes, "the save issued no statements"
+        assert "graph_metadata" in writes[-1] and "ON CONFLICT" in writes[-1], (
+            "the metadata upsert is no longer the save's last statement, "
+            "which is what the interrupt and stall hooks rely on to land "
+            f"after the writes: {writes}"
+        )
+
+
+class TestPostgresGuardsAreCaseSensitive:
+    """Two schemas differing only by case are two schemas.
+
+    A guard that compared case-insensitively would see the *other* schema's
+    tables, skip creating its own, and leave the instance running against a
+    schema with nothing in it. The least-privilege parametrisation cannot
+    catch this - its two names differ by more than case.
+    """
+
+    def test_a_sibling_schema_differing_only_by_case_is_not_this_store(
+        self, schema, backends
+    ):
+        sibling = schema.upper()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(sibling)
+                )
+            )
+            for table in ("graph_nodes", "graph_edges", "graph_metadata"):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} (id text PRIMARY KEY)").format(
+                        psycopg.sql.Identifier(sibling),
+                        psycopg.sql.Identifier(table),
+                    )
+                )
+        try:
+            backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+            backends.append(backend)
+            # Would raise UndefinedColumn against the sibling's shape if the
+            # guard had matched case-insensitively and skipped creating ours.
+            backend.save_graph_data(snapshot([node_payload("a")]))
+            assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(sibling)
+                    )
+                )
+
+
+class TestPostgresMigrationBuildsTheDocumentedSchema:
+    def test_every_table_gets_its_primary_key(self, schema, backends):
+        """The DDL the document publishes for an operator to provision.
+
+        The keys are not decoration. `graph_metadata.only_row` is named in
+        the save's ON CONFLICT, so without it every save fails; the entity
+        keys are what turn a lost save lock into a loud duplicate-key error
+        instead of a silent union of two graphs.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            keyed = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT c.relname FROM pg_constraint k"
+                    " JOIN pg_class c ON c.oid = k.conrelid"
+                    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND k.contype = 'p'",
+                    (schema,),
+                )
+            }
+        assert keyed == {"graph_nodes", "graph_edges", "graph_metadata"}
 
 
 class TestPostgresStoreIdentity:
