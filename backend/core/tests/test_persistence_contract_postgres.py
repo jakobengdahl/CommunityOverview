@@ -30,7 +30,16 @@ from backend.core.tests.persistence_contract import (
     snapshot,
 )
 
-psycopg = pytest.importorskip("psycopg", reason="psycopg is an optional dependency")
+# Read before the import guard below, not after: `importorskip` would
+# otherwise skip the whole module for a missing driver before anything got
+# to ask whether a skip is acceptable here - the same silent green this
+# variable exists to prevent, reached by the other door.
+REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
+
+if REQUIRE:
+    import psycopg  # noqa: F401  (a skip here would be the failure, not a pass)
+else:
+    psycopg = pytest.importorskip("psycopg", reason="psycopg is an optional dependency")
 
 from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     MIGRATION_LOCK_KEY,
@@ -56,12 +65,12 @@ def _dsn_as_role(user: str, password: str) -> str:
     return psycopg.conninfo.make_conninfo(**parts)
 
 
-# CI sets this alongside the DSN. Without it, an unreachable server is a
-# skip - the developer who set a stale variable should not be blocked. With
-# it, an unreachable server is an error: CI always sets the DSN, so a
-# service container that failed to start would otherwise leave "Backend
-# tests" green having run none of this backend at all.
-REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
+# CO_REQUIRE_POSTGRES (read above, before the driver import): without it an
+# unreachable server is a skip, so a developer with a stale variable is not
+# blocked. With it, an unreachable server - or a missing driver - is an
+# error, because CI always sets the DSN and a service container that failed
+# to start would otherwise leave "Backend tests" green having run none of
+# this backend at all.
 
 
 def _server_reachable() -> bool:
