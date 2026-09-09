@@ -301,6 +301,9 @@ class _ObservableBackend(PostgresGraphPersistenceBackend):
     and a defect in any of them fails these clauses exactly as it would fail
     an instance in production. Every class below it drives the unwrapped
     class directly, for the same reason.
+
+    Recording a report costs no read of its own: the content is asked for
+    after the listener has already asked, and a report is read at most once.
     """
 
     def __init__(self, *args, **kwargs):
@@ -316,9 +319,10 @@ class _ObservableBackend(PostgresGraphPersistenceBackend):
                 # Recorded with its content in hand. The shipped backend hands
                 # over a change whose content is read when the application
                 # asks - after it has settled its own writes - so a report
-                # observed at delivery names nothing yet. Reading it here, and
-                # only after the listener has had it, records what was
-                # announced without moving the read the listener itself makes.
+                # observed at delivery names nothing yet. Asked for AFTER the
+                # listener has had it, and a report is read at most once, so
+                # this returns the listener's own answer rather than making a
+                # second read the shipped backend would not make.
                 with self._applied_change:
                     self.seen.append(change.with_content())
                     self._applied_change.notify_all()
@@ -4126,15 +4130,15 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
 
     The read-back runs on the pool, which the instance's own writers are
     using: a pool timeout under contention, or a connection dropped between
-    the announcement and the read. It is asked for on the application's
-    thread now, not the reading one, so the reading thread is not where it can
-    fail - but a backend that went back to reading on dispatch would put it
-    there again, and that is the connection this whole class exists to keep.
+    the announcement and the read. It is asked for inside the listener now
+    rather than before it, so the failure surfaces where the application can
+    answer for it - still on the reading thread, since a report is applied
+    inline, but no longer on the path that owns the listening connection.
 
-    Where the failure does land, the change is still real, so the application
-    may not drop it: it re-reads the whole graph instead. The two halves are
-    asserted separately because they are separately breakable - a listener
-    that swallowed the failure would keep the connection and lose the change.
+    The change is real whatever the read did, so the application may not drop
+    it: it re-reads the whole graph instead. The two halves are asserted
+    separately because they are separately breakable - a listener that
+    swallowed the failure would keep the connection and lose the change.
     """
 
     # Not one class, and not one family. Only PoolTimeout and QueryCanceled
@@ -4174,7 +4178,7 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
         self, failure, schema, backends
     ):
         """The connection the announcements arrive on is not the one the
-        content is read on, and a failure on the second must not reach the
+        content is read on, and a failure on the second must not close the
         first - nor stop the announcements after it."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)

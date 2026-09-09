@@ -396,13 +396,16 @@ class TestTwoInstancesWritingTheSameEntity:
         backend._resolve = watch.__get__(backend)
 
         real_upsert = type(backend).upsert_node
+        released = []
 
         def stall(self, node):
-            # Long enough that the peer's announcement is in hand while this
-            # instance's own write is still queued - which is the whole
-            # interleaving. Released as soon as the write is through, so the
-            # test does not pay for it twice.
-            slow.wait(2.0)
+            # Held until the test releases it, so the peer's announcement is
+            # in hand while this instance's own write is still queued - which
+            # is the whole interleaving. A timeout here would let the write
+            # through early and fail the assertion below for a reason that has
+            # nothing to do with the property, so whether the wait was
+            # released or expired is recorded and checked.
+            released.append(slow.wait(CONVERGE_TIMEOUT))
             return real_upsert(self, node)
 
         backend.upsert_node = stall.__get__(backend)
@@ -412,12 +415,76 @@ class TestTwoInstancesWritingTheSameEntity:
         slow.set()
         _drain(one)
         _assert_nothing_failed(one, two)
+        assert released == [True], (
+            "the stalled write was released by its own timeout rather than by "
+            "the test, so the interleaving this case is about did not happen"
+        )
 
         _wait_until(
             lambda: seen_at_read and seen_at_read[-1] == ["Mine"],
             "the content was read with this instance's own write already in "
             f"the store; reads saw {seen_at_read}",
         )
+
+    def test_reading_back_this_instances_own_value_changes_nothing(
+        self, instances, schema
+    ):
+        """Reading after the settle means the answer is often our own write,
+        and applying that is not free: the event would tell every subscriber a
+        node changed when nothing about it did, and settling the vector would
+        evict a description to regenerate the identical one. So an answer that
+        agrees with what is held is applied as nothing at all.
+
+        Constructed by writing the held value back to the store verbatim,
+        which is the same thing the interleaving above produces and is
+        deterministic."""
+        one, two = instances(), instances()
+        one.add_nodes(
+            [Node(id="c", type=NodeType.ACTOR, name="Mine", embedding=[0.5, 0.25])], []
+        )
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("c") is not None,
+            "the second instance learned of the node",
+        )
+        vector = one.vector_store.get_vector_list("c")
+        assert vector is not None, "no vector to keep, so nothing to assert"
+
+        emitted = []
+        real_emit = type(one)._emit_event
+
+        def record(self, **kwargs):
+            if self is one:
+                emitted.append(kwargs.get("entity_id"))
+            return real_emit(self, **kwargs)
+
+        GraphStorage._emit_event = record
+        try:
+            reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+            try:
+                doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
+                reader.upsert_node(doc)
+                # The assertion is an ABSENCE, so it needs a barrier rather
+                # than a wait: a second write, announced on the same channel
+                # after the first, whose arrival proves the first was already
+                # dealt with. A bounded sleep would only prove the machine was
+                # slow.
+                reader.upsert_node(_node("sentinel").to_dict())
+            finally:
+                reader.close()
+            _wait_until(
+                lambda: one.get_node("sentinel") is not None,
+                "the report after the identical one arrived",
+            )
+        finally:
+            GraphStorage._emit_event = real_emit
+
+        assert emitted == ["sentinel"], (
+            f"an answer identical to what this instance holds was applied "
+            f"anyway; the only event should be the barrier's, got {emitted}"
+        )
+        assert one.vector_store.get_vector_list("c") == vector
+        assert one.get_node("c").name == "Mine"
 
     def test_a_raced_write_leaves_every_party_on_the_same_value(
         self, instances, schema

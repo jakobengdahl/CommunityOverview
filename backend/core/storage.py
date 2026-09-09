@@ -1499,6 +1499,27 @@ class GraphStorage:
         value = getattr(entity, "type", None)
         return value.value if hasattr(value, "value") else str(value)
 
+    def _already_held(self, existing: Node, reported: Node) -> bool:
+        """Is the store's answer the value this instance already holds?
+
+        The vector is compared where it lives rather than where it is written:
+        an embedding is moved off the node and into the index as soon as it is
+        adopted, so a node held in memory carries none while the store's copy
+        of the same node carries one. Comparing the two dictionaries whole
+        would therefore call every vectored node changed.
+        """
+        held = existing.to_dict()
+        answer = reported.to_dict()
+        held.pop("embedding", None)
+        vector = answer.pop("embedding", None)
+        if held != answer:
+            return False
+        # Both directions: an answer carrying no embedding for a node the
+        # index has a vector for is a change too - the store dropped it - and
+        # reading that as "nothing to do" would leave semantic search matching
+        # a description the store no longer keeps.
+        return self.vector_store.get_vector_list(reported.id) == vector
+
     def _external_upsert_node(
         self,
         op: EntityOperation,
@@ -1518,6 +1539,17 @@ class GraphStorage:
         # take it. The top level is all from_dict touches.
         node = Node.from_dict(dict(op.payload))
         existing = self.nodes.get(node.id)
+        if (
+            authoritative
+            and existing is not None
+            and self._already_held(existing, node)
+        ):
+            # Reading after the settle means the answer is often this
+            # instance's own write, and there is nothing in that to apply. Not
+            # a no-op if it were: the event would tell every subscriber a node
+            # changed when nothing about it did, and settling the vector would
+            # evict a description to regenerate the identical one.
+            return
         if (
             not authoritative
             and existing is not None

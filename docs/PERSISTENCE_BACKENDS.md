@@ -267,12 +267,29 @@ What the backend passes is an `ExternalChange`:
   the report was dispatched. An upsert whose payload carries an `embedding`
   hands the vector over with it.
 - `ExternalChange.entities_read_on_demand(read_content)` — the same, except
-  that `GraphStorage` calls `read_content()` to get the operations, on its own
-  thread and **after it has drained its write queue**. What comes back is
-  applied as the store's own answer, with no conflict rule consulted, which is
-  sound precisely because this instance's queued writes are already in it.
-  **Prefer this wherever the backend can re-read its store**; *When both
-  instances wrote the same thing* below is what the alternative costs.
+  that `GraphStorage` calls `read_content()` to get the operations, **after it
+  has drained its write queue**. What comes back is applied as the store's own
+  answer, with no conflict rule consulted, which is sound precisely because
+  this instance's queued writes are already in it. **Prefer this wherever the
+  backend can re-read its store**; *When both instances wrote the same thing*
+  below is what the alternative costs.
+
+  Three things about *when* it is called decide whether an implementation is
+  correct, and none of them is "on some thread of the application's" —
+  `GraphStorage` has no thread of its own and applies a report inline:
+
+  - It is called **on the thread the report was delivered on**, further down
+    that call stack. A backend that dispatches from a poller it needs to keep
+    polling must hand the report to another thread itself.
+  - The application's lock is held for its whole duration, so it must not call
+    back into the storage, and **its latency is that instance's write stall** —
+    every mutation waits for it. Bound the read: a pool with no timeout, or one
+    long enough to wait out a hung server, stalls the instance for exactly that
+    long. Under `entities` the same read happened off-lock, so this is a real
+    trade for the correctness it buys.
+  - It is called **at most once per report**; a second ask returns the first
+    ask's answer rather than a fresher read.
+
   Raising from `read_content` is not an error to swallow: `GraphStorage` logs
   it and reloads the whole graph, and the report is not lost.
 
@@ -344,6 +361,13 @@ instance's own work already in it, and there is nothing left for the
 application to arbitrate: it takes what it is given. Every instance ends on
 whatever the store committed last, which is the only ordering the instances
 actually share.
+
+One consequence worth expecting: the answer is often this instance's own
+write, and applying that would emit an event whose before and after are the
+same. `GraphStorage` compares the answer against what it holds and applies
+nothing when they agree — including the vector, which it compares against the
+index rather than against the node, since an adopted embedding lives in the
+index and not on the node it describes.
 
 **A backend that reports `entities` instead falls back to a wall clock.** Its
 content was gathered when the report was dispatched, which can predate the

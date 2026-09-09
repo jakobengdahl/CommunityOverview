@@ -895,21 +895,22 @@ class PostgresGraphPersistenceBackend:
         if pairs is None:
             self._deliver(ExternalChange.unknown())
             return
-        # Read ON DEMAND, not here. The application calls back once it has
-        # settled its own writes, so what this reads is the store's answer
-        # with that instance's work already in it - where reading now would
-        # hand over content that predates it, and leave the application
+        # Read ON DEMAND, not here. The application asks for the content once
+        # it has settled its own writes, so what gets read is the store's
+        # answer with that instance's work already in it - where reading now
+        # would hand over content that predates it, and leave the application
         # arbitrating with a wall clock that does not order the commits.
         #
-        # The pool connection is therefore taken on the application's thread
-        # rather than this one. That is safe for the reason the old ordering
-        # was not: the application has drained its write queue by then and
-        # holds the lock every mutation needs to enqueue, so nothing of its
-        # own is competing for the pool.
+        # "Later", not "elsewhere": the application applies the report inline,
+        # so the read still happens on THIS thread, further down this call
+        # stack, inside _deliver. What makes that safe is not which thread it
+        # is on but what the application has done by then - it has drained its
+        # write queue and holds the lock every mutation needs in order to be
+        # queued, so nothing of its own is competing for the pool.
         #
-        # A read that fails there is not this thread's to absorb either - the
+        # A read that fails there is not this thread's to absorb, though: the
         # application turns it into a reload, which is what this used to do
-        # here, and the listening connection survives it.
+        # here, and the listening connection is not in its path.
         self._deliver(
             ExternalChange.entities_read_on_demand(lambda: self._resolve(pairs))
         )
@@ -955,14 +956,20 @@ class PostgresGraphPersistenceBackend:
         return operations
 
     def _deliver(self, change: ExternalChange) -> None:
-        """Hand one change to the listener, holding nothing while it runs.
+        """Hand one change to the listener, holding nothing of ours while it runs.
 
         Nothing of ours is held here on purpose. The listener refreshes an
-        application that may wait for its own write queue, and that queue's
-        writes need this pool - so a pooled connection still held from the
-        read-back above would have the refresh waiting for a writer that is
-        waiting for the connection the refresh has. `_resolve` returns its
-        connection before this is called, and this is why.
+        application that waits for its own write queue first, and that queue's
+        writes need this pool - so a pooled connection held across this call
+        would have the refresh waiting for a writer that is waiting for the
+        connection the refresh has.
+
+        The read-back is inside the listener now rather than before it, which
+        is not the same hazard turned back on: it runs after that wait, with
+        the queue drained and the application's lock held, so there is no
+        writer of its own left to wait for. What must not happen is a
+        connection taken HERE and held across the call, which is why there is
+        none.
         """
         listener = self._listener
         if listener is None or self._listen_stop.is_set():
