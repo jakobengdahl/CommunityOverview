@@ -524,6 +524,87 @@ class TestTwoInstancesWritingTheSameEntity:
         assert one.vector_store.get_vector_list("c") == vector
         assert one.get_node("c").name == "Mine"
 
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("metadata", {"owner": "someone else"}),
+            ("archived", True),
+            ("aliases", ["Also known as"]),
+            ("updated_at", "2030-01-01T00:00:00+00:00"),
+            ("created_at", "2030-01-01T00:00:00+00:00"),
+        ],
+    )
+    def test_a_change_to_any_field_at_all_is_a_change(
+        self, instances, schema, field, value
+    ):
+        """What "identical" has to mean for the comparison that suppresses a
+        no-op. Every other case in this class renames the node, so a
+        comparison that read only the name - or that skipped the fields a
+        rename never touches - would pass all of them while dropping a
+        metadata-only, archived-only or timestamp-only write and leaving the
+        two instances apart on that field with nothing left to report.
+
+        `created_at` is in the list for the delete-and-recreate shape, where a
+        node comes back with the same content and a new life."""
+        one, two = instances(), instances()
+        one.add_nodes([_node("c", name="Mine")], [])
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("c") is not None,
+            "the second instance learned of the node",
+        )
+
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
+            assert doc[field] != value, "the field already held the value written"
+            doc[field] = value
+            reader.upsert_node(doc)
+        finally:
+            reader.close()
+
+        def arrived():
+            held = one.get_node("c")
+            if held is None:
+                return False
+            written = getattr(held, field)
+            return (
+                written.isoformat() if hasattr(written, "isoformat") else written
+            ) == value
+
+        _wait_until(arrived, f"the change to {field} reached the instance")
+        _assert_nothing_failed(one, two)
+
+    def test_a_vector_the_store_replaced_is_not_nothing(self, instances, schema):
+        """The vector arm again, and the half the removal case cannot reach: a
+        comparison that asked whether an embedding is PRESENT rather than what
+        it is would pass that one and drop this."""
+        one, two = instances(), instances()
+        one.add_nodes(
+            [Node(id="c", type=NodeType.ACTOR, name="Mine", embedding=[0.5, 0.25])], []
+        )
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("c") is not None,
+            "the second instance learned of the node",
+        )
+        assert one.vector_store.get_vector_list("c") == [0.5, 0.25]
+
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
+            doc["embedding"] = [0.25, 0.5]
+            reader.upsert_node(doc)
+        finally:
+            reader.close()
+
+        _wait_until(
+            lambda: one.vector_store.get_vector_list("c") == [0.25, 0.5],
+            "the instance adopted the vector the store now holds; it has "
+            f"{one.vector_store.get_vector_list('c')}",
+        )
+        _assert_nothing_failed(one, two)
+
     def test_an_answer_that_dropped_the_vector_is_not_nothing(self, instances, schema):
         """The other direction of the same comparison. An answer carrying no
         embedding for a node the index still has a vector for is a change like

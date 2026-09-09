@@ -3284,6 +3284,39 @@ class TestADeferredReport:
         finally:
             storage.shutdown_events()
 
+    def test_the_eager_constructor_is_not_quietly_given_the_same_treatment(
+        self,
+    ):
+        """The suppression belongs to the deferred path and to nothing else.
+
+        An eager report's content was gathered before this instance settled,
+        so "identical to what we hold" does not mean the store agrees with us
+        - it means the store agreed with us at some earlier moment. Applying
+        it is what that path has always done, and a subscriber that stopped
+        hearing about it would be losing an event this change never set out to
+        remove.
+        """
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            storage.add_nodes([_node("a", "Alpha")], [])
+            storage.flush()
+            seen = []
+            storage.add_system_listener(seen.append)
+
+            held = storage.get_node("a").to_dict()
+            backend.listener(
+                ExternalChange.entities([EntityOperation.upsert_node(held)])
+            )
+
+            assert [e.event_type for e in seen] == [EventType.NODE_UPDATE], (
+                "an eager report carrying what this instance already holds was "
+                f"suppressed; that is the deferred path's rule, not this one "
+                f"(saw {[e.event_type for e in seen]})"
+            )
+        finally:
+            storage.shutdown_events()
+
     def test_a_read_that_raises_reloads_the_graph_exactly_once(self):
         """The change is real whatever the read did, so it may not be dropped.
         A whole graph is the most expensive read this seam has, so it is also
