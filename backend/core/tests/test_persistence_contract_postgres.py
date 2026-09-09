@@ -1025,9 +1025,22 @@ class TestPostgresEntityWritesTouchOneRow:
     #
     # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
     # node delete per node, so the length is whatever the caller deleted.
-    # 2 and 7 sit away from the lengths the other tests use (1, 5, 6, 12,
-    # 40, 41, 43); 41 deliberately coincides with the lock probe's, so the
-    # region above 40 is walked by more than one test rather than by one.
+    #
+    # None of these three is a length new to the module. Measured, by
+    # recording every `apply_batch` the file drives: 1, 2, 3, 4, 5, 6, 7,
+    # 9, 12, 40, 41, 43 - and 2 alone accounts for 38 of the calls. An
+    # earlier version of this comment claimed 2 and 7 "sit away from the
+    # lengths the other tests use" and listed a set that omitted 2, 3, 4,
+    # 7 and 9. They are kept for reasons other than novelty, which is
+    # what the earlier claim should have said:
+    #
+    # - 2 truncates the cycle below, which is the point of running it;
+    # - 7 is the only mid-length under the cost and blast-radius
+    #   assertions - the module's other seven-operation batch is a
+    #   contract clause that checks the resulting graph and not the
+    #   statements;
+    # - 41 coincides with the lock probe's on purpose, so the region
+    #   above 40 is walked by two tests rather than one.
     BATCH_LENGTHS = (2, 7, 41)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
