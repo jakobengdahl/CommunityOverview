@@ -367,10 +367,17 @@ the nodes already on the canvas.
   lost on restart. (AgentRun *history* is recorded durably — see above — but the
   delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
-- **Single process**: Works within one process only. A backend declaring
-  `change_notification` refreshes a second instance's model and emits these
-  events there too, but no shipped backend declares it yet, and running
-  several instances is separate work.
+- **Per-instance delivery**: the queue is per process, and so is delivery.
+  `PostgresGraphPersistenceBackend` declares `change_notification`, so a
+  second instance is refreshed by another instance's write and emits these
+  events too — stamped with the `external-change` origin, so an agent that
+  answers a change by writing cannot bounce it between instances. What is not
+  shared is delivery: each instance dispatches to subscriptions out of its own
+  in-memory queue, with its own retries. Two instances therefore deliver a
+  webhook subscription twice for one change — once from the writer and once
+  from the instance that was told about it — unless the subscription lists
+  `external-change` in its `ignore_origins`. Delivering exactly once across
+  instances, rather than opting out per subscription, is separate work.
 - **Simple filtering**: No complex query expressions
 
 ## Future Enhancements

@@ -208,13 +208,12 @@ passes against it.
 against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
-worked example of a backend built up one step at a time: it declares
-`incremental_writes` and `transactions`, having landed first as
-`SNAPSHOT_ONLY` with the entity clauses skipping too. Nine clauses still
-skip for it — the eight change-notification ones, and the
-backwards-compatibility clause, because a store written by a previous
-release of this backend does not exist yet. Count them the way step 4
-says to: a skipped clause is an unverified one whatever the reason.
+worked example of a backend built up one step at a time: it declares all
+three capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
+clauses skipping, then with the entity contract, then with notification. One clause still skips for it — the backwards-compatibility
+one, because a store written by a previous release of this backend does not
+exist yet. Count it the way step 4 says to: a skipped clause is an
+unverified one whatever the reason.
 `test_persistence_seam.py` covers the other half — which shape `GraphStorage`
 hands a backend for each mutation.
 
@@ -231,10 +230,12 @@ check it: a backend declaring `incremental_writes` must satisfy the
 Every read path serves state built at load: the node and edge dictionaries,
 the NetworkX graph, the searchable-text cache behind lexical search, and the
 vector index behind semantic search. Nothing tells them another writer moved
-the store underneath. That is why one instance is the limit today, and it is
-what `change_notification` is for — it is a property of the store, not of the
-storage engine: a file lock is kernel-local and coordinates nothing between
-machines.
+the store underneath. That is why a backend that cannot report is a backend
+one instance at a time, which is where the default file backend still stands,
+and it is what `change_notification` is for — it is a property of the store,
+not of the storage engine: a file lock is kernel-local and coordinates
+nothing between machines. `PostgresGraphPersistenceBackend` declares it; see
+*Cross-instance notification, over LISTEN/NOTIFY* below for how.
 
 A backend that declares it implements two methods:
 
@@ -438,11 +439,11 @@ writing a backend of your own against a shared server:
 - **Connections are the resource that scales with instance count**, and the
   server's ceiling is shared by every instance at once — 100 on a stock
   server, three of them reserved. The per-instance pool is therefore small by
-  default (`DEFAULT_POOL_SIZE`), and a deployment that raises it should divide
-  the server's `max_connections` by the instance count it scales to. Leave
-  room beyond the pool: cross-instance notification holds one further
-  connection open per instance, because a listener cannot return its
-  connection to a pool and still be listening.
+  default (`DEFAULT_POOL_SIZE`), and a deployment that raises it should check
+  that the server's `max_connections` covers
+  `instance_count × (pool_size + 1)`. The `+ 1` is notification: a listener
+  cannot return its connection to a pool and still be listening, so it holds
+  one further connection open per instance for as long as it runs.
 
 - **A load is one moment, under `REPEATABLE READ`.** Nodes, edges and metadata
   read as three queries are three moments: PostgreSQL takes its snapshot per
@@ -582,7 +583,71 @@ whole graph, which is the pre-entity behaviour rather than a new hazard.
 to a journal and rewrites the graph only periodically; a database has no
 deferred state, so what is already committed is the canonical form.
 
-What is still missing is the other direction: nothing tells an instance that
-another one wrote, so a running instance serves what it last loaded until it
-reloads — correct, but stale. `change_notification` is the next slice, and
-this backend does not declare it yet.
+### Cross-instance notification, over LISTEN/NOTIFY
+
+The other direction is the server's own `LISTEN`/`NOTIFY`. Each instance
+holds one connection listening on a channel derived from the schema, and each
+write announces itself on that channel.
+
+- **The announcement is issued inside the writing transaction.** The server
+  holds it until commit and discards it on rollback, so a listener is never
+  told about a change that did not happen and a retried batch announces once —
+  from the attempt that committed. That is why there is no bookkeeping here:
+  announcing after the commit would leave a window in which the write is
+  visible and unannounced, and a process dying in it would leave every other
+  instance permanently behind with nothing to notice.
+- **The announcement carries identifiers, never content.** A node payload
+  carries its embedding inline when there is no vector sidecar, so one node
+  can exceed the server's entire payload allowance. The listener reads the
+  content back from the store — which is also the stronger design: between the
+  commit and the read a third instance may have written the same entity again,
+  and the store's answer is then newer than the announcement rather than
+  contradicting it. The store decides what happened to a named identifier;
+  one that is no longer there is reported as a delete.
+- **The payload ceiling is enforced here, not by the server.** `NOTIFY` caps a
+  payload at 8000 bytes and *raises* past it — inside the writing transaction,
+  which would abort the batch being announced. An announcement that will not
+  fit therefore degrades to the whole-graph form (`ExternalChange.unknown()`)
+  before the statement is issued. A large batch costs the other instances a
+  reload; it must never cost the writer its mutation.
+- **Order is preserved.** `GraphStorage` drops an external edge whose endpoint
+  is not present yet, so a report that grouped by kind would silently lose
+  every edge created alongside its endpoints — the ordinary shape of a create.
+- **An instance is not told about its own writes.** The server delivers a
+  notification to the connection that sent it as readily as to any other, so
+  the announcement carries the writer's origin and a listener skips its own.
+  Without it every mutation would emit a second event to every subscriber.
+- **An announcement this build cannot read is a reload, not noise.** During a
+  rolling deploy the store is shared with instances running a different
+  version. Ignoring an unreadable announcement would leave this instance stale
+  for as long as the other keeps writing.
+- **The listening connection is outside the pool, and is reconnected.**
+  `LISTEN` registers on the session, so a pooled connection would stop
+  listening the moment it was returned; and the thread reading it blocks for
+  the instance's lifetime. One instance therefore costs `pool_size + 1`
+  connections. A connection that drops is re-established with backoff, and the
+  instance then reports `unknown()`: the announcements sent while it was not
+  listening are gone, and the server does not replay them. Without that, a
+  single failover would put an instance silently and permanently out of step —
+  it would go on answering reads and pass its health check.
+- **Failing to establish the *first* connection fails the start.** An instance
+  that boots without listening looks healthy and is silently wrong, which is
+  the same failure reached at boot instead of at runtime.
+
+`start_change_notification` returns only once the connection is listening.
+Returning earlier would lose every write made in the gap — and the caller's
+next act is typically to serve traffic, so that gap is exactly when the first
+cross-instance write arrives. `stop_change_notification` joins the listening
+thread rather than merely signalling it, because a refresh already inside the
+listener is running against a model the caller is about to tear down.
+
+One window stays open, and it is the seam's rather than this backend's.
+`GraphStorage` loads and *then* starts notification — deliberately, so that
+no change is reported against a model that does not exist yet — so a write
+committed between the load and the LISTEN is announced to a connection that
+is not listening and is not replayed. The instance is stale from boot until
+the next write announces itself. It is narrow, and closing it means changing
+the order the seam specifies, not this backend.
+
+The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
+is how the listening thread reads its channel while still noticing a stop.
