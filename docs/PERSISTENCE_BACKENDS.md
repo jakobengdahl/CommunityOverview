@@ -661,3 +661,56 @@ make, not this backend's.
 
 The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
 is how the listening thread reads its channel while still noticing a stop.
+
+### Sizing it: what an instance costs
+
+One instance costs **`pool_size + 1`** server connections while notification is
+running — the pool, plus the listening connection that cannot go back to a pool
+and still be listening. So a deployment needs
+`instance_count × (pool_size + 1)`, and it needs it at the instance count it
+*scales to*, not the one it was tested at. Getting this wrong is not a slow
+deployment: the instance that cannot get a connection fails to boot.
+
+Against a stock server — `max_connections` 100, three reserved for superusers,
+so 97 available:
+
+| Instances | `pool_size` | Connections | Fits in 97 |
+|---:|---:|---:|:--|
+| 1 | 4 (default) | 5 | yes |
+| 10 | 4 (default) | 50 | yes, with room for psql and a migration |
+| 10 | 8 | 90 | yes, but nothing else may connect |
+| 20 | 4 (default) | 100 | **no** |
+| 20 | 2 | 60 | yes |
+
+Two things worth reading off that table. Raising `pool_size` costs
+`instance_count` connections per step, not one — it is the multiplied number,
+which is why the default is deliberately small. And scaling out is cheaper per
+instance at a small pool than at a large one, so an autoscaling deployment
+should lower `pool_size` before it raises `max_connections`.
+
+`backend/core/tests/test_multi_instance_postgres.py` asserts the per-instance
+half of this against a running server, so the number above is measured rather
+than argued.
+
+### The acceptance test
+
+`backend/core/tests/test_multi_instance_postgres.py` is the whole stack run
+against itself: two `GraphStorage` instances on one store, writing at the same
+time. It is the only test that does this — the backend's contract tests drive
+the backend, and the seam's tests drive `GraphStorage` against a reference
+backend.
+
+It asserts what the earlier layers cannot: that neither instance's writes are
+lost, that both converge on what the other wrote *and* on what the store holds,
+that a node arriving by report is searchable at the instance that received it,
+and that a delete takes the node's edges and its vector with it. Nothing in it
+calls `save()`: that is the whole-graph path, where two writers overwrite each
+other by design, which is why the contract's own two-writer clause asserts
+liveness and explicitly not content.
+
+One thing it checks before believing any of that: `_resync_pending` on both
+instances. A failed entity write is invisible to the caller — `add_nodes`
+discards the future and swallows the exception with a print — and it makes the
+instance drop every external report it is sent until the next flush heals it
+with a whole-graph write. Without that check a convergence assertion can pass
+vacuously, or a lost write can be laundered into an overwrite.
