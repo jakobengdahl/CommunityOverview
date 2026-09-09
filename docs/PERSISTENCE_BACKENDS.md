@@ -210,10 +210,11 @@ against the contract, with every hook implemented;
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares all
 three capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
-clauses skipping, then with the entity contract, then with notification. One clause still skips for it — the backwards-compatibility
-one, because a store written by a previous release of this backend does not
-exist yet. Count it the way step 4 says to: a skipped clause is an
-unverified one whatever the reason.
+clauses skipping, then with the entity contract, then with notification. One
+clause still skips for it — the backwards-compatibility one, because a store
+written by a previous release of this backend does not exist yet. Count it
+the way step 4 says to: a skipped clause is an unverified one whatever the
+reason.
 `test_persistence_seam.py` covers the other half — which shape `GraphStorage`
 hands a backend for each mutation.
 

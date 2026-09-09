@@ -52,6 +52,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     PostgresGraphPersistenceBackend,
     _channel_for,
 )
+from backend.core.storage_backends import ExternalChangeRefused  # noqa: E402
 from backend.core.storage_backends import (  # noqa: E402
     BackendCapabilities,
     EntityOperation,
@@ -69,6 +70,13 @@ DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 # tests below pin it from both sides rather than following it wherever it
 # is moved.
 DOCUMENTED_DEADLOCK_RETRIES = 3
+
+# The window the reconnect-pacing test watches, and the count above which it
+# calls the loop unpaced. Wide on purpose: the property is the difference
+# between a paced loop and an unpaced one - two orders of magnitude - not the
+# exact schedule, which depends on how fast the killer thread gets scheduled.
+_MEASURE_SECONDS = 5.0
+_UNPACED_FLOOR = 30
 
 
 class _RetryBoundExceeded(BaseException):
@@ -3070,9 +3078,7 @@ class TestPostgresListensOutsideThePool:
         assert backend._listen_conn is not None
         assert backend._listen_conn.info.backend_pid != pooled
 
-    def test_the_listener_runs_with_no_pool_connection_held(
-        self, schema, backends, listening
-    ):
+    def test_the_listener_runs_with_no_pool_connection_held(self, schema, backends):
         """The deadlock this ordering exists to prevent. A refresh waits for
         the application's write queue, and that queue's writes need this pool.
         Read the content back and keep the connection while calling the
@@ -3492,11 +3498,11 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
         # apart. Measured against the shape that checked nothing until the
         # read-back: most of these payloads reached this assertion having
         # killed the listening thread, and the reload arrived only as a side
-        # effect of reconnecting - minutes late in the general case, and
-        # indistinguishable from a healthy reconnect in the logs. The one
-        # that did not crash was worse: an unknown kind read as "edge"
-        # looked its id up in the wrong table and reported a confident
-        # delete of an entity nothing had announced.
+        # effect of reconnecting - which costs the connection, costs the
+        # backoff wait a drop now takes, and is reported as a lost connection
+        # naming a KeyError. The one that did not crash was worse: an unknown
+        # kind read as "edge" looked its id up in the wrong table and
+        # reported a confident delete of an entity nothing had announced.
         assert backend._listen_conn is not None
         assert backend._listen_conn.info.backend_pid == before, (
             "the announcement was not read - it crashed the listening thread "
@@ -3539,3 +3545,233 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
+
+
+class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
+    """A reconnect is not free, and the loop that performs it must be paced.
+
+    Every reconnect reports `unknown()`, which costs each instance a drain of
+    its own write queue and a whole-graph reload. A flapping server - a
+    failover loop, an idle reaper, a connection limit being hit - therefore
+    turns into a reload storm driven by the recovery rather than by the
+    fault, and it is the recovering instance that pays.
+
+    The failure this pins is specific and was measured, not imagined: the
+    backoff was reset by the fact of having *connected*, which is the one
+    thing a flapping server does reliably, so the ceiling was unreachable on
+    exactly the failure it was written for. A dropped connection reconnected
+    76 times a second, and each of those was a whole-graph reload.
+    """
+
+    def test_a_connection_killed_as_fast_as_it_appears_does_not_spin(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        stop = threading.Event()
+        terminations = []
+
+        def keep_killing():
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                while not stop.is_set():
+                    conn = backend._listen_conn
+                    if conn is not None:
+                        try:
+                            killer.execute(
+                                "SELECT pg_terminate_backend(%s)",
+                                (conn.info.backend_pid,),
+                            )
+                            terminations.append(1)
+                        except Exception:
+                            pass  # it went away on its own; try again
+                    time.sleep(0.001)
+
+        killer_thread = threading.Thread(target=keep_killing, daemon=True)
+        killer_thread.start()
+        try:
+            time.sleep(_MEASURE_SECONDS)
+        finally:
+            stop.set()
+            killer_thread.join(30)
+            backend.stop_change_notification()
+
+        # A ceiling with room to spare rather than a tight bound: the point is
+        # the difference between a paced loop and an unpaced one, which is two
+        # orders of magnitude, not the exact schedule. Unpaced, this window
+        # produced hundreds.
+        assert len(collector.changes) <= _UNPACED_FLOOR, (
+            f"{len(collector.changes)} reloads in {_MEASURE_SECONDS}s from "
+            f"{len(terminations)} terminations: the reconnect is not backing "
+            f"off, so every drop costs every instance a whole-graph reload"
+        )
+        assert terminations, "the killer never caught a listening connection"
+
+    def test_it_is_still_listening_after_the_flapping_stops(self, schema, backends):
+        """Backing off must not mean giving up: an instance that paced itself
+        through a failover and then went deaf is worse than one that spun."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        try:
+            for _ in range(3):
+                conn = backend._listen_conn
+                if conn is not None:
+                    with psycopg.connect(DSN, autocommit=True) as killer:
+                        killer.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (conn.info.backend_pid,),
+                        )
+                time.sleep(0.05)
+            collector.wait_for(1, timeout=60)
+            settled = len(collector.changes)
+
+            writer.upsert_node(node_payload("after_the_storm"))
+            changes = collector.wait_for(settled + 1, timeout=60)
+        finally:
+            backend.stop_change_notification()
+
+        named = [c for c in changes[settled:] if c.operations is not None]
+        assert named, "nothing was reported once the connection settled"
+        assert any(op.entity_id == "after_the_storm" for op in named[-1].operations)
+
+
+class TestPostgresDoesNotStartASecondListener:
+    """A start that fails must not leave a live thread behind it.
+
+    The handle to the listening thread is what the next start consults. Clear
+    it while the thread is still running - which a stop whose join timed out
+    used to do - and the next start finds nothing running, clears the stop
+    flag, and revives the abandoned thread beside the new one. Measured: two
+    listening connections, every change delivered to the application twice,
+    and an instance costing pool_size + 2 connections against a budget
+    written for pool_size + 1.
+    """
+
+    def test_a_start_that_times_out_does_not_leave_a_startable_backend(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        released = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def hang_once(*args, **kwargs):
+            # A server that accepts the connection and never answers: the
+            # shape the connect timeout exists for, and the one that made
+            # start's own bound expire against a thread still running.
+            released.wait(60)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_LISTEN_START_TIMEOUT", 1.0)
+        monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 1.0)
+        monkeypatch.setattr(module.psycopg, "connect", hang_once)
+
+        try:
+            with pytest.raises(TimeoutError):
+                backend.start_change_notification(_Collector())
+
+            live = [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
+            # The thread is still there - that is the situation, not the bug.
+            # The bug was the backend claiming to have none.
+            with pytest.raises(RuntimeError):
+                backend.start_change_notification(_Collector())
+            assert len(
+                [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
+            ) <= len(live), "a second listener was started beside the abandoned one"
+        finally:
+            released.set()
+            backend.stop_change_notification()
+
+
+class TestPostgresSurvivesAReadBackItCannotComplete:
+    """The store not answering for an announcement is not the announcement's
+    fault, and must not cost the listening connection.
+
+    The read-back runs on the pool, which the instance's own writers are
+    using. A pool timeout under contention, or a connection dropped between
+    the announcement and the read, would otherwise leave the reading thread -
+    taking the listening connection with it, costing a reconnect and the
+    backoff wait after it. A transient read amplified into the most expensive
+    recovery this backend has, and on the load that caused it.
+    """
+
+    def test_a_read_back_that_fails_reports_a_reload_and_keeps_listening(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        real_resolve = type(backend)._resolve
+        failed = threading.Event()
+
+        def fail_once(self, pairs):
+            if not failed.is_set():
+                failed.set()
+                raise psycopg.OperationalError("injected: the pool would not answer")
+            return real_resolve(self, pairs)
+
+        backend._resolve = fail_once.__get__(backend)
+        backend.start_change_notification(collector)
+        try:
+            before = backend._listen_conn.info.backend_pid
+            writer.upsert_node(node_payload("a"))
+            (first,) = collector.wait_for(1)
+            assert first.operations is None, (
+                "a read-back that failed must report that something changed, "
+                "not nothing and not a guess"
+            )
+            assert backend._listen_conn is not None
+            assert backend._listen_conn.info.backend_pid == before, (
+                "the failed read-back took the listening connection with it"
+            )
+
+            writer.upsert_node(node_payload("b"))
+            changes = collector.wait_for(2)
+        finally:
+            backend.stop_change_notification()
+
+        assert [op.entity_id for op in changes[1].operations] == ["b"]
+
+
+class TestPostgresReportsAContractViolationDistinctly:
+    """`ExternalChangeRefused` means this backend reported on a thread that
+    was running a write - its own obligation, stated on ChangeNotifyingBackend
+    and impossible to see from the application's side.
+
+    It subclasses RuntimeError, so a generic handler would swallow it into the
+    same line as an application bug. The refusal says the refresh did not
+    happen and this instance is now behind, which is a different thing to
+    report and a different thing to fix.
+    """
+
+    def test_a_refusal_is_reported_and_reporting_continues(
+        self, schema, backends, capsys
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        seen = _Collector()
+
+        def refusing(change):
+            seen(change)
+            if len(seen.changes) == 1:
+                raise ExternalChangeRefused("reported from a writing thread")
+
+        backend.start_change_notification(refusing)
+        try:
+            writer.upsert_node(node_payload("first"))
+            seen.wait_for(1)
+            writer.upsert_node(node_payload("second"))
+            changes = seen.wait_for(2)
+        finally:
+            backend.stop_change_notification()
+
+        assert [op.entity_id for op in changes[1].operations] == ["second"]
+        assert "refused" in capsys.readouterr().out

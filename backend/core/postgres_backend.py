@@ -51,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -121,15 +122,26 @@ NOTIFY_POLL_SECONDS = 0.5
 # down does not get hammered by every instance at once.
 NOTIFY_RECONNECT_MAX_SECONDS = 30.0
 
-# Not published: the first backoff step, and how long start and stop wait for
-# the listening thread. Start's bound only has to outlast one connect - it
-# turns a server that accepts the pool's connections but hangs on this one
-# into a boot failure rather than a boot that silently never listens. Stop's
-# has to outlast a refresh already inside the listener, which waits for the
-# application's write queue.
+# Not published: the first backoff step, how long one connect attempt may
+# take, and how long start and stop wait for the listening thread. The
+# connect timeout is what makes start's bound mean anything - without it a
+# server that accepts TCP and never answers holds the thread indefinitely,
+# and start's own timeout then abandons a thread that is still alive. Stop's
+# bound has to outlast a refresh already inside the listener, which waits for
+# the application's write queue.
 _NOTIFY_RECONNECT_MIN_SECONDS = 0.25
+_LISTEN_CONNECT_TIMEOUT = 10.0
 _LISTEN_START_TIMEOUT = 30.0
 _LISTEN_STOP_TIMEOUT = 30.0
+
+# How long a listening connection must survive before the next drop is
+# treated as an isolated one rather than a flap. Without this the backoff is
+# reset by the mere fact of connecting, which is the one thing a flapping
+# server does reliably - and the backoff then never engages on the failure it
+# was written for. Measured before it existed: a connection terminated as
+# fast as it appeared reconnected 76 times a second, each reconnect costing
+# every other instance a whole-graph reload.
+_NOTIFY_STABLE_SECONDS = 60.0
 
 
 # The two kinds an announcement can name, abbreviated because the payload has
@@ -650,7 +662,11 @@ class PostgresGraphPersistenceBackend:
         """
         with self._listen_lock:
             if self._listen_thread is not None:
-                raise RuntimeError("change notification is already running")
+                raise RuntimeError(
+                    "change notification is already running"
+                    if self._listen_thread.is_alive()
+                    else "change notification was not stopped cleanly"
+                )
             self._ensure_schema()
             self._listener = listener
             self._listen_stop.clear()
@@ -683,19 +699,45 @@ class PostgresGraphPersistenceBackend:
         already inside the listener is running against a model the caller is
         about to tear down. Closing the connection is the fallback for a
         thread that does not notice the flag - the blocking read raises on a
-        closed socket, which is measured, not assumed.
+        closed socket.
+
+        The promise holds even when the join does not: the stop flag is set
+        before anything else and `_deliver` reads it, so no further call is
+        made whatever the thread is doing. What a failed join costs is the
+        thread, and the handle to it is then kept rather than cleared - a
+        cleared handle would let the next start run a second listener beside
+        the first.
         """
         with self._stop_lock:
-            with self._listen_lock:
-                thread, self._listen_thread = self._listen_thread, None
+            # Set before the thread is read, so a thread that wakes during
+            # the join below sees it and leaves.
             self._listen_stop.set()
-            if thread is not None and thread is not threading.current_thread():
+            with self._listen_lock:
+                thread = self._listen_thread
+            mine = thread is not None and thread is not threading.current_thread()
+            if mine:
                 thread.join(_LISTEN_STOP_TIMEOUT)
                 if thread.is_alive():
                     self._close_listen_conn()
                     thread.join(_LISTEN_STOP_TIMEOUT)
             self._close_listen_conn()
             self._listener = None
+            if mine and thread.is_alive():
+                # Left in place deliberately. The listener will not be called
+                # again - the flag is set and _deliver reads it - but the
+                # thread is still there, and clearing the handle would let the
+                # next start believe nothing is running and start a second
+                # one. Measured before this: two listening connections, and
+                # every change delivered to the application twice.
+                print(
+                    f"Warning: the listener thread for {self._channel} did "
+                    f"not stop within {_LISTEN_STOP_TIMEOUT}s; notification "
+                    f"cannot be started again on this backend"
+                )
+                return
+            with self._listen_lock:
+                if self._listen_thread is thread:
+                    self._listen_thread = None
 
     def _close_listen_conn(self) -> None:
         with self._listen_lock:
@@ -711,7 +753,11 @@ class PostgresGraphPersistenceBackend:
         while not self._listen_stop.is_set():
             conn = None
             try:
-                conn = psycopg.connect(self.conninfo, autocommit=True)
+                conn = psycopg.connect(
+                    self.conninfo,
+                    autocommit=True,
+                    connect_timeout=_LISTEN_CONNECT_TIMEOUT,
+                )
                 conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self._channel)))
             except Exception as exc:
                 # Closed here, not left to the garbage collector: LISTEN can
@@ -735,16 +781,18 @@ class PostgresGraphPersistenceBackend:
 
             with self._listen_lock:
                 self._listen_conn = conn
-            delay = _NOTIFY_RECONNECT_MIN_SECONDS
             reconnected = ready.is_set()
             ready.set()
             if reconnected:
                 # Whatever was written while this instance was not listening
                 # was announced to a connection that no longer existed. The
                 # notifications are gone; the writes are in the store. A
-                # reload is the only honest answer.
+                # reload is the only honest answer - and the reason the
+                # backoff below is not optional, because this is the cost
+                # every reconnect puts on this instance.
                 self._deliver(ExternalChange.unknown())
 
+            listening_since = time.monotonic()
             try:
                 self._read_until_stopped(conn)
             except Exception as exc:
@@ -755,6 +803,19 @@ class PostgresGraphPersistenceBackend:
                     )
             finally:
                 self._close_listen_conn()
+
+            if self._listen_stop.is_set():
+                return
+            # The connection dropped. This waits too, and it is the path that
+            # needed it most: a connection that establishes and dies is what a
+            # flapping server, a failover loop or an idle reaper produces, and
+            # resetting the backoff on the strength of having connected made
+            # the whole ceiling unreachable on exactly that failure. Reset
+            # only on a connection that actually stayed up.
+            if time.monotonic() - listening_since >= _NOTIFY_STABLE_SECONDS:
+                delay = _NOTIFY_RECONNECT_MIN_SECONDS
+            self._listen_stop.wait(delay)
+            delay = min(delay * 2, NOTIFY_RECONNECT_MAX_SECONDS)
 
     def _read_until_stopped(self, conn) -> None:
         """Block on the connection, waking often enough to see the stop flag.
@@ -785,9 +846,10 @@ class PostgresGraphPersistenceBackend:
         Which is why the shape is checked *here*, before any of it is used.
         Letting a malformed entry reach the read-back instead would raise out
         of the reading thread, and the reload would arrive only as a side
-        effect of the reconnect that followed - the right outcome by the wrong
-        road, minutes late, and indistinguishable from a healthy reconnect in
-        the logs.
+        effect of the reconnect that followed: the right outcome by the wrong
+        road. It costs the listening connection, it costs the backoff wait
+        that a drop now takes, and it is reported as a lost connection naming
+        a KeyError - a misdiagnosis in the one line an operator would read.
         """
         try:
             announcement = json.loads(payload)
@@ -802,7 +864,23 @@ class PostgresGraphPersistenceBackend:
         if pairs is None:
             self._deliver(ExternalChange.unknown())
             return
-        self._deliver(self._resolve(pairs))
+        try:
+            change = self._resolve(pairs)
+        except Exception as exc:
+            # The announcement was read; the store would not answer for it -
+            # a pool timeout under contention, a connection dropped between
+            # the two. Left to propagate it would leave the reading thread,
+            # take the listening connection with it and cost a reconnect, so
+            # a transient read is amplified into the most expensive recovery
+            # this backend has. The change is real either way, so this
+            # instance says what it honestly knows: something changed.
+            print(
+                f"Warning: could not read back an announced change on "
+                f"{self._channel}: {type(exc).__name__}: {exc}"
+            )
+            self._deliver(ExternalChange.unknown())
+            return
+        self._deliver(change)
 
     def _resolve(self, pairs: Sequence[Tuple[str, str]]) -> ExternalChange:
         """Turn named identifiers into operations, reading content from the store.
