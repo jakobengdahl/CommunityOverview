@@ -53,6 +53,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     PostgresGraphPersistenceBackend,
     _channel_for,
 )
+from backend.core.storage import GraphStorage  # noqa: E402
 from backend.core.storage_backends import ExternalChangeRefused  # noqa: E402
 from backend.core.storage_backends import (  # noqa: E402
     BackendCapabilities,
@@ -312,8 +313,14 @@ class _ObservableBackend(PostgresGraphPersistenceBackend):
             try:
                 listener(change)
             finally:
+                # Recorded with its content in hand. The shipped backend hands
+                # over a change whose content is read when the application
+                # asks - after it has settled its own writes - so a report
+                # observed at delivery names nothing yet. Reading it here, and
+                # only after the listener has had it, records what was
+                # announced without moving the read the listener itself makes.
                 with self._applied_change:
-                    self.seen.append(change)
+                    self.seen.append(change.with_content())
                     self._applied_change.notify_all()
 
         super().start_change_notification(recording)
@@ -2694,6 +2701,10 @@ class _Collector:
         self._arrived = threading.Condition()
 
     def __call__(self, change):
+        # This collector is the whole application, so reading the content here
+        # is the read a real one makes once it has settled - it has nothing
+        # queued to settle.
+        change = change.with_content()
         with self._arrived:
             self.changes.append(change)
             self.arrivals.append(time.monotonic())
@@ -2718,6 +2729,30 @@ class _Collector:
             assert len(self.changes) == count, (
                 f"expected no change beyond {count}, got {len(self.changes)}"
             )
+
+
+class _ReadingCollector(_Collector):
+    """A collector that records what the read raised instead of failing on it.
+
+    `_Collector` reads the content the way a settled application does, which
+    is exactly the read the class below makes fail. Left to propagate it would
+    be caught by the backend's own generic handler and the test would see an
+    absence, which is indistinguishable from a change that never arrived.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.failures = []
+
+    def __call__(self, change):
+        try:
+            super().__call__(change)
+        except Exception as exc:
+            with self._arrived:
+                self.failures.append(exc)
+                self.changes.append(change)
+                self.arrivals.append(time.monotonic())
+                self._arrived.notify_all()
 
 
 @pytest.fixture
@@ -4087,14 +4122,19 @@ class TestPostgresDoesNotStartASecondListener:
 
 class TestPostgresSurvivesAReadBackItCannotComplete:
     """The store not answering for an announcement is not the announcement's
-    fault, and must not cost the listening connection.
+    fault, and must cost neither the listening connection nor the change.
 
     The read-back runs on the pool, which the instance's own writers are
-    using. A pool timeout under contention, or a connection dropped between
-    the announcement and the read, would otherwise leave the reading thread -
-    taking the listening connection with it, costing a reconnect and the
-    backoff wait after it. A transient read amplified into the most expensive
-    recovery this backend has, and on the load that caused it.
+    using: a pool timeout under contention, or a connection dropped between
+    the announcement and the read. It is asked for on the application's
+    thread now, not the reading one, so the reading thread is not where it can
+    fail - but a backend that went back to reading on dispatch would put it
+    there again, and that is the connection this whole class exists to keep.
+
+    Where the failure does land, the change is still real, so the application
+    may not drop it: it re-reads the whole graph instead. The two halves are
+    asserted separately because they are separately breakable - a listener
+    that swallowed the failure would keep the connection and lose the change.
     """
 
     # Not one class, and not one family. Only PoolTimeout and QueryCanceled
@@ -4113,16 +4153,9 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
         ValueError("injected: something no one predicted"),
     ]
 
-    @pytest.mark.parametrize(
-        "failure", READ_BACK_FAILURES, ids=lambda e: type(e).__name__
-    )
-    def test_a_read_back_that_fails_reports_a_reload_and_keeps_listening(
-        self, failure, schema, backends
-    ):
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        backends.extend([backend, writer])
-        collector = _Collector()
+    @staticmethod
+    def _failing_once(backend, failure):
+        """Make the next read-back raise `failure`, and the ones after it work."""
         real_resolve = type(backend)._resolve
         failed = threading.Event()
 
@@ -4133,14 +4166,30 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
             return real_resolve(self, pairs)
 
         backend._resolve = fail_once.__get__(backend)
+
+    @pytest.mark.parametrize(
+        "failure", READ_BACK_FAILURES, ids=lambda e: type(e).__name__
+    )
+    def test_a_read_back_that_fails_keeps_the_listener_connected(
+        self, failure, schema, backends
+    ):
+        """The connection the announcements arrive on is not the one the
+        content is read on, and a failure on the second must not reach the
+        first - nor stop the announcements after it."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _ReadingCollector()
+        self._failing_once(backend, failure)
+
         backend.start_change_notification(collector)
         try:
             before = backend._listen_conn.info.backend_pid
             writer.upsert_node(node_payload("a"))
-            (first,) = collector.wait_for(1)
-            assert first.operations is None, (
-                "a read-back that failed must report that something changed, "
-                "not nothing and not a guess"
+            collector.wait_for(1)
+            assert [type(exc) for exc in collector.failures] == [type(failure)], (
+                "the failed read must reach the application, which is the only "
+                "party that can turn it into a reload"
             )
             assert backend._listen_conn is not None
             assert backend._listen_conn.info.backend_pid == before, (
@@ -4153,6 +4202,36 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["b"]
+
+    @pytest.mark.parametrize(
+        "failure", READ_BACK_FAILURES, ids=lambda e: type(e).__name__
+    )
+    def test_a_read_back_that_fails_reloads_the_graph(
+        self, failure, schema, backends, tmp_path, monkeypatch
+    ):
+        """The change was real, so losing it is not an option. A content read
+        this instance could not complete says nothing about what the store
+        holds, and the only honest answer left is to read all of it."""
+        monkeypatch.chdir(tmp_path)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        backend.save_graph_data(snapshot())
+        storage = GraphStorage(persistence_backend=backend)
+        self._failing_once(backend, failure)
+
+        try:
+            writer.upsert_node(node_payload("a", name="Alpha"))
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and "a" not in storage.nodes:
+                time.sleep(0.05)
+        finally:
+            storage.shutdown_events()
+
+        assert "a" in storage.nodes, (
+            "a read-back that failed dropped the change instead of reloading"
+        )
+        assert storage.nodes["a"].name == "Alpha"
 
 
 class TestPostgresReportsAContractViolationDistinctly:

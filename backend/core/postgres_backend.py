@@ -895,25 +895,26 @@ class PostgresGraphPersistenceBackend:
         if pairs is None:
             self._deliver(ExternalChange.unknown())
             return
-        try:
-            change = self._resolve(pairs)
-        except Exception as exc:
-            # The announcement was read; the store would not answer for it -
-            # a pool timeout under contention, a connection dropped between
-            # the two. Left to propagate it would leave the reading thread,
-            # take the listening connection with it and cost a reconnect, so
-            # a transient read is amplified into the most expensive recovery
-            # this backend has. The change is real either way, so this
-            # instance says what it honestly knows: something changed.
-            print(
-                f"Warning: could not read back an announced change on "
-                f"{self._channel}: {type(exc).__name__}: {exc}"
-            )
-            self._deliver(ExternalChange.unknown())
-            return
-        self._deliver(change)
+        # Read ON DEMAND, not here. The application calls back once it has
+        # settled its own writes, so what this reads is the store's answer
+        # with that instance's work already in it - where reading now would
+        # hand over content that predates it, and leave the application
+        # arbitrating with a wall clock that does not order the commits.
+        #
+        # The pool connection is therefore taken on the application's thread
+        # rather than this one. That is safe for the reason the old ordering
+        # was not: the application has drained its write queue by then and
+        # holds the lock every mutation needs to enqueue, so nothing of its
+        # own is competing for the pool.
+        #
+        # A read that fails there is not this thread's to absorb either - the
+        # application turns it into a reload, which is what this used to do
+        # here, and the listening connection survives it.
+        self._deliver(
+            ExternalChange.entities_read_on_demand(lambda: self._resolve(pairs))
+        )
 
-    def _resolve(self, pairs: Sequence[Tuple[str, str]]) -> ExternalChange:
+    def _resolve(self, pairs: Sequence[Tuple[str, str]]) -> List[EntityOperation]:
         """Turn named identifiers into operations, reading content from the store.
 
         The store decides what happened, not the announcement. An identifier
@@ -951,7 +952,7 @@ class PostgresGraphPersistenceBackend:
                 operations.append(
                     EntityOperation(kind, "upsert", entity_id, dict(doc))  # type: ignore[arg-type]
                 )
-        return ExternalChange.entities(operations)
+        return operations
 
     def _deliver(self, change: ExternalChange) -> None:
         """Hand one change to the listener, holding nothing while it runs.

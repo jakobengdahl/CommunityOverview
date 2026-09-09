@@ -263,9 +263,18 @@ What the backend passes is an `ExternalChange`:
 
 - `ExternalChange.entities(operations)` — the same `EntityOperation`s a
   mutation is delivered as, read the other way round, in the order the store
-  applied them. Each upsert carries the entity's new content, so the refresh
-  needs no read-back. An upsert whose payload carries an `embedding` hands
-  the vector over with it.
+  applied them. Each upsert carries the entity's new content, gathered when
+  the report was dispatched. An upsert whose payload carries an `embedding`
+  hands the vector over with it.
+- `ExternalChange.entities_read_on_demand(read_content)` — the same, except
+  that `GraphStorage` calls `read_content()` to get the operations, on its own
+  thread and **after it has drained its write queue**. What comes back is
+  applied as the store's own answer, with no conflict rule consulted, which is
+  sound precisely because this instance's queued writes are already in it.
+  **Prefer this wherever the backend can re-read its store**; *When both
+  instances wrote the same thing* below is what the alternative costs.
+  Raising from `read_content` is not an error to swallow: `GraphStorage` logs
+  it and reloads the whole graph, and the report is not lost.
 
   **Report what the store applied together as one change, not one change per
   entity.** The vector index is rebuilt whole whenever it changes, so
@@ -325,17 +334,35 @@ A local mutation is in memory before it is in the store: it is applied on the
 calling thread and written in the background. So when two instances write the
 same node, the store settles on whichever write reached it last — and the
 instance whose write *won* is the one at risk, because it is never told about
-its own write. Applying a report that predates it would leave that instance
-serving a value the store does not hold, and nothing would put it right: there
-is no later change to report.
+its own write.
 
-`GraphStorage` resolves it as **last writer wins, by `updated_at`**. A reported
-node upsert is ignored when the node held in memory carries a later
-`updated_at` than the payload; a warning names the node. Consequences worth
-knowing before you build on it:
+**The store settles it, where the backend can re-read.** A backend reporting
+`entities_read_on_demand` is asked for the content after `GraphStorage` has
+drained its own write queue, under the lock that every mutation needs in order
+to be queued. What it reads is therefore the store's answer with this
+instance's own work already in it, and there is nothing left for the
+application to arbitrate: it takes what it is given. Every instance ends on
+whatever the store committed last, which is the only ordering the instances
+actually share.
+
+**A backend that reports `entities` instead falls back to a wall clock.** Its
+content was gathered when the report was dispatched, which can predate the
+receiving instance's queued writes, so `GraphStorage` protects itself with
+**last writer wins, by `updated_at`**: a reported node upsert is ignored when
+the node held in memory carries a later `updated_at` than the payload, and a
+warning names the node. That rule is weaker than it sounds, and this is the
+reason to prefer the other constructor:
 
 - It is a wall clock. The instances share no other ordering, so their clocks
   have to be roughly in step for this to mean anything.
+- **It does not order the commits.** The stamp is taken in memory under the
+  lock and the write commits asynchronously afterwards, so the write that
+  commits *last* can carry the *earlier* stamp. The instance holding the later
+  stamp then refuses the store's value — and goes on refusing it, because
+  there is no further change to report. Measured on PostgreSQL 16 before the
+  read was deferred, five racing renames from each of two instances: 4 of 8
+  runs ended with the two instances on different values, in both directions,
+  with no failed write on either side.
 - A tie defers to the report. Equal stamps are unresolvable, and taking the
   store's side is what converges the two instances.
 - A stamp that cannot be compared — one naive against one aware, which a
@@ -348,14 +375,12 @@ knowing before you build on it:
   stamp. A payload whose `updated_at` is explicitly `null` does not reach the
   comparison at all: it fails validation, and an unreadable payload is a
   whole-graph reload.
+
+Two things hold on both paths, because neither has anything to arbitrate:
+
 - **Edges carry no `updated_at`**, so an edge upsert is applied as reported.
 - **Deletes carry no payload**, so an external delete is applied whatever this
   instance last did to the entity.
-
-A backend that can order writes itself — a log sequence number, a stream id, a
-commit timestamp the store assigns — has a better answer than a wall clock, and
-should carry it in the payload's `updated_at` rather than leaving it to the
-writing instance's clock.
 
 ### A local write that failed
 
@@ -716,29 +741,29 @@ until the next write, flush or shutdown heals it with a whole-graph write.
 Without that check a convergence assertion can pass vacuously, or a lost write
 can be laundered into an overwrite.
 
-#### A contested entity does not converge under a true race
+#### A contested entity, and the defect that found this section
 
 Writes to **distinct** entities lose nothing; that is the property above, and
-it is the one this work exists to provide. Writes to the **same** entity are
-weaker, and weaker than *last writer wins* implies.
+it is the one this work exists to provide. Writes to the **same** entity now
+converge too — every party ends on whatever the store committed last — but
+they did not always, and the module keeps the cases that pin it because the
+way they failed is not a way a race would reliably show.
 
-`updated_at` is stamped in memory under the lock, and the write commits
-asynchronously afterwards — so commit order is not stamp order. The store
-settles on whichever write committed last; each instance keeps whichever stamp
-is newest, because `_is_newer` makes it discard a report older than what it
-holds. When those two disagree, the instance holding the newer stamp refuses
-every report of the store's value from then on, and the disagreement is
-permanent.
+The report used to carry content gathered when the announcement was
+dispatched, and the application defended itself against that with `updated_at`.
+Since commit order is not stamp order, the write that committed last could
+carry the earlier stamp, and the instance holding the later stamp then refused
+the store's value permanently. Measured on PostgreSQL 16, five racing renames
+from each of two instances: **4 of 8 runs ended divergent** on an idle
+machine — and **none at all under load**, which is the part worth keeping.
+A race-based regression test would have passed on a CI runner for the wrong
+reason.
 
-Measured on PostgreSQL 16, five racing renames from each of two instances:
-**5 of 8 runs ended with the two instances on different values**, in both
-directions, with no failed write on either side. Sequenced writes — one
-delivered before the next is made — converge; the test module pins that case
-and deliberately does not pin the raced one, because a test asserting the
-divergence would lock in the defect.
-
-The fix this points at is the one *When both instances wrote the same thing*
-already names: an ordering the instances share rather than a wall clock. A
-store that assigns commit order can supply it; PostgreSQL can. Doing so is a
-change to the seam's conflict rule, not to this backend, and is tracked
-separately.
+So the two cases that guard the fix are constructed rather than raced: one puts
+a value stamped *earlier* into the store after an instance already holds a
+later stamp, and asserts the instance takes it; the other pins the ordering
+that makes that sound, by watching when the content is read relative to the
+instance's own queued write. The raced case is kept as well, asserting that
+the store and both instances settle on one value — it guards no particular
+interleaving, which is exactly why it is worth having alongside two that each
+guard one.

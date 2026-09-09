@@ -26,6 +26,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -262,38 +263,35 @@ class TestTwoInstancesWritingDistinctEntities:
 
 
 class TestTwoInstancesWritingTheSameEntity:
-    """The same entity is a different property with a weaker answer, and this
-    class exists so the class above cannot be read as promising it.
+    """The same entity is the case the class above does not answer, and the
+    one that decided how the seam arbitrates at all.
 
-    `GraphStorage` resolves a contested node as last writer wins by
-    `updated_at`, and the two instances share no other ordering. SEQUENCED -
-    one write, delivered, then the other - that converges, and the first case
-    below pins it.
+    What settles it is the store, not either instance's clock. An instance
+    reads the contested entity back from the store AFTER its own queued writes
+    have committed, and takes what it finds - so whichever write the store
+    committed last is what every instance ends on.
 
-    RACED it does not, and this class does not pretend otherwise. The stamp is
-    taken in memory under the lock; the write commits asynchronously
-    afterwards. So commit order is not stamp order, and when the write that
-    commits LAST carries the OLDER stamp the store settles on one value while
-    the peer holds the other and refuses every report of the store's value
-    from then on, because its own stamp is newer. Measured at this commit on
-    an unloaded machine: 4 of 8 raced runs ended with the two instances on
-    different values, in both directions, with no failed write on either side.
-    Under load it does not reproduce at all, which is its own finding: a CI
-    runner would rarely catch it, and a race-based regression test would pass
-    there for the wrong reason.
-
-    So the second case asserts what a race does guarantee - each party ends on
-    a value one of the instances actually wrote - and not the convergence that
-    would be flaky here and false in general. The divergence is recorded as
-    task-oc-contested-entity-divergence, with the fix it points at; a test
-    that asserted the divergence would be locking in the defect, and one that
-    asserted convergence would be asserting something the system does not do.
+    It did not start there. The report used to carry content gathered when the
+    announcement was dispatched, which is before the receiving instance's own
+    queued writes have landed, and the instance defended itself against that
+    with `updated_at`: keep whichever version is stamped later. The stamp is
+    taken in memory under the lock and the write commits asynchronously
+    afterwards, so commit order is not stamp order - and when the write that
+    committed LAST carried the EARLIER stamp, the instance holding the later
+    stamp refused the store's value and went on refusing it. There is no
+    further change to report, so the disagreement was permanent, and that
+    instance served a value nothing else held. Measured before the fix, on an
+    unloaded machine: 4 of 8 raced runs ended divergent, in both directions,
+    with no failed write on either side. Under load it did not reproduce at
+    all - which is why the two cases that pin the fix below are constructed
+    rather than raced, and the raced one is here for what it is worth and not
+    as the guard.
     """
 
     def test_a_delivered_write_is_superseded_by_a_later_one(self, instances, schema):
-        """Sequenced, which is the case that does converge: the second write
-        is made after the first has been delivered, so its stamp and its
-        commit fall in the same order."""
+        """Sequenced, which is the easy case: the second write is made after
+        the first has been delivered, so its stamp and its commit fall in the
+        same order and nothing has to arbitrate."""
         one, two = instances(), instances()
         one.add_nodes([_node("contested", name="First")], [])
         _drain(one)
@@ -311,15 +309,124 @@ class TestTwoInstancesWritingTheSameEntity:
             "the instance that wrote first adopted the later write",
         )
 
-    def test_a_raced_write_leaves_no_one_holding_an_invented_value(
+    def test_a_value_the_store_took_last_wins_over_a_later_stamp(
         self, instances, schema
     ):
-        """What a race does guarantee. Not convergence - see the class
-        docstring and the item it names - but that nothing is torn: the store
-        and both instances each end on a value one of the instances actually
-        wrote. A torn or invented value would mean the row was not written
-        atomically, which is a different and far worse failure than the two
-        instances disagreeing."""
+        """The regression guard, and deliberately not a race.
+
+        The interleaving that used to diverge is constructed here instead of
+        hoped for: an instance holds a stamp, and the store then takes a value
+        stamped EARLIER, exactly as it does when the write carrying the older
+        stamp is the one that commits last. Raced, this happened about half
+        the time on an idle machine and not at all under load, so a race would
+        pass on a CI runner for the wrong reason. Constructed, it fails
+        wherever the instance arbitrates by clock and passes wherever it takes
+        the store's answer.
+        """
+        one, two = instances(), instances()
+        one.add_nodes([_node("contested", name="Origin")], [])
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("contested") is not None,
+            "the second instance learned of the node",
+        )
+
+        two.update_node("contested", {"name": "Stamped later"})
+        _drain(two)
+        _wait_until(
+            lambda: one.get_node("contested").name == "Stamped later",
+            "both instances hold the later stamp",
+        )
+        held = two.get_node("contested").updated_at
+
+        # A third writer stands in for the commit that lands last carrying the
+        # earlier stamp. Going through a backend rather than a GraphStorage is
+        # what makes the stamp settable at all: GraphStorage stamps its own,
+        # and stamping it is the very thing under test.
+        stale = one.get_node("contested").to_dict()
+        stale["name"] = "Committed last"
+        stale["updated_at"] = (held - timedelta(seconds=60)).isoformat()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            writer.upsert_node(stale)
+        finally:
+            writer.close()
+
+        for label, storage in (("one", one), ("two", two)):
+            _wait_until(
+                lambda s=storage: s.get_node("contested").name == "Committed last",
+                f"instance {label} took the value the store committed last, "
+                f"rather than keeping its own later stamp",
+            )
+        _assert_nothing_failed(one, two)
+
+    def test_the_content_is_read_after_this_instance_has_settled(
+        self, instances, schema
+    ):
+        """Why the guard above holds: the read is made late, not early.
+
+        An instance that read the contested entity when the announcement
+        arrived would read it without its own queued writes in it, and would
+        then be arbitrating between two values with nothing to order them by.
+        So the read is asked for by the application, once it has drained its
+        own queue - and this pins that ordering directly, because a refactor
+        could move the read back to dispatch and still satisfy the case above,
+        which has nothing queued.
+        """
+        one, two = instances(), instances()
+        one.add_nodes([_node("contested", name="Origin")], [])
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("contested") is not None,
+            "the second instance learned of the node",
+        )
+
+        backend = one._persistence_backend
+        real_resolve = type(backend)._resolve
+        seen_at_read = []
+        slow = threading.Event()
+
+        def watch(self, pairs):
+            operations = real_resolve(self, pairs)
+            seen_at_read.append(
+                [op.payload.get("name") for op in operations if op.kind == "node"]
+            )
+            return operations
+
+        backend._resolve = watch.__get__(backend)
+
+        real_upsert = type(backend).upsert_node
+
+        def stall(self, node):
+            # Long enough that the peer's announcement is in hand while this
+            # instance's own write is still queued - which is the whole
+            # interleaving. Released as soon as the write is through, so the
+            # test does not pay for it twice.
+            slow.wait(2.0)
+            return real_upsert(self, node)
+
+        backend.upsert_node = stall.__get__(backend)
+        one.update_node("contested", {"name": "Mine"})
+        two.update_node("contested", {"name": "Theirs"})
+        _drain(two)
+        slow.set()
+        _drain(one)
+        _assert_nothing_failed(one, two)
+
+        _wait_until(
+            lambda: seen_at_read and seen_at_read[-1] == ["Mine"],
+            "the content was read with this instance's own write already in "
+            f"the store; reads saw {seen_at_read}",
+        )
+
+    def test_a_raced_write_leaves_every_party_on_the_same_value(
+        self, instances, schema
+    ):
+        """Raced rather than constructed, and so it is the weaker of the two:
+        it passed before the fix about half the time on an idle machine and
+        every time under load. It is here because the constructed cases fix
+        one interleaving each and this one fixes none - if the arbitration is
+        wrong in a way neither of them named, this is what notices."""
         one, two = instances(), instances()
         one.add_nodes([_node("contested", name="Origin")], [])
         _drain(one)
@@ -355,20 +462,28 @@ class TestTwoInstancesWritingTheSameEntity:
         _drain(two)
         _assert_nothing_failed(one, two)
 
-        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        try:
-            stored = {n["id"]: n for n in reader.load_graph_data()["nodes"]}
-        finally:
-            reader.close()
-        assert stored["contested"]["name"] in written, (
-            f"the store holds {stored['contested']['name']!r}, which neither "
-            f"instance wrote"
+        def stored_name():
+            reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+            try:
+                rows = {n["id"]: n for n in reader.load_graph_data()["nodes"]}
+            finally:
+                reader.close()
+            return rows["contested"]["name"]
+
+        _wait_until(
+            lambda: (
+                one.get_node("contested").name
+                == two.get_node("contested").name
+                == stored_name()
+            ),
+            "the store and both instances settled on one value; "
+            "one holds {!r}, two holds {!r}".format(
+                one.get_node("contested").name, two.get_node("contested").name
+            ),
         )
-        for label, storage in (("one", one), ("two", two)):
-            held = storage.get_node("contested").name
-            assert held in written, (
-                f"instance {label} holds {held!r}, which neither instance wrote"
-            )
+        assert stored_name() in written, (
+            f"the store holds {stored_name()!r}, which neither instance wrote"
+        )
 
 
 class TestADeleteByOneInstanceReachesTheOther:

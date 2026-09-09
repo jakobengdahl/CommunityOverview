@@ -153,19 +153,68 @@ class ExternalChange:
     mutation is delivered as, read the other way round. A backend that learns
     only that *something* changed, and cannot say what, reports ``unknown()``
     instead and the application reloads the whole graph.
+
+    A backend that can re-read its own store should report
+    ``entities_read_on_demand`` instead of ``entities``, and it is worth
+    understanding why before choosing. Content gathered when the report is
+    DISPATCHED can be older than the receiving instance's own writes, which
+    may still be queued at that moment. The application cannot tell, so it
+    protects itself with a wall clock - it keeps whichever version carries the
+    later ``updated_at`` - and that clock does not order the commits. When the
+    write that committed last carries the earlier stamp, the instance holding
+    the later stamp refuses the store's value and goes on refusing it: there
+    is no further change to report, and the two instances stay apart for good.
+    Measured on PostgreSQL 16, five racing renames from each of two
+    instances: four runs in eight ended divergent on an idle machine, and none
+    at all under load - so a race is not what catches this.
+
+    Deferring the read removes the ambiguity rather than arbitrating it. The
+    application settles its own writes FIRST and only then asks, so what comes
+    back is the store's own answer with this instance's work already in it.
+    There is then nothing of ours to protect and no clock to consult.
     """
 
     operations: Optional[Tuple[EntityOperation, ...]]
+    read_content: Optional[Callable[[], Iterable[EntityOperation]]] = None
 
     @classmethod
     def entities(cls, operations: Iterable[EntityOperation]) -> "ExternalChange":
-        """Named entities changed, newest content included."""
+        """Named entities changed, content gathered now.
+
+        For a backend that cannot re-read on demand. The content it carries is
+        arbitrated against the application's own by wall clock; see above for
+        what that costs.
+        """
         return cls(tuple(operations))
+
+    @classmethod
+    def entities_read_on_demand(
+        cls, read_content: Callable[[], Iterable[EntityOperation]]
+    ) -> "ExternalChange":
+        """Named entities changed; the application asks for the content.
+
+        ``read_content`` is called on the application's thread, after it has
+        settled its own writes, and must return the operations describing what
+        the store holds AT THAT MOMENT. What it returns is applied as the
+        store's own answer, with no clock consulted - which is sound precisely
+        because it is read after this instance's writes have landed. Raising
+        from it is not an error to swallow: it becomes a whole-graph reload.
+        """
+        return cls(None, read_content)
 
     @classmethod
     def unknown(cls) -> "ExternalChange":
         """Something changed and the backend cannot say what."""
         return cls(None)
+
+    def content_read_on_demand(self) -> bool:
+        return self.read_content is not None
+
+    def with_content(self) -> "ExternalChange":
+        """This change with its content in hand. Callers must have settled."""
+        if self.read_content is None:
+            return self
+        return ExternalChange(tuple(self.read_content()))
 
 
 @runtime_checkable
