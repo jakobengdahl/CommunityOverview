@@ -4383,12 +4383,15 @@ class TestPostgresKeepsItsPromiseWhenTheJoinFails:
     path - the one stop's docstring makes its promise about - was reached by
     nothing.
 
-    What this pins is the outcome, not the mechanism. Two things stop a change
-    arriving after such a stop: `_deliver` re-reads the flag, and the reading
-    loop checks it before going back for another notification. On this path
-    the second is enough on its own, so removing the first does not fail this
-    test. Isolating it needs a stop landing while the loop is inside a
-    reconnect, which is left as follow-up rather than claimed here.
+    What this pins is the outcome, not any one mechanism. THREE things stop a
+    change arriving after such a stop: `_deliver` re-reads the flag, the
+    reading loop checks it before going back for another notification, and
+    `stop` clears the listener. Any one of them alone is enough on this path,
+    so removing any one does not fail this - measured. What the second case
+    below adds is the outcome with all three gone, which is reachable more
+    cheaply than it looked: two notifications committed in ONE transaction
+    arrive in one read, so the loop is already holding the second when the
+    listener blocks on the first.
     """
 
     def test_nothing_reaches_the_listener_after_a_stop_whose_join_timed_out(
@@ -4550,3 +4553,250 @@ class TestPostgresCanListenAgainAfterStopping:
         finally:
             backend.stop_change_notification()
         assert [op.entity_id for op in change.operations] == ["after_a_failed_start"]
+
+
+class TestPostgresReadsEachKindEvenAlone:
+    """A write that names only one kind is the ordinary case, and it was the
+    one no notification test made.
+
+    Every case in this module that names an edge names a node in the same
+    batch, so `_resolve`'s per-table loop always ran its node arm first with
+    something to look up. Change its skip-the-empty-kind `continue` to a
+    `break` - one character - and a write of edges alone stops before the edge
+    table is read: every other instance is told the edge was DELETED while the
+    store holds it, and deletes a live edge. The suite passes.
+    """
+
+    def test_an_edge_written_alone_is_reported_as_an_upsert(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        collector.wait_for(1)
+
+        writer.upsert_edge(edge_payload("aa", "a", "a", label="Alone"))
+
+        changes = collector.wait_for(2)
+        (op,) = changes[1].operations
+        assert (op.kind, op.action, op.entity_id) == ("edge", "upsert", "aa")
+        assert op.payload["label"] == "Alone"
+
+    def test_a_node_written_alone_is_reported_as_an_upsert(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.upsert_node(node_payload("solo", name="Solo"))
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert (op.kind, op.action, op.entity_id) == ("node", "upsert", "solo")
+        assert op.payload["name"] == "Solo"
+
+    def test_a_batch_of_edges_alone_is_reported_whole(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        collector.wait_for(1)
+
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_edge(edge_payload(f"e{i}", "a", "a"))
+                for i in range(5)
+            ]
+        )
+
+        changes = collector.wait_for(2)
+        assert [(op.kind, op.action) for op in changes[1].operations] == [
+            ("edge", "upsert")
+        ] * 5
+
+
+class TestPostgresNamesEveryEntityOrNone:
+    """An announcement names all of what it names, or it names none of them.
+
+    "Name as many as fit" is the plausible alternative to degrading, and it is
+    silently wrong: the entities past the cut are never reported by name and
+    never covered by an `unknown()` either, so every other instance diverges
+    permanently with nothing left to notice it. Nothing pinned it - the
+    largest DESCRIBED batch anywhere else in this module is four operations,
+    and every case that crosses the cap crosses it with 240-byte ids, which
+    degrade whole.
+    """
+
+    def test_a_large_batch_of_short_ids_is_named_in_full(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        # Short enough that 250 of them still fit under the cap, so this batch
+        # must be described rather than degraded - and long enough past any
+        # round number that a truncation would show.
+        ids = [f"n{i:03d}" for i in range(250)]
+        batch = [EntityOperation.upsert_node(node_payload(i)) for i in ids]
+        assert json.loads(writer._encode(batch)).get("ops") is not None, (
+            "this batch no longer fits the cap, so it cannot say anything "
+            "about a described announcement naming all of its entities"
+        )
+
+        writer.apply_batch(batch)
+
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == ids
+
+
+class TestPostgresOriginIsWideEnoughNotToCollide:
+    """Two instances that share an origin are deaf to each other.
+
+    Each skips the other's announcements as its own, so both go on serving
+    what they last loaded, both look healthy, and nothing ever reports it -
+    the failure this capability exists to remove, produced by the mechanism
+    that prevents a different one. The channel digest has a collision test;
+    the origin does the same job on the same payload and had none, and
+    shortening it is exactly what the 8000-byte cap invites, because every
+    origin byte is a byte not spent on entity names.
+    """
+
+    def test_the_origin_keeps_a_full_uuid_of_width(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert len(backend._origin) == 32
+        int(backend._origin, 16)  # hex, so the width is the whole entropy
+
+    def test_backends_on_one_store_do_not_share_an_origin(self, schema, backends):
+        made = [PostgresGraphPersistenceBackend(DSN, schema=schema) for _ in range(200)]
+        backends.extend(made)
+        assert len({b._origin for b in made}) == len(made)
+
+
+class TestPostgresSubscribesBeforeItReloads:
+    """The reconnect's reload must read a store it is already subscribed to.
+
+    Deliver the `unknown()` before `LISTEN` is re-registered and the reload
+    reads a snapshot taken before the channel exists again - and a refresh
+    drains the application's write queue, so it can take seconds. Anything
+    announced in that window is in neither the reload nor the subscription:
+    permanently missed, with no further report coming. Which is the staleness
+    the reconnect exists to repair, reintroduced by the repair.
+
+    Asserted on the order of the two events rather than by racing a write into
+    a window measured in microseconds - a test that tried the race would pass
+    on a slow machine for the wrong reason.
+    """
+
+    def test_listen_is_registered_before_the_reconnect_reports(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        events = []
+        real_execute = psycopg.Connection.execute
+
+        def note_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                events.append("listen")
+            return real_execute(conn, query, *args, **kwargs)
+
+        collector = _Collector()
+
+        def note_report(change):
+            events.append("report")
+            collector(change)
+
+        psycopg.Connection.execute = note_listen
+        try:
+            backend.start_change_notification(note_report)
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                killer.execute(
+                    "SELECT pg_terminate_backend(%s)",
+                    (backend._listen_conn.info.backend_pid,),
+                )
+            collector.wait_for(1, timeout=60)
+        finally:
+            psycopg.Connection.execute = real_execute
+            backend.stop_change_notification()
+
+        assert events[:1] == ["listen"], f"unexpected first event: {events[:3]}"
+        assert "report" in events, "the reconnect never reported"
+        # The report belongs to the SECOND listen, not before it.
+        assert events.index("report") > 1, (
+            f"the reconnect reported before re-registering LISTEN: {events}"
+        )
+
+
+class TestPostgresStopHoldsWithABatchAlreadyRead:
+    """The promise with a notification already in hand.
+
+    Two `pg_notify` calls in one transaction are delivered together and read
+    into one batch, so when the listener blocks on the first, the second is
+    already inside this process - past the server, past the socket, past the
+    read. That is the case where "stop returns and nothing else is delivered"
+    stops being obvious, and it is the one the suite could not reach before:
+    every other stop case has the loop go back to the server for the next
+    notification, where the loop's own flag check catches it.
+    """
+
+    def test_a_notification_already_read_is_not_delivered_after_stop(
+        self, schema, backends, monkeypatch
+    ):
+        import backend.core.postgres_backend as module
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload("first")),
+                EntityOperation.upsert_node(node_payload("second")),
+            ]
+        )
+        seen = _Collector()
+        inside = threading.Event()
+        release = threading.Event()
+
+        def blocking(change):
+            seen(change)
+            if len(seen.changes) == 1:
+                inside.set()
+                release.wait(60)
+
+        backend.start_change_notification(blocking)
+        try:
+            # Two announcements, one transaction: the server releases them
+            # together and psycopg hands them over in one batch.
+            with psycopg.connect(DSN) as sender:
+                sender.execute(
+                    "SELECT pg_notify(%s, %s)",
+                    (backend._channel, '{"o": "elsewhere", "ops": [["n", "first"]]}'),
+                )
+                sender.execute(
+                    "SELECT pg_notify(%s, %s)",
+                    (backend._channel, '{"o": "elsewhere", "ops": [["n", "second"]]}'),
+                )
+                sender.commit()
+
+            assert inside.wait(30), "the listener was never called"
+            monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 0.2)
+            backend.stop_change_notification()
+            release.set()
+            time.sleep(2.0)
+        finally:
+            release.set()
+            backend.stop_change_notification()
+
+        delivered = [
+            op.entity_id
+            for change in seen.changes
+            if change.operations
+            for op in change.operations
+        ]
+        assert "second" not in delivered, (
+            "a notification the loop had already read was delivered after "
+            f"stop returned: {delivered}"
+        )
