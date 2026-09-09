@@ -1049,7 +1049,10 @@ class TestPostgresEntityWritesTouchOneRow:
 
     @classmethod
     def _long_batch(cls, length):
-        """Both kinds and both actions, in runs, at a caller-chosen length."""
+        """A cycle of both kinds and both actions, in runs of two, cut off
+        at a caller-chosen length - so a short length gets only the start
+        of it, which is what the comment above says 2 is for.
+        """
         make = (
             lambda i: EntityOperation.delete_edge(f"e{i}"),
             lambda i: EntityOperation.delete_node(f"n{i}"),
@@ -1519,12 +1522,15 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
     """Connections are the scarce resource this backend is sized around.
 
     The pool size is documented against a server's `max_connections`
-    divided by the instance count, and the migration is memoised so a
-    boot-time advisory lock is not re-taken on every call. Both are
-    load-bearing for the multi-instance case and neither was pinned: a
-    write path opening its own connection, or a memo that never sets,
-    leaves every functional test green while quietly turning the
-    connection budget into a fiction.
+    divided by the instance count; the migration is memoised so a
+    boot-time advisory lock is not re-taken on every call; and a
+    connection is given back whether the batch succeeded or failed. Each
+    is load-bearing for the multi-instance case and none of them was
+    pinned: a write path opening its own connection, a memo that never
+    sets, or a connection kept after a failure, leaves every functional
+    test green while quietly turning the connection budget into a
+    fiction - the last of them by emptying the pool one bad payload at a
+    time.
     """
 
     def test_repeated_entity_writes_take_no_new_connections(self, schema, backends):
@@ -1685,10 +1691,12 @@ class TestPostgresBatchesSurviveADeadlock:
     threads racing produce a server-side cycle only sometimes, so the
     hammering test passed with the retry removed in 5 runs out of 12 -
     measured, and the same shape as the probabilistic detector removed
-    earlier in this work. The two injected cases below pin what the
-    hammering cannot: that a deadlock is retried, that exhaustion *raises*
-    rather than returning as if it had written, and that the retry is
-    bounded at all.
+    earlier in this work. The injected cases below pin what the hammering
+    cannot: that a deadlock is retried, that exhaustion *raises* rather
+    than returning as if it had written, that the retry is bounded at
+    all, that the batch it replays is still the caller's and in the
+    caller's order, and that a batch interrupted part way through leaves
+    nothing behind whatever its length.
     """
 
     def test_a_deadlocked_batch_is_retried_and_then_lands(self, schema, backends):
