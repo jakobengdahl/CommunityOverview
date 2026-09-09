@@ -275,15 +275,19 @@ class TestTwoInstancesWritingTheSameEntity:
     afterwards. So commit order is not stamp order, and when the write that
     commits LAST carries the OLDER stamp the store settles on one value while
     the peer holds the other and refuses every report of the store's value
-    from then on, because its own stamp is newer. Measured on this server: 5
-    of 8 raced runs ended with the two instances on different values, in both
-    directions, and with no failed write on either side.
+    from then on, because its own stamp is newer. Measured at this commit on
+    an unloaded machine: 4 of 8 raced runs ended with the two instances on
+    different values, in both directions, with no failed write on either side.
+    Under load it does not reproduce at all, which is its own finding: a CI
+    runner would rarely catch it, and a race-based regression test would pass
+    there for the wrong reason.
 
     So the second case asserts what a race does guarantee - each party ends on
     a value one of the instances actually wrote - and not the convergence that
-    would make it flaky and would be asserting something the system does not
-    do. The divergence itself is recorded as its own item rather than pinned
-    here: a test that asserted it would be locking in the defect.
+    would be flaky here and false in general. The divergence is recorded as
+    task-oc-contested-entity-divergence, with the fix it points at; a test
+    that asserted the divergence would be locking in the defect, and one that
+    asserted convergence would be asserting something the system does not do.
     """
 
     def test_a_delivered_write_is_superseded_by_a_later_one(self, instances, schema):
@@ -311,11 +315,11 @@ class TestTwoInstancesWritingTheSameEntity:
         self, instances, schema
     ):
         """What a race does guarantee. Not convergence - see the class
-        docstring and the follow-up it names - but that nothing is torn: the
-        store and both instances each end on a value one of the instances
-        actually wrote. A torn or invented value would mean the row was not
-        written atomically, which is a different and far worse failure than
-        the two instances disagreeing."""
+        docstring and the item it names - but that nothing is torn: the store
+        and both instances each end on a value one of the instances actually
+        wrote. A torn or invented value would mean the row was not written
+        atomically, which is a different and far worse failure than the two
+        instances disagreeing."""
         one, two = instances(), instances()
         one.add_nodes([_node("contested", name="Origin")], [])
         _drain(one)
