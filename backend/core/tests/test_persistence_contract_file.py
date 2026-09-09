@@ -12,8 +12,12 @@ from pathlib import Path
 import pytest
 
 import backend.core.storage_backends as storage_backends
-from backend.core.storage_backends import FileGraphPersistenceBackend
-from backend.core.tests.persistence_contract import PersistenceBackendContract
+from backend.core.storage_backends import EntityOperation, FileGraphPersistenceBackend
+from backend.core.tests.persistence_contract import (
+    PersistenceBackendContract,
+    node_payload,
+    snapshot,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PREVIOUS_VERSION_GRAPH = REPO_ROOT / "data" / "examples" / "default.json"
@@ -42,6 +46,30 @@ class TestFileBackendContract(PersistenceBackendContract):
             raise OSError("power lost during append")
 
         monkeypatch.setattr(storage_backends.os, "fsync", crash)
+
+    def test_apply_batch_journals_the_whole_batch_as_one_record(self, factory):
+        """The atomicity clause tested in the shared contract
+        (`test_a_declared_atomic_batch_lands_entirely_or_not_at_all`) relies on
+        `apply_batch` writing ONE journal record per call, not one per
+        operation: `interrupt_next_append` above fails whichever fsync happens
+        first, so a regression that journalled each operation separately would
+        still look atomic there - its first op's fsync fails before anything
+        lands, exactly like today's single-record write, for the wrong reason.
+        Assert the journal shape directly so that regression cannot hide."""
+        backend = factory()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        backend.apply_batch(
+            [
+                EntityOperation.delete_node("a"),
+                EntityOperation.upsert_node(node_payload("b")),
+                EntityOperation.upsert_node(node_payload("c")),
+            ]
+        )
+
+        lines = backend.journal_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1, "one apply_batch call must write one journal line"
+        assert len(json.loads(lines[0])["ops"]) == 3
 
     def previous_version_store(self, tmp_path):
         """A graph.json as shipped before the journal existed: whole graph,

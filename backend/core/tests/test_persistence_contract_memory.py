@@ -21,9 +21,13 @@ class TestInMemoryBackendContract(PersistenceBackendContract):
         return lambda: InMemoryGraphPersistenceBackend(store)
 
     def interrupt_next_snapshot(self, backend, monkeypatch):
-        """Fail while the edges are being copied - after the nodes were: a
-        snapshot that assigned as it went would leave new nodes with old
-        edges, which the contract must see."""
+        """Fail on the second deepcopy. save_graph_data copies nodes, then
+        edges, then metadata; the fixture that exercises this hook saves one
+        node and no edges, so the edges comprehension makes no deepcopy call
+        of its own and call two lands on the metadata copy - still after the
+        nodes were copied and before the store swap. A snapshot that assigned
+        as it went would leave new nodes with old edges, which the contract
+        must see."""
         _fail_on_deepcopy(monkeypatch, call=2)
 
     def interrupt_next_append(self, backend, monkeypatch):
