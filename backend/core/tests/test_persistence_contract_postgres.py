@@ -2456,7 +2456,8 @@ class TestPostgresSaveWritesMetadataLast:
 
     `interrupt_next_snapshot` and `_stalled_save` both key on "the payload
     dict with no id" - the metadata row - to place their hook after every
-    row the save writes. Nothing asserted that it *is* the last of them. Move the upsert to the
+    row the save writes. Nothing asserted that it *is* the last of them.
+    Move the upsert to the
     front of the transaction and both hooks fire before any write: the
     interrupt no longer exercises rollback, and the overlapping-save test
     stops arming at all. Measured: with the upsert moved AND the save
@@ -2866,13 +2867,23 @@ class TestPostgresDoesNotReportAnInstanceToItself:
         """
         backend, collector = listening()
         long_id = "n" * 240
-
-        backend.apply_batch(
-            [
-                EntityOperation.upsert_node(node_payload(f"{long_id}{i:04d}"))
-                for i in range(60)
-            ]
+        batch = [
+            EntityOperation.upsert_node(node_payload(f"{long_id}{i:04d}"))
+            for i in range(60)
+        ]
+        # This case is about the DEGRADED return, and the id length and count
+        # that get it there are chosen here rather than derived from the cap.
+        # Raise NOTIFY_PAYLOAD_LIMIT - the obvious future change, since the
+        # comment beside it tracks a server measurement - and without this
+        # assertion the batch quietly stops degrading, the test stops
+        # exercising the return it exists for, and becomes a duplicate of the
+        # case above it with the suite still green.
+        assert json.loads(backend._encode(batch)).get("ops") is None, (
+            "this batch no longer takes the degraded return, so the case no "
+            "longer covers the second of _encode's two origin markers"
         )
+
+        backend.apply_batch(batch)
 
         assert len(backend.load_graph_data()["nodes"]) == 60
         collector.stays_at(0)
@@ -4308,15 +4319,22 @@ class TestPostgresPacesAServerThatRefusesConnections:
         backends.append(backend)
         import backend.core.postgres_backend as module
 
+        # Read before the helper patches it, so the message can tell the two
+        # apart. The shipped ceiling is thirty seconds; the one in force here
+        # is a stand-in, and reporting the stand-in as "the documented
+        # ceiling" would send a reader looking for a constant that does not
+        # exist.
+        shipped = module.NOTIFY_RECONNECT_MAX_SECONDS
         # Low enough to bind, and enough attempts that an unbounded schedule
         # has had room to pass it: bounded this gives 0.5, 1, 1, 1, 1;
         # unbounded, 0.5, 1, 2, 4, 8.
-        gaps = self._refused_connect_gaps(backend, monkeypatch, 1.0, 6)
+        in_force = 1.0
+        gaps = self._refused_connect_gaps(backend, monkeypatch, in_force, 6)
 
-        assert max(gaps) <= module.NOTIFY_RECONNECT_MAX_SECONDS + 0.6, (
+        assert max(gaps) <= in_force + 0.6, (
             f"connect attempts {[round(g, 3) for g in gaps]} passed the "
-            f"documented ceiling of {module.NOTIFY_RECONNECT_MAX_SECONDS}s: "
-            f"the backoff has no upper bound"
+            f"ceiling of {in_force}s in force for this test (the shipped one "
+            f"is {shipped}s): the backoff has no upper bound"
         )
 
     def test_the_listening_connection_carries_a_connect_timeout(

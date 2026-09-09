@@ -655,8 +655,9 @@ does not, because the caller has just loaded. So an entity written in the gap
 and never written again is never reported, and that instance serves the wrong
 value for as long as it runs. Later announcements do not help: each names only
 its own entities. Closing it means either an `unknown()` at start — one
-redundant whole-graph read per boot — or listening before the load, which is
-the order the seam specifies and not this backend's to change.
+redundant whole-graph read per boot — or listening *before* the load, which is
+the reverse of what the seam specifies today and so is the seam's change to
+make, not this backend's.
 
 The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
 is how the listening thread reads its channel while still noticing a stop.
