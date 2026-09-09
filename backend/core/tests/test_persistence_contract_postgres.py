@@ -302,8 +302,11 @@ class _ObservableBackend(PostgresGraphPersistenceBackend):
     an instance in production. Every class below it drives the unwrapped
     class directly, for the same reason.
 
-    Recording a report costs no read of its own: the content is asked for
-    after the listener has already asked, and a report is read at most once.
+    Recording a report normally costs no read of its own: the content is
+    asked for after the listener has already asked, and a report is read at
+    most once. Where the listener declined to ask - a failed local write, or a
+    report refused as coming from a writing thread - the recording is the
+    first read, and is made after that listener returned.
     """
 
     def __init__(self, *args, **kwargs):

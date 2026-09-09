@@ -179,10 +179,10 @@ class TestTwoInstancesWritingDistinctEntities:
     """The parent task's acceptance criterion in one sentence: two instances
     write the same graph at the same time and neither one's work is lost.
 
-    Distinct entities, deliberately. Writes to the SAME entity are a different
-    property with a different answer - last writer wins by wall clock - and
-    the class below says so rather than letting this one imply more than the
-    system promises.
+    Distinct entities, deliberately. Writes to the SAME entity are settled by
+    the store rather than by either instance, which is a different property
+    reached a different way, and the class below is where it is asserted -
+    rather than letting this one imply more than it shows.
     """
 
     WRITES = 15
@@ -390,10 +390,13 @@ class TestTwoInstancesWritingTheSameEntity:
         backend = one._persistence_backend
         real_resolve = type(backend)._resolve
         seen_at_read = []
+        read_on = []
+        delivered_on = []
         slow = threading.Event()
 
         def watch(self, pairs):
             operations = real_resolve(self, pairs)
+            read_on.append(threading.get_ident())
             seen_at_read.append(
                 [op.payload.get("name") for op in operations if op.kind == "node"]
             )
@@ -425,6 +428,7 @@ class TestTwoInstancesWritingTheSameEntity:
         real_deliver = type(backend)._deliver
 
         def note(self, change):
+            delivered_on.append(threading.get_ident())
             arrived.set()
             return real_deliver(self, change)
 
@@ -449,6 +453,15 @@ class TestTwoInstancesWritingTheSameEntity:
             lambda: seen_at_read and seen_at_read[-1] == ["Mine"],
             "the content was read with this instance's own write already in "
             f"the store; reads saw {seen_at_read}",
+        )
+        # The obligation the seam documents for anyone implementing
+        # `entities_read_on_demand`: the read happens on the thread the report
+        # was delivered on, further down that call stack. Handing the apply to
+        # a worker would leave every clause above passing and every one of the
+        # five places that state it false.
+        assert read_on and read_on[-1] in delivered_on, (
+            f"the content was read on thread {read_on[-1]}, which is not one "
+            f"the report was delivered on ({delivered_on})"
         )
 
     def test_reading_back_this_instances_own_value_changes_nothing(
@@ -510,6 +523,38 @@ class TestTwoInstancesWritingTheSameEntity:
         )
         assert one.vector_store.get_vector_list("c") == vector
         assert one.get_node("c").name == "Mine"
+
+    def test_an_answer_that_dropped_the_vector_is_not_nothing(self, instances, schema):
+        """The other direction of the same comparison. An answer carrying no
+        embedding for a node the index still has a vector for is a change like
+        any other - the store dropped it - and reading that as "nothing to do"
+        would leave semantic search matching a description the store no longer
+        keeps. Everything else about the node is identical, so nothing but the
+        vector can tell the two answers apart."""
+        one, two = instances(), instances()
+        one.add_nodes(
+            [Node(id="c", type=NodeType.ACTOR, name="Mine", embedding=[0.5, 0.25])], []
+        )
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("c") is not None,
+            "the second instance learned of the node",
+        )
+        assert one.vector_store.get_vector_list("c") is not None
+
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
+            doc["embedding"] = None
+            reader.upsert_node(doc)
+        finally:
+            reader.close()
+
+        _wait_until(
+            lambda: one.vector_store.get_vector_list("c") is None,
+            "the instance let go of a vector the store no longer keeps",
+        )
+        _assert_nothing_failed(one, two)
 
     def test_a_raced_write_leaves_every_party_on_the_same_value(
         self, instances, schema

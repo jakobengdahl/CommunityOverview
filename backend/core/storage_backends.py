@@ -235,8 +235,9 @@ class ExternalChange:
         """
         if self.read_content is None:
             return self
-        # Not a field: a report is compared, copied and serialised elsewhere,
-        # and what the read returned is none of those things' business.
+        # Not a field, so that a report stays a value: what one happens to
+        # have been asked for has no business in its equality, its hash or
+        # its repr, and a memo declared as a field is in all three.
         content = getattr(self, "_content", None)
         if content is None:
             content = tuple(self.read_content())

@@ -3174,6 +3174,34 @@ class TestADeferredReport:
         finally:
             storage.shutdown_events()
 
+    def test_asking_twice_returns_the_first_answer_rather_than_a_fresher_one(
+        self,
+    ):
+        """A report is observed in more than one place - the application
+        applies it, a harness records what arrived - and asking twice would
+        mean two reads at two moments, of which only the first was made after
+        the settle. So the second ask is not a read."""
+        answers = [
+            [EntityOperation.upsert_node(_node_payload("b", "Beacon"))],
+            [EntityOperation.upsert_node(_node_payload("b", "Later"))],
+        ]
+        reads = []
+
+        def read_content():
+            reads.append(1)
+            return answers[len(reads) - 1]
+
+        change = ExternalChange.entities_read_on_demand(read_content)
+        first = change.with_content()
+        second = change.with_content()
+
+        assert len(reads) == 1, f"the content was read {len(reads)} times"
+        assert first.operations == second.operations, (
+            "the second ask returned a fresher answer than the first, so the "
+            "two observers of one report disagree about what it said"
+        )
+        assert [op.payload["name"] for op in first.operations] == ["Beacon"]
+
     def test_the_content_is_read_after_this_instances_queued_writes(self):
         """The whole reason the read is deferred. A read taken while a write
         of ours is still queued answers for a store that does not have it, and

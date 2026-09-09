@@ -364,10 +364,13 @@ actually share.
 
 One consequence worth expecting: the answer is often this instance's own
 write, and applying that would emit an event whose before and after are the
-same. `GraphStorage` compares the answer against what it holds and applies
-nothing when they agree — including the vector, which it compares against the
-index rather than against the node, since an adopted embedding lives in the
-index and not on the node it describes.
+same. For a **node** upsert `GraphStorage` compares the answer against what it
+holds and applies nothing when they agree — including the vector, which it
+compares against the index rather than against the node, since an adopted
+embedding lives in the index and not on the node it describes. An edge upsert
+has nothing to compare (see the next paragraph) and is applied as reported, so
+two instances that both wrote one edge do each emit an `edge.update` whose
+before and after are the same.
 
 **A backend that reports `entities` instead falls back to a wall clock.** Its
 content was gathered when the report was dispatched, which can predate the
@@ -399,6 +402,11 @@ reason to prefer the other constructor:
   stamp. A payload whose `updated_at` is explicitly `null` does not reach the
   comparison at all: it fails validation, and an unreadable payload is a
   whole-graph reload.
+
+A backend stuck on this path but able to order writes itself — a log sequence
+number, a stream id, a commit timestamp the store assigns — has a better answer
+than its writer's wall clock, and should carry that in the payload's
+`updated_at`.
 
 Two things hold on both paths, because neither has anything to arbitrate:
 
