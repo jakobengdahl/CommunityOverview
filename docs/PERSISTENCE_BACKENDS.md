@@ -367,10 +367,10 @@ write, and applying that would emit an event whose before and after are the
 same. For a **node** upsert `GraphStorage` compares the answer against what it
 holds and applies nothing when they agree — including the vector, which it
 compares against the index rather than against the node, since an adopted
-embedding lives in the index and not on the node it describes. An edge upsert
-has nothing to compare (see the next paragraph) and is applied as reported, so
-two instances that both wrote one edge do each emit an `edge.update` whose
-before and after are the same.
+embedding lives in the index and not on the node it describes. An edge upsert is
+never offered the comparison at all - it is applied as reported, exactly as it
+was before - so two instances that both wrote one edge do each emit an
+`edge.update` whose before and after are the same.
 
 **A backend that reports `entities` instead falls back to a wall clock.** Its
 content was gathered when the report was dispatched, which can predate the

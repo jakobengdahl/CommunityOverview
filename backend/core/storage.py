@@ -1548,7 +1548,9 @@ class GraphStorage:
             # instance's own write, and there is nothing in that to apply. Not
             # a no-op if it were: the event would tell every subscriber a node
             # changed when nothing about it did, and settling the vector would
-            # evict a description to regenerate the identical one.
+            # rebuild the index twice - once to evict the node's vector, once
+            # to put the same one back from the payload - for a description
+            # that did not change.
             return
         if (
             not authoritative

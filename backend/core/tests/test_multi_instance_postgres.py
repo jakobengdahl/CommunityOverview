@@ -100,9 +100,14 @@ def instances(schema):
     """
     built = []
 
-    def start(pool_size=DEFAULT_POOL_SIZE):
+    def start(pool_size=DEFAULT_POOL_SIZE, application_name=None):
+        dsn = DSN
+        if application_name is not None:
+            parts = psycopg.conninfo.conninfo_to_dict(DSN)
+            parts["application_name"] = application_name
+            dsn = psycopg.conninfo.make_conninfo(**parts)
         backend = PostgresGraphPersistenceBackend(
-            DSN, schema=schema, pool_size=pool_size
+            dsn, schema=schema, pool_size=pool_size
         )
         storage = GraphStorage(persistence_backend=backend)
         built.append((storage, backend))
@@ -470,8 +475,10 @@ class TestTwoInstancesWritingTheSameEntity:
         """Reading after the settle means the answer is often our own write,
         and applying that is not free: the event would tell every subscriber a
         node changed when nothing about it did, and settling the vector would
-        evict a description to regenerate the identical one. So an answer that
-        agrees with what is held is applied as nothing at all.
+        rebuild the index twice - evicting the node's vector and putting the
+        same one back from the payload - for a description that did not
+        change. So an answer that agrees with what is held is applied as
+        nothing at all.
 
         Constructed by writing the held value back to the store verbatim,
         which is the same thing the interleaving above produces and is
@@ -631,9 +638,15 @@ class TestTwoInstancesWritingTheSameEntity:
         finally:
             reader.close()
 
+        # Not "is None": the node goes into the settle's `missing` list, so
+        # where the ML extras are installed a fresh vector is generated for it
+        # from its text and where they are not the slot stays empty. Both are
+        # the property - the instance no longer serves the vector the store
+        # dropped - and asserting the empty slot would fail on every install
+        # that can actually embed.
         _wait_until(
-            lambda: one.vector_store.get_vector_list("c") is None,
-            "the instance let go of a vector the store no longer keeps",
+            lambda: one.vector_store.get_vector_list("c") != [0.5, 0.25],
+            "the instance let go of the vector the store no longer keeps",
         )
         _assert_nothing_failed(one, two)
 
@@ -771,19 +784,29 @@ class TestTheConnectionBudgetIsWhatTheDocumentSays:
     at.
     """
 
-    def _connections(self):
+    def _connections(self, application_name):
+        """How many connections THIS instance holds.
+
+        Counted by application_name rather than by database: a count of the
+        whole database is a count of whatever else happens to be connected to
+        it, so a second test process - or a developer's psql - would move the
+        number and the failure would read as a budget regression rather than
+        as the interference it is.
+        """
         with psycopg.connect(DSN, autocommit=True) as conn:
             return conn.execute(
                 "SELECT count(*) FROM pg_stat_activity"
-                " WHERE datname = current_database()"
+                " WHERE datname = current_database() AND application_name = %s",
+                (application_name,),
             ).fetchone()[0]
 
     @pytest.mark.parametrize("pool_size", [1, 2])
     def test_an_instance_at_full_stretch_holds_pool_size_plus_one(
         self, pool_size, instances
     ):
-        baseline = self._connections()
-        storage = instances(pool_size=pool_size)
+        name = f"co_budget_{uuid.uuid4().hex[:12]}"
+        storage = instances(pool_size=pool_size, application_name=name)
+        assert self._connections(name) >= 0
         # A write opens the pool's connections; without one the pool is at
         # min_size 0 and the count says nothing about the budget.
         storage.add_nodes([_node("a")], [])
@@ -795,7 +818,7 @@ class TestTheConnectionBudgetIsWhatTheDocumentSays:
                 conn = pool.getconn(timeout=30)
                 conn.execute("SELECT 1")
                 held.append(conn)
-            at_full_stretch = self._connections() - baseline
+            at_full_stretch = self._connections(name)
         finally:
             for conn in held:
                 pool.putconn(conn)

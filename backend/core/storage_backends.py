@@ -181,9 +181,10 @@ class ExternalChange:
     def entities(cls, operations: Iterable[EntityOperation]) -> "ExternalChange":
         """Named entities changed, content gathered now.
 
-        For a backend that cannot re-read on demand. The content it carries is
-        arbitrated against the application's own by wall clock; see above for
-        what that costs.
+        For a backend that cannot re-read on demand. Its NODE upserts are
+        arbitrated against the application's own by wall clock - an edge
+        upsert has no stamp to arbitrate by and a delete has no payload, so
+        both are applied as reported. See above for what the clock costs.
         """
         return cls(tuple(operations))
 
