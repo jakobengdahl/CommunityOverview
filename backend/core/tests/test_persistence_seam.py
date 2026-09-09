@@ -3124,3 +3124,181 @@ class TestFaultInjectionOnlyPaths:
         assert set(storage.nodes) == {"a", "b"} == set(backend.nodes)
         assert set(storage.edges) == {"e"} == set(backend.edges)
         assert _kinds(backend) == ["apply_batch", "upsert_edge"]
+
+
+class TestADeferredReport:
+    """`ExternalChange.entities_read_on_demand` - the constructor a backend
+    that can re-read its own store should use.
+
+    What makes it worth the extra call is entirely a matter of WHEN the read
+    happens, so that is what this class pins, and it pins it without a
+    database: the PostgreSQL clauses drive the real transport, but they cannot
+    run on a clone with nothing installed, and every property below belongs to
+    the seam rather than to that backend.
+    """
+
+    def _deferred(self, storage, backend, operations):
+        """Deliver one deferred report, recording the state at the read."""
+        seen = []
+
+        def read_content():
+            seen.append(
+                {
+                    "lock_held": storage._lock._is_owned(),
+                    "store": dict(backend.nodes),
+                }
+            )
+            return operations
+
+        backend.listener(ExternalChange.entities_read_on_demand(read_content))
+        return seen
+
+    def test_the_content_is_read_once_under_the_lock(self):
+        """Twice would be two answers from two moments, of which only the
+        first was made after the settle - and the lock is what stops a
+        mutation being queued between them."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            seen = self._deferred(
+                storage,
+                backend,
+                [EntityOperation.upsert_node(_node_payload("b", "Beacon"))],
+            )
+            assert len(seen) == 1, f"the content was read {len(seen)} times"
+            assert seen[0]["lock_held"], (
+                "the content was read without the lock, so a mutation could "
+                "be queued between the settle and the read that used it"
+            )
+            assert storage.get_node("b").name == "Beacon"
+        finally:
+            storage.shutdown_events()
+
+    def test_the_content_is_read_after_this_instances_queued_writes(self):
+        """The whole reason the read is deferred. A read taken while a write
+        of ours is still queued answers for a store that does not have it, and
+        the instance then has nothing to tell the two apart by."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        released = threading.Event()
+        real_upsert = backend.upsert_node
+
+        def stall(node):
+            assert released.wait(30.0), "the stalled write was never released"
+            return real_upsert(node)
+
+        backend.upsert_node = stall
+        try:
+            storage.add_nodes([_node("c", "Cedar")], [])
+            assert "c" not in backend.nodes, "the write was not queued at all"
+
+            reader = threading.Thread(
+                target=lambda: seen.extend(
+                    self._deferred(
+                        storage,
+                        backend,
+                        [EntityOperation.upsert_node(_node_payload("b", "Beacon"))],
+                    )
+                ),
+                daemon=True,
+            )
+            seen = []
+            reader.start()
+            # The report is now waiting on the settle, which is waiting on the
+            # stalled write. Releasing it is what lets both through, in that
+            # order.
+            released.set()
+            reader.join(30.0)
+            assert not reader.is_alive(), "the report never completed"
+        finally:
+            released.set()
+            del backend.upsert_node
+            storage.shutdown_events()
+
+        assert len(seen) == 1
+        assert "c" in seen[0]["store"], (
+            "the content was read before this instance's own queued write had "
+            "landed, so the answer it gave predates it"
+        )
+
+    def test_a_failed_local_write_stops_it_before_the_content_is_read(self):
+        """The refusal `_settle_before_refresh` reports is not advisory. A
+        mutation that failed is in memory and nowhere else, so an answer read
+        from the store cannot contain it - and applying that answer as the
+        store's own, which is exactly what this path does, would drop it."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            storage.add_nodes([_node("a", "Alpha")], [])
+            storage.flush()
+
+            def refuse(node):
+                raise OSError("the write failed")
+
+            backend.upsert_node = refuse
+            storage.add_nodes([_node("c", "Cedar")], [])
+            storage._io_executor.submit(lambda: None).result()
+            assert storage._resync_pending, "the failed write did not raise the flag"
+            del backend.upsert_node
+
+            seen = self._deferred(
+                storage,
+                backend,
+                [EntityOperation.delete_node("a")],
+            )
+
+            assert seen == [], (
+                "the content was read over a failed local write; the answer "
+                "cannot contain the mutation, and applying it drops it"
+            )
+            assert {n.id for n in storage.get_all_nodes()} == {"a", "c"}
+            assert storage._resync_pending
+        finally:
+            storage.shutdown_events()
+
+    def test_a_read_that_raises_reloads_the_graph_exactly_once(self):
+        """The change is real whatever the read did, so it may not be dropped.
+        A whole graph is the most expensive read this seam has, so it is also
+        not done twice."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        loads = []
+        real_load = backend.load_graph_data
+        backend.load_graph_data = lambda: (loads.append(1), real_load())[1]
+        try:
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+
+            def read_content():
+                raise OSError("the store would not answer")
+
+            backend.listener(ExternalChange.entities_read_on_demand(read_content))
+
+            assert loads == [1], f"the graph was reloaded {len(loads)} times"
+            assert storage.get_node("z").name == "Zulu", (
+                "the report was dropped rather than turned into a reload"
+            )
+        finally:
+            del backend.load_graph_data
+            storage.shutdown_events()
+
+    def test_a_report_with_no_content_to_read_is_not_a_reload(self):
+        """`unknown()` and a deferred report both arrive with `operations`
+        unset, and only the first means reload the whole graph. Reading the
+        one as the other would throw away the named change - or reload on
+        every announcement, whichever way round the confusion ran."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        loads = []
+        real_load = backend.load_graph_data
+        backend.load_graph_data = lambda: (loads.append(1), real_load())[1]
+        try:
+            backend.nodes["z"] = _node_payload("z", "Zulu")
+            self._deferred(storage, backend, [])
+
+            assert loads == [], "a deferred report was mistaken for unknown()"
+            assert storage.get_node("z") is None, (
+                "the graph was reloaded by some other road"
+            )
+        finally:
+            del backend.load_graph_data
+            storage.shutdown_events()

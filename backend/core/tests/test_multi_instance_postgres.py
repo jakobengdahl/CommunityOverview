@@ -372,6 +372,12 @@ class TestTwoInstancesWritingTheSameEntity:
         own queue - and this pins that ordering directly, because a refactor
         could move the read back to dispatch and still satisfy the case above,
         which has nothing queued.
+
+        Constructed, and constructed on the announcement rather than on a
+        clock: the stalled write is released only once the peer's report is
+        actually in this instance's hands. The same ordering is pinned without
+        a database in `test_persistence_seam.py`; what this one adds is that
+        the real transport delivers it that way too.
         """
         one, two = instances(), instances()
         one.add_nodes([_node("contested", name="Origin")], [])
@@ -408,10 +414,29 @@ class TestTwoInstancesWritingTheSameEntity:
             released.append(slow.wait(CONVERGE_TIMEOUT))
             return real_upsert(self, node)
 
+        # The release is gated on the announcement being in hand, not on a
+        # wall clock. Released as soon as the peer's write commits, the window
+        # is a few milliseconds wide and whether the announcement lands inside
+        # it is a race - which is exactly what this case must not be, since a
+        # read moved back to dispatch would then escape it whenever the race
+        # went the other way. Measured before this gate: it escaped about one
+        # run in ten.
+        arrived = threading.Event()
+        real_deliver = type(backend)._deliver
+
+        def note(self, change):
+            arrived.set()
+            return real_deliver(self, change)
+
+        backend._deliver = note.__get__(backend)
         backend.upsert_node = stall.__get__(backend)
         one.update_node("contested", {"name": "Mine"})
         two.update_node("contested", {"name": "Theirs"})
         _drain(two)
+        assert arrived.wait(CONVERGE_TIMEOUT), (
+            "the peer's announcement never reached this instance, so the "
+            "interleaving this case is about did not happen"
+        )
         slow.set()
         _drain(one)
         _assert_nothing_failed(one, two)
