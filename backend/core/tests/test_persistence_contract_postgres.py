@@ -966,11 +966,10 @@ class TestPostgresEntityWritesTouchOneRow:
     while destroying exactly the property this slice exists for. These check
     the cost and the blast radius rather than the outcome.
 
-    The two cost-and-blast-radius cases below - the single-write one and
-    the batch one - run for edges as well as nodes, and for
-    multi-operation batches as well as the single-operation wrappers. The
-    rest of the class is narrower and says so in its own name. That
-    breadth is not symmetry for its own sake: `GraphStorage._do_apply`
+    Cases below run for edges as well as nodes, and for multi-operation
+    batches as well as the single-operation wrappers; each says which in
+    its own parametrisation, and the narrower ones say so in their names.
+    That breadth is not symmetry for its own sake: `GraphStorage._do_apply`
     reaches `apply_batch` only
     when there is more than one operation, and `delete_nodes` builds
     exactly that - edge deletes followed by node deletes - so the wrappers
@@ -1150,10 +1149,11 @@ class TestPostgresEntityWritesTouchOneRow:
         """The same two questions, at several batch lengths.
 
         A mutation gated on `len(operations) >= N`, or on the operation at
-        index N, is invisible to any single fixed length. This is the one
-        test that walks the whole batch: one writing statement per
-        operation, naming that operation's own table, in the caller's
-        order, and no plan that scans.
+        index N, is invisible to any single fixed length, which is what
+        each case above is. This one asks the same of a whole batch at
+        each of several: one writing statement per operation, naming that
+        operation's own table, in the caller's order, and no plan that
+        scans.
         """
         backend = self._seeded(schema, backends)
 
@@ -1214,7 +1214,9 @@ class TestPostgresEntityWritesTouchOneRow:
         read that row and put it back. The lost update only appears when the
         row lands between such a backend's read and its write - which is the
         ordinary case on a shared store, not a contrived one. So the row is
-        inserted from another connection after the first writing statement.
+        inserted from another connection immediately before the first
+        writing statement runs - which is where a read-modify-write has
+        already read and has not yet written.
 
         The batch case is the one that matters most and was missing longest:
         "batches are complicated, just re-save" is a plausible thing for a
