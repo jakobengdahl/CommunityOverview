@@ -2854,6 +2854,29 @@ class TestPostgresDoesNotReportAnInstanceToItself:
 
         collector.stays_at(0)
 
+    def test_an_instance_is_not_told_about_its_own_oversized_write(self, listening):
+        """The degraded announcement carries the origin too.
+
+        `_encode` has two returns that name only the writer, and they are the
+        same expression. The whole-graph one is pinned by the case above; this
+        one - the batch too large to describe - was pinned by nothing, because
+        every oversized write in this file is made by a separate writer. Drop
+        the origin from it and a busy instance answers its own large batches
+        with a whole-graph reload, on exactly the batches that cost most.
+        """
+        backend, collector = listening()
+        long_id = "n" * 240
+
+        backend.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload(f"{long_id}{i:04d}"))
+                for i in range(60)
+            ]
+        )
+
+        assert len(backend.load_graph_data()["nodes"]) == 60
+        collector.stays_at(0)
+
     def test_two_backends_in_one_process_are_two_instances(
         self, listening, schema, backends
     ):
@@ -2914,11 +2937,18 @@ class TestPostgresAnnouncesOnlyWhatCommitted:
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(writer)
         real_announce = type(writer)._announce
+        real_apply_one = type(writer)._apply_one
+        rows_written = []
+
+        def note_row(self, conn, operation):
+            rows_written.append(operation)
+            return real_apply_one(self, conn, operation)
 
         def announce_then_die(self, conn, operations):
             real_announce(self, conn, operations)
             raise OSError("connection lost after announcing")
 
+        monkeypatch.setattr(type(writer), "_apply_one", note_row)
         monkeypatch.setattr(type(writer), "_announce", announce_then_die)
 
         with pytest.raises(OSError):
@@ -2926,6 +2956,17 @@ class TestPostgresAnnouncesOnlyWhatCommitted:
 
         collector.stays_at(0)
         assert writer.load_graph_data()["nodes"] == []
+        # What makes this the stronger half is that a row was written before
+        # the announcement was issued and the rollback then took both. Move
+        # the announcement to the top of the transaction - which changes
+        # nothing about the guarantee, since the server holds it to commit -
+        # and this case degenerates into a copy of the weaker one above
+        # without saying so.
+        assert rows_written, (
+            "the announcement was issued before the batch wrote anything, so "
+            "the injected failure no longer rolls back a row and this case is "
+            "not the stronger half it calls itself"
+        )
 
     def test_a_save_that_fails_after_announcing_announces_nothing(
         self, listening, schema, backends, monkeypatch
@@ -3678,6 +3719,11 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             # that produced a confident delete instead of a reload.
             '{"o": "other", "ops": ["ne"]}',
             '{"o": "other", "ops": [["n", "a", "extra"]]}',
+            # null is the one non-string psycopg adapts without complaint: it
+            # matches nothing and comes back as a delete of None, where every
+            # other wrong type dies in the query. So the id's type has to be
+            # checked here rather than left to the server.
+            '{"o": "other", "ops": [["n", null]]}',
         ],
     )
     def test_an_announcement_this_build_cannot_read_reloads_the_graph(
@@ -4182,11 +4228,15 @@ class TestPostgresPacesAServerThatRefusesConnections:
     a tight retry is worst.
     """
 
-    def test_a_refused_connection_is_retried_with_a_growing_wait(
-        self, schema, backends, monkeypatch
-    ):
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        backends.append(backend)
+    def _refused_connect_gaps(self, backend, monkeypatch, ceiling, attempts_wanted):
+        """Drive the connect-failure branch and time the attempts.
+
+        The escalation and the ceiling need different windows and are asserted
+        in different tests: a ceiling low enough to bind saturates the
+        doubling after two steps, so a growth assertion under it has nothing
+        left to see. Measured - one test asserting both passed on good code
+        only by rounding.
+        """
         import backend.core.postgres_backend as module
 
         attempts = []
@@ -4199,9 +4249,7 @@ class TestPostgresPacesAServerThatRefusesConnections:
                 raise psycopg.OperationalError("injected: connection refused")
             return real_connect(*args, **kwargs)
 
-        # Small enough that several attempts fit in a short window, while
-        # still leaving the escalation visible.
-        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", 2.0)
+        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", ceiling)
         monkeypatch.setattr(module.psycopg, "connect", refuse_while_asked)
 
         backend.start_change_notification(_Collector())
@@ -4215,23 +4263,60 @@ class TestPostgresPacesAServerThatRefusesConnections:
             # Drop the established connection so the loop goes round and meets
             # the refusing connect.
             killer.execute("SELECT pg_terminate_backend(%s)", (victim,))
-            deadline = time.monotonic() + 10
-            while len(attempts) < 4 and time.monotonic() < deadline:
+            deadline = time.monotonic() + 40
+            while len(attempts) < attempts_wanted and time.monotonic() < deadline:
                 time.sleep(0.05)
         finally:
             refusing.clear()
             killer.close()
             backend.stop_change_notification()
 
-        assert len(attempts) >= 4, (
-            f"only {len(attempts)} connect attempts in 10s - the loop is not "
-            f"retrying a refused connection at all"
+        assert len(attempts) >= attempts_wanted, (
+            f"only {len(attempts)} connect attempts of {attempts_wanted} in "
+            f"40s - the loop is not retrying a refused connection at all"
         )
-        gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+        return [b - a for a, b in zip(attempts, attempts[1:])]
+
+    def test_a_refused_connection_is_retried_with_a_growing_wait(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        # High enough that the ceiling never binds: this is about the shape of
+        # the escalation, not about where it stops.
+        gaps = self._refused_connect_gaps(backend, monkeypatch, 30.0, 4)
+
         assert gaps[-1] >= 2 * gaps[0], (
             f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
             f"spaced: a server that is refusing connections is being retried "
             f"at a fixed rate by every instance at once"
+        )
+
+    def test_the_wait_between_refused_connections_has_a_ceiling(
+        self, schema, backends, monkeypatch
+    ):
+        """The other end of the same schedule.
+
+        Growth alone does not need a bound, and unbounded doubling satisfies
+        the test above perfectly - while an instance that flapped for a few
+        minutes then waits hours, staying deaf long after the server came
+        back. Which is the same silent staleness this capability exists to
+        remove, reached from the recovery side.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        # Low enough to bind, and enough attempts that an unbounded schedule
+        # has had room to pass it: bounded this gives 0.5, 1, 1, 1, 1;
+        # unbounded, 0.5, 1, 2, 4, 8.
+        gaps = self._refused_connect_gaps(backend, monkeypatch, 1.0, 6)
+
+        assert max(gaps) <= module.NOTIFY_RECONNECT_MAX_SECONDS + 0.6, (
+            f"connect attempts {[round(g, 3) for g in gaps]} passed the "
+            f"documented ceiling of {module.NOTIFY_RECONNECT_MAX_SECONDS}s: "
+            f"the backoff has no upper bound"
         )
 
     def test_the_listening_connection_carries_a_connect_timeout(
@@ -4384,3 +4469,66 @@ class TestPostgresReconnectsWithoutLeakingConnections:
             f"{after - baseline} connections above baseline after five "
             f"reconnects: the loop is leaking one per attempt"
         )
+
+
+class TestPostgresCanListenAgainAfterStopping:
+    """Nothing in this module ever started notification twice on one backend.
+
+    `start` resets three pieces of per-run state - the thread handle, the stop
+    flag and the recorded start error - and only the handle was pinned. Both
+    of the others hide a backend that looks healthy and hears nothing:
+
+    - leave the stop flag set and `start` blocks for its whole bound and then
+      raises, although the connection is fine. `close()` calls `stop`, so any
+      backend that has ever been stopped could never listen again.
+    - leave the error set and a start that SUCCEEDS raises the previous
+      attempt's failure, and tears down the working listener on its way out.
+
+    Neither is reachable from GraphStorage, which starts once. Both are
+    reachable from a script, a test, or any future caller that reconnects a
+    backend rather than building a new one.
+    """
+
+    def test_a_backend_that_was_stopped_can_start_again(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+
+        backend.start_change_notification(_Collector())
+        backend.stop_change_notification()
+
+        second = _Collector()
+        backend.start_change_notification(second)
+        try:
+            writer.upsert_node(node_payload("after_restart"))
+            (change,) = second.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+        assert [op.entity_id for op in change.operations] == ["after_restart"]
+
+    def test_a_start_that_failed_does_not_poison_the_next_one(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        good = backend.conninfo
+        backend.conninfo = psycopg.conninfo.make_conninfo(
+            **{
+                **psycopg.conninfo.conninfo_to_dict(DSN),
+                "dbname": f"co_absent_{uuid.uuid4().hex[:12]}",
+            }
+        )
+        with pytest.raises(psycopg.OperationalError):
+            backend.start_change_notification(_Collector())
+
+        backend.conninfo = good
+        collector = _Collector()
+        # The failure above must not be raised at this one, and - the quieter
+        # half - must not have this successful start tear itself down on the
+        # way out.
+        backend.start_change_notification(collector)
+        try:
+            writer.upsert_node(node_payload("after_a_failed_start"))
+            (change,) = collector.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+        assert [op.entity_id for op in change.operations] == ["after_a_failed_start"]
