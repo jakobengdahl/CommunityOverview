@@ -1011,28 +1011,16 @@ class TestPostgresEntityWritesTouchOneRow:
         ),
     }
 
-    # Several lengths, and no claim that this pins a property. An earlier
-    # version of this comment said driving (2, 5, 40) meant a threshold
-    # gate "has nowhere plausible to hide". That was measured and it is
-    # false: six of seven length-gated mutations survived it, `6 <= len
-    # <= 39` among them, because three points are three fenceposts and
-    # the gaps between them are as wide as the gap above them. What a
-    # spread buys is that a *single* threshold has to fall in a gap
-    # every one of these tests leaves - it lowers the odds, it does not
-    # close the family. Closing it would need one shared length source,
-    # randomised per run, driving every length-sensitive test; that is
-    # recorded as follow-up rather than done here.
+    # Several lengths, and no claim that this pins a property: a
+    # threshold gate can still sit in a gap between them, or above them.
+    # Closing that family would need one shared length source, randomised
+    # per run, driving every length-sensitive test; that is recorded as
+    # follow-up rather than done here.
     #
     # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
     # node delete per node, so the length is whatever the caller deleted.
-    #
-    # None of these three is a length new to the module. Measured, by
-    # recording every `apply_batch` the file drives: 1, 2, 3, 4, 5, 6, 7,
-    # 9, 12, 40, 41, 43 - and 2 alone accounts for 38 of the calls. An
-    # earlier version of this comment claimed 2 and 7 "sit away from the
-    # lengths the other tests use" and listed a set that omitted 2, 3, 4,
-    # 7 and 9. They are kept for reasons other than novelty, which is
-    # what the earlier claim should have said:
+    # These three are chosen for what each exercises, not for being new to
+    # the module - none of them is:
     #
     # - 2 truncates the cycle below, which is the point of running it;
     # - 7 is the only mid-length under the cost and blast-radius
@@ -1040,11 +1028,14 @@ class TestPostgresEntityWritesTouchOneRow:
     #   contract clause that checks the resulting graph and not the
     #   statements;
     # - 41 is the lock probe's holder length, so that length is also
-    #   reached by a test asking a different question - about the lock's
-    #   mode rather than about what a write costs. How many other tests
-    #   run batches longer than 40 is deliberately not stated: two
-    #   earlier versions of this line counted something and got it
-    #   wrong, and the count was never what the value is for.
+    #   reached by a test asking a different question: about the lock's
+    #   mode rather than about what a write costs.
+    #
+    # Why this comment says so little about which lengths the rest of the
+    # module drives: counts of that here have repeatedly gone wrong or
+    # gone stale. The measurements live in the branch history, where a
+    # reader can check one against the commit that made it; a comment
+    # that restates them has to be re-verified on every edit.
     BATCH_LENGTHS = (2, 7, 41)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
@@ -1619,9 +1610,9 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
     def test_a_failed_batch_gives_its_connection_back(self, schema, backends):
         """The failure path, which is where a pooled connection is lost.
 
-        Every test that fails a batch builds a fresh backend and never
-        writes through it again, so a connection returned only on the
-        success path costs nothing anywhere in this suite - and wedges a
+        Every other test that fails a batch builds a fresh backend and
+        never writes through it again, so a connection returned only on
+        the success path costs nothing anywhere else in this suite - and wedges a
         real instance permanently: the pool empties one bad payload at a
         time and the next good write blocks for ever. A pool of one makes
         it show up on the first retry rather than the fourth.
