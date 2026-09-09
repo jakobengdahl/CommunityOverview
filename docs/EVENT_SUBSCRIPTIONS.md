@@ -374,8 +374,13 @@ the nodes already on the canvas.
   label, not a brake: the only thing that acts on it is a subscription's own
   `ignore_origins`, so both consequences below are opt-out rather than
   handled.
-  - A webhook subscription is delivered **twice** for one change — once from
-    the writer and once from the instance that was told about it.
+  - A webhook subscription is delivered **once per instance** for a change
+    reported as named entities — once by the writer, and once by each instance
+    told about it. With ten instances that is ten deliveries, not two.
+  - A change the backend could not describe is the exception: a whole-graph
+    save, or a batch too large to fit the announcement, arrives as
+    `unknown()`, and `apply_external_change` answers that with a reload, which
+    emits nothing. Those are delivered once, by the writer alone.
   - An agent that answers a change by writing **can** bounce it between
     instances, exactly as the `event_origin` note above warns. Listing
     `external-change` in the agent subscription's `ignore_origins` is what

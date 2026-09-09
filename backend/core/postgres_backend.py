@@ -139,8 +139,11 @@ _LISTEN_STOP_TIMEOUT = 30.0
 # reset by the mere fact of connecting, which is the one thing a flapping
 # server does reliably - and the backoff then never engages on the failure it
 # was written for. Measured before it existed: a connection terminated as
-# fast as it appeared reconnected 76 times a second, each reconnect costing
-# every other instance a whole-graph reload.
+# fast as it appeared reconnected 76 times a second, and every one of those
+# reconnects reports unknown(), so this instance reloads the whole graph 76
+# times a second. The cost falls on the instance that is already struggling,
+# not on the others - a reconnect announces nothing and their listening
+# connections are untouched.
 _NOTIFY_STABLE_SECONDS = 60.0
 
 

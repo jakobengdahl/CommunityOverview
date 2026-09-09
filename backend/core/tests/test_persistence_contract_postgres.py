@@ -298,8 +298,8 @@ class _ObservableBackend(PostgresGraphPersistenceBackend):
     call into the listener. Only that callable is wrapped. The connection, the
     channel, the payload, the read-back and the thread are the shipped ones,
     and a defect in any of them fails these clauses exactly as it would fail
-    an instance in production. `TestPostgresNotifiesOtherInstances` below
-    drives the unwrapped class for the same reason.
+    an instance in production. Every class below it drives the unwrapped
+    class directly, for the same reason.
     """
 
     def __init__(self, *args, **kwargs):
@@ -3826,6 +3826,74 @@ class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
             f"reconnect intervals {[round(g, 3) for g in gaps]} are not "
             f"growing: the wait is a fixed floor rather than a backoff, so a "
             f"server that keeps dropping is never given room to recover"
+        )
+
+    def test_the_backoff_comes_back_down_after_a_connection_that_held(
+        self, schema, backends, monkeypatch
+    ):
+        """Escalating is half of it; coming back down is the other half.
+
+        Without the reset, an instance that flapped once during a failover
+        stays at the ceiling for the rest of its life - so the next drop, an
+        isolated one years later, costs thirty seconds of staleness for no
+        reason. Nothing pinned it: the flapping test asserts the intervals
+        grow, which a backoff that only ever grows satisfies perfectly.
+
+        `_NOTIFY_STABLE_SECONDS` is lowered so "a connection that stayed up"
+        fits in a test rather than in a minute. That is the constant's whole
+        meaning, so lowering it is what makes the case reachable, not what
+        makes it pass.
+        """
+        import backend.core.postgres_backend as module
+
+        monkeypatch.setattr(module, "_NOTIFY_STABLE_SECONDS", 0.5)
+        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", 4.0)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+        backend.start_change_notification(collector)
+
+        def drop():
+            # Wait for one to exist: between a drop and the reconnect there is
+            # no connection to drop, and the wait is exactly the backoff this
+            # test is about.
+            deadline = time.monotonic() + 30
+            conn = backend._listen_conn
+            while conn is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                conn = backend._listen_conn
+            assert conn is not None, "no listening connection appeared in 30s"
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                killer.execute(
+                    "SELECT pg_terminate_backend(%s)", (conn.info.backend_pid,)
+                )
+
+        try:
+            # Three drops in quick succession: the backoff escalates.
+            for _ in range(3):
+                drop()
+                time.sleep(0.05)
+            collector.wait_for(3, timeout=60)
+            escalated = len(collector.changes)
+
+            # Let the next connection hold well past _NOTIFY_STABLE_SECONDS,
+            # then drop it once. The reconnect after a connection that held
+            # must be prompt again, not at the escalated delay.
+            deadline = time.monotonic() + 30
+            while backend._listen_conn is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(1.5)
+            before = time.monotonic()
+            drop()
+            collector.wait_for(escalated + 1, timeout=60)
+            recovered_in = collector.arrivals[escalated] - before
+        finally:
+            backend.stop_change_notification()
+
+        assert recovered_in < 1.0, (
+            f"the reconnect after a connection that stayed up took "
+            f"{recovered_in:.2f}s: the backoff never comes back down, so one "
+            f"flap costs this instance the ceiling for the rest of its life"
         )
 
     def test_it_is_still_listening_after_the_flapping_stops(self, schema, backends):
