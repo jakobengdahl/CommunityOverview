@@ -370,14 +370,19 @@ the nodes already on the canvas.
 - **Per-instance delivery**: the queue is per process, and so is delivery.
   `PostgresGraphPersistenceBackend` declares `change_notification`, so a
   second instance is refreshed by another instance's write and emits these
-  events too — stamped with the `external-change` origin, so an agent that
-  answers a change by writing cannot bounce it between instances. What is not
-  shared is delivery: each instance dispatches to subscriptions out of its own
-  in-memory queue, with its own retries. Two instances therefore deliver a
-  webhook subscription twice for one change — once from the writer and once
-  from the instance that was told about it — unless the subscription lists
-  `external-change` in its `ignore_origins`. Delivering exactly once across
-  instances, rather than opting out per subscription, is separate work.
+  events too, stamped with the `external-change` origin. That origin is a
+  label, not a brake: the only thing that acts on it is a subscription's own
+  `ignore_origins`, so both consequences below are opt-out rather than
+  handled.
+  - A webhook subscription is delivered **twice** for one change — once from
+    the writer and once from the instance that was told about it.
+  - An agent that answers a change by writing **can** bounce it between
+    instances, exactly as the `event_origin` note above warns. Listing
+    `external-change` in the agent subscription's `ignore_origins` is what
+    stops it.
+
+  Delivering exactly once across instances, and making the origin act by
+  default rather than by configuration, are both separate work.
 - **Simple filtering**: No complex query expressions
 
 ## Future Enhancements

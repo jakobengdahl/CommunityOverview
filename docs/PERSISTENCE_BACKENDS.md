@@ -645,10 +645,18 @@ listener is running against a model the caller is about to tear down.
 One window stays open, and it is the seam's rather than this backend's.
 `GraphStorage` loads and *then* starts notification — deliberately, so that
 no change is reported against a model that does not exist yet — so a write
-committed between the load and the LISTEN is announced to a connection that
-is not listening and is not replayed. The instance is stale from boot until
-the next write announces itself. It is narrow, and closing it means changing
-the order the seam specifies, not this backend.
+committed between the load and the `LISTEN` is announced to a connection that
+is not listening, and the server does not replay it.
+
+**That window is narrow in time and unbounded in consequence, and it is the
+one case with no recovery at all.** A reconnect reports `unknown()` precisely
+because the announcements it missed are gone; the first connect deliberately
+does not, because the caller has just loaded. So an entity written in the gap
+and never written again is never reported, and that instance serves the wrong
+value for as long as it runs. Later announcements do not help: each names only
+its own entities. Closing it means either an `unknown()` at start — one
+redundant whole-graph read per boot — or listening before the load, which is
+the order the seam specifies and not this backend's to change.
 
 The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
 is how the listening thread reads its channel while still noticing a stop.

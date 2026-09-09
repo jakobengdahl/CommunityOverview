@@ -158,7 +158,15 @@ def _pair(entry: Any) -> Tuple[str, str]:
     Raising is the point: `_handle` turns any failure here into a reload,
     which is the only honest answer to an announcement whose shape this build
     does not recognise.
+
+    The type is checked before the unpacking, not after. A string of two
+    characters unpacks as happily as a pair does, so `["ne"]` used to arrive
+    as ("node", "e") - a confident delete of an entity nothing announced,
+    which is exactly the failure _KINDS above exists to prevent, reached
+    through the door beside the one it guards.
     """
+    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+        raise TypeError(f"announced entity is not a pair: {entry!r}")
     kind, entity_id = entry
     if not isinstance(entity_id, str):
         raise TypeError(f"announced id is not a string: {entity_id!r}")
@@ -731,18 +739,27 @@ class PostgresGraphPersistenceBackend:
                     thread.join(_LISTEN_STOP_TIMEOUT)
             self._close_listen_conn()
             self._listener = None
-            if mine and thread.is_alive():
-                # Left in place deliberately. The listener will not be called
-                # again - the flag is set and _deliver reads it - but the
-                # thread is still there, and clearing the handle would let the
-                # next start believe nothing is running and start a second
-                # one. Measured before this: two listening connections, and
-                # every change delivered to the application twice.
-                print(
-                    f"Warning: the listener thread for {self._channel} did "
-                    f"not stop within {_LISTEN_STOP_TIMEOUT}s; notification "
-                    f"cannot be started again on this backend"
-                )
+            if thread is not None and thread.is_alive():
+                # Left in place deliberately, and on the same test whether we
+                # joined it or not. The listener will not be called again -
+                # the flag is set and _deliver reads it - but the thread is
+                # still there, and clearing the handle would let the next
+                # start believe nothing is running and start a second one.
+                # Measured before this: two listening connections, and every
+                # change delivered to the application twice.
+                #
+                # `mine` decides whether it can be JOINED, not whether it is
+                # running. Stop called from inside the listener - a listener
+                # that closes its own backend - cannot join itself, and
+                # reading that as "nothing is running" cleared the handle on
+                # the one thread guaranteed to still be alive.
+                if mine:
+                    print(
+                        f"Warning: the listener thread for {self._channel} "
+                        f"did not stop within {_LISTEN_STOP_TIMEOUT}s; "
+                        f"notification cannot be started again on this "
+                        f"backend"
+                    )
                 return
             with self._listen_lock:
                 if self._listen_thread is thread:

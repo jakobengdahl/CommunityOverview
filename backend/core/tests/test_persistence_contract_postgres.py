@@ -2689,11 +2689,13 @@ class _Collector:
 
     def __init__(self):
         self.changes = []
+        self.arrivals = []
         self._arrived = threading.Condition()
 
     def __call__(self, change):
         with self._arrived:
             self.changes.append(change)
+            self.arrivals.append(time.monotonic())
             self._arrived.notify_all()
 
     def wait_for(self, count, timeout=30.0):
@@ -3671,6 +3673,11 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             '{"o": "other", "ops": [["n", 7]]}',  # an id that is not a string
             '{"o": "other", "ops": [["n"]]}',  # an entry of the wrong shape
             '{"o": "other", "ops": [null]}',
+            # A two-character string unpacks as readily as a pair does, so
+            # this used to arrive as ("node", "e") - the one malformed shape
+            # that produced a confident delete instead of a reload.
+            '{"o": "other", "ops": ["ne"]}',
+            '{"o": "other", "ops": [["n", "a", "extra"]]}',
         ],
     )
     def test_an_announcement_this_build_cannot_read_reloads_the_graph(
@@ -3799,6 +3806,27 @@ class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
             f"off, so every drop costs every instance a whole-graph reload"
         )
         assert terminations, "the killer never caught a listening connection"
+
+        # The count alone pins only half of it. The defect had two halves -
+        # the drop path did not wait AT ALL, and the wait it would have used
+        # was reset by the mere fact of having connected - and a loop that
+        # waits a fixed minimum satisfies the ceiling above while never
+        # escalating. Measured: with the escalation removed and the wait
+        # kept, this window produced 18 reloads against a floor of 30, so the
+        # assertion passed against half the defect it names.
+        #
+        # The intervals are what tells the two apart: escalating they double,
+        # fixed they do not.
+        gaps = [b - a for a, b in zip(collector.arrivals, collector.arrivals[1:])]
+        assert len(gaps) >= 3, (
+            f"only {len(gaps) + 1} reconnects in {_MEASURE_SECONDS}s - too "
+            f"few to say anything about how they are spaced"
+        )
+        assert gaps[-1] >= 2 * gaps[0], (
+            f"reconnect intervals {[round(g, 3) for g in gaps]} are not "
+            f"growing: the wait is a fixed floor rather than a backoff, so a "
+            f"server that keeps dropping is never given room to recover"
+        )
 
     def test_it_is_still_listening_after_the_flapping_stops(self, schema, backends):
         """Backing off must not mean giving up: an instance that paced itself
@@ -3967,3 +3995,43 @@ class TestPostgresReportsAContractViolationDistinctly:
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
         assert "refused" in capsys.readouterr().out
+
+
+class TestPostgresStopFromInsideTheListener:
+    """A listener that closes its own backend cannot be joined by the stop it
+    triggered - and that is not the same thing as nothing running.
+
+    Reading it as such cleared the thread handle on the one thread guaranteed
+    to still be alive, which is precisely what the handle is kept for: the
+    next start would then find nothing running, clear the stop flag, and the
+    old thread would fall back into its reconnect branch beside the new one.
+    Two listeners, every change delivered twice - the round-1 failure reached
+    by another road.
+    """
+
+    def test_stopping_from_the_listener_does_not_free_the_handle(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        stopped = threading.Event()
+        handle_after = []
+
+        def stop_myself(change):
+            backend.stop_change_notification()
+            handle_after.append(backend._listen_thread)
+            stopped.set()
+
+        backend.start_change_notification(stop_myself)
+        try:
+            writer.upsert_node(node_payload("a"))
+            assert stopped.wait(30), "the listener was never called"
+        finally:
+            backend.stop_change_notification()
+
+        assert handle_after and handle_after[0] is not None, (
+            "stop called from the listener cleared the handle to the thread "
+            "it was running on, which the next start would read as nothing "
+            "running"
+        )
