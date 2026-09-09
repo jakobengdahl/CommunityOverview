@@ -3201,6 +3201,31 @@ class TestADeferredReport:
             "two observers of one report disagree about what it said"
         )
         assert [op.payload["name"] for op in first.operations] == ["Beacon"]
+        # And the answer is an answer: a change that still carried the callable
+        # would read the store again the moment anyone asked it, which is the
+        # same defect one indirection further along.
+        assert not first.content_read_on_demand()
+        assert first.with_content() is first
+        assert len(reads) == 1
+
+    def test_an_empty_answer_is_an_answer_and_is_not_asked_for_twice(self):
+        """The store's answer to "what happened to these" can be "nothing is
+        there any more", which is an empty batch of operations. Remembering it
+        as "not read yet" would send the second observer back to the store -
+        and the second read is the one taken at the wrong moment."""
+        reads = []
+
+        def read_content():
+            reads.append(1)
+            return []
+
+        change = ExternalChange.entities_read_on_demand(read_content)
+        assert change.with_content().operations == ()
+        assert change.with_content().operations == ()
+        assert len(reads) == 1, (
+            f"an empty answer was not remembered; the store was read "
+            f"{len(reads)} times for one report"
+        )
 
     def test_the_content_is_read_after_this_instances_queued_writes(self):
         """The whole reason the read is deferred. A read taken while a write
