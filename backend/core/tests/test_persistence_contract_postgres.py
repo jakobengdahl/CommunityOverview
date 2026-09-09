@@ -2457,8 +2457,8 @@ class TestPostgresSaveWritesMetadataLast:
     `interrupt_next_snapshot` and `_stalled_save` both key on "the payload
     dict with no id" - the metadata row - to place their hook after every
     row the save writes. Nothing asserted that it *is* the last of them.
-    Move the upsert to the
-    front of the transaction and both hooks fire before any write: the
+    Move the upsert to the front of the transaction and both hooks fire
+    before any write: the
     interrupt no longer exercises rollback, and the overlapping-save test
     stops arming at all. Measured: with the upsert moved AND the save
     advisory lock deleted, the whole module still passed - so the guarantee
@@ -3179,10 +3179,15 @@ class TestPostgresAnnouncementFitsThePayloadLimit:
         This is not the byte-versus-character test it looks like it should be.
         `json.dumps` escapes non-ASCII by default, so what `_encode` produces
         is always pure ASCII and the two counts can never differ - measured:
-        one "\u00e4" is six characters and six bytes. Writing the cap over
-        the encoded length is still right, because bytes are the unit the
-        server's own check uses, but it is not currently distinguishable and
-        no test can make it so.
+        an a-umlaut becomes a six-character escape sequence in the payload,
+        costing six characters and six bytes alike. Writing the cap over the
+        encoded length is still right, because bytes are the unit the server's
+        own check uses, but it is not currently distinguishable and no test
+        can make it so.
+
+        (Not written with the character itself: this docstring is not raw, so
+        an escape written here would be collapsed back into the one character
+        the sentence is about, and the sentence would read as nonsense.)
 
         What IS worth pinning, and was covered nowhere: such a graph works.
         The escaping costs six bytes per character, so these ids reach the cap
