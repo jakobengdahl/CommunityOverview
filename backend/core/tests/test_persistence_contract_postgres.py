@@ -1039,8 +1039,12 @@ class TestPostgresEntityWritesTouchOneRow:
     #   assertions - the module's other seven-operation batch is a
     #   contract clause that checks the resulting graph and not the
     #   statements;
-    # - 41 coincides with the lock probe's on purpose, so the region
-    #   above 40 is walked by two tests rather than one.
+    # - 41 is the lock probe's holder length, so that length is also
+    #   reached by a test asking a different question - about the lock's
+    #   mode rather than about what a write costs. How many other tests
+    #   run batches longer than 40 is deliberately not stated: two
+    #   earlier versions of this line counted something and got it
+    #   wrong, and the count was never what the value is for.
     BATCH_LENGTHS = (2, 7, 41)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
