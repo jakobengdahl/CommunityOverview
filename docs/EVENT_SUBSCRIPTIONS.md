@@ -367,10 +367,27 @@ the nodes already on the canvas.
   lost on restart. (AgentRun *history* is recorded durably — see above — but the
   delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
-- **Single process**: Works within one process only. A backend declaring
-  `change_notification` refreshes a second instance's model and emits these
-  events there too, but no shipped backend declares it yet, and running
-  several instances is separate work.
+- **Per-instance delivery**: the queue is per process, and so is delivery.
+  `PostgresGraphPersistenceBackend` declares `change_notification`, so a
+  second instance is refreshed by another instance's write and emits these
+  events too, stamped with the `external-change` origin. That origin is a
+  label, not a brake: the only thing that acts on it is a subscription's own
+  `ignore_origins`, so both consequences below are opt-out rather than
+  handled.
+  - A webhook subscription is delivered **once per instance** for a change
+    reported as named entities — once by the writer, and once by each instance
+    told about it. With ten instances that is ten deliveries, not two.
+  - A change the backend could not describe is the exception: a whole-graph
+    save, or a batch too large to fit the announcement, arrives as
+    `unknown()`, and `apply_external_change` answers that with a reload, which
+    emits nothing. Those are delivered once, by the writer alone.
+  - An agent that answers a change by writing **can** bounce it between
+    instances, exactly as the `event_origin` note above warns. Listing
+    `external-change` in the agent subscription's `ignore_origins` is what
+    stops it.
+
+  Delivering exactly once across instances, and making the origin act by
+  default rather than by configuration, are both separate work.
 - **Simple filtering**: No complex query expressions
 
 ## Future Enhancements

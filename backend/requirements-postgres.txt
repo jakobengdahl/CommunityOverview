@@ -6,4 +6,9 @@
 #
 # [binary] is a prebuilt wheel, so there is no compiler and no libpq-dev to
 # install. [pool] is the connection pool the backend bounds itself with.
-psycopg[binary,pool]>=3.1,<4
+#
+# The floor is 3.2 for Connection.notifies(timeout=...), which the listening
+# thread reads its channel with. Without the argument the read blocks until a
+# notification arrives and the thread can only be stopped by closing the
+# connection under it - so shutdown becomes a race rather than a flag check.
+psycopg[binary,pool]>=3.2,<4

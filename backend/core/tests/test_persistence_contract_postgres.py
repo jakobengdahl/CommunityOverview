@@ -15,6 +15,7 @@ is what lets one server serve the whole suite.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import secrets
 import threading
@@ -48,8 +49,11 @@ from psycopg_pool import ConnectionPool  # noqa: E402  (after importorskip)
 from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     DEFAULT_POOL_SIZE,
     MIGRATION_LOCK_KEY,
+    NOTIFY_PAYLOAD_LIMIT,
     PostgresGraphPersistenceBackend,
+    _channel_for,
 )
+from backend.core.storage_backends import ExternalChangeRefused  # noqa: E402
 from backend.core.storage_backends import (  # noqa: E402
     BackendCapabilities,
     EntityOperation,
@@ -67,6 +71,13 @@ DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 # tests below pin it from both sides rather than following it wherever it
 # is moved.
 DOCUMENTED_DEADLOCK_RETRIES = 3
+
+# The window the reconnect-pacing test watches, and the count above which it
+# calls the loop unpaced. Wide on purpose: the property is the difference
+# between a paced loop and an unpaced one - two orders of magnitude - not the
+# exact schedule, which depends on how fast the killer thread gets scheduled.
+_MEASURE_SECONDS = 5.0
+_UNPACED_FLOOR = 30
 
 
 class _RetryBoundExceeded(BaseException):
@@ -273,15 +284,99 @@ def _wait_until_blocking(pid, timeout=15.0):
     return False
 
 
+class _ObservableBackend(PostgresGraphPersistenceBackend):
+    """The shipped backend, with the changes it applied recorded.
+
+    `settle_notifications` needs a barrier: it must return only once every
+    instance on this store has *applied* what the writer just wrote. Nothing
+    in the transport answers that. The server hands a notification to the
+    client library, which buffers it, long before the application sees it, so
+    a quiet server queue proves nothing - and polling the reader's graph until
+    it agrees would make every clause below assert its own precondition.
+
+    So the count is taken at the one place the application actually is: the
+    call into the listener. Only that callable is wrapped. The connection, the
+    channel, the payload, the read-back and the thread are the shipped ones,
+    and a defect in any of them fails these clauses exactly as it would fail
+    an instance in production. Every class below it drives the unwrapped
+    class directly, for the same reason.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen = []
+        self._applied_change = threading.Condition()
+
+    def start_change_notification(self, listener) -> None:
+        def recording(change):
+            try:
+                listener(change)
+            finally:
+                with self._applied_change:
+                    self.seen.append(change)
+                    self._applied_change.notify_all()
+
+        super().start_change_notification(recording)
+
+    def wait_for_barrier(self, after: int, timeout: float = 60.0) -> None:
+        """Wait for the barrier change itself, never for a count.
+
+        A count read before the barrier was issued is not a mark. The writes
+        being waited for may not have been applied yet when it was taken, so
+        `mark + 1` is satisfied by the first of them rather than by the
+        barrier behind them - and the clause then asserts against a model that
+        has applied some of the writes it is about. Measured: the external
+        delete clause passed on its own and failed under the whole module's
+        load, which is the load that decides how much of the backlog has
+        drained by the time the mark is read.
+
+        So the barrier is identified by what it is rather than by where it
+        falls: the only change that carries no operations.
+        """
+        with self._applied_change:
+            if not self._applied_change.wait_for(
+                lambda: any(change.operations == () for change in self.seen[after:]),
+                timeout=timeout,
+            ):
+                raise AssertionError(
+                    f"the barrier was not applied in {timeout}s; "
+                    f"{len(self.seen) - after} changes arrived after the mark"
+                )
+
+
 class TestPostgresBackendContract(PersistenceBackendContract):
     @pytest.fixture
     def factory(self, schema, backends):
         def make():
-            backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+            backend = _ObservableBackend(DSN, schema=schema)
             backends.append(backend)
             return backend
 
         return make
+
+    @pytest.fixture(autouse=True)
+    def _made(self, backends):
+        self._backends = backends
+
+    def settle_notifications(self, backend) -> None:
+        """Wait for every instance to have applied what `backend` wrote.
+
+        The barrier is an empty batch through the ordinary write path, not a
+        crafted notification: the server delivers on one connection in the
+        order the transactions committed, so an instance that has applied the
+        barrier has applied everything announced before it. Nothing about the
+        barrier is special-cased in the backend, which is the point - a
+        transport that dropped the barrier would drop the writes too.
+        """
+        listening = [
+            other
+            for other in self._backends
+            if other is not backend and other._listen_thread is not None
+        ]
+        marks = [len(other.seen) for other in listening]
+        backend.apply_batch([])
+        for other, mark in zip(listening, marks):
+            other.wait_for_barrier(mark)
 
     def interrupt_next_snapshot(self, backend, monkeypatch):
         """Fail the save at its last write, inside the open transaction.
@@ -934,13 +1029,15 @@ class TestPostgresDeclaresWhatItImplements:
     assertion outside the contract can see it.
     """
 
-    def test_the_declaration_is_exactly_incremental_and_transactional(
-        self, schema, backends
-    ):
+    def test_the_declaration_names_all_three_capabilities(self, schema, backends):
+        """Equality, not three flag reads: a capability added to the dataclass
+        and left undeclared here would pass every `is True` in the file."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         assert backend.capabilities() == BackendCapabilities(
-            incremental_writes=True, transactions=True
+            incremental_writes=True,
+            transactions=True,
+            change_notification=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
@@ -2358,16 +2455,17 @@ class TestPostgresSaveWritesMetadataLast:
     """The ordering two other tests silently depend on.
 
     `interrupt_next_snapshot` and `_stalled_save` both key on "the payload
-    dict with no id" - the metadata row - to place their hook at the end of
-    the save. Nothing asserted that it *is* the end. Move the upsert to the
-    front of the transaction and both hooks fire before any write: the
+    dict with no id" - the metadata row - to place their hook after every
+    row the save writes. Nothing asserted that it *is* the last of them.
+    Move the upsert to the front of the transaction and both hooks fire
+    before any write: the
     interrupt no longer exercises rollback, and the overlapping-save test
     stops arming at all. Measured: with the upsert moved AND the save
     advisory lock deleted, the whole module still passed - so the guarantee
     the lock exists for was left undefended by an unrelated refactor.
     """
 
-    def test_the_metadata_upsert_is_the_last_statement_of_a_save(
+    def test_the_metadata_upsert_is_the_saves_last_write_to_a_graph_table(
         self, schema, backends
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -2426,10 +2524,19 @@ class TestPostgresSaveWritesMetadataLast:
             "a payload was serialised before the save opened its transaction, "
             "which moves the interrupt and stall hooks outside it"
         )
-        assert "graph_metadata" in writes[-1] and "ON CONFLICT" in writes[-1], (
-            "the metadata upsert is no longer the save's last statement, "
-            "which is what the interrupt and stall hooks rely on to land "
-            f"after the writes: {writes}"
+        # Among the statements that touch a graph table, not among all of
+        # them. The save's own last statement is its announcement, which
+        # writes no row and is not what either hook keys on - a hook fires
+        # while a payload is being serialised, and the announcement carries
+        # none. Narrowed when the announcement was added, rather than
+        # relaxed: what the hooks depend on is that every row this save
+        # writes has been written by the time the metadata upsert runs.
+        row_writes = [q for q in writes if _tables_named(q)]
+        assert row_writes, "the save wrote no graph table"
+        assert "graph_metadata" in row_writes[-1] and "ON CONFLICT" in row_writes[-1], (
+            "the metadata upsert is no longer the save's last write to a "
+            "graph table, which is what the interrupt and stall hooks rely "
+            f"on to land after the writes: {writes}"
         )
 
 
@@ -2569,3 +2676,2132 @@ class TestPostgresStoreIdentity:
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:
                 conn.execute(f'DROP SCHEMA IF EXISTS "{other}" CASCADE')
+
+
+class _Collector:
+    """A listener that records what it was handed, for tests about the report.
+
+    Deliberately not a GraphStorage. The contract clauses already drive a real
+    one and assert the graph that comes out; what is missing is the shape of
+    the report itself - how many changes a batch became, which operations they
+    carried and in what order - and a storage answers none of that, because it
+    applies the report and discards it.
+    """
+
+    def __init__(self):
+        self.changes = []
+        self.arrivals = []
+        self._arrived = threading.Condition()
+
+    def __call__(self, change):
+        with self._arrived:
+            self.changes.append(change)
+            self.arrivals.append(time.monotonic())
+            self._arrived.notify_all()
+
+    def wait_for(self, count, timeout=30.0):
+        with self._arrived:
+            if not self._arrived.wait_for(
+                lambda: len(self.changes) >= count, timeout=timeout
+            ):
+                raise AssertionError(
+                    f"{len(self.changes)} of {count} changes arrived in {timeout}s"
+                )
+            return list(self.changes)
+
+    def stays_at(self, count, seconds=2.0):
+        """Assert no further change arrives. The only way to test a negative
+        here is to wait, so the wait is named and bounded rather than a bare
+        sleep."""
+        with self._arrived:
+            self._arrived.wait_for(lambda: len(self.changes) > count, timeout=seconds)
+            assert len(self.changes) == count, (
+                f"expected no change beyond {count}, got {len(self.changes)}"
+            )
+
+
+@pytest.fixture
+def listening(schema, backends):
+    """A backend listening on `schema`, plus the collector it reports to.
+
+    Stopped by the fixture rather than by each test, so a test that fails
+    mid-way still leaves no thread reading a connection behind it.
+    """
+    started = []
+
+    def start(**kwargs):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, **kwargs)
+        backends.append(backend)
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        started.append(backend)
+        return backend, collector
+
+    yield start
+    for backend in started:
+        backend.stop_change_notification()
+
+
+class TestPostgresReportsOneChangePerTransaction:
+    """The acceptance property of this slice, and the one the batch path in
+    GraphStorage was built for: what the store applied together is reported
+    together.
+
+    A backend that reported per entity would satisfy every contract clause -
+    the graph that comes out is identical - while making the vector index
+    rebuild once per node instead of once per batch, and emitting N events
+    where the store performed one transaction.
+    """
+
+    def test_a_batch_of_many_operations_arrives_as_one_change(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload("a")),
+                EntityOperation.upsert_node(node_payload("b")),
+                EntityOperation.upsert_edge(edge_payload("ab", "a", "b")),
+            ]
+        )
+
+        (change,) = collector.wait_for(1)
+        assert [(op.kind, op.action, op.entity_id) for op in change.operations] == [
+            ("node", "upsert", "a"),
+            ("node", "upsert", "b"),
+            ("edge", "upsert", "ab"),
+        ]
+        collector.stays_at(1)
+
+    def test_the_reported_order_is_the_order_the_store_applied(
+        self, listening, schema, backends
+    ):
+        """Not cosmetic. GraphStorage drops an external edge whose endpoint is
+        not present yet and says so in a warning, so a report that grouped by
+        kind - edges first, or nodes read back in one query and edges in
+        another - would silently lose every edge created alongside its
+        endpoints. Which is the ordinary shape of a create."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload("a")),
+                EntityOperation.upsert_edge(edge_payload("aa", "a", "a")),
+                EntityOperation.upsert_node(node_payload("b")),
+                EntityOperation.upsert_edge(edge_payload("ab", "a", "b")),
+            ]
+        )
+
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == ["a", "aa", "b", "ab"]
+
+    def test_a_single_entity_write_arrives_as_one_operation(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.upsert_node(node_payload("solo", name="Solo"))
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert (op.kind, op.action, op.entity_id) == ("node", "upsert", "solo")
+        assert op.payload["name"] == "Solo"
+
+    def test_a_whole_graph_save_reports_that_it_cannot_say_what_changed(
+        self, listening, schema, backends
+    ):
+        """A save replaced rows it never named, including rows it deleted.
+        Naming what changed would mean diffing the store against itself."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.save_graph_data(snapshot([node_payload("z")]))
+
+        (change,) = collector.wait_for(1)
+        assert change.operations is None
+
+
+class TestPostgresDoesNotReportAnInstanceToItself:
+    """The server delivers a notification to the connection that sent it as
+    readily as to any other - measured, not assumed - so the origin marker is
+    load bearing rather than an optimisation.
+
+    Without it every instance re-applies its own writes: harmless-looking,
+    because the values agree, but it emits a second event for every mutation
+    to every subscriber and every agent, and an agent that answers a change by
+    writing would then answer itself.
+    """
+
+    def test_an_instance_is_not_told_about_its_own_write(self, listening):
+        backend, collector = listening()
+
+        backend.apply_batch([EntityOperation.upsert_node(node_payload("mine"))])
+
+        collector.stays_at(0)
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["mine"]
+
+    def test_an_instance_is_not_told_about_its_own_whole_graph_save(self, listening):
+        backend, collector = listening()
+
+        backend.save_graph_data(snapshot([node_payload("mine")]))
+
+        collector.stays_at(0)
+
+    def test_an_instance_is_not_told_about_its_own_oversized_write(self, listening):
+        """The degraded announcement carries the origin too.
+
+        `_encode` has two returns that name only the writer, and they are the
+        same expression. The whole-graph one is pinned by the case above; this
+        one - the batch too large to describe - was pinned by nothing, because
+        every oversized write in this file is made by a separate writer. Drop
+        the origin from it and a busy instance answers its own large batches
+        with a whole-graph reload, on exactly the batches that cost most.
+        """
+        backend, collector = listening()
+        long_id = "n" * 240
+        batch = [
+            EntityOperation.upsert_node(node_payload(f"{long_id}{i:04d}"))
+            for i in range(60)
+        ]
+        # This case is about the DEGRADED return, and the id length and count
+        # that get it there are chosen here rather than derived from the cap.
+        # Raise NOTIFY_PAYLOAD_LIMIT - the obvious future change, since the
+        # comment beside it tracks a server measurement - and without this
+        # assertion the batch quietly stops degrading, the test stops
+        # exercising the return it exists for, and becomes a duplicate of the
+        # case above it with the suite still green.
+        assert json.loads(backend._encode(batch)).get("ops") is None, (
+            "this batch no longer takes the degraded return, so the case no "
+            "longer covers the second of _encode's two origin markers"
+        )
+
+        backend.apply_batch(batch)
+
+        assert len(backend.load_graph_data()["nodes"]) == 60
+        collector.stays_at(0)
+
+    def test_two_backends_in_one_process_are_two_instances(
+        self, listening, schema, backends
+    ):
+        """Per object, not per process. Nothing stops one process holding two
+        backends on one store, the tests here do it constantly, and an origin
+        keyed on the process would make each of them deaf to the other."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.upsert_node(node_payload("theirs"))
+
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == ["theirs"]
+
+
+class TestPostgresAnnouncesOnlyWhatCommitted:
+    """The announcement is issued inside the writing transaction, so the
+    server holds it until commit and discards it on rollback.
+
+    That is the whole reason there is no bookkeeping here. Announce after the
+    commit instead and there is a window in which the write is visible and
+    unannounced - and a process that dies in it leaves every other instance
+    permanently behind, with nothing to notice it. Announce before, outside
+    the transaction, and a rolled-back batch tells everyone about a change
+    that never happened.
+    """
+
+    def test_a_failed_batch_announces_nothing(self, listening, schema, backends):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        with pytest.raises(Exception):
+            writer.apply_batch(
+                [
+                    EntityOperation.upsert_node(node_payload("ok")),
+                    # jsonb cannot hold a non-finite float; the batch dies.
+                    EntityOperation.upsert_node(
+                        node_payload("bad", embedding=[float("nan")])
+                    ),
+                ]
+            )
+
+        collector.stays_at(0)
+        assert writer.load_graph_data()["nodes"] == []
+
+    def test_a_batch_that_fails_after_announcing_announces_nothing(
+        self, listening, schema, backends, monkeypatch
+    ):
+        """The stronger half. Above, the failure happens before the
+        announcement is even issued, so it would pass against an
+        implementation that announced outside the transaction too. Here the
+        announcement reaches the server and the transaction then rolls back,
+        which is the property the design actually rests on.
+        """
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        real_announce = type(writer)._announce
+        real_apply_one = type(writer)._apply_one
+        rows_written = []
+
+        def note_row(self, conn, operation):
+            rows_written.append(operation)
+            return real_apply_one(self, conn, operation)
+
+        def announce_then_die(self, conn, operations):
+            real_announce(self, conn, operations)
+            raise OSError("connection lost after announcing")
+
+        monkeypatch.setattr(type(writer), "_apply_one", note_row)
+        monkeypatch.setattr(type(writer), "_announce", announce_then_die)
+
+        with pytest.raises(OSError):
+            writer.apply_batch([EntityOperation.upsert_node(node_payload("ghost"))])
+
+        collector.stays_at(0)
+        assert writer.load_graph_data()["nodes"] == []
+        # What makes this the stronger half is that a row was written before
+        # the announcement was issued and the rollback then took both. Move
+        # the announcement to the top of the transaction - which changes
+        # nothing about the guarantee, since the server holds it to commit -
+        # and this case degenerates into a copy of the weaker one above
+        # without saying so.
+        assert rows_written, (
+            "the announcement was issued before the batch wrote anything, so "
+            "the injected failure no longer rolls back a row and this case is "
+            "not the stronger half it calls itself"
+        )
+
+    def test_a_save_that_fails_after_announcing_announces_nothing(
+        self, listening, schema, backends, monkeypatch
+    ):
+        """The save path's own half of this class, not the batch path's.
+
+        Every other case here drives `apply_batch`, and both paths call the
+        same helper - so the save's half of G1 rested entirely on that sharing.
+        Replace the save's announcement with one on a connection of its own
+        and the whole class still passes, while a listener is told about a
+        graph the save had not committed: under READ COMMITTED it reloads,
+        sees the graph as it was, and stays there with nothing further coming.
+        """
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.save_graph_data(snapshot([node_payload("before")]))
+        collector.wait_for(1)
+        real_announce = type(writer)._announce
+
+        def announce_then_die(self, conn, operations):
+            real_announce(self, conn, operations)
+            raise OSError("connection lost after announcing")
+
+        monkeypatch.setattr(type(writer), "_announce", announce_then_die)
+
+        with pytest.raises(OSError):
+            writer.save_graph_data(snapshot([node_payload("after")]))
+
+        collector.stays_at(1)
+        assert [n["id"] for n in writer.load_graph_data()["nodes"]] == ["before"]
+
+    def test_a_deadlocked_batch_announces_once_from_the_attempt_that_committed(
+        self, listening, schema, backends, monkeypatch
+    ):
+        """A retried batch must not announce per attempt. Announcing outside
+        the transaction would send one per try, and every other instance would
+        read the same change back from the store two and three times."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        real_announce = type(writer)._announce
+        attempts = []
+
+        def announce_then_deadlock(self, conn, operations):
+            attempts.append(1)
+            # Announce first, then abort - so all three attempts reach the
+            # server with a notification and only the last one commits. An
+            # attempt that failed before announcing would prove nothing here:
+            # it is the discarding of an announcement already sent that this
+            # test is about.
+            real_announce(self, conn, operations)
+            if len(attempts) <= DOCUMENTED_DEADLOCK_RETRIES - 1:
+                raise psycopg.errors.DeadlockDetected("injected")
+
+        monkeypatch.setattr(type(writer), "_announce", announce_then_deadlock)
+
+        writer.apply_batch([EntityOperation.upsert_node(node_payload("retried"))])
+
+        assert len(attempts) == DOCUMENTED_DEADLOCK_RETRIES
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == ["retried"]
+        collector.stays_at(1)
+
+
+class TestPostgresAnnouncementFitsThePayloadLimit:
+    """The server caps a NOTIFY payload at 8000 bytes and *raises* past it -
+    InvalidParameterValue, inside the writing transaction.
+
+    So the cap cannot be left to the server. An oversized announcement would
+    not merely fail to arrive: it would abort the batch it describes, and a
+    mutation would be lost to the act of announcing it. Which makes it a
+    payload-size bug that presents as data loss, on exactly the large batches
+    a busy instance produces.
+    """
+
+    # Long enough that a modest batch overruns the limit: ids come from the
+    # graph's own data and are not bounded by anything this backend controls.
+    LONG_ID = "n" * 240
+
+    def _batch(self, count):
+        return [
+            EntityOperation.upsert_node(node_payload(f"{self.LONG_ID}{i:04d}"))
+            for i in range(count)
+        ]
+
+    @pytest.mark.parametrize("count", [1, 2, 7, 20, 32, 33, 40, 200])
+    def test_no_announcement_is_ever_too_long_for_the_server(
+        self, count, schema, backends
+    ):
+        """Both halves, over a range that crosses the limit rather than
+        approaching it: what `_encode` produces is under the cap, and the
+        server accepts it. Asserting only the first would pass against a
+        limit constant that is simply wrong, and asserting only the second
+        would pass against a `_encode` that never degrades at all - because
+        the server is what would raise, and the raise would be the bug.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        payload = backend._encode(self._batch(count))
+
+        assert len(payload.encode("utf-8")) < NOTIFY_PAYLOAD_LIMIT
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("SELECT pg_notify(%s, %s)", (backend._channel, payload))
+
+    def test_a_batch_too_large_to_describe_still_lands(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        batch = self._batch(60)
+
+        writer.apply_batch(batch)
+
+        assert len(writer.load_graph_data()["nodes"]) == 60
+        (change,) = collector.wait_for(1)
+        assert change.operations is None, (
+            "an announcement that cannot name what changed must say so, "
+            "not name part of it"
+        )
+
+    def test_a_batch_small_enough_to_describe_is_described(
+        self, listening, schema, backends
+    ):
+        """The other side of the same fence. Without it, degrading *every*
+        batch to a whole-graph reload would pass the test above and quietly
+        undo the entire slice."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        batch = self._batch(4)
+
+        writer.apply_batch(batch)
+
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == [
+            op.entity_id for op in batch
+        ]
+
+    def _largest_described(self, backend):
+        """The biggest announcement this backend will ever actually send.
+
+        Found by growing one id a byte at a time until `_encode` stops naming
+        the entities, then taking the step before. Measured through the
+        behaviour rather than by re-deriving the payload here: a test that
+        rebuilt the encoding to measure it would be asserting against its own
+        copy of the thing under test, and the first version of this did the
+        other wrong thing - it measured `_encode`'s OUTPUT, which is the
+        degraded form, so the search never converged.
+
+        The parametrised test above steps by a whole entry, about 250 bytes,
+        so it can straddle the limit without ever landing on it. This is what
+        finds the byte where it flips.
+        """
+        base = self._batch(30)
+        pad = 0
+        described = None
+        while True:
+            grown = list(base)
+            grown[-1] = EntityOperation.upsert_node(
+                node_payload(f"{self.LONG_ID}{'p' * pad}")
+            )
+            payload = backend._encode(grown)
+            if json.loads(payload).get("ops") is None:
+                assert described is not None, "even the smallest batch degraded"
+                return described
+            described = payload
+            pad += 1
+            assert pad < 2000, "the announcement never degraded"
+
+    def test_the_largest_announcement_it_will_send_is_one_the_server_accepts(
+        self, schema, backends
+    ):
+        """The boundary, from the only side that matters.
+
+        The cap is a comparison against a length the server rejects, and off
+        by one it is worse than useless: the payload it lets through is
+        exactly the one `pg_notify` refuses, inside the transaction the write
+        is in, so the batch dies of being described. Asserting the largest
+        payload the backend will ever send is one the server takes says that
+        without restating the comparison.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        payload = self._largest_described(backend)
+
+        assert len(payload.encode("utf-8")) < NOTIFY_PAYLOAD_LIMIT
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("SELECT pg_notify(%s, %s)", (backend._channel, payload))
+
+    def test_a_graph_whose_ids_are_not_ascii_announces_and_reads_back(
+        self, listening, schema, backends
+    ):
+        """Entity ids are graph data, not an ASCII-bounded namespace.
+
+        This is not the byte-versus-character test it looks like it should be.
+        `json.dumps` escapes non-ASCII by default, so what `_encode` produces
+        is always pure ASCII and the two counts can never differ - measured:
+        an a-umlaut becomes a six-character escape sequence in the payload,
+        costing six characters and six bytes alike. Writing the cap over the
+        encoded length is still right, because bytes are the unit the server's
+        own check uses, but it is not currently distinguishable and no test
+        can make it so.
+
+        (Not written with the character itself: this docstring is not raw, so
+        an escape written here would be collapsed back into the one character
+        the sentence is about, and the sentence would read as nonsense.)
+
+        What IS worth pinning, and was covered nowhere: such a graph works.
+        The escaping costs six bytes per character, so these ids reach the cap
+        six times sooner and this batch announces as a reload rather than by
+        name - and the entities still have to arrive.
+        """
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        wide = ["\u00e4\u00f6\u5b57" * 60 + f"{i:04d}" for i in range(20)]
+
+        writer.apply_batch(
+            [EntityOperation.upsert_node(node_payload(i, name="Wide")) for i in wide]
+        )
+
+        assert sorted(by_id(writer.load_graph_data(), "nodes")) == sorted(wide)
+        (change,) = collector.wait_for(1)
+        assert change.operations is None
+
+    def test_a_non_ascii_id_reads_back_by_name(self, listening, schema, backends):
+        """The read-back with a non-ASCII id, which is the half above cannot
+        reach: that batch degrades, so nothing looks the ids up in the store.
+        A short one stays under the cap and goes through `_resolve`."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        entity_id = "\u00e4\u00f6\u5b57-\u00e9\u00e8"
+
+        writer.upsert_node(node_payload(entity_id, name="Named"))
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert (op.action, op.entity_id) == ("upsert", entity_id)
+        assert op.payload["name"] == "Named"
+
+    def test_the_limit_is_the_servers_and_is_measured_here(self):
+        """The constant restated against the server that enforces it, so a
+        version that moved the cap fails here rather than in production.
+        `pg_notify` is asked directly: nothing of this backend is involved.
+        """
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                "SELECT pg_notify('co_limit_probe', %s)",
+                ("x" * (NOTIFY_PAYLOAD_LIMIT - 1),),
+            )
+            with pytest.raises(psycopg.errors.InvalidParameterValue):
+                conn.execute(
+                    "SELECT pg_notify('co_limit_probe', %s)",
+                    ("x" * NOTIFY_PAYLOAD_LIMIT,),
+                )
+
+
+class TestPostgresListensOutsideThePool:
+    """The listening connection is the instance's, not the pool's.
+
+    LISTEN registers on the session, so a pooled connection would stop
+    listening the moment it was returned - and the thread reading it blocks
+    for the instance's lifetime, which would hold a pooled connection out of
+    circulation for good. At the default pool size that is a quarter of the
+    instance's write capacity; at pool_size=1 it is all of it, and the
+    instance deadlocks on its first write.
+    """
+
+    def test_a_single_connection_pool_can_still_write_while_listening(
+        self, listening, schema, backends
+    ):
+        backend, _ = listening(pool_size=1)
+
+        backend.upsert_node(node_payload("a"))
+
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+    def test_the_listening_connection_is_not_one_of_the_pools(self, listening):
+        backend, _ = listening(pool_size=1)
+
+        with backend._pool.connection(timeout=10) as conn:
+            pooled = conn.info.backend_pid
+        assert backend._listen_conn is not None
+        assert backend._listen_conn.info.backend_pid != pooled
+
+    def test_the_listener_runs_with_no_pool_connection_held(self, schema, backends):
+        """The deadlock this ordering exists to prevent. A refresh waits for
+        the application's write queue, and that queue's writes need this pool.
+        Read the content back and keep the connection while calling the
+        listener, and the refresh waits for a writer that is waiting for the
+        connection the refresh is holding - at pool_size=1, for ever.
+
+        Stands in for the write queue with the pool itself: whether a pool
+        connection is available during the listener call is exactly the
+        question, and it is asked without needing a GraphStorage.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        outcome = []
+        done = threading.Event()
+
+        def listener(change):
+            try:
+                with backend._pool.connection(timeout=5) as conn:
+                    conn.execute("SELECT 1")
+                outcome.append("free")
+            except Exception as exc:
+                outcome.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                done.set()
+
+        backend.start_change_notification(listener)
+        try:
+            writer.upsert_node(node_payload("a"))
+            assert done.wait(30), "the listener was never called"
+        finally:
+            backend.stop_change_notification()
+        assert outcome == ["free"], (
+            "a pool connection was still held while the listener ran"
+        )
+
+
+class TestPostgresStartsListeningBeforeItReturns:
+    """A gap between returning and listening loses every write made in it.
+
+    And it is the worst possible gap to have: GraphStorage starts
+    notification as the last act of its constructor, so the caller's next
+    move is to serve traffic. A write arriving there is announced to a
+    connection that is not listening yet and is gone for good - there is no
+    catch-up, only the next write.
+    """
+
+    def test_a_write_immediately_after_start_is_not_lost(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+
+        backend.start_change_notification(collector)
+        try:
+            # No settling, no sleep: the next statement after start returns.
+            writer.upsert_node(node_payload("immediate"))
+            (change,) = collector.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+        assert [op.entity_id for op in change.operations] == ["immediate"]
+
+    def test_a_second_start_is_refused_rather_than_leaking_a_thread(self, listening):
+        backend, _ = listening()
+        with pytest.raises(RuntimeError):
+            backend.start_change_notification(_Collector())
+
+
+class TestPostgresStopsWhenAsked:
+    """`stop_change_notification` promises the listener is not called again.
+
+    A storage that has shut down has torn down the executor a refresh would
+    wait for, and what it holds is nobody's view any more. Signalling the
+    thread without joining it would leave a refresh already inside the
+    listener running against exactly that.
+    """
+
+    def test_no_change_arrives_after_stop_returns(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        writer.upsert_node(node_payload("before"))
+        collector.wait_for(1)
+
+        backend.stop_change_notification()
+        writer.upsert_node(node_payload("after"))
+
+        collector.stays_at(1)
+
+    def test_stop_waits_for_a_listener_call_already_running(self, schema, backends):
+        """The promise, asked directly rather than through a proxy.
+
+        "No change arrives after stop returns" is satisfied by the flag alone,
+        because _deliver re-reads it before calling - so a stop that only
+        signalled passed that test, and the whole suite, while returning with
+        a refresh still running against a model the caller was about to tear
+        down. What the docstring promises is about calls in flight, so this
+        holds one in flight and watches stop from outside.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        inside = threading.Event()
+        release = threading.Event()
+        left = threading.Event()
+
+        def slow_listener(change):
+            inside.set()
+            release.wait(60)
+            left.set()
+
+        backend.start_change_notification(slow_listener)
+        returned = threading.Event()
+        try:
+            writer.upsert_node(node_payload("a"))
+            assert inside.wait(30), "the listener was never called"
+
+            threading.Thread(
+                target=lambda: (backend.stop_change_notification(), returned.set()),
+                daemon=True,
+            ).start()
+
+            assert not returned.wait(2), (
+                "stop returned while a listener call was still running"
+            )
+            release.set()
+            assert returned.wait(60), "stop did not return once the listener left"
+            assert left.is_set()
+        finally:
+            release.set()
+            backend.stop_change_notification()
+
+    def test_stopping_releases_the_listening_connection(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.start_change_notification(_Collector())
+        pid = backend._listen_conn.info.backend_pid
+
+        backend.stop_change_notification()
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            assert not conn.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE pid = %s", (pid,)
+            ).fetchone(), "the listening connection outlived the listener"
+
+    def test_stopping_twice_is_not_an_error(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.start_change_notification(_Collector())
+        backend.stop_change_notification()
+        backend.stop_change_notification()
+
+    def test_stopping_one_that_never_started_is_not_an_error(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.stop_change_notification()
+
+    def test_close_stops_the_listener(self, schema, backends):
+        """A script or a test that only closes the backend would otherwise
+        leave a thread reading a connection whose pool is gone."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backend.start_change_notification(_Collector())
+        thread = backend._listen_thread
+
+        backend.close()
+
+        assert thread is not None
+        thread.join(30)
+        assert not thread.is_alive()
+
+
+class TestPostgresRecoversItsListeningConnection:
+    """A dropped listening connection is the quiet failure this capability
+    exists to remove, arrived at by another road.
+
+    The instance goes on answering reads, its health check passes, and it
+    never hears another write for as long as it runs. Nothing else notices:
+    the writers' announcements succeed, because NOTIFY does not care whether
+    anyone is listening. So reconnecting is not a nicety here - without it a
+    single server restart, failover or idle-connection reaper puts an
+    instance permanently and silently out of step.
+    """
+
+    @staticmethod
+    def _terminate(pid):
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+    def test_a_write_after_the_connection_dies_still_reaches_the_listener(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        try:
+            self._terminate(backend._listen_conn.info.backend_pid)
+            # Announced into the gap or after it - either way the instance
+            # must not be left behind.
+            writer.upsert_node(node_payload("survivor"))
+
+            changes = collector.wait_for(1, timeout=60)
+        finally:
+            backend.stop_change_notification()
+
+        assert any(change.operations is None for change in changes), (
+            "a reconnect must report that changes may have been missed: "
+            "the announcements sent while the connection was gone are not "
+            "replayed by the server"
+        )
+        assert "survivor" in by_id(backend.load_graph_data(), "nodes")
+
+    def test_the_listener_is_still_live_after_a_reconnect(self, schema, backends):
+        """Recovery is not one report and then silence: the point is that the
+        instance goes on hearing writes."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        try:
+            self._terminate(backend._listen_conn.info.backend_pid)
+            collector.wait_for(1, timeout=60)  # the reconnect's own report
+            settled = len(collector.changes)
+
+            writer.upsert_node(node_payload("later"))
+            changes = collector.wait_for(settled + 1, timeout=60)
+        finally:
+            backend.stop_change_notification()
+
+        named = [c for c in changes[settled:] if c.operations is not None]
+        assert named, "nothing was reported after the reconnect"
+        assert any(op.entity_id == "later" for op in named[-1].operations)
+
+    def test_a_connection_that_never_opens_fails_the_start(self, schema, backends):
+        """Boot loudly rather than into permanent staleness. An instance that
+        starts without listening looks healthy and is silently wrong, which is
+        the whole failure mode above - reached at boot instead of at runtime.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        # Outside the raises block: an assignment that raised would otherwise
+        # satisfy it, and the test would pass without calling start at all.
+        backend.conninfo = psycopg.conninfo.make_conninfo(
+            **{
+                **psycopg.conninfo.conninfo_to_dict(DSN),
+                "dbname": f"co_absent_{uuid.uuid4().hex[:12]}",
+            }
+        )
+        with pytest.raises(psycopg.OperationalError):
+            backend.start_change_notification(_Collector())
+        assert backend._listen_thread is None, "a failed start left a thread behind"
+
+
+class TestPostgresChannelsAreOnePerStore:
+    """Two graphs in one database must not hear each other, and the channel
+    name is what keeps them apart.
+
+    A channel is an SQL identifier: capped at 63 bytes where a schema name may
+    itself be 63, and case-folded unless quoted - so an interpolated name
+    would truncate one schema into another's channel, or have `LISTEN` and
+    `pg_notify` disagree about which channel a mixed-case schema meant.
+    """
+
+    def test_a_write_to_one_schema_is_not_reported_to_another(self, schema, backends):
+        other = f"{schema}_other"
+        listener_backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=other)
+        backends.extend([listener_backend, writer])
+        collector = _Collector()
+        listener_backend.start_change_notification(collector)
+        try:
+            writer.upsert_node(node_payload("elsewhere"))
+            collector.stays_at(0)
+        finally:
+            listener_backend.stop_change_notification()
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(f'DROP SCHEMA IF EXISTS "{other}" CASCADE')
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "public",
+            "MixedCase",
+            "mixedcase",
+            "with.a.dot",
+            "x" * 63,
+            "x" * 62 + "y",
+            'quo"te',
+        ],
+    )
+    def test_every_schema_name_yields_a_usable_channel(self, name):
+        channel = _channel_for(name)
+        assert len(channel.encode("utf-8")) <= 63
+        assert channel == channel.lower(), (
+            "an unquoted identifier is case-folded, so a channel with upper "
+            "case in it is a different channel to LISTEN than to pg_notify"
+        )
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(channel))
+            )
+            conn.execute("SELECT pg_notify(%s, %s)", (channel, "probe"))
+            assert [n.payload for n in conn.notifies(timeout=5, stop_after=1)] == [
+                "probe"
+            ]
+
+    def test_schemas_that_differ_at_all_get_different_channels(self):
+        """Including past the point an identifier would have truncated: two
+        63-byte schemas differing only in their last byte are two stores."""
+        assert _channel_for("x" * 63) != _channel_for("x" * 62 + "y")
+        assert _channel_for("MixedCase") != _channel_for("mixedcase")
+
+    def test_the_channel_space_is_wide_enough_not_to_collide(self):
+        """Two hard-coded pairs say nothing about a space that is too small.
+
+        G11 is "for any schema name", and a digest shortened to fit some
+        future constraint stays lower-case, stays under 63 bytes and still
+        round-trips through LISTEN - so every other assertion in this class
+        survives it. What does not survive is two tenants in one database:
+        they hear each other's writes and each reads the other's ids out of
+        its own schema, reporting deletes for entities that exist elsewhere.
+        Measured at four hex characters: a collision inside 211 names.
+        """
+        names = [f"co_tenant_{i}" for i in range(20_000)]
+        channels = {_channel_for(name) for name in names}
+        assert len(channels) == len(names), (
+            f"{len(names) - len(channels)} of {len(names)} schema names share "
+            f"a channel with another"
+        )
+
+
+class TestPostgresReadsContentFromTheStore:
+    """The announcement names identifiers; the store says what happened to
+    them.
+
+    Content cannot travel in the announcement - one node with an inline
+    embedding can exceed the server's whole payload allowance - so the
+    listener reads it back. That turns out to be the stronger design as well
+    as the necessary one: between the commit and the read a third instance may
+    have written the same entity again, and the announced action would then
+    apply something the store contradicts.
+    """
+
+    def test_an_upsert_carries_the_content_that_is_in_the_store(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.upsert_node(
+            node_payload("a", name="Alpha", tags=["x"], embedding=[0.5, 0.25])
+        )
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert op.payload["name"] == "Alpha"
+        assert op.payload["tags"] == ["x"]
+        assert op.payload["embedding"] == [0.5, 0.25]
+
+    def test_an_entity_the_store_no_longer_holds_is_reported_as_a_delete(
+        self, schema, backends
+    ):
+        """The race the read-back exists to survive. The announcement says an
+        entity was written; by the time it is read the entity is gone. Naming
+        it as an upsert with no payload would be a report the application
+        cannot apply; trusting the announcement would resurrect a row the
+        store does not have.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        removed = threading.Event()
+        real_resolve = type(backend)._resolve
+
+        def resolve_after_a_delete(self, named):
+            # Between the announcement and the read, exactly where the race
+            # is. Once only: the second call is the delete's own report.
+            if not removed.is_set():
+                removed.set()
+                writer.delete_node("a")
+            return real_resolve(self, named)
+
+        backend._resolve = resolve_after_a_delete.__get__(backend)
+        backend.start_change_notification(collector)
+        try:
+            writer.upsert_node(node_payload("a", name="Alpha"))
+            (change, *_) = collector.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+
+        assert [(op.kind, op.action, op.entity_id) for op in change.operations] == [
+            ("node", "delete", "a")
+        ]
+
+    def test_a_delete_is_reported_without_a_payload(self, listening, schema, backends):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.upsert_node(node_payload("a"))
+        collector.wait_for(1)
+
+        writer.delete_node("a")
+
+        changes = collector.wait_for(2)
+        (op,) = changes[1].operations
+        assert (op.action, op.entity_id, op.payload) == ("delete", "a", None)
+
+    def test_edges_and_nodes_are_read_from_their_own_tables(
+        self, listening, schema, backends
+    ):
+        """One id can name a node and an edge at once. Reading both from one
+        table - or matching on the id alone - would report the wrong content
+        for one of them, and there is nothing in the payload to catch it."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload("same", name="TheNode")),
+                EntityOperation.upsert_edge(
+                    edge_payload("same", "same", "same", label="TheEdge")
+                ),
+            ]
+        )
+
+        (change,) = collector.wait_for(1)
+        node_op, edge_op = change.operations
+        assert (node_op.kind, node_op.payload["name"]) == ("node", "TheNode")
+        assert (edge_op.kind, edge_op.payload["label"]) == ("edge", "TheEdge")
+
+
+class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
+    """A store is shared with instances that may run a version this one
+    predates - that is what a rolling deploy is.
+
+    An announcement this build cannot read is still an announcement. Ignoring
+    it would leave the instance stale for exactly as long as the newer one
+    keeps writing, and nothing would ever put it right: there is no catch-up,
+    only the next announcement, which this build cannot read either.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "not json at all",
+            "",
+            "[]",
+            '{"ops": []}',  # no origin: a newer shape, not ours to guess at
+            '{"o": "other", "ops": "not a list"}',
+            '{"o": "other", "ops": [["x", "a"]]}',  # a kind this build lacks
+            '{"o": "other", "ops": [["n", 7]]}',  # an id that is not a string
+            '{"o": "other", "ops": [["n"]]}',  # an entry of the wrong shape
+            '{"o": "other", "ops": [null]}',
+            # A two-character string unpacks as readily as a pair does, so
+            # this used to arrive as ("node", "e") - the one malformed shape
+            # that produced a confident delete instead of a reload.
+            '{"o": "other", "ops": ["ne"]}',
+            '{"o": "other", "ops": [["n", "a", "extra"]]}',
+            # null is the one non-string psycopg adapts without complaint: it
+            # matches nothing and comes back as a delete of None, where every
+            # other wrong type dies in the query. So the id's type has to be
+            # checked here rather than left to the server.
+            '{"o": "other", "ops": [["n", null]]}',
+        ],
+    )
+    def test_an_announcement_this_build_cannot_read_reloads_the_graph(
+        self, payload, listening
+    ):
+        backend, collector = listening()
+        before = backend._listen_conn.info.backend_pid
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("SELECT pg_notify(%s, %s)", (backend._channel, payload))
+
+        (change,) = collector.wait_for(1)
+        assert change.operations is None
+        # The reload must come from reading the announcement, not from the
+        # reconnect that follows an exception thrown out of the reading
+        # thread. Both end in a reload, so the connection is what tells them
+        # apart. Measured against the shape that checked nothing until the
+        # read-back: most of these payloads reached this assertion having
+        # killed the listening thread, and the reload arrived only as a side
+        # effect of reconnecting - which costs the connection, costs the
+        # backoff wait a drop now takes, and is reported as a lost connection
+        # naming a KeyError. The one that did not crash was worse: an unknown
+        # kind read as "edge" looked its id up in the wrong table and
+        # reported a confident delete of an entity nothing had announced.
+        assert backend._listen_conn is not None
+        assert backend._listen_conn.info.backend_pid == before, (
+            "the announcement was not read - it crashed the listening thread "
+            "and the reload arrived as a side effect of reconnecting"
+        )
+
+    def test_an_announcement_with_no_operations_key_reloads_the_graph(self, listening):
+        """The shape a whole-graph save sends, arriving from anywhere."""
+        backend, collector = listening()
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                "SELECT pg_notify(%s, %s)",
+                (backend._channel, '{"o": "someone-else"}'),
+            )
+
+        (change,) = collector.wait_for(1)
+        assert change.operations is None
+
+    def test_a_listener_that_raises_does_not_end_the_reporting(self, schema, backends):
+        """One bad refresh must not silence the instance for good: the thread
+        that dies here is the only one that would ever hear another write."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        seen = _Collector()
+
+        def angry(change):
+            seen(change)
+            if len(seen.changes) == 1:
+                raise RuntimeError("the application refused this one")
+
+        backend.start_change_notification(angry)
+        try:
+            writer.upsert_node(node_payload("first"))
+            seen.wait_for(1)
+            writer.upsert_node(node_payload("second"))
+            changes = seen.wait_for(2)
+        finally:
+            backend.stop_change_notification()
+
+        assert [op.entity_id for op in changes[1].operations] == ["second"]
+
+
+class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
+    """A reconnect is not free, and the loop that performs it must be paced.
+
+    Every reconnect reports `unknown()`, which costs each instance a drain of
+    its own write queue and a whole-graph reload. A flapping server - a
+    failover loop, an idle reaper, a connection limit being hit - therefore
+    turns into a reload storm driven by the recovery rather than by the
+    fault, and it is the recovering instance that pays.
+
+    The failure this pins is specific and was measured, not imagined: the
+    backoff was reset by the fact of having *connected*, which is the one
+    thing a flapping server does reliably, so the ceiling was unreachable on
+    exactly the failure it was written for. A dropped connection reconnected
+    76 times a second, and each of those was a whole-graph reload.
+    """
+
+    def test_a_connection_killed_as_fast_as_it_appears_does_not_spin(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        stop = threading.Event()
+        terminations = []
+
+        def keep_killing():
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                while not stop.is_set():
+                    conn = backend._listen_conn
+                    if conn is not None:
+                        try:
+                            killer.execute(
+                                "SELECT pg_terminate_backend(%s)",
+                                (conn.info.backend_pid,),
+                            )
+                            terminations.append(1)
+                        except Exception:
+                            pass  # it went away on its own; try again
+                    time.sleep(0.001)
+
+        killer_thread = threading.Thread(target=keep_killing, daemon=True)
+        killer_thread.start()
+        try:
+            time.sleep(_MEASURE_SECONDS)
+        finally:
+            stop.set()
+            killer_thread.join(30)
+            backend.stop_change_notification()
+
+        # A ceiling with room to spare rather than a tight bound: the point is
+        # the difference between a paced loop and an unpaced one, which is two
+        # orders of magnitude, not the exact schedule. Unpaced, this window
+        # produced hundreds.
+        assert len(collector.changes) <= _UNPACED_FLOOR, (
+            f"{len(collector.changes)} reloads in {_MEASURE_SECONDS}s from "
+            f"{len(terminations)} terminations: the reconnect is not backing "
+            f"off, so every drop costs every instance a whole-graph reload"
+        )
+        assert terminations, "the killer never caught a listening connection"
+
+        # The count alone pins only half of it. The defect had two halves -
+        # the drop path did not wait AT ALL, and the wait it would have used
+        # was reset by the mere fact of having connected - and a loop that
+        # waits a fixed minimum satisfies the ceiling above while never
+        # escalating. Measured: with the escalation removed and the wait
+        # kept, this window produced 18 reloads against a floor of 30, so the
+        # assertion passed against half the defect it names.
+        #
+        # The intervals are what tells the two apart: escalating they double,
+        # fixed they do not.
+        gaps = [b - a for a, b in zip(collector.arrivals, collector.arrivals[1:])]
+        assert len(gaps) >= 3, (
+            f"only {len(gaps) + 1} reconnects in {_MEASURE_SECONDS}s - too "
+            f"few to say anything about how they are spaced"
+        )
+        assert gaps[-1] >= 2 * gaps[0], (
+            f"reconnect intervals {[round(g, 3) for g in gaps]} are not "
+            f"growing: the wait is a fixed floor rather than a backoff, so a "
+            f"server that keeps dropping is never given room to recover"
+        )
+
+    def test_the_backoff_comes_back_down_after_a_connection_that_held(
+        self, schema, backends, monkeypatch
+    ):
+        """Escalating is half of it; coming back down is the other half.
+
+        Without the reset, an instance that flapped once during a failover
+        stays at the ceiling for the rest of its life - so the next drop, an
+        isolated one years later, costs thirty seconds of staleness for no
+        reason. Nothing pinned it: the flapping test asserts the intervals
+        grow, which a backoff that only ever grows satisfies perfectly.
+
+        `_NOTIFY_STABLE_SECONDS` is lowered so "a connection that stayed up"
+        fits in a test rather than in a minute. That is the constant's whole
+        meaning, so lowering it is what makes the case reachable, not what
+        makes it pass.
+        """
+        import backend.core.postgres_backend as module
+
+        monkeypatch.setattr(module, "_NOTIFY_STABLE_SECONDS", 0.5)
+        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", 4.0)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+        backend.start_change_notification(collector)
+
+        def drop():
+            # Wait for one to exist: between a drop and the reconnect there is
+            # no connection to drop, and the wait is exactly the backoff this
+            # test is about.
+            deadline = time.monotonic() + 30
+            conn = backend._listen_conn
+            while conn is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                conn = backend._listen_conn
+            assert conn is not None, "no listening connection appeared in 30s"
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                killer.execute(
+                    "SELECT pg_terminate_backend(%s)", (conn.info.backend_pid,)
+                )
+
+        try:
+            # Three drops in quick succession: the backoff escalates.
+            for _ in range(3):
+                drop()
+                time.sleep(0.05)
+            collector.wait_for(3, timeout=60)
+            escalated = len(collector.changes)
+
+            # Let the next connection hold well past _NOTIFY_STABLE_SECONDS,
+            # then drop it once. The reconnect after a connection that held
+            # must be prompt again, not at the escalated delay.
+            deadline = time.monotonic() + 30
+            while backend._listen_conn is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(1.5)
+            before = time.monotonic()
+            drop()
+            collector.wait_for(escalated + 1, timeout=60)
+            recovered_in = collector.arrivals[escalated] - before
+        finally:
+            backend.stop_change_notification()
+
+        assert recovered_in < 1.0, (
+            f"the reconnect after a connection that stayed up took "
+            f"{recovered_in:.2f}s: the backoff never comes back down, so one "
+            f"flap costs this instance the ceiling for the rest of its life"
+        )
+
+    def test_it_is_still_listening_after_the_flapping_stops(self, schema, backends):
+        """Backing off must not mean giving up: an instance that paced itself
+        through a failover and then went deaf is worse than one that spun."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        backend.start_change_notification(collector)
+        try:
+            for _ in range(3):
+                conn = backend._listen_conn
+                if conn is not None:
+                    with psycopg.connect(DSN, autocommit=True) as killer:
+                        killer.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (conn.info.backend_pid,),
+                        )
+                time.sleep(0.05)
+            collector.wait_for(1, timeout=60)
+            settled = len(collector.changes)
+
+            writer.upsert_node(node_payload("after_the_storm"))
+            changes = collector.wait_for(settled + 1, timeout=60)
+        finally:
+            backend.stop_change_notification()
+
+        named = [c for c in changes[settled:] if c.operations is not None]
+        assert named, "nothing was reported once the connection settled"
+        assert any(op.entity_id == "after_the_storm" for op in named[-1].operations)
+
+
+class TestPostgresDoesNotStartASecondListener:
+    """A start that fails must not leave a live thread behind it.
+
+    The handle to the listening thread is what the next start consults. Clear
+    it while the thread is still running - which a stop whose join timed out
+    used to do - and the next start finds nothing running, clears the stop
+    flag, and revives the abandoned thread beside the new one. Measured: two
+    listening connections, every change delivered to the application twice,
+    and an instance costing pool_size + 2 connections against a budget
+    written for pool_size + 1.
+    """
+
+    def test_a_start_that_times_out_does_not_leave_a_startable_backend(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        released = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def hang_once(*args, **kwargs):
+            # A server that accepts the connection and never answers: the
+            # shape the connect timeout exists for, and the one that made
+            # start's own bound expire against a thread still running.
+            released.wait(60)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_LISTEN_START_TIMEOUT", 1.0)
+        monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 1.0)
+        monkeypatch.setattr(module.psycopg, "connect", hang_once)
+
+        try:
+            with pytest.raises(TimeoutError):
+                backend.start_change_notification(_Collector())
+
+            live = [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
+            # The thread is still there - that is the situation, not the bug.
+            # The bug was the backend claiming to have none.
+            with pytest.raises(RuntimeError):
+                backend.start_change_notification(_Collector())
+            assert len(
+                [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
+            ) <= len(live), "a second listener was started beside the abandoned one"
+            assert backend._listen_stop.is_set(), (
+                "a start that failed left the abandoned thread un-signalled: "
+                "when the hang clears it will connect, LISTEN, and call a "
+                "listener the caller believes was never installed"
+            )
+        finally:
+            released.set()
+            backend.stop_change_notification()
+
+    def test_a_start_that_times_out_never_calls_the_listener_it_was_given(
+        self, schema, backends, monkeypatch
+    ):
+        """The other half, and the one a thread count cannot see.
+
+        A start that raises has told its caller no listener is installed. The
+        thread it abandoned does not know that: when whatever held it up
+        clears, it connects, registers LISTEN and starts delivering to a
+        callable the application has already forgotten - into a model that,
+        for a GraphStorage, may be half torn down.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        import backend.core.postgres_backend as module
+
+        released = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def hang_once(*args, **kwargs):
+            released.wait(60)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_LISTEN_START_TIMEOUT", 1.0)
+        monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 1.0)
+        monkeypatch.setattr(module.psycopg, "connect", hang_once)
+        forgotten = _Collector()
+
+        try:
+            with pytest.raises(TimeoutError):
+                backend.start_change_notification(forgotten)
+            released.set()
+            # Long enough for the abandoned thread to get through connect and
+            # LISTEN, if it were going to.
+            time.sleep(1.0)
+            writer.upsert_node(node_payload("after_the_failed_start"))
+            forgotten.stays_at(0)
+        finally:
+            released.set()
+            backend.stop_change_notification()
+
+
+class TestPostgresSurvivesAReadBackItCannotComplete:
+    """The store not answering for an announcement is not the announcement's
+    fault, and must not cost the listening connection.
+
+    The read-back runs on the pool, which the instance's own writers are
+    using. A pool timeout under contention, or a connection dropped between
+    the announcement and the read, would otherwise leave the reading thread -
+    taking the listening connection with it, costing a reconnect and the
+    backoff wait after it. A transient read amplified into the most expensive
+    recovery this backend has, and on the load that caused it.
+    """
+
+    # Not one class, and not one family. Only PoolTimeout and QueryCanceled
+    # are OperationalError subclasses; InterfaceError, InsufficientPrivilege
+    # and UndefinedTable are not - measured against the installed driver. A
+    # containment narrowed to OperationalError therefore looks right, passes a
+    # test that injects one, and lets a revoked grant or a dropped socket out
+    # of the reading thread. The plain ValueError is there so the case does
+    # not quietly become "any driver error": what must survive is anything at
+    # all, because whatever it is, the change was real.
+    READ_BACK_FAILURES = [
+        psycopg.OperationalError("injected: the pool would not answer"),
+        psycopg.InterfaceError("injected: the connection was already closed"),
+        psycopg.errors.InsufficientPrivilege("injected: SELECT was revoked"),
+        psycopg.errors.UndefinedTable("injected: the table went away"),
+        ValueError("injected: something no one predicted"),
+    ]
+
+    @pytest.mark.parametrize(
+        "failure", READ_BACK_FAILURES, ids=lambda e: type(e).__name__
+    )
+    def test_a_read_back_that_fails_reports_a_reload_and_keeps_listening(
+        self, failure, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        real_resolve = type(backend)._resolve
+        failed = threading.Event()
+
+        def fail_once(self, pairs):
+            if not failed.is_set():
+                failed.set()
+                raise failure
+            return real_resolve(self, pairs)
+
+        backend._resolve = fail_once.__get__(backend)
+        backend.start_change_notification(collector)
+        try:
+            before = backend._listen_conn.info.backend_pid
+            writer.upsert_node(node_payload("a"))
+            (first,) = collector.wait_for(1)
+            assert first.operations is None, (
+                "a read-back that failed must report that something changed, "
+                "not nothing and not a guess"
+            )
+            assert backend._listen_conn is not None
+            assert backend._listen_conn.info.backend_pid == before, (
+                "the failed read-back took the listening connection with it"
+            )
+
+            writer.upsert_node(node_payload("b"))
+            changes = collector.wait_for(2)
+        finally:
+            backend.stop_change_notification()
+
+        assert [op.entity_id for op in changes[1].operations] == ["b"]
+
+
+class TestPostgresReportsAContractViolationDistinctly:
+    """`ExternalChangeRefused` means this backend reported on a thread that
+    was running a write - its own obligation, stated on ChangeNotifyingBackend
+    and impossible to see from the application's side.
+
+    It subclasses RuntimeError, so a generic handler would swallow it into the
+    same line as an application bug. The refusal says the refresh did not
+    happen and this instance is now behind, which is a different thing to
+    report and a different thing to fix.
+    """
+
+    def test_a_refusal_is_reported_and_reporting_continues(
+        self, schema, backends, capsys
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        seen = _Collector()
+
+        def refusing(change):
+            seen(change)
+            if len(seen.changes) == 1:
+                raise ExternalChangeRefused("reported from a writing thread")
+
+        backend.start_change_notification(refusing)
+        try:
+            writer.upsert_node(node_payload("first"))
+            seen.wait_for(1)
+            writer.upsert_node(node_payload("second"))
+            changes = seen.wait_for(2)
+        finally:
+            backend.stop_change_notification()
+
+        assert [op.entity_id for op in changes[1].operations] == ["second"]
+        assert "refused" in capsys.readouterr().out
+
+
+class TestPostgresStopFromInsideTheListener:
+    """A listener that closes its own backend cannot be joined by the stop it
+    triggered - and that is not the same thing as nothing running.
+
+    Reading it as such cleared the thread handle on the one thread guaranteed
+    to still be alive, which is precisely what the handle is kept for: the
+    next start would then find nothing running, clear the stop flag, and the
+    old thread would fall back into its reconnect branch beside the new one.
+    Two listeners, every change delivered twice - the round-1 failure reached
+    by another road.
+    """
+
+    def test_stopping_from_the_listener_does_not_free_the_handle(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        stopped = threading.Event()
+        handle_after = []
+
+        def stop_myself(change):
+            backend.stop_change_notification()
+            handle_after.append(backend._listen_thread)
+            stopped.set()
+
+        backend.start_change_notification(stop_myself)
+        try:
+            writer.upsert_node(node_payload("a"))
+            assert stopped.wait(30), "the listener was never called"
+        finally:
+            backend.stop_change_notification()
+
+        assert handle_after and handle_after[0] is not None, (
+            "stop called from the listener cleared the handle to the thread "
+            "it was running on, which the next start would read as nothing "
+            "running"
+        )
+
+
+class TestPostgresPacesAServerThatRefusesConnections:
+    """The other branch of the reconnect loop, and the one the flapping test
+    never enters.
+
+    That test kills connections the server has already accepted. A server that
+    is *down* refuses them, which is a different path with its own wait - and
+    it is the path the constant's own comment justifies: "so a server that is
+    down does not get hammered by every instance at once". Every instance in
+    the deployment is in this loop at the same moment, which is exactly when
+    a tight retry is worst.
+    """
+
+    def _refused_connect_gaps(self, backend, monkeypatch, ceiling, attempts_wanted):
+        """Drive the connect-failure branch and time the attempts.
+
+        The escalation and the ceiling need different windows and are asserted
+        in different tests: a ceiling low enough to bind saturates the
+        doubling after two steps, so a growth assertion under it has nothing
+        left to see. Measured - one test asserting both passed on good code
+        only by rounding.
+        """
+        import backend.core.postgres_backend as module
+
+        attempts = []
+        refusing = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def refuse_while_asked(*args, **kwargs):
+            if refusing.is_set():
+                attempts.append(time.monotonic())
+                raise psycopg.OperationalError("injected: connection refused")
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", ceiling)
+        monkeypatch.setattr(module.psycopg, "connect", refuse_while_asked)
+
+        backend.start_change_notification(_Collector())
+        # Opened BEFORE the refusal is armed: the patch is on the module
+        # `psycopg` object, which this test uses too, so a connection taken
+        # afterwards would be refused along with the backend's.
+        killer = psycopg.connect(DSN, autocommit=True)
+        try:
+            victim = backend._listen_conn.info.backend_pid
+            refusing.set()
+            # Drop the established connection so the loop goes round and meets
+            # the refusing connect.
+            killer.execute("SELECT pg_terminate_backend(%s)", (victim,))
+            deadline = time.monotonic() + 40
+            while len(attempts) < attempts_wanted and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            refusing.clear()
+            killer.close()
+            backend.stop_change_notification()
+
+        assert len(attempts) >= attempts_wanted, (
+            f"only {len(attempts)} connect attempts of {attempts_wanted} in "
+            f"40s - the loop is not retrying a refused connection at all"
+        )
+        return [b - a for a, b in zip(attempts, attempts[1:])]
+
+    def test_a_refused_connection_is_retried_with_a_growing_wait(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        # High enough that the ceiling never binds: this is about the shape of
+        # the escalation, not about where it stops.
+        gaps = self._refused_connect_gaps(backend, monkeypatch, 30.0, 4)
+
+        assert gaps[-1] >= 2 * gaps[0], (
+            f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
+            f"spaced: a server that is refusing connections is being retried "
+            f"at a fixed rate by every instance at once"
+        )
+
+    def test_the_wait_between_refused_connections_has_a_ceiling(
+        self, schema, backends, monkeypatch
+    ):
+        """The other end of the same schedule.
+
+        Growth alone does not need a bound, and unbounded doubling satisfies
+        the test above perfectly - while an instance that flapped for a few
+        minutes then waits hours, staying deaf long after the server came
+        back. Which is the same silent staleness this capability exists to
+        remove, reached from the recovery side.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        # Read before the helper patches it, so the message can tell the two
+        # apart. The shipped ceiling is thirty seconds; the one in force here
+        # is a stand-in, and reporting the stand-in as "the documented
+        # ceiling" would send a reader looking for a constant that does not
+        # exist.
+        shipped = module.NOTIFY_RECONNECT_MAX_SECONDS
+        # Low enough to bind, and enough attempts that an unbounded schedule
+        # has had room to pass it: bounded this gives 0.5, 1, 1, 1, 1;
+        # unbounded, 0.5, 1, 2, 4, 8.
+        in_force = 1.0
+        gaps = self._refused_connect_gaps(backend, monkeypatch, in_force, 6)
+
+        assert max(gaps) <= in_force + 0.6, (
+            f"connect attempts {[round(g, 3) for g in gaps]} passed the "
+            f"ceiling of {in_force}s in force for this test (the shipped one "
+            f"is {shipped}s): the backoff has no upper bound"
+        )
+
+    def test_the_listening_connection_carries_a_connect_timeout(
+        self, schema, backends, monkeypatch
+    ):
+        """Without it, start's own bound is the only thing that expires and it
+        expires against a thread still inside connect - which is the state
+        that cannot be joined and cannot be started over. A server that
+        accepts TCP and never answers is the ordinary way to reach it: a
+        firewall dropping packets, a failing-over primary.
+
+        Asserted on the call rather than through behaviour, because the
+        behaviour it prevents is an unbounded hang.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        seen = []
+        real_connect = module.psycopg.connect
+
+        def record(*args, **kwargs):
+            seen.append(kwargs)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module.psycopg, "connect", record)
+        backend.start_change_notification(_Collector())
+        backend.stop_change_notification()
+
+        assert seen, "the listening connection was never opened"
+        assert "connect_timeout" in seen[0], (
+            "the listening connection is opened without a connect timeout, so "
+            "a server that accepts TCP and never answers holds the thread for "
+            "as long as the kernel allows"
+        )
+        assert seen[0]["connect_timeout"] < module._LISTEN_START_TIMEOUT, (
+            "a connect timeout at or above start's own bound cannot keep "
+            "start from expiring against a live thread"
+        )
+
+
+class TestPostgresKeepsItsPromiseWhenTheJoinFails:
+    """A stop whose join times out still keeps its promise, and its handle.
+
+    The suite's other stop cases all join successfully, so the failed-join
+    path - the one stop's docstring makes its promise about - was reached by
+    nothing.
+
+    What this pins is the outcome, not any one mechanism. THREE things stop a
+    change arriving after such a stop: `_deliver` re-reads the flag, the
+    reading loop checks it before going back for another notification, and
+    `stop` clears the listener. Any one of them alone is enough on this path,
+    so removing any one does not fail this - measured. What the second case
+    below adds is the outcome with all three gone, which is reachable more
+    cheaply than it looked: two notifications committed in ONE transaction
+    arrive in one read, so the loop is already holding the second when the
+    listener blocks on the first.
+    """
+
+    def test_nothing_reaches_the_listener_after_a_stop_whose_join_timed_out(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        import backend.core.postgres_backend as module
+
+        collector = _Collector()
+        inside = threading.Event()
+        release = threading.Event()
+
+        def slow_then_recording(change):
+            if not inside.is_set():
+                inside.set()
+                release.wait(60)
+            collector(change)
+
+        backend.start_change_notification(slow_then_recording)
+        try:
+            writer.upsert_node(node_payload("first"))
+            assert inside.wait(30), "the listener was never called"
+
+            # The join cannot succeed: the thread is inside the listener,
+            # which is waiting on us.
+            monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 0.2)
+            backend.stop_change_notification()
+            assert backend._listen_thread is not None, (
+                "a join that timed out still cleared the handle"
+            )
+
+            release.set()
+            writer.upsert_node(node_payload("second"))
+            # The first change was already in flight and may still land; what
+            # must never arrive is anything announced after stop returned.
+            time.sleep(2.0)
+            assert not any(
+                op.entity_id == "second"
+                for change in collector.changes
+                if change.operations
+                for op in change.operations
+            ), (
+                "a change announced after stop returned reached the listener: "
+                "the promise rests on the flag, not on the join"
+            )
+        finally:
+            release.set()
+
+
+class TestPostgresReconnectsWithoutLeakingConnections:
+    """Five reconnects, and the server's connection count back where it was.
+
+    The server is the shared resource this backend is careful with, and
+    nothing counted it across a reconnect. What this does NOT establish is
+    that the explicit close is what keeps it there: measured, CPython's
+    refcounting closes a dropped connection promptly, so removing the close
+    leaves this passing. The close is still right - depending on the
+    interpreter's collection strategy for a server resource is not a thing to
+    do deliberately - but its reason is determinism rather than a leak, and
+    the production comment was corrected to say so.
+    """
+
+    def test_repeated_drops_leave_no_connections_behind(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+
+        def total():
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                return conn.execute(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database()"
+                ).fetchone()[0]
+
+        backend.start_change_notification(collector)
+        try:
+            baseline = total()
+            for _ in range(5):
+                conn = backend._listen_conn
+                if conn is not None:
+                    with psycopg.connect(DSN, autocommit=True) as killer:
+                        killer.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (conn.info.backend_pid,),
+                        )
+                time.sleep(0.4)
+            collector.wait_for(1, timeout=60)
+            time.sleep(1.0)
+            after = total()
+        finally:
+            backend.stop_change_notification()
+
+        assert after <= baseline + 1, (
+            f"{after - baseline} connections above baseline after five "
+            f"reconnects: the loop is leaking one per attempt"
+        )
+
+
+class TestPostgresCanListenAgainAfterStopping:
+    """Nothing in this module ever started notification twice on one backend.
+
+    `start` resets three pieces of per-run state - the thread handle, the stop
+    flag and the recorded start error - and only the handle was pinned. Both
+    of the others hide a backend that looks healthy and hears nothing:
+
+    - leave the stop flag set and `start` blocks for its whole bound and then
+      raises, although the connection is fine. `close()` calls `stop`, so any
+      backend that has ever been stopped could never listen again.
+    - leave the error set and a start that SUCCEEDS raises the previous
+      attempt's failure, and tears down the working listener on its way out.
+
+    Neither is reachable from GraphStorage, which starts once. Both are
+    reachable from a script, a test, or any future caller that reconnects a
+    backend rather than building a new one.
+    """
+
+    def test_a_backend_that_was_stopped_can_start_again(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+
+        backend.start_change_notification(_Collector())
+        backend.stop_change_notification()
+
+        second = _Collector()
+        backend.start_change_notification(second)
+        try:
+            writer.upsert_node(node_payload("after_restart"))
+            (change,) = second.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+        assert [op.entity_id for op in change.operations] == ["after_restart"]
+
+    def test_a_start_that_failed_does_not_poison_the_next_one(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        good = backend.conninfo
+        backend.conninfo = psycopg.conninfo.make_conninfo(
+            **{
+                **psycopg.conninfo.conninfo_to_dict(DSN),
+                "dbname": f"co_absent_{uuid.uuid4().hex[:12]}",
+            }
+        )
+        with pytest.raises(psycopg.OperationalError):
+            backend.start_change_notification(_Collector())
+
+        backend.conninfo = good
+        collector = _Collector()
+        # The failure above must not be raised at this one, and - the quieter
+        # half - must not have this successful start tear itself down on the
+        # way out.
+        backend.start_change_notification(collector)
+        try:
+            writer.upsert_node(node_payload("after_a_failed_start"))
+            (change,) = collector.wait_for(1)
+        finally:
+            backend.stop_change_notification()
+        assert [op.entity_id for op in change.operations] == ["after_a_failed_start"]
+
+
+class TestPostgresReadsEachKindEvenAlone:
+    """A write that names only one kind is the ordinary case, and it was the
+    one no notification test made.
+
+    Every case in this module that names an edge names a node in the same
+    batch, so `_resolve`'s per-table loop always ran its node arm first with
+    something to look up. Change its skip-the-empty-kind `continue` to a
+    `break` - one character - and a write of edges alone stops before the edge
+    table is read: every other instance is told the edge was DELETED while the
+    store holds it, and deletes a live edge. The suite passes.
+    """
+
+    def test_an_edge_written_alone_is_reported_as_an_upsert(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        collector.wait_for(1)
+
+        writer.upsert_edge(edge_payload("aa", "a", "a", label="Alone"))
+
+        changes = collector.wait_for(2)
+        (op,) = changes[1].operations
+        assert (op.kind, op.action, op.entity_id) == ("edge", "upsert", "aa")
+        assert op.payload["label"] == "Alone"
+
+    def test_a_node_written_alone_is_reported_as_an_upsert(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+
+        writer.upsert_node(node_payload("solo", name="Solo"))
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert (op.kind, op.action, op.entity_id) == ("node", "upsert", "solo")
+        assert op.payload["name"] == "Solo"
+
+    def test_a_batch_of_edges_alone_is_reported_whole(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        collector.wait_for(1)
+
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_edge(edge_payload(f"e{i}", "a", "a"))
+                for i in range(5)
+            ]
+        )
+
+        changes = collector.wait_for(2)
+        assert [(op.kind, op.action) for op in changes[1].operations] == [
+            ("edge", "upsert")
+        ] * 5
+
+
+class TestPostgresNamesEveryEntityOrNone:
+    """An announcement names all of what it names, or it names none of them.
+
+    "Name as many as fit" is the plausible alternative to degrading, and it is
+    silently wrong: the entities past the cut are never reported by name and
+    never covered by an `unknown()` either, so every other instance diverges
+    permanently with nothing left to notice it. Nothing pinned it - the
+    largest DESCRIBED batch anywhere else in this module is four operations,
+    and every case that crosses the cap crosses it with 240-byte ids, which
+    degrade whole.
+    """
+
+    def test_a_large_batch_of_short_ids_is_named_in_full(
+        self, listening, schema, backends
+    ):
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        # Short enough that 250 of them still fit under the cap, so this batch
+        # must be described rather than degraded - and long enough past any
+        # round number that a truncation would show.
+        ids = [f"n{i:03d}" for i in range(250)]
+        batch = [EntityOperation.upsert_node(node_payload(i)) for i in ids]
+        assert json.loads(writer._encode(batch)).get("ops") is not None, (
+            "this batch no longer fits the cap, so it cannot say anything "
+            "about a described announcement naming all of its entities"
+        )
+
+        writer.apply_batch(batch)
+
+        (change,) = collector.wait_for(1)
+        assert [op.entity_id for op in change.operations] == ids
+
+
+class TestPostgresOriginIsWideEnoughNotToCollide:
+    """Two instances that share an origin are deaf to each other.
+
+    Each skips the other's announcements as its own, so both go on serving
+    what they last loaded, both look healthy, and nothing ever reports it -
+    the failure this capability exists to remove, produced by the mechanism
+    that prevents a different one. The channel digest has a collision test;
+    the origin does the same job on the same payload and had none, and
+    shortening it is exactly what the 8000-byte cap invites, because every
+    origin byte is a byte not spent on entity names.
+    """
+
+    def test_the_origin_keeps_a_full_uuid_of_width(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert len(backend._origin) == 32
+        int(backend._origin, 16)  # hex, so the width is the whole entropy
+
+    def test_backends_on_one_store_do_not_share_an_origin(self, schema, backends):
+        made = [PostgresGraphPersistenceBackend(DSN, schema=schema) for _ in range(200)]
+        backends.extend(made)
+        assert len({b._origin for b in made}) == len(made)
+
+
+class TestPostgresSubscribesBeforeItReloads:
+    """The reconnect's reload must read a store it is already subscribed to.
+
+    Deliver the `unknown()` before `LISTEN` is re-registered and the reload
+    reads a snapshot taken before the channel exists again - and a refresh
+    drains the application's write queue, so it can take seconds. Anything
+    announced in that window is in neither the reload nor the subscription:
+    permanently missed, with no further report coming. Which is the staleness
+    the reconnect exists to repair, reintroduced by the repair.
+
+    Asserted on the order of the two events rather than by racing a write into
+    a window measured in microseconds - a test that tried the race would pass
+    on a slow machine for the wrong reason.
+    """
+
+    def test_listen_is_registered_before_the_reconnect_reports(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        events = []
+        real_execute = psycopg.Connection.execute
+
+        def note_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                events.append("listen")
+            return real_execute(conn, query, *args, **kwargs)
+
+        collector = _Collector()
+
+        def note_report(change):
+            events.append("report")
+            collector(change)
+
+        psycopg.Connection.execute = note_listen
+        try:
+            backend.start_change_notification(note_report)
+            with psycopg.connect(DSN, autocommit=True) as killer:
+                killer.execute(
+                    "SELECT pg_terminate_backend(%s)",
+                    (backend._listen_conn.info.backend_pid,),
+                )
+            collector.wait_for(1, timeout=60)
+        finally:
+            psycopg.Connection.execute = real_execute
+            backend.stop_change_notification()
+
+        assert events[:1] == ["listen"], f"unexpected first event: {events[:3]}"
+        assert "report" in events, "the reconnect never reported"
+        # The report belongs to the SECOND listen, not before it.
+        assert events.index("report") > 1, (
+            f"the reconnect reported before re-registering LISTEN: {events}"
+        )
+
+
+class TestPostgresStopHoldsWithABatchAlreadyRead:
+    """The promise with a notification already in hand.
+
+    Two `pg_notify` calls in one transaction are delivered together and read
+    into one batch, so when the listener blocks on the first, the second is
+    already inside this process - past the server, past the socket, past the
+    read. That is the case where "stop returns and nothing else is delivered"
+    stops being obvious, and it is the one the suite could not reach before:
+    every other stop case has the loop go back to the server for the next
+    notification, where the loop's own flag check catches it.
+    """
+
+    def test_a_notification_already_read_is_not_delivered_after_stop(
+        self, schema, backends, monkeypatch
+    ):
+        import backend.core.postgres_backend as module
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        writer.apply_batch(
+            [
+                EntityOperation.upsert_node(node_payload("first")),
+                EntityOperation.upsert_node(node_payload("second")),
+            ]
+        )
+        seen = _Collector()
+        inside = threading.Event()
+        release = threading.Event()
+
+        def blocking(change):
+            seen(change)
+            if len(seen.changes) == 1:
+                inside.set()
+                release.wait(60)
+
+        backend.start_change_notification(blocking)
+        try:
+            # Two announcements, one transaction: the server releases them
+            # together and psycopg hands them over in one batch.
+            with psycopg.connect(DSN) as sender:
+                sender.execute(
+                    "SELECT pg_notify(%s, %s)",
+                    (backend._channel, '{"o": "elsewhere", "ops": [["n", "first"]]}'),
+                )
+                sender.execute(
+                    "SELECT pg_notify(%s, %s)",
+                    (backend._channel, '{"o": "elsewhere", "ops": [["n", "second"]]}'),
+                )
+                sender.commit()
+
+            assert inside.wait(30), "the listener was never called"
+            monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 0.2)
+            backend.stop_change_notification()
+            release.set()
+            time.sleep(2.0)
+        finally:
+            release.set()
+            backend.stop_change_notification()
+
+        delivered = [
+            op.entity_id
+            for change in seen.changes
+            if change.operations
+            for op in change.operations
+        ]
+        assert "second" not in delivered, (
+            "a notification the loop had already read was delivered after "
+            f"stop returned: {delivered}"
+        )

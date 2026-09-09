@@ -115,7 +115,9 @@ session: `change_notification` in the persistence seam
 (`core/storage_backends.py`). A backend whose store can have another writer
 reports what changed, and `GraphStorage` refreshes the affected entities —
 including the searchable-text cache and the vector index — without a restart.
-No shipped backend declares it: the file backend cannot be a shared store. See
+The default file backend does not declare it and cannot: one graph file is not
+a store two instances can share. `PostgresGraphPersistenceBackend` does,
+reporting over the server's own LISTEN/NOTIFY. See
 `docs/PERSISTENCE_BACKENDS.md`.
 
 The REST/ops surface is bounded to keep a single instance healthy under load:
