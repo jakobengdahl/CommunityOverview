@@ -232,9 +232,16 @@ What this means in practice:
   against. Replayed onto a different dataset it would resurrect nodes of the
   old one and overwrite same-id nodes of the new one with stale payloads. So
   `graph.json` carries a `journal_id` in its metadata — minted the first time
-  the app writes the file, kept for its lifetime — and every journal line
-  names the id it extends. A journal whose lines name a different id, or none
-  where the file has one, or one where the file has none, is **refused at
+  the app writes the file — and every journal line names the id it extends.
+  The id is kept for the file's lifetime, with one exception: if the
+  checkpoint that mints it writes the snapshot but is interrupted before it
+  empties the journal, that id sits in `graph.json` beside a journal that
+  still predates it — refused at load like any other mismatch, described
+  below — and the next successful append mints and writes a replacement,
+  superseding it once the journal is emptied too. No journal line ever names
+  the superseded id, so nothing already acknowledged is lost, but it is not
+  the id the file ends up keeping. A journal whose lines name a different id,
+  or none where the file has one, or one where the file has none, is **refused at
   startup** with a message naming both ids; the graph is not loaded, and
   nothing is deleted. If you replaced
   `graph.json` on purpose, delete the journal (its mutations belong to the old
