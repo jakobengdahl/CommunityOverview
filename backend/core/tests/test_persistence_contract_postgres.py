@@ -3904,6 +3904,52 @@ class TestPostgresDoesNotStartASecondListener:
             assert len(
                 [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
             ) <= len(live), "a second listener was started beside the abandoned one"
+            assert backend._listen_stop.is_set(), (
+                "a start that failed left the abandoned thread un-signalled: "
+                "when the hang clears it will connect, LISTEN, and call a "
+                "listener the caller believes was never installed"
+            )
+        finally:
+            released.set()
+            backend.stop_change_notification()
+
+    def test_a_start_that_times_out_never_calls_the_listener_it_was_given(
+        self, schema, backends, monkeypatch
+    ):
+        """The other half, and the one a thread count cannot see.
+
+        A start that raises has told its caller no listener is installed. The
+        thread it abandoned does not know that: when whatever held it up
+        clears, it connects, registers LISTEN and starts delivering to a
+        callable the application has already forgotten - into a model that,
+        for a GraphStorage, may be half torn down.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        import backend.core.postgres_backend as module
+
+        released = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def hang_once(*args, **kwargs):
+            released.wait(60)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_LISTEN_START_TIMEOUT", 1.0)
+        monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 1.0)
+        monkeypatch.setattr(module.psycopg, "connect", hang_once)
+        forgotten = _Collector()
+
+        try:
+            with pytest.raises(TimeoutError):
+                backend.start_change_notification(forgotten)
+            released.set()
+            # Long enough for the abandoned thread to get through connect and
+            # LISTEN, if it were going to.
+            time.sleep(1.0)
+            writer.upsert_node(node_payload("after_the_failed_start"))
+            forgotten.stays_at(0)
         finally:
             released.set()
             backend.stop_change_notification()
@@ -3921,8 +3967,27 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
     recovery this backend has, and on the load that caused it.
     """
 
+    # Not one class, and not one family. Only PoolTimeout and QueryCanceled
+    # are OperationalError subclasses; InterfaceError, InsufficientPrivilege
+    # and UndefinedTable are not - measured against the installed driver. A
+    # containment narrowed to OperationalError therefore looks right, passes a
+    # test that injects one, and lets a revoked grant or a dropped socket out
+    # of the reading thread. The plain ValueError is there so the case does
+    # not quietly become "any driver error": what must survive is anything at
+    # all, because whatever it is, the change was real.
+    READ_BACK_FAILURES = [
+        psycopg.OperationalError("injected: the pool would not answer"),
+        psycopg.InterfaceError("injected: the connection was already closed"),
+        psycopg.errors.InsufficientPrivilege("injected: SELECT was revoked"),
+        psycopg.errors.UndefinedTable("injected: the table went away"),
+        ValueError("injected: something no one predicted"),
+    ]
+
+    @pytest.mark.parametrize(
+        "failure", READ_BACK_FAILURES, ids=lambda e: type(e).__name__
+    )
     def test_a_read_back_that_fails_reports_a_reload_and_keeps_listening(
-        self, schema, backends
+        self, failure, schema, backends
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -3934,7 +3999,7 @@ class TestPostgresSurvivesAReadBackItCannotComplete:
         def fail_once(self, pairs):
             if not failed.is_set():
                 failed.set()
-                raise psycopg.OperationalError("injected: the pool would not answer")
+                raise failure
             return real_resolve(self, pairs)
 
         backend._resolve = fail_once.__get__(backend)
@@ -4034,4 +4099,220 @@ class TestPostgresStopFromInsideTheListener:
             "stop called from the listener cleared the handle to the thread "
             "it was running on, which the next start would read as nothing "
             "running"
+        )
+
+
+class TestPostgresPacesAServerThatRefusesConnections:
+    """The other branch of the reconnect loop, and the one the flapping test
+    never enters.
+
+    That test kills connections the server has already accepted. A server that
+    is *down* refuses them, which is a different path with its own wait - and
+    it is the path the constant's own comment justifies: "so a server that is
+    down does not get hammered by every instance at once". Every instance in
+    the deployment is in this loop at the same moment, which is exactly when
+    a tight retry is worst.
+    """
+
+    def test_a_refused_connection_is_retried_with_a_growing_wait(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        attempts = []
+        refusing = threading.Event()
+        real_connect = module.psycopg.connect
+
+        def refuse_while_asked(*args, **kwargs):
+            if refusing.is_set():
+                attempts.append(time.monotonic())
+                raise psycopg.OperationalError("injected: connection refused")
+            return real_connect(*args, **kwargs)
+
+        # Small enough that several attempts fit in a short window, while
+        # still leaving the escalation visible.
+        monkeypatch.setattr(module, "NOTIFY_RECONNECT_MAX_SECONDS", 2.0)
+        monkeypatch.setattr(module.psycopg, "connect", refuse_while_asked)
+
+        backend.start_change_notification(_Collector())
+        # Opened BEFORE the refusal is armed: the patch is on the module
+        # `psycopg` object, which this test uses too, so a connection taken
+        # afterwards would be refused along with the backend's.
+        killer = psycopg.connect(DSN, autocommit=True)
+        try:
+            victim = backend._listen_conn.info.backend_pid
+            refusing.set()
+            # Drop the established connection so the loop goes round and meets
+            # the refusing connect.
+            killer.execute("SELECT pg_terminate_backend(%s)", (victim,))
+            deadline = time.monotonic() + 10
+            while len(attempts) < 4 and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            refusing.clear()
+            killer.close()
+            backend.stop_change_notification()
+
+        assert len(attempts) >= 4, (
+            f"only {len(attempts)} connect attempts in 10s - the loop is not "
+            f"retrying a refused connection at all"
+        )
+        gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+        assert gaps[-1] >= 2 * gaps[0], (
+            f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
+            f"spaced: a server that is refusing connections is being retried "
+            f"at a fixed rate by every instance at once"
+        )
+
+    def test_the_listening_connection_carries_a_connect_timeout(
+        self, schema, backends, monkeypatch
+    ):
+        """Without it, start's own bound is the only thing that expires and it
+        expires against a thread still inside connect - which is the state
+        that cannot be joined and cannot be started over. A server that
+        accepts TCP and never answers is the ordinary way to reach it: a
+        firewall dropping packets, a failing-over primary.
+
+        Asserted on the call rather than through behaviour, because the
+        behaviour it prevents is an unbounded hang.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        import backend.core.postgres_backend as module
+
+        seen = []
+        real_connect = module.psycopg.connect
+
+        def record(*args, **kwargs):
+            seen.append(kwargs)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(module.psycopg, "connect", record)
+        backend.start_change_notification(_Collector())
+        backend.stop_change_notification()
+
+        assert seen, "the listening connection was never opened"
+        assert "connect_timeout" in seen[0], (
+            "the listening connection is opened without a connect timeout, so "
+            "a server that accepts TCP and never answers holds the thread for "
+            "as long as the kernel allows"
+        )
+        assert seen[0]["connect_timeout"] < module._LISTEN_START_TIMEOUT, (
+            "a connect timeout at or above start's own bound cannot keep "
+            "start from expiring against a live thread"
+        )
+
+
+class TestPostgresKeepsItsPromiseWhenTheJoinFails:
+    """A stop whose join times out still keeps its promise, and its handle.
+
+    The suite's other stop cases all join successfully, so the failed-join
+    path - the one stop's docstring makes its promise about - was reached by
+    nothing.
+
+    What this pins is the outcome, not the mechanism. Two things stop a change
+    arriving after such a stop: `_deliver` re-reads the flag, and the reading
+    loop checks it before going back for another notification. On this path
+    the second is enough on its own, so removing the first does not fail this
+    test. Isolating it needs a stop landing while the loop is inside a
+    reconnect, which is left as follow-up rather than claimed here.
+    """
+
+    def test_nothing_reaches_the_listener_after_a_stop_whose_join_timed_out(
+        self, schema, backends, monkeypatch
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        import backend.core.postgres_backend as module
+
+        collector = _Collector()
+        inside = threading.Event()
+        release = threading.Event()
+
+        def slow_then_recording(change):
+            if not inside.is_set():
+                inside.set()
+                release.wait(60)
+            collector(change)
+
+        backend.start_change_notification(slow_then_recording)
+        try:
+            writer.upsert_node(node_payload("first"))
+            assert inside.wait(30), "the listener was never called"
+
+            # The join cannot succeed: the thread is inside the listener,
+            # which is waiting on us.
+            monkeypatch.setattr(module, "_LISTEN_STOP_TIMEOUT", 0.2)
+            backend.stop_change_notification()
+            assert backend._listen_thread is not None, (
+                "a join that timed out still cleared the handle"
+            )
+
+            release.set()
+            writer.upsert_node(node_payload("second"))
+            # The first change was already in flight and may still land; what
+            # must never arrive is anything announced after stop returned.
+            time.sleep(2.0)
+            assert not any(
+                op.entity_id == "second"
+                for change in collector.changes
+                if change.operations
+                for op in change.operations
+            ), (
+                "a change announced after stop returned reached the listener: "
+                "the promise rests on the flag, not on the join"
+            )
+        finally:
+            release.set()
+
+
+class TestPostgresReconnectsWithoutLeakingConnections:
+    """Five reconnects, and the server's connection count back where it was.
+
+    The server is the shared resource this backend is careful with, and
+    nothing counted it across a reconnect. What this does NOT establish is
+    that the explicit close is what keeps it there: measured, CPython's
+    refcounting closes a dropped connection promptly, so removing the close
+    leaves this passing. The close is still right - depending on the
+    interpreter's collection strategy for a server resource is not a thing to
+    do deliberately - but its reason is determinism rather than a leak, and
+    the production comment was corrected to say so.
+    """
+
+    def test_repeated_drops_leave_no_connections_behind(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        collector = _Collector()
+
+        def total():
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                return conn.execute(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database()"
+                ).fetchone()[0]
+
+        backend.start_change_notification(collector)
+        try:
+            baseline = total()
+            for _ in range(5):
+                conn = backend._listen_conn
+                if conn is not None:
+                    with psycopg.connect(DSN, autocommit=True) as killer:
+                        killer.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (conn.info.backend_pid,),
+                        )
+                time.sleep(0.4)
+            collector.wait_for(1, timeout=60)
+            time.sleep(1.0)
+            after = total()
+        finally:
+            backend.stop_change_notification()
+
+        assert after <= baseline + 1, (
+            f"{after - baseline} connections above baseline after five "
+            f"reconnects: the loop is leaking one per attempt"
         )

@@ -786,11 +786,13 @@ class PostgresGraphPersistenceBackend:
                 )
                 conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self._channel)))
             except Exception as exc:
-                # Closed here, not left to the garbage collector: LISTEN can
-                # fail on a connection that opened, and a connection is the
-                # resource this backend is most careful with. A reconnect
-                # loop leaking one per attempt would exhaust the server while
-                # reporting only that it could not listen.
+                # Closed here rather than left to the interpreter: LISTEN
+                # can fail on a connection that opened, and a connection is
+                # the resource this backend is most careful with. Measured,
+                # so the reason is stated no larger than it is - CPython's
+                # refcounting does close the dropped connection promptly, so
+                # this is about not depending on that, not about a leak that
+                # would exhaust the server.
                 if conn is not None:
                     conn.close()
                 if not ready.is_set():
