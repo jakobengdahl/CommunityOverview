@@ -125,14 +125,27 @@ class TestTheDefaultBackendDidNotChange:
         )
 
     def test_a_storage_on_it_never_starts_notification(self, tmp_path):
-        """The other half: `GraphStorage` consults the declaration, so an
-        undeclared capability must also mean an unstarted listener."""
+        """The other half, and it has to WATCH rather than re-read the flag.
+
+        `capabilities_of` hands back the backend's own object, so asserting
+        `storage._backend_capabilities.change_notification` is False is the
+        same assertion as the equality above, made twice - it says nothing
+        about whether a listener was started. So the backend is given the
+        method and it is spied on: if `GraphStorage` ever starts notification
+        on some other condition, this is what notices.
+        """
         from backend.core.storage import GraphStorage
 
-        storage = GraphStorage(
-            persistence_backend=FileGraphPersistenceBackend(tmp_path / "graph.json")
-        )
+        started = []
+        backend = FileGraphPersistenceBackend(tmp_path / "graph.json")
+        backend.start_change_notification = lambda listener: started.append(listener)
+        backend.stop_change_notification = lambda: None
+
+        storage = GraphStorage(persistence_backend=backend)
         try:
-            assert not storage._backend_capabilities.change_notification
+            assert started == [], (
+                "the default backend was asked to start reporting external "
+                "changes, which it does not implement"
+            )
         finally:
             storage.shutdown_events()

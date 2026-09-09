@@ -678,7 +678,7 @@ so 97 available:
 |---:|---:|---:|:--|
 | 1 | 4 (default) | 5 | yes |
 | 10 | 4 (default) | 50 | yes, with room for psql and a migration |
-| 10 | 8 | 90 | yes, but nothing else may connect |
+| 10 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
 | 20 | 4 (default) | 100 | **no** |
 | 20 | 2 | 60 | yes |
 
@@ -696,21 +696,49 @@ than argued.
 
 `backend/core/tests/test_multi_instance_postgres.py` is the whole stack run
 against itself: two `GraphStorage` instances on one store, writing at the same
-time. It is the only test that does this — the backend's contract tests drive
-the backend, and the seam's tests drive `GraphStorage` against a reference
-backend.
+time, on the **entity** path and with content asserted.
 
 It asserts what the earlier layers cannot: that neither instance's writes are
-lost, that both converge on what the other wrote *and* on what the store holds,
-that a node arriving by report is searchable at the instance that received it,
-and that a delete takes the node's edges and its vector with it. Nothing in it
-calls `save()`: that is the whole-graph path, where two writers overwrite each
-other by design, which is why the contract's own two-writer clause asserts
-liveness and explicitly not content.
+lost when they touch **distinct** entities, that both converge on what the
+other wrote and on what the store holds, that a rename arriving by report is
+searchable there under its new name and no longer under its old one, and that
+a delete takes the node's edges and its vector with it. Nothing in it calls
+`save()`: that is the whole-graph path, where two writers overwrite each other
+by design, which is why the contract's own two-writer clause — which does drive
+two instances against a real store — asserts liveness and explicitly not
+content.
 
 One thing it checks before believing any of that: `_resync_pending` on both
 instances. A failed entity write is invisible to the caller — `add_nodes`
 discards the future and swallows the exception with a print — and it makes the
-instance drop every external report it is sent until the next flush heals it
-with a whole-graph write. Without that check a convergence assertion can pass
-vacuously, or a lost write can be laundered into an overwrite.
+instance drop every external report it is sent (with a warning per report)
+until the next write, flush or shutdown heals it with a whole-graph write.
+Without that check a convergence assertion can pass vacuously, or a lost write
+can be laundered into an overwrite.
+
+#### A contested entity does not converge under a true race
+
+Writes to **distinct** entities lose nothing; that is the property above, and
+it is the one this work exists to provide. Writes to the **same** entity are
+weaker, and weaker than *last writer wins* implies.
+
+`updated_at` is stamped in memory under the lock, and the write commits
+asynchronously afterwards — so commit order is not stamp order. The store
+settles on whichever write committed last; each instance keeps whichever stamp
+is newest, because `_is_newer` makes it discard a report older than what it
+holds. When those two disagree, the instance holding the newer stamp refuses
+every report of the store's value from then on, and the disagreement is
+permanent.
+
+Measured on PostgreSQL 16, five racing renames from each of two instances:
+**5 of 8 runs ended with the two instances on different values**, in both
+directions, with no failed write on either side. Sequenced writes — one
+delivered before the next is made — converge; the test module pins that case
+and deliberately does not pin the raced one, because a test asserting the
+divergence would lock in the defect.
+
+The fix this points at is the one *When both instances wrote the same thing*
+already names: an ordering the instances share rather than a wall clock. A
+store that assigns commit order can supply it; PostgreSQL can. Doing so is a
+change to the seam's conflict rule, not to this backend, and is tracked
+separately.
