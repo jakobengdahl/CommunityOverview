@@ -806,7 +806,6 @@ class TestTheConnectionBudgetIsWhatTheDocumentSays:
     ):
         name = f"co_budget_{uuid.uuid4().hex[:12]}"
         storage = instances(pool_size=pool_size, application_name=name)
-        assert self._connections(name) >= 0
         # A write opens the pool's connections; without one the pool is at
         # min_size 0 and the count says nothing about the budget.
         storage.add_nodes([_node("a")], [])

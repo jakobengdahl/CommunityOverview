@@ -1546,11 +1546,13 @@ class GraphStorage:
         ):
             # Reading after the settle means the answer is often this
             # instance's own write, and there is nothing in that to apply. Not
-            # a no-op if it were: the event would tell every subscriber a node
-            # changed when nothing about it did, and settling the vector would
-            # rebuild the index twice - once to evict the node's vector, once
-            # to put the same one back from the payload - for a description
-            # that did not change.
+            # a no-op if it were. The event would tell every subscriber a node
+            # changed when nothing about it did; and the settle would go to
+            # work on a description that did not change - rebuilding the index
+            # twice for a node that has a vector, once to evict it and once to
+            # put the same one back from the payload, and for a node that has
+            # none, asking the model for one, which is the whole cost on an
+            # install with no model to ask.
             return
         if (
             not authoritative

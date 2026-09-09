@@ -369,8 +369,10 @@ holds and applies nothing when they agree — including the vector, which it
 compares against the index rather than against the node, since an adopted
 embedding lives in the index and not on the node it describes. An edge upsert is
 never offered the comparison at all - it is applied as reported, exactly as it
-was before - so two instances that both wrote one edge do each emit an
-`edge.update` whose before and after are the same.
+was before - so the instance whose edge the store kept emits an `edge.update`
+whose before and after are the same. Its peer's is a real change rather than a
+redundant one, since `Edge` stamps a `created_at` of its own and two instances
+writing "the same" edge are not writing the same payload.
 
 **A backend that reports `entities` instead falls back to a wall clock.** Its
 content was gathered when the report was dispatched, which can predate the
