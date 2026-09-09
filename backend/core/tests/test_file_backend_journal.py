@@ -1052,6 +1052,33 @@ class TestJournalIdentity:
         assert "elsewhere" in str(excinfo.value)
         assert backend.journal_path.read_bytes() == before
 
+    def test_a_refusal_past_line_one_leaves_a_live_backend_unable_to_append(
+        self, tmp, backend
+    ):
+        """u03b: test_a_refused_reload_leaves_a_live_backend_unable_to_append
+        pins this for a line-1 mismatch; it applies just as much when the
+        foreign record is further into the journal. Refuse the load on the
+        SAME instance that wrote line 1 (not a freshly constructed one) and
+        confirm it comes away unmirrored, unable to append behind the lines
+        that were refused."""
+        backend.upsert_node(_payload("c"))
+        own = _lines(backend.journal_path)[0]
+        foreign = json.dumps(
+            {
+                "journal_id": "elsewhere",
+                "ops": [asdict_op(EntityOperation.upsert_node(_payload("x")))],
+            }
+        )
+        backend.journal_path.write_text(own + "\n" + foreign + "\n", encoding="utf-8")
+        before = backend.journal_path.read_bytes()
+
+        with pytest.raises(GraphJournalError, match="line 2"):
+            backend.load_graph_data()
+        with pytest.raises(GraphJournalError):
+            backend.upsert_node(_payload("d"))
+
+        assert backend.journal_path.read_bytes() == before
+
     def test_a_stamped_graph_with_an_unstamped_journal_is_refused(self, backend):
         backend.journal_path.write_text(
             json.dumps({"ops": [asdict_op(EntityOperation.upsert_node(_payload("c")))]})
@@ -1100,7 +1127,11 @@ class TestJournalIdentity:
         with pytest.raises(OSError, match="crash"):
             backend.upsert_node(_payload("c"))
 
-        with pytest.raises(GraphJournalError, match="loses nothing"):
+        with pytest.raises(
+            GraphJournalError,
+            match=r"folded into graph\.json by that checkpoint or superseded "
+            r"by that whole-graph save.*loses nothing",
+        ):
             FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
         (tmp / "g.journal.ndjson").unlink()
         assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
@@ -1436,6 +1467,146 @@ class TestJournalIdentity:
         assert _graph_metadata(tmp / "g.json")["journal_id"] == "given"
         backend.upsert_node(_payload("b"))
         assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == "given"
+
+    def test_a_failed_save_with_its_own_id_leaves_a_loaded_pre_stamp_mirror_unstamped(
+        self, tmp, monkeypatch
+    ):
+        """v07: twin of the fresh-file case above, but the backend already
+        loaded a pre-stamp file before the save. The incoming data still
+        carries its own id ('given'), but the write that would carry that id
+        to disk fails - the id must not sit in the mirror until it does, or
+        the next append names an id graph.json never actually held."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.load_graph_data()
+
+        data = _snapshot("z")
+        data["metadata"]["journal_id"] = "given"
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(data)
+        assert "journal_id" not in backend._metadata
+
+        monkeypatch.setattr(json, "dump", real_dump)
+        fresh = FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()
+        assert _ids(fresh) == {"a"}, "the aborted save never reached disk"
+
+    def test_a_failed_save_on_a_never_loaded_backend_leaves_the_mirror_unstamped(
+        self, tmp, monkeypatch
+    ):
+        """v06/v10: the same hazard as test_a_failed_whole_graph_save_leaves_
+        the_mirror_unstamped, but the very first call on a fresh instance is
+        the failing save - there is no prior load_graph_data() to build the
+        mirror, so save_graph_data must build it itself, unstamped, and the
+        failure must not stamp it either. The mirror already holds the save's
+        nodes at the point of failure - only the id is missing."""
+        (tmp / "g.json").write_text(json.dumps(_snapshot("a")), encoding="utf-8")
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(_snapshot("a", "z"))
+        assert "journal_id" not in _graph_metadata(tmp / "g.json")
+        assert set(backend._nodes) == {"a", "z"}, (
+            "the mirror holds the save's nodes despite the failed write"
+        )
+
+        monkeypatch.setattr(json, "dump", real_dump)
+        backend.upsert_node(_payload("b"))
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+        assert stamp, "the append stamped the file first"
+        assert [r["journal_id"] for r in _records(tmp / "g.journal.ndjson")] == [stamp]
+        assert _ids(FileGraphPersistenceBackend(tmp / "g.json").load_graph_data()) == {
+            "a",
+            "z",
+            "b",
+        }
+
+    def test_a_reload_onto_a_swapped_stamped_file_checkpoints_under_that_files_id(
+        self, tmp
+    ):
+        """s2b (round 3): reload a live backend onto a *different*, validly
+        stamped graph.json (journal removed, so nothing to replay). The
+        mirror must take the new file's id outright - not whatever this same
+        instance minted or held before the swap - so a mutation journaled
+        after the reload, and the checkpoint that folds it back in, both
+        carry the new file's id rather than a stale, cached one."""
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        backend.save_graph_data(_snapshot("a"))
+        stamp_a = _graph_metadata(tmp / "g.json")["journal_id"]
+
+        other = FileGraphPersistenceBackend(tmp / "other.json")
+        other.save_graph_data(_snapshot("z"))
+        stamp_b = _graph_metadata(tmp / "other.json")["journal_id"]
+        assert stamp_b != stamp_a
+        (tmp / "g.json").write_bytes((tmp / "other.json").read_bytes())
+
+        backend.load_graph_data()
+        backend.upsert_node(_payload("y"))
+        assert _records(tmp / "g.journal.ndjson")[0]["journal_id"] == stamp_b
+        backend.checkpoint()
+
+        assert _graph_metadata(tmp / "g.json")["journal_id"] == stamp_b
+        assert _lines(tmp / "g.journal.ndjson") == []
+
+    def test_a_failed_saves_pre_write_mirror_metadata_replaces_rather_than_merges(
+        self, tmp, monkeypatch
+    ):
+        """v08 (marginal): the first save seeds a metadata key the renamed
+        save omits. If the pre-write mirror metadata merged onto the
+        previous mirror instead of replacing it outright, that key would
+        survive into the checkpoint though the renamed save never carried
+        it - pinning replace, not merge, semantics."""
+        backend = FileGraphPersistenceBackend(tmp / "g.json")
+        seed = _snapshot("a")
+        seed["metadata"]["seeded_only"] = "from the first save"
+        backend.save_graph_data(seed)
+        stamp = _graph_metadata(tmp / "g.json")["journal_id"]
+
+        renamed = _snapshot("a", "z")
+        renamed["metadata"]["graph_name"] = "renamed"
+        real_dump = json.dump
+        calls = {"n": 0}
+
+        def failing_dump(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("disk full")
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr(json, "dump", failing_dump)
+        with pytest.raises(OSError, match="disk full"):
+            backend.save_graph_data(renamed)
+        backend.upsert_node(_payload("b"))
+        backend.checkpoint()
+
+        written = json.loads((tmp / "g.json").read_text(encoding="utf-8"))
+        non_id_metadata = {
+            k: v
+            for k, v in written["metadata"].items()
+            if k not in ("journal_id", "last_updated")
+        }
+        expected = {k: v for k, v in renamed["metadata"].items() if k != "journal_id"}
+        assert non_id_metadata == expected
+        assert "seeded_only" not in written["metadata"]
+        assert written["metadata"]["journal_id"] == stamp
 
 
 class TestShortWriteBoundary:
