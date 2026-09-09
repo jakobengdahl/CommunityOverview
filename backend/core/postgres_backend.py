@@ -638,6 +638,15 @@ class PostgresGraphPersistenceBackend:
             },
             separators=(",", ":"),
         )
+        # The encoded length, because bytes are the unit the server's own
+        # check uses. It is not currently distinguishable from the character
+        # count - json.dumps escapes non-ASCII by default, so this payload is
+        # always pure ASCII and one "a-umlaut" is six of both - and no test
+        # can make it so. Written this way because it is the right unit if
+        # that default is ever changed, which is tempting: the escaping costs
+        # six bytes per character, so a graph whose ids are not ASCII reaches
+        # this cap six times sooner and announces reloads where it could have
+        # named entities.
         if len(payload.encode("utf-8")) >= NOTIFY_PAYLOAD_LIMIT:
             return json.dumps({"o": self._origin})
         return payload

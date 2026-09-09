@@ -15,6 +15,7 @@ is what lets one server serve the whole suite.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import secrets
 import threading
@@ -2924,6 +2925,37 @@ class TestPostgresAnnouncesOnlyWhatCommitted:
         collector.stays_at(0)
         assert writer.load_graph_data()["nodes"] == []
 
+    def test_a_save_that_fails_after_announcing_announces_nothing(
+        self, listening, schema, backends, monkeypatch
+    ):
+        """The save path's own half of this class, not the batch path's.
+
+        Every other case here drives `apply_batch`, and both paths call the
+        same helper - so the save's half of G1 rested entirely on that sharing.
+        Replace the save's announcement with one on a connection of its own
+        and the whole class still passes, while a listener is told about a
+        graph the save had not committed: under READ COMMITTED it reloads,
+        sees the graph as it was, and stays there with nothing further coming.
+        """
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        writer.save_graph_data(snapshot([node_payload("before")]))
+        collector.wait_for(1)
+        real_announce = type(writer)._announce
+
+        def announce_then_die(self, conn, operations):
+            real_announce(self, conn, operations)
+            raise OSError("connection lost after announcing")
+
+        monkeypatch.setattr(type(writer), "_announce", announce_then_die)
+
+        with pytest.raises(OSError):
+            writer.save_graph_data(snapshot([node_payload("after")]))
+
+        collector.stays_at(1)
+        assert [n["id"] for n in writer.load_graph_data()["nodes"]] == ["before"]
+
     def test_a_deadlocked_batch_announces_once_from_the_attempt_that_committed(
         self, listening, schema, backends, monkeypatch
     ):
@@ -3032,6 +3064,105 @@ class TestPostgresAnnouncementFitsThePayloadLimit:
         assert [op.entity_id for op in change.operations] == [
             op.entity_id for op in batch
         ]
+
+    def _largest_described(self, backend):
+        """The biggest announcement this backend will ever actually send.
+
+        Found by growing one id a byte at a time until `_encode` stops naming
+        the entities, then taking the step before. Measured through the
+        behaviour rather than by re-deriving the payload here: a test that
+        rebuilt the encoding to measure it would be asserting against its own
+        copy of the thing under test, and the first version of this did the
+        other wrong thing - it measured `_encode`'s OUTPUT, which is the
+        degraded form, so the search never converged.
+
+        The parametrised test above steps by a whole entry, about 250 bytes,
+        so it can straddle the limit without ever landing on it. This is what
+        finds the byte where it flips.
+        """
+        base = self._batch(30)
+        pad = 0
+        described = None
+        while True:
+            grown = list(base)
+            grown[-1] = EntityOperation.upsert_node(
+                node_payload(f"{self.LONG_ID}{'p' * pad}")
+            )
+            payload = backend._encode(grown)
+            if json.loads(payload).get("ops") is None:
+                assert described is not None, "even the smallest batch degraded"
+                return described
+            described = payload
+            pad += 1
+            assert pad < 2000, "the announcement never degraded"
+
+    def test_the_largest_announcement_it_will_send_is_one_the_server_accepts(
+        self, schema, backends
+    ):
+        """The boundary, from the only side that matters.
+
+        The cap is a comparison against a length the server rejects, and off
+        by one it is worse than useless: the payload it lets through is
+        exactly the one `pg_notify` refuses, inside the transaction the write
+        is in, so the batch dies of being described. Asserting the largest
+        payload the backend will ever send is one the server takes says that
+        without restating the comparison.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+
+        payload = self._largest_described(backend)
+
+        assert len(payload.encode("utf-8")) < NOTIFY_PAYLOAD_LIMIT
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("SELECT pg_notify(%s, %s)", (backend._channel, payload))
+
+    def test_a_graph_whose_ids_are_not_ascii_announces_and_reads_back(
+        self, listening, schema, backends
+    ):
+        """Entity ids are graph data, not an ASCII-bounded namespace.
+
+        This is not the byte-versus-character test it looks like it should be.
+        `json.dumps` escapes non-ASCII by default, so what `_encode` produces
+        is always pure ASCII and the two counts can never differ - measured:
+        one "\u00e4" is six characters and six bytes. Writing the cap over
+        the encoded length is still right, because bytes are the unit the
+        server's own check uses, but it is not currently distinguishable and
+        no test can make it so.
+
+        What IS worth pinning, and was covered nowhere: such a graph works.
+        The escaping costs six bytes per character, so these ids reach the cap
+        six times sooner and this batch announces as a reload rather than by
+        name - and the entities still have to arrive.
+        """
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        wide = ["\u00e4\u00f6\u5b57" * 60 + f"{i:04d}" for i in range(20)]
+
+        writer.apply_batch(
+            [EntityOperation.upsert_node(node_payload(i, name="Wide")) for i in wide]
+        )
+
+        assert sorted(by_id(writer.load_graph_data(), "nodes")) == sorted(wide)
+        (change,) = collector.wait_for(1)
+        assert change.operations is None
+
+    def test_a_non_ascii_id_reads_back_by_name(self, listening, schema, backends):
+        """The read-back with a non-ASCII id, which is the half above cannot
+        reach: that batch degrades, so nothing looks the ids up in the store.
+        A short one stays under the cap and goes through `_resolve`."""
+        _, collector = listening()
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(writer)
+        entity_id = "\u00e4\u00f6\u5b57-\u00e9\u00e8"
+
+        writer.upsert_node(node_payload(entity_id, name="Named"))
+
+        (change,) = collector.wait_for(1)
+        (op,) = change.operations
+        assert (op.action, op.entity_id) == ("upsert", entity_id)
+        assert op.payload["name"] == "Named"
 
     def test_the_limit_is_the_servers_and_is_measured_here(self):
         """The constant restated against the server that enforces it, so a
@@ -3170,6 +3301,49 @@ class TestPostgresStopsWhenAsked:
         writer.upsert_node(node_payload("after"))
 
         collector.stays_at(1)
+
+    def test_stop_waits_for_a_listener_call_already_running(self, schema, backends):
+        """The promise, asked directly rather than through a proxy.
+
+        "No change arrives after stop returns" is satisfied by the flag alone,
+        because _deliver re-reads it before calling - so a stop that only
+        signalled passed that test, and the whole suite, while returning with
+        a refresh still running against a model the caller was about to tear
+        down. What the docstring promises is about calls in flight, so this
+        holds one in flight and watches stop from outside.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        inside = threading.Event()
+        release = threading.Event()
+        left = threading.Event()
+
+        def slow_listener(change):
+            inside.set()
+            release.wait(60)
+            left.set()
+
+        backend.start_change_notification(slow_listener)
+        returned = threading.Event()
+        try:
+            writer.upsert_node(node_payload("a"))
+            assert inside.wait(30), "the listener was never called"
+
+            threading.Thread(
+                target=lambda: (backend.stop_change_notification(), returned.set()),
+                daemon=True,
+            ).start()
+
+            assert not returned.wait(2), (
+                "stop returned while a listener call was still running"
+            )
+            release.set()
+            assert returned.wait(60), "stop did not return once the listener left"
+            assert left.is_set()
+        finally:
+            release.set()
+            backend.stop_change_notification()
 
     def test_stopping_releases_the_listening_connection(self, schema, backends):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -3352,6 +3526,24 @@ class TestPostgresChannelsAreOnePerStore:
         63-byte schemas differing only in their last byte are two stores."""
         assert _channel_for("x" * 63) != _channel_for("x" * 62 + "y")
         assert _channel_for("MixedCase") != _channel_for("mixedcase")
+
+    def test_the_channel_space_is_wide_enough_not_to_collide(self):
+        """Two hard-coded pairs say nothing about a space that is too small.
+
+        G11 is "for any schema name", and a digest shortened to fit some
+        future constraint stays lower-case, stays under 63 bytes and still
+        round-trips through LISTEN - so every other assertion in this class
+        survives it. What does not survive is two tenants in one database:
+        they hear each other's writes and each reads the other's ids out of
+        its own schema, reporting deletes for entities that exist elsewhere.
+        Measured at four hex characters: a collision inside 211 names.
+        """
+        names = [f"co_tenant_{i}" for i in range(20_000)]
+        channels = {_channel_for(name) for name in names}
+        assert len(channels) == len(names), (
+            f"{len(names) - len(channels)} of {len(names)} schema names share "
+            f"a channel with another"
+        )
 
 
 class TestPostgresReadsContentFromTheStore:
