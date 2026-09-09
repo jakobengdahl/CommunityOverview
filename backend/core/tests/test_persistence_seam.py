@@ -3226,6 +3226,12 @@ class TestADeferredReport:
             f"an empty answer was not remembered; the store was read "
             f"{len(reads)} times for one report"
         )
+        # An empty answer and "I cannot say what changed" are the two reports
+        # that carry no operations, and only the second is a reload. The
+        # predicate that separates them is the presence of the callable, not
+        # the absence of operations.
+        assert not ExternalChange.unknown().content_read_on_demand()
+        assert not ExternalChange.entities([]).content_read_on_demand()
 
     def test_the_content_is_read_after_this_instances_queued_writes(self):
         """The whole reason the read is deferred. A read taken while a write
@@ -3309,6 +3315,39 @@ class TestADeferredReport:
         finally:
             storage.shutdown_events()
 
+    def test_an_answer_that_changes_nothing_leaves_the_fallback_vector_alone(
+        self,
+    ):
+        """ "Applied as nothing at all" has to mean the inline fallback too.
+
+        That fallback is the raw copy a node was loaded with, kept for a
+        vector the index would not take - a width it refuses, say. For such a
+        node it is the only durable copy there is, so dropping it on a report
+        that changed nothing would take the vector out of every structure at
+        once, and the next snapshot would write the node without it.
+        """
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            storage.add_nodes([_node("a", "Alpha")], [])
+            storage.flush()
+            storage._inline_fallback["a"] = [0.5, 0.25]
+            assert storage._vector_for_payload("a") == [0.5, 0.25]
+
+            held = storage.get_node("a").to_dict()
+            backend.listener(
+                ExternalChange.entities_read_on_demand(
+                    lambda: [EntityOperation.upsert_node(held)]
+                )
+            )
+
+            assert storage._vector_for_payload("a") == [0.5, 0.25], (
+                "a report that changed nothing took the node's only durable "
+                "copy of its vector with it"
+            )
+        finally:
+            storage.shutdown_events()
+
     def test_the_eager_constructor_is_not_quietly_given_the_same_treatment(
         self,
     ):
@@ -3365,6 +3404,34 @@ class TestADeferredReport:
             )
         finally:
             del backend.load_graph_data
+            storage.shutdown_events()
+
+    def test_a_read_that_raises_does_not_write_this_instances_graph(self):
+        """And the reload it turns into does not bootstrap.
+
+        A store reporting that it is not there - mid-restore, being replaced -
+        is not an invitation to write this instance's image over it, and on a
+        store whose whole point is that someone else is writing it too that
+        would destroy their work. `_reload_from_store` says bootstrapping is
+        off; this is that road, which is not the one `unknown()` takes.
+        """
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            backend.exists = lambda: False
+            snapshots = backend.snapshots
+
+            def read_content():
+                raise OSError("the store would not answer")
+
+            backend.listener(ExternalChange.entities_read_on_demand(read_content))
+
+            assert backend.snapshots == snapshots, (
+                "the reload bootstrapped: this instance wrote its whole graph "
+                "over a store it had just been told it could not read"
+            )
+        finally:
+            del backend.exists
             storage.shutdown_events()
 
     def test_a_report_with_no_content_to_read_is_not_a_reload(self):

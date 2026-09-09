@@ -44,6 +44,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     PostgresGraphPersistenceBackend,
 )
 from backend.core.storage import GraphStorage  # noqa: E402
+from backend.core.storage_backends import EntityOperation  # noqa: E402
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
@@ -353,7 +354,18 @@ class TestTwoInstancesWritingTheSameEntity:
         stale["updated_at"] = (held - timedelta(seconds=60)).isoformat()
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:
-            writer.upsert_node(stale)
+            # In a BATCH, and second in it. A batch is what an ordinary write
+            # announces - `add_nodes` and `update_nodes` commit one - so the
+            # contested entity is routinely not the first operation of the
+            # report that carries it, and a rule applied to the first
+            # operation only would leave the divergence in place everywhere
+            # except the single-entity case.
+            writer.apply_batch(
+                [
+                    EntityOperation.upsert_node(_node("bystander").to_dict()),
+                    EntityOperation.upsert_node(stale),
+                ]
+            )
         finally:
             writer.close()
 
@@ -363,6 +375,7 @@ class TestTwoInstancesWritingTheSameEntity:
                 f"instance {label} took the value the store committed last, "
                 f"rather than keeping its own later stamp",
             )
+            assert storage.get_node("bystander") is not None
         _assert_nothing_failed(one, two)
 
     def test_the_content_is_read_after_this_instance_has_settled(
@@ -607,6 +620,36 @@ class TestTwoInstancesWritingTheSameEntity:
 
         _wait_until(
             lambda: one.vector_store.get_vector_list("c") == [0.25, 0.5],
+            "the instance adopted the vector the store now holds; it has "
+            f"{one.vector_store.get_vector_list('c')}",
+        )
+        _assert_nothing_failed(one, two)
+
+    def test_a_vector_the_store_added_is_not_nothing(self, instances, schema):
+        """The third direction, and the one neither of the others reaches:
+        both of those start from a node that already has a vector, so a
+        comparison that answered "nothing to do" whenever the index is empty
+        would pass them and leave a node that gained a description in the
+        store without one here, for good."""
+        one, two = instances(), instances()
+        one.add_nodes([_node("c", name="Mine")], [])
+        _drain(one)
+        _wait_until(
+            lambda: two.get_node("c") is not None,
+            "the second instance learned of the node",
+        )
+        assert one.vector_store.get_vector_list("c") is None
+
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            doc = {n["id"]: n for n in reader.load_graph_data()["nodes"]}["c"]
+            doc["embedding"] = [0.5, 0.25]
+            reader.upsert_node(doc)
+        finally:
+            reader.close()
+
+        _wait_until(
+            lambda: one.vector_store.get_vector_list("c") == [0.5, 0.25],
             "the instance adopted the vector the store now holds; it has "
             f"{one.vector_store.get_vector_list('c')}",
         )
