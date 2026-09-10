@@ -874,15 +874,16 @@ class PostgresGraphPersistenceBackend:
         catch-up; there is only the next announcement, which this build would
         not understand either.
 
-        Which is why the shape is checked *here*, before any of it is used.
-        The read-back is deferred, so a malformed entry left to reach it would
-        not raise until the application asked for the content - and the
-        application would then reload the whole graph, which is the right
-        outcome by an expensive road: a whole-graph read for an announcement
-        that could be recognised as unreadable without touching the store at
-        all. Worse, it would be reported from there as a content read that
-        failed, which is a different thing to look for than an announcement
-        this build cannot parse.
+        Which is why the shape is checked *here*, before any of it is used -
+        though not for the reason it might look like. The read-back is
+        deferred, so a malformed entry left to reach it raises only when the
+        application asks for the content, and what follows is the same
+        whole-graph reload this road takes: measured both ways, the cost is
+        identical, and waiting buys nothing back. What it costs is the
+        diagnosis. From there it is reported as a content read that failed,
+        which is a different thing to look for than an announcement this build
+        cannot parse - and from here it is reported as nothing at all, which
+        is the weaker half of that trade and worth fixing on its own.
         """
         try:
             announcement = json.loads(payload)

@@ -275,10 +275,9 @@ What the backend passes is an `ExternalChange`:
   below is what the alternative costs.
 
   Three things about *when* it is called decide whether an implementation is
-  correct, and none of them is "on some thread of the application's" — the one
-  thread `GraphStorage` owns is the write queue, which is the one thread a
-  report may **not** arrive on, and it applies a report inline rather than
-  handing it anywhere:
+  correct, and none of them is "on some thread of the application's" —
+  `GraphStorage`'s write queue is the one thread a report may **not** arrive
+  on, and it applies a report inline rather than handing it anywhere:
 
   - It is called **on the thread the report was delivered on**, further down
     that call stack. A backend that dispatches from a poller it needs to keep
