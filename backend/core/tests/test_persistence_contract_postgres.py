@@ -21,7 +21,6 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 
 import pytest
 
@@ -33,11 +32,23 @@ from backend.core.tests.persistence_contract import (
     snapshot,
 )
 
+
+def _env_flag(name: str) -> bool:
+    """Whether `name` is set to a value that means "on".
+
+    Docs and CI both write "1", but matching only that exact string means a
+    developer's own habit - "true", "yes" - silently reads as unset instead
+    of raising the loud error this variable exists to produce, which is a
+    worse failure than the one it guards against.
+    """
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Read before the import guard below, not after: `importorskip` would
 # otherwise skip the whole module for a missing driver before anything got
 # to ask whether a skip is acceptable here - the same silent green this
 # variable exists to prevent, reached by the other door.
-REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
+REQUIRE = _env_flag("CO_REQUIRE_POSTGRES")
 
 if REQUIRE:
     import psycopg  # noqa: F401  (a skip here would be the failure, not a pass)
@@ -96,6 +107,22 @@ def _dsn_as_role(user: str, password: str) -> str:
     return psycopg.conninfo.make_conninfo(**parts)
 
 
+def _redacted_dsn(dsn: str) -> str:
+    """`dsn` with its password removed, for a message that reaches a log.
+
+    CI already prints this DSN in plaintext elsewhere (ci.yml), so this is
+    hygiene rather than a leak - but an error message manufactured here is
+    not the place to make that worse.
+    """
+    try:
+        parts = psycopg.conninfo.conninfo_to_dict(dsn)
+    except Exception:
+        return dsn
+    if parts.get("password"):
+        parts["password"] = "***"
+    return psycopg.conninfo.make_conninfo(**parts)
+
+
 # CO_REQUIRE_POSTGRES (read above, before the driver import): without it an
 # unreachable server is a skip, so a developer with a stale variable is not
 # blocked. With it, an unreachable server - or a missing driver - is an
@@ -117,7 +144,7 @@ def _server_reachable() -> bool:
     except Exception as exc:
         if REQUIRE:
             raise RuntimeError(
-                f"CO_REQUIRE_POSTGRES=1 but the server at {DSN} is "
+                f"CO_REQUIRE_POSTGRES=1 but the server at {_redacted_dsn(DSN)} is "
                 f"unreachable: {type(exc).__name__}: {exc}"
             ) from exc
         return False
@@ -128,7 +155,7 @@ pytestmark = pytest.mark.skipif(
     reason=(
         "set CO_TEST_POSTGRES_DSN to a PostgreSQL server to run these"
         if not DSN
-        else f"no PostgreSQL server reachable at CO_TEST_POSTGRES_DSN ({DSN})"
+        else f"no PostgreSQL server reachable at CO_TEST_POSTGRES_DSN ({_redacted_dsn(DSN)})"
     ),
 )
 
@@ -256,8 +283,8 @@ def _sequential_scans(issued):
     return touched, scanning
 
 
-def _wait_until_blocking(pid, timeout=15.0):
-    """Wait until the session `pid` is blocking another one.
+def _wait_until_blocking(pid, timeout=15.0, count=1):
+    """Wait until `count` distinct sessions are blocked on the session `pid`.
 
     Attributed on purpose. A fixed sleep plus `thread.is_alive()` cannot
     tell "blocked on the lock" from "has not reached it yet", so under
@@ -268,7 +295,11 @@ def _wait_until_blocking(pid, timeout=15.0):
     database, or a developer with a psql parked in an open transaction.
 
     `pg_blocking_pids` names the sessions doing the blocking, so the
-    caller can ask about the one it holds open and can vouch for.
+    caller can ask about the one it holds open and can vouch for. `count`
+    above 1 is for a caller that needs to tell "a second waiter joined"
+    apart from "the first one is still there": the first blocking already
+    satisfies count=1 on its own, so re-calling with the default would
+    return immediately without the second ever having been checked.
     """
     deadline = time.monotonic() + timeout
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -279,7 +310,7 @@ def _wait_until_blocking(pid, timeout=15.0):
                 " AND %s = ANY(pg_blocking_pids(pid))",
                 (pid,),
             ).fetchone()[0]
-            if waiting:
+            if waiting >= count:
                 return True
             threading.Event().wait(0.05)
     return False
@@ -486,33 +517,6 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         assert not [t for t in threads if t.is_alive()], "a boot never finished"
         assert failures == [], f"instances failed to boot: {failures}"
 
-    def test_a_partly_provisioned_schema_gets_the_rest(self, schema, backends):
-        """An operator who provisioned some of the tables, not all three.
-
-        Every other existing-schema case here provisions all three together,
-        so a migration that checked one table and assumed the others would
-        look identical. It is not: the instance boots, then dies on the
-        first statement touching a table nobody created.
-        """
-        with psycopg.connect(DSN, autocommit=True) as conn:
-            conn.execute(
-                psycopg.sql.SQL("CREATE SCHEMA {}").format(
-                    psycopg.sql.Identifier(schema)
-                )
-            )
-            conn.execute(
-                psycopg.sql.SQL(
-                    "CREATE TABLE {}.graph_nodes"
-                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
-                ).format(psycopg.sql.Identifier(schema))
-            )
-
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        backends.append(backend)
-        assert not backend.exists()
-        backend.save_graph_data(snapshot([node_payload("a")]))
-        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
-
     def test_the_migration_holds_the_advisory_lock(self, schema, backends):
         """The lock is what makes the test above pass rather than luck.
 
@@ -613,12 +617,24 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             blocker.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,))
             first = threading.Thread(target=use, daemon=True)
             first.start()
-            # Long enough that a memo set on the way in would have released
-            # the second thread while the first is still blocked on the lock.
+            # Asked of the server, not guessed at with a sleep: a wait long
+            # enough on a fast run is not long enough on a slow one, and too
+            # short here starts the second thread before the first has even
+            # reached the lock - which would not exercise the memo-set-too-
+            # early bug this test is for.
+            assert _wait_until_blocking(blocker.info.backend_pid), (
+                "the first thread never blocked on the migration lock"
+            )
             second = threading.Thread(target=use, daemon=True)
-            threading.Event().wait(1.0)
             second.start()
-            threading.Event().wait(1.0)
+            # A memo set on the way in would let this thread sail past
+            # rather than block, so confirming a SECOND session is now
+            # waiting on `blocker` - not merely re-confirming the first - is
+            # what actually exercises the bug.
+            assert _wait_until_blocking(blocker.info.backend_pid, count=2), (
+                "the second thread never blocked on the migration lock - it "
+                "may have taken the memo's lock-free fast path instead"
+            )
             blocker.rollback()
             first.join(30)
             second.join(30)
@@ -634,6 +650,40 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         )
 
 
+class TestPostgresMigrationToleratesPartialProvisioning:
+    """An operator who provisioned some of the tables, not all three.
+
+    Not a concurrency case - a single instance against a schema someone
+    else set up by hand - so it lives apart from the boot-race class above
+    rather than inside it.
+    """
+
+    def test_a_partly_provisioned_schema_gets_the_rest(self, schema, backends):
+        """Every other existing-schema case here provisions all three
+        tables together, so a migration that checked one table and assumed
+        the others would look identical. It is not: the instance boots,
+        then dies on the first statement touching a table nobody created.
+        """
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_nodes"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert not backend.exists()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+
 class TestPostgresConcurrentSavesDoNotMerge:
     """Two whole-graph saves at once must not leave a graph neither wrote.
 
@@ -646,14 +696,44 @@ class TestPostgresConcurrentSavesDoNotMerge:
     they share - and sharing ids is what two instances of the same graph do.
     """
 
-    stall_errors: list = []
+    @pytest.fixture(autouse=True)
+    def _fresh_stall_errors(self):
+        # An instance attribute set here, not a mutable class-level list: a
+        # class attribute default is shared by every test method that never
+        # reassigns it, so a second test added to this class would silently
+        # inherit whatever the first one appended.
+        self.stall_errors = []
 
-    def _stalled_save(self, backend, nodes, released):
-        """Save from `backend`, holding its transaction open until released."""
+    def _stalled_save(self, backend, nodes, released, monkeypatch):
+        """Save from `backend`, holding its transaction open until released.
+
+        Returns the thread and the backend pid of the connection it
+        stalled on, so a caller can confirm a second writer is actually
+        blocked on *this* save's lock rather than guessing with a fixed
+        wait.
+
+        `monkeypatch`, not a bare try/finally on this daemon thread: the
+        save can sit inside `released.wait(30)` for up to 30s, so a
+        failure in the OUTER test before `released` is ever set would
+        otherwise leave the global patch live under that wait, into
+        whatever test runs next. Restoring at THIS test's teardown -
+        whichever thread is still running - is what monkeypatch buys here
+        that a plain `finally` inside `run()` does not.
+        """
         import backend.core.postgres_backend as module
 
         real = module.psycopg.types.json.Jsonb
+        real_execute = module.psycopg.Connection.execute
         seen = threading.Event()
+        holder = []
+
+        def spy_execute(conn, query, *args, **kwargs):
+            # The save's own lock statement, so `holder` names the session
+            # actually holding the save open rather than some other
+            # connection the backend happens to use.
+            if "hashtext" in str(query).lower() and not holder:
+                holder.append(conn.info.backend_pid)
+            return real_execute(conn, query, *args, **kwargs)
 
         def stalling(value):
             if isinstance(value, dict) and "id" not in value:  # the metadata row
@@ -661,8 +741,10 @@ class TestPostgresConcurrentSavesDoNotMerge:
                 released.wait(30)
             return real(value)
 
+        monkeypatch.setattr(module.psycopg.Connection, "execute", spy_execute)
+        monkeypatch.setattr(module.psycopg.types.json, "Jsonb", stalling)
+
         def run():
-            module.psycopg.types.json.Jsonb = stalling
             try:
                 backend.save_graph_data(snapshot(nodes))
             except Exception as exc:
@@ -670,27 +752,33 @@ class TestPostgresConcurrentSavesDoNotMerge:
                 # silent: the thread dies raising, is_alive() is satisfied,
                 # and only a pytest warning records it.
                 self.stall_errors.append(f"{type(exc).__name__}: {exc}")
-            finally:
-                module.psycopg.types.json.Jsonb = real
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         assert seen.wait(30), "the stalled save never reached its metadata write"
-        return thread
+        assert holder, "the stalled save never issued its own advisory lock statement"
+        return thread, holder[0]
 
-    def test_overlapping_saves_leave_one_writers_graph(self, schema, backends):
-        # Different graph_name, same store: the lock must be keyed on what
-        # identifies the store - the schema - not on a constructor argument
-        # two instances of one graph need not agree on.
+    def test_overlapping_saves_leave_one_writers_graph(
+        self, schema, backends, monkeypatch
+    ):
+        # Different graph_name, same store: this falsifies a lock keyed on
+        # graph_name specifically, which two instances of one graph need
+        # not agree on. It does not prove the lock is keyed on the schema
+        # - a lock keyed on a bare constant would pass this too, and
+        # closing that needs a timing assertion against a second schema,
+        # not attempted here.
         first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
         second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="b")
         backends.extend([first, second])
-        self.stall_errors = []
         first.save_graph_data(snapshot([node_payload("seed")]))
 
         released = threading.Event()
-        stalled = self._stalled_save(
-            first, [node_payload("shared"), node_payload("only_first")], released
+        stalled, holder_pid = self._stalled_save(
+            first,
+            [node_payload("shared"), node_payload("only_first")],
+            released,
+            monkeypatch,
         )
 
         errors = []
@@ -705,12 +793,13 @@ class TestPostgresConcurrentSavesDoNotMerge:
 
         other = threading.Thread(target=save_second, daemon=True)
         other.start()
-        # The second save must actually reach its first statement while the
-        # first is still holding its transaction open - that is the whole
-        # interleaving. Releasing straight away lets the first commit before
-        # the second has begun, which is two saves in sequence and proves
-        # nothing.
-        threading.Event().wait(1.5)
+        # Asked of the server rather than guessed at with a fixed wait: a
+        # wait long enough on a fast run degrades into two sequential
+        # saves on a slow one, which is a vacuous pass, not a flake - the
+        # interleaving this test is for never happened, and nothing said
+        # so. `_wait_until_blocking` confirms the second save actually
+        # reached the lock and is waiting on THIS save specifically.
+        blocked = _wait_until_blocking(holder_pid) and other.is_alive()
         released.set()
         stalled.join(30)
         other.join(30)
@@ -723,6 +812,10 @@ class TestPostgresConcurrentSavesDoNotMerge:
         # test reported green on that for thirty seconds.
         assert not stalled.is_alive(), "the first save never finished"
         assert not other.is_alive(), "the second save never finished"
+        assert blocked, (
+            "the second save never waited on the first save's lock, so "
+            "this proves nothing about the interleaving"
+        )
         assert errors == [], f"the second save failed: {errors}"
         assert self.stall_errors == [], f"the first save failed: {self.stall_errors}"
         landed = {n["id"] for n in second.load_graph_data()["nodes"]}
@@ -961,9 +1054,15 @@ class TestPostgresSaveFailsWholeOnAnEntityWrite:
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("keep")]))
 
-        # A value json cannot encode, reached through the ordinary payload.
+        # One of the two failures the module's own docstring names as
+        # actually reachable from a graph, not one `json.dumps` rejects
+        # client-side: Python writes bare NaN and reads it back, so this
+        # value reaches the server and is rejected there, which is the
+        # rollback path this test is for. A `datetime` would raise a
+        # TypeError before any statement was ever sent, testing nothing
+        # about the transaction at all.
         doomed = node_payload("doomed")
-        doomed["metadata"] = {"when": datetime.now(timezone.utc)}
+        doomed["metadata"] = {"score": float("nan")}
         with pytest.raises(Exception):
             backend.save_graph_data(snapshot([node_payload("also_new"), doomed]))
 
@@ -991,7 +1090,7 @@ class TestPostgresSaveIsolation:
         return psycopg.conninfo.make_conninfo(**parts)
 
     def test_the_save_runs_read_committed_under_a_repeatable_read_default(
-        self, schema, backends
+        self, schema, backends, monkeypatch
     ):
         dsn = self._dsn_defaulting_to_repeatable_read()
         with psycopg.connect(dsn) as check:
@@ -1022,11 +1121,12 @@ class TestPostgresSaveIsolation:
                 )
             return result
 
-        psycopg.Connection.execute = spy
-        try:
-            backend.save_graph_data(snapshot([node_payload("a")]))
-        finally:
-            psycopg.Connection.execute = real_execute
+        # monkeypatch, not a manual save/restore: it undoes the patch at
+        # this test's teardown regardless of how the test exits, where a
+        # bare try/finally only restores once this function's own body
+        # returns.
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        backend.save_graph_data(snapshot([node_payload("a")]))
 
         assert seen == ["read committed"], (
             f"the save inherited the connection's isolation level: {seen}"
@@ -2411,8 +2511,15 @@ class TestPostgresLoadIsolation:
     """
 
     def test_the_load_runs_repeatable_read_and_leaves_nothing_behind(
-        self, schema, backends
+        self, schema, backends, monkeypatch
     ):
+        # The server's own default, not assumed: a role or database with a
+        # non-default `default_transaction_isolation` would otherwise fail
+        # this test for nothing having leaked, which is what a hardcoded
+        # "read committed" expectation would do.
+        with psycopg.connect(DSN) as check:
+            baseline = check.execute("SHOW transaction_isolation").fetchone()[0]
+
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("a")]))
@@ -2432,21 +2539,24 @@ class TestPostgresLoadIsolation:
                 )
             return result
 
-        psycopg.Connection.execute = spy
-        try:
-            backend.load_graph_data()
-        finally:
-            psycopg.Connection.execute = real_execute
+        # monkeypatch, not a manual save/restore: it undoes the patch at
+        # this test's teardown regardless of how the test exits, where a
+        # bare try/finally only restores once this function's own body
+        # returns.
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        backend.load_graph_data()
 
         assert seen == ["repeatable read"], (
             f"the load did not run at REPEATABLE READ: {seen}"
         )
 
-        # The same pooled connection, next transaction: back to the default.
+        # The same pooled connection, next transaction: back to whatever it
+        # started at.
         with backend._pool.connection() as conn:
             after = conn.execute("SHOW transaction_isolation").fetchone()[0]
-        assert after == "read committed", (
-            f"the isolation level leaked onto the pooled connection: {after}"
+        assert after == baseline, (
+            f"the isolation level leaked onto the pooled connection: "
+            f"{after} != {baseline}"
         )
 
 
@@ -2480,7 +2590,7 @@ class TestPostgresSaveWritesMetadataLast:
     """
 
     def test_the_metadata_upsert_is_the_saves_last_write_to_a_graph_table(
-        self, schema, backends
+        self, schema, backends, monkeypatch
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -2513,15 +2623,14 @@ class TestPostgresSaveWritesMetadataLast:
             jsonb_calls.append(next(clock))
             return real_jsonb(value)
 
-        psycopg.Connection.execute = spy_execute
-        psycopg.Cursor.executemany = spy_many
-        psycopg.types.json.Jsonb = spy_jsonb
-        try:
-            backend.save_graph_data(snapshot([node_payload("a")]))
-        finally:
-            psycopg.Connection.execute = real_execute
-            psycopg.Cursor.executemany = real_many
-            psycopg.types.json.Jsonb = real_jsonb
+        # monkeypatch, not a manual save/restore: it undoes all three
+        # patches at this test's teardown regardless of how the test
+        # exits, where a bare try/finally only restores once this
+        # function's own body returns.
+        monkeypatch.setattr(psycopg.Connection, "execute", spy_execute)
+        monkeypatch.setattr(psycopg.Cursor, "executemany", spy_many)
+        monkeypatch.setattr(psycopg.types.json, "Jsonb", spy_jsonb)
+        backend.save_graph_data(snapshot([node_payload("a")]))
 
         writes = [q for q in statements if "advisory" not in q.lower()]
         assert writes, "the save issued no statements"
@@ -2597,13 +2706,18 @@ class TestPostgresGuardsAreCaseSensitive:
 
 
 class TestPostgresMigrationBuildsTheDocumentedSchema:
-    def test_every_table_gets_its_primary_key(self, schema, backends):
+    def test_every_table_matches_the_documented_ddl(self, schema, backends):
         """The DDL the document publishes for an operator to provision.
 
         The keys are not decoration. `graph_metadata.only_row` is named in
         the save's ON CONFLICT, so without it every save fails; the entity
         keys are what turn a lost save lock into a loud duplicate-key error
-        instead of a silent union of two graphs.
+        instead of a silent union of two graphs. `DEFAULT true` and
+        `CHECK (only_row)` are checked too - dropping either leaves the
+        table shape (and every assertion above it) green, and is harmless
+        only because the save always supplies the value explicitly; an
+        operator who provisioned from a DDL missing them would not be so
+        lucky against a future save that omitted it.
         """
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -2654,6 +2768,29 @@ class TestPostgresMigrationBuildsTheDocumentedSchema:
             ("graph_metadata", "only_row", "boolean", "NO"),
             ("graph_metadata", "doc", "jsonb", "NO"),
         }
+
+        # DEFAULT true and CHECK (only_row): neither is exercised by the
+        # key or column assertions above, so a migration that dropped one
+        # would still pass every one of them.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            default = conn.execute(
+                "SELECT column_default FROM information_schema.columns"
+                " WHERE table_schema = %s AND table_name = 'graph_metadata'"
+                " AND column_name = 'only_row'",
+                (schema,),
+            ).fetchone()[0]
+            checked = conn.execute(
+                "SELECT count(*) FROM pg_constraint k"
+                " JOIN pg_class c ON c.oid = k.conrelid"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = %s AND c.relname = 'graph_metadata'"
+                " AND k.contype = 'c'",
+                (schema,),
+            ).fetchone()[0]
+        assert default is not None and "true" in default.lower(), (
+            f"graph_metadata.only_row lost its DEFAULT true: {default!r}"
+        )
+        assert checked > 0, "graph_metadata lost its CHECK (only_row) constraint"
 
 
 class TestPostgresStoreIdentity:

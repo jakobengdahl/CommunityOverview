@@ -535,7 +535,12 @@ writing a backend of your own against a shared server:
   after it takes a fresh snapshot at statement start; under a server or role
   default of `REPEATABLE READ` the snapshot would be taken at the lock,
   before it blocks, and the writer that waited would die on a serialization
-  failure rather than proceed. Neither level is left to the environment.
+  failure rather than proceed. Neither level is left to the environment for
+  the save or the load — each states its own. Migration (`_ensure_schema()`)
+  and `exists()` are not part of that guarantee: they run under whatever the
+  connection's environment defaults to, which is fine for what they do — a
+  single advisory lock and a single `SELECT`, neither exposed to the
+  statement-snapshot anomaly the save and the load guard against.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
