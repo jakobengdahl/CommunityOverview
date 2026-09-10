@@ -275,8 +275,10 @@ What the backend passes is an `ExternalChange`:
   below is what the alternative costs.
 
   Three things about *when* it is called decide whether an implementation is
-  correct, and none of them is "on some thread of the application's" —
-  `GraphStorage` has no thread of its own and applies a report inline:
+  correct, and none of them is "on some thread of the application's" — the one
+  thread `GraphStorage` owns is the write queue, which is the one thread a
+  report may **not** arrive on, and it applies a report inline rather than
+  handing it anywhere:
 
   - It is called **on the thread the report was delivered on**, further down
     that call stack. A backend that dispatches from a poller it needs to keep
@@ -369,10 +371,9 @@ holds and applies nothing when they agree — including the vector, which it
 compares against the index rather than against the node, since an adopted
 embedding lives in the index and not on the node it describes. An edge upsert is
 never offered the comparison at all - it is applied as reported, exactly as it
-was before - so the instance whose edge the store kept emits an `edge.update`
-whose before and after are the same. Its peer's is a real change rather than a
-redundant one, since `Edge` stamps a `created_at` of its own and two instances
-writing "the same" edge are not writing the same payload.
+was before - so two instances that make the same edit to an edge they both
+hold each emit an `edge.update` whose before and after are the same, on top of
+the real one each emits for its own write.
 
 **A backend that reports `entities` instead falls back to a wall clock.** Its
 content was gathered when the report was dispatched, which can predate the

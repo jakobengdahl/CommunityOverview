@@ -875,12 +875,14 @@ class PostgresGraphPersistenceBackend:
         not understand either.
 
         Which is why the shape is checked *here*, before any of it is used.
-        Letting a malformed entry reach the read-back instead would raise out
-        of the reading thread, and the reload would arrive only as a side
-        effect of the reconnect that followed: the right outcome by the wrong
-        road. It costs the listening connection, it costs the backoff wait
-        that a drop now takes, and it is reported as a lost connection naming
-        a KeyError - a misdiagnosis in the one line an operator would read.
+        The read-back is deferred, so a malformed entry left to reach it would
+        not raise until the application asked for the content - and the
+        application would then reload the whole graph, which is the right
+        outcome by an expensive road: a whole-graph read for an announcement
+        that could be recognised as unreadable without touching the store at
+        all. Worse, it would be reported from there as a content read that
+        failed, which is a different thing to look for than an announcement
+        this build cannot parse.
         """
         try:
             announcement = json.loads(payload)
