@@ -5,3 +5,7 @@
 ## 2024-09-02 - Custom Dialog Accessibility
 **Learning:** Standard ARIA attributes (`role="dialog"`, `aria-modal="true"`, and `aria-labelledby` linked to an `id` on the title element) are required for custom dialog components in React to ensure they are properly identified and read by screen readers. Some legacy components like `ConfirmDialog`, `InputDialog`, and `SettingsDialog` were missing these properties.
 **Action:** When creating or updating custom dialog components in the frontend, strictly include these standard ARIA attributes.
+
+## 2026-09-10 - Subtype Input Accessibility
+**Learning:** Found an icon-only chip removal button (×) in `SubtypeInput.jsx` lacking aria-labels and tooltips, making it inaccessible to screen readers and visually unclear.
+**Action:** Ensure all icon-only buttons include descriptive `aria-label` and `title` attributes. I added `aria-label={`Remove ${subtype}`}` and `title={`Remove ${subtype}`}` to the remove button in `SubtypeInput.jsx`.
