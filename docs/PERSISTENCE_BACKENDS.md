@@ -263,9 +263,36 @@ What the backend passes is an `ExternalChange`:
 
 - `ExternalChange.entities(operations)` — the same `EntityOperation`s a
   mutation is delivered as, read the other way round, in the order the store
-  applied them. Each upsert carries the entity's new content, so the refresh
-  needs no read-back. An upsert whose payload carries an `embedding` hands
-  the vector over with it.
+  applied them. Each upsert carries the entity's new content, gathered when
+  the report was dispatched. An upsert whose payload carries an `embedding`
+  hands the vector over with it.
+- `ExternalChange.entities_read_on_demand(read_content)` — the same, except
+  that `GraphStorage` calls `read_content()` to get the operations, **after it
+  has drained its write queue**. What comes back is applied as the store's own
+  answer, with no conflict rule consulted, which is sound precisely because
+  this instance's queued writes are already in it. **Prefer this wherever the
+  backend can re-read its store**; *When both instances wrote the same thing*
+  below is what the alternative costs.
+
+  Three things about *when* it is called decide whether an implementation is
+  correct, and none of them is "on some thread of the application's" —
+  `GraphStorage`'s write queue is the one thread a report may **not** arrive
+  on, and it applies a report inline rather than handing it anywhere:
+
+  - It is called **on the thread the report was delivered on**, further down
+    that call stack. A backend that dispatches from a poller it needs to keep
+    polling must hand the report to another thread itself.
+  - The application's lock is held for its whole duration, so it must not call
+    back into the storage, and **its latency is that instance's write stall** —
+    every mutation waits for it. Bound the read: a pool with no timeout, or one
+    long enough to wait out a hung server, stalls the instance for exactly that
+    long. Under `entities` the same read happened off-lock, so this is a real
+    trade for the correctness it buys.
+  - It is called **at most once per report**; a second ask returns the first
+    ask's answer rather than a fresher read.
+
+  Raising from `read_content` is not an error to swallow: `GraphStorage` logs
+  it and reloads the whole graph, and the report is not lost.
 
   **Report what the store applied together as one change, not one change per
   entity.** The vector index is rebuilt whole whenever it changes, so
@@ -325,17 +352,46 @@ A local mutation is in memory before it is in the store: it is applied on the
 calling thread and written in the background. So when two instances write the
 same node, the store settles on whichever write reached it last — and the
 instance whose write *won* is the one at risk, because it is never told about
-its own write. Applying a report that predates it would leave that instance
-serving a value the store does not hold, and nothing would put it right: there
-is no later change to report.
+its own write.
 
-`GraphStorage` resolves it as **last writer wins, by `updated_at`**. A reported
-node upsert is ignored when the node held in memory carries a later
-`updated_at` than the payload; a warning names the node. Consequences worth
-knowing before you build on it:
+**The store settles it, where the backend can re-read.** A backend reporting
+`entities_read_on_demand` is asked for the content after `GraphStorage` has
+drained its own write queue, under the lock that every mutation needs in order
+to be queued. What it reads is therefore the store's answer with this
+instance's own work already in it, and there is nothing left for the
+application to arbitrate: it takes what it is given. Every instance ends on
+whatever the store committed last, which is the only ordering the instances
+actually share.
+
+One consequence worth expecting: the answer is often this instance's own
+write, and applying that would emit an event whose before and after are the
+same. For a **node** upsert `GraphStorage` compares the answer against what it
+holds and applies nothing when they agree — including the vector, which it
+compares against the index rather than against the node, since an adopted
+embedding lives in the index and not on the node it describes. An edge upsert is
+never offered the comparison at all - it is applied as reported, exactly as it
+was before - so two instances that make the same edit to an edge they both
+hold each emit an `edge.update` whose before and after are the same, on top of
+the real one each emits for its own write.
+
+**A backend that reports `entities` instead falls back to a wall clock.** Its
+content was gathered when the report was dispatched, which can predate the
+receiving instance's queued writes, so `GraphStorage` protects itself with
+**last writer wins, by `updated_at`**: a reported node upsert is ignored when
+the node held in memory carries a later `updated_at` than the payload, and a
+warning names the node. That rule is weaker than it sounds, and this is the
+reason to prefer the other constructor:
 
 - It is a wall clock. The instances share no other ordering, so their clocks
   have to be roughly in step for this to mean anything.
+- **It does not order the commits.** The stamp is taken in memory under the
+  lock and the write commits asynchronously afterwards, so the write that
+  commits *last* can carry the *earlier* stamp. The instance holding the later
+  stamp then refuses the store's value — and goes on refusing it, because
+  there is no further change to report. Measured on PostgreSQL 16 before the
+  read was deferred, five racing renames from each of two instances: 4 of 8
+  runs ended with the two instances on different values, in both directions,
+  with no failed write on either side.
 - A tie defers to the report. Equal stamps are unresolvable, and taking the
   store's side is what converges the two instances.
 - A stamp that cannot be compared — one naive against one aware, which a
@@ -348,14 +404,17 @@ knowing before you build on it:
   stamp. A payload whose `updated_at` is explicitly `null` does not reach the
   comparison at all: it fails validation, and an unreadable payload is a
   whole-graph reload.
+
+A backend stuck on this path but able to order writes itself — a log sequence
+number, a stream id, a commit timestamp the store assigns — has a better answer
+than its writer's wall clock, and should carry that in the payload's
+`updated_at`.
+
+Two things hold on both paths, because neither has anything to arbitrate:
+
 - **Edges carry no `updated_at`**, so an edge upsert is applied as reported.
 - **Deletes carry no payload**, so an external delete is applied whatever this
   instance last did to the entity.
-
-A backend that can order writes itself — a log sequence number, a stream id, a
-commit timestamp the store assigns — has a better answer than a wall clock, and
-should carry it in the payload's `updated_at` rather than leaving it to the
-writing instance's clock.
 
 ### A local write that failed
 
@@ -661,3 +720,84 @@ make, not this backend's.
 
 The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
 is how the listening thread reads its channel while still noticing a stop.
+
+### Sizing it: what an instance costs
+
+One instance costs **`pool_size + 1`** server connections while notification is
+running — the pool, plus the listening connection that cannot go back to a pool
+and still be listening. So a deployment needs
+`instance_count × (pool_size + 1)`, and it needs it at the instance count it
+*scales to*, not the one it was tested at. Getting this wrong is not a slow
+deployment: the instance that cannot get a connection fails to boot.
+
+Against a stock server — `max_connections` 100, three reserved for superusers,
+so 97 available:
+
+| Instances | `pool_size` | Connections | Fits in 97 |
+|---:|---:|---:|:--|
+| 1 | 4 (default) | 5 | yes |
+| 10 | 4 (default) | 50 | yes, with room for psql and a migration |
+| 10 | 8 | 90 | yes, with 7 spare — a psql session and a migration, and no more |
+| 20 | 4 (default) | 100 | **no** |
+| 20 | 2 | 60 | yes |
+
+Two things worth reading off that table. Raising `pool_size` costs
+`instance_count` connections per step, not one — it is the multiplied number,
+which is why the default is deliberately small. And scaling out is cheaper per
+instance at a small pool than at a large one, so an autoscaling deployment
+should lower `pool_size` before it raises `max_connections`.
+
+`backend/core/tests/test_multi_instance_postgres.py` asserts the per-instance
+half of this against a running server, so the number above is measured rather
+than argued.
+
+### The acceptance test
+
+`backend/core/tests/test_multi_instance_postgres.py` is the whole stack run
+against itself: two `GraphStorage` instances on one store, writing at the same
+time, on the **entity** path and with content asserted.
+
+It asserts what the earlier layers cannot: that neither instance's writes are
+lost when they touch **distinct** entities, that both converge on what the
+other wrote and on what the store holds, that a rename arriving by report is
+searchable there under its new name and no longer under its old one, and that
+a delete takes the node's edges and its vector with it. Nothing in it calls
+`save()`: that is the whole-graph path, where two writers overwrite each other
+by design, which is why the contract's own two-writer clause — which does drive
+two instances against a real store — asserts liveness and explicitly not
+content.
+
+One thing it checks before believing any of that: `_resync_pending` on both
+instances. A failed entity write is invisible to the caller — `add_nodes`
+discards the future and swallows the exception with a print — and it makes the
+instance drop every external report it is sent (with a warning per report)
+until the next write, flush or shutdown heals it with a whole-graph write.
+Without that check a convergence assertion can pass vacuously, or a lost write
+can be laundered into an overwrite.
+
+#### A contested entity, and the defect that found this section
+
+Writes to **distinct** entities lose nothing; that is the property above, and
+it is the one this work exists to provide. Writes to the **same** entity now
+converge too — every party ends on whatever the store committed last — but
+they did not always, and the module keeps the cases that pin it because the
+way they failed is not a way a race would reliably show.
+
+The report used to carry content gathered when the announcement was
+dispatched, and the application defended itself against that with `updated_at`.
+Since commit order is not stamp order, the write that committed last could
+carry the earlier stamp, and the instance holding the later stamp then refused
+the store's value permanently. Measured on PostgreSQL 16, five racing renames
+from each of two instances: **4 of 8 runs ended divergent** on an idle
+machine — and **none at all under load**, which is the part worth keeping.
+A race-based regression test would have passed on a CI runner for the wrong
+reason.
+
+So the two cases that guard the fix are constructed rather than raced: one puts
+a value stamped *earlier* into the store after an instance already holds a
+later stamp, and asserts the instance takes it; the other pins the ordering
+that makes that sound, by watching when the content is read relative to the
+instance's own queued write. The raced case is kept as well, asserting that
+the store and both instances settle on one value — it guards no particular
+interleaving, which is exactly why it is worth having alongside two that each
+guard one.

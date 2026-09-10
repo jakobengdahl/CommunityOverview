@@ -153,19 +153,97 @@ class ExternalChange:
     mutation is delivered as, read the other way round. A backend that learns
     only that *something* changed, and cannot say what, reports ``unknown()``
     instead and the application reloads the whole graph.
+
+    A backend that can re-read its own store should report
+    ``entities_read_on_demand`` instead of ``entities``, and it is worth
+    understanding why before choosing. Content gathered when the report is
+    DISPATCHED can be older than the receiving instance's own writes, which
+    may still be queued at that moment. The application cannot tell, so it
+    protects itself with a wall clock - it keeps whichever version carries the
+    later ``updated_at`` - and that clock does not order the commits. When the
+    write that committed last carries the earlier stamp, the instance holding
+    the later stamp refuses the store's value and goes on refusing it: there
+    is no further change to report, and the two instances stay apart for good.
+    Measured on PostgreSQL 16, five racing renames from each of two
+    instances: four runs in eight ended divergent on an idle machine, and none
+    at all under load - so a race is not what catches this.
+
+    Deferring the read removes the ambiguity rather than arbitrating it. The
+    application settles its own writes FIRST and only then asks, so what comes
+    back is the store's own answer with this instance's work already in it.
+    There is then nothing of ours to protect and no clock to consult.
     """
 
     operations: Optional[Tuple[EntityOperation, ...]]
+    read_content: Optional[Callable[[], Iterable[EntityOperation]]] = None
 
     @classmethod
     def entities(cls, operations: Iterable[EntityOperation]) -> "ExternalChange":
-        """Named entities changed, newest content included."""
+        """Named entities changed, content gathered now.
+
+        For a backend that cannot re-read on demand. Its NODE upserts are
+        arbitrated against the application's own by wall clock - an edge
+        upsert has no stamp to arbitrate by and a delete has no payload, so
+        both are applied as reported. See above for what the clock costs.
+        """
         return cls(tuple(operations))
+
+    @classmethod
+    def entities_read_on_demand(
+        cls, read_content: Callable[[], Iterable[EntityOperation]]
+    ) -> "ExternalChange":
+        """Named entities changed; the application asks for the content.
+
+        ``read_content`` must return the operations describing what the store
+        holds AT THE MOMENT IT IS CALLED. What it returns is applied as the
+        store's own answer, with no clock consulted - which is sound precisely
+        because it is called after this instance's writes have landed. Raising
+        from it is not an error to swallow: it becomes a whole-graph reload.
+
+        Three things about when it is called decide whether an implementation
+        of it is correct:
+
+        - It is called on **the thread the report was delivered on**, further
+          down that call stack, because the application applies a report
+          inline. A backend that dispatches from a poller it needs to keep
+          polling has to hand the report to another thread itself.
+        - The application's lock is held throughout, so it must not call back
+          into the storage, and its LATENCY IS THAT INSTANCE'S WRITE STALL:
+          every mutation waits for it. Bound the read - a pool with no
+          timeout, or one long enough to wait out a hung server, stalls the
+          instance for exactly that long.
+        - It is called at most once per report; a second ask returns what the
+          first read.
+        """
+        return cls(None, read_content)
 
     @classmethod
     def unknown(cls) -> "ExternalChange":
         """Something changed and the backend cannot say what."""
         return cls(None)
+
+    def content_read_on_demand(self) -> bool:
+        return self.read_content is not None
+
+    def with_content(self) -> "ExternalChange":
+        """This change with its content in hand. Callers must have settled.
+
+        Read once, then remembered. A report is observed in more than one
+        place - the application applies it, a test records what arrived - and
+        asking twice would mean two reads of the store at two moments, of
+        which only the first was made after the settle. So the second ask
+        returns the first ask's answer rather than a fresher one.
+        """
+        if self.read_content is None:
+            return self
+        # Not a field, so that a report stays a value: what one happens to
+        # have been asked for has no business in its equality, its hash or
+        # its repr, and a memo declared as a field is in all three.
+        content = getattr(self, "_content", None)
+        if content is None:
+            content = tuple(self.read_content())
+            object.__setattr__(self, "_content", content)
+        return ExternalChange(content)
 
 
 @runtime_checkable
@@ -254,7 +332,10 @@ class ChangeNotifyingBackend(Protocol):
         The listener is called only with changes the store has already
         applied - it never writes back. Called once, after the application's
         first load, so no change can be reported against a model that does
-        not exist yet.
+        not exist yet. It applies the report inline, so a report handed over
+        with `ExternalChange.entities_read_on_demand` has its content read on
+        this same thread, further down this call stack - see that constructor
+        for the three obligations that follow.
 
         Report from a thread of the backend's own - the thread a notification
         channel, a poller or a watcher runs on. One kind of thread is

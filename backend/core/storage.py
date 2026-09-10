@@ -1237,6 +1237,24 @@ class GraphStorage:
         with self._lock:
             if not self._settle_before_refresh():
                 return
+            # Read AFTER the settle, never before. A backend that gathers the
+            # content when it dispatches gathers it without this instance's
+            # queued writes in it, and the only defence left is the wall clock
+            # below - which does not order the commits, and which leaves the
+            # two instances apart for good when it disagrees with them. Asking
+            # here instead means the answer is the store's, with our own work
+            # already landed in it.
+            authoritative = change.content_read_on_demand()
+            if authoritative:
+                try:
+                    change = change.with_content()
+                except Exception as exc:
+                    print(
+                        f"Warning: could not read the content of an external "
+                        f"change ({exc}); reloading the graph instead"
+                    )
+                    self._reload_from_store()
+                    return
             if change.operations is None:
                 self._reload_from_store()
                 return
@@ -1257,7 +1275,7 @@ class GraphStorage:
                         raise ValueError(f"unknown entity action {op.action!r}")
                     if op.kind == "node":
                         if op.action == "upsert":
-                            self._external_upsert_node(op, touched)
+                            self._external_upsert_node(op, touched, authoritative)
                         else:
                             self._external_delete_node(op.entity_id, touched)
                     elif op.kind == "edge":
@@ -1481,25 +1499,78 @@ class GraphStorage:
         value = getattr(entity, "type", None)
         return value.value if hasattr(value, "value") else str(value)
 
+    def _already_held(self, existing: Node, reported: Node) -> bool:
+        """Is the store's answer the value this instance already holds?
+
+        The vector is compared where it lives rather than where it is written:
+        an embedding is moved off the node and into the index as soon as it is
+        adopted, so a node held in memory carries none while the store's copy
+        of the same node carries one. Comparing the two dictionaries whole
+        would therefore call every vectored node changed.
+        """
+        held = existing.to_dict()
+        answer = reported.to_dict()
+        held.pop("embedding", None)
+        vector = answer.pop("embedding", None)
+        if held != answer:
+            return False
+        # Both directions: an answer carrying no embedding for a node the
+        # index has a vector for is a change too - the store dropped it - and
+        # reading that as "nothing to do" would leave semantic search matching
+        # a description the store no longer keeps.
+        return self.vector_store.get_vector_list(reported.id) == vector
+
     def _external_upsert_node(
-        self, op: EntityOperation, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+        self,
+        op: EntityOperation,
+        touched: "Dict[str, Tuple[Optional[Node], Any]]",
+        authoritative: bool = False,
     ) -> None:
-        """Callers must hold _lock, and settle `touched` when the batch ends."""
+        """Callers must hold _lock, and settle `touched` when the batch ends.
+
+        `authoritative` says the payload was read from the store AFTER this
+        instance settled its own writes, so it already contains them. There is
+        then nothing of ours for the clock below to protect, and consulting it
+        would be worse than useless - it is what keeps the two instances apart.
+        """
         # from_dict rewrites its argument in place - timestamps parsed,
         # defaults filled in - and the argument here belongs to the backend,
         # which may still be holding the record it reported. Read it, do not
         # take it. The top level is all from_dict touches.
         node = Node.from_dict(dict(op.payload))
         existing = self.nodes.get(node.id)
-        if existing is not None and self._is_newer(
-            existing.updated_at, node.updated_at
+        if (
+            authoritative
+            and existing is not None
+            and self._already_held(existing, node)
         ):
-            # Both instances wrote this node. The store settles on whichever
-            # write reached it last, but this instance is never told about its
-            # own, so applying a report that predates ours would leave us
-            # serving a value the store does not hold - and nothing would put
-            # it right, because there is nothing left to report. Last writer
-            # wins, by the only ordering two instances share.
+            # Reading after the settle means the answer is often this
+            # instance's own write, and there is nothing in that to apply. Not
+            # a no-op if it were. The event would tell every subscriber a node
+            # changed when nothing about it did; and the settle would go to
+            # work on a description that did not change - rebuilding the index
+            # twice for a node that has a vector, once to evict it and once to
+            # put the same one back from the payload, and for a node that has
+            # none, asking the model for one, which is the whole cost on an
+            # install with no model to ask.
+            return
+        if (
+            not authoritative
+            and existing is not None
+            and self._is_newer(existing.updated_at, node.updated_at)
+        ):
+            # Both instances wrote this node, and this report was gathered
+            # before we settled - so it may predate our own write, which we
+            # are never told about. Applying it would leave us serving a value
+            # the store does not hold, with nothing left to report that would
+            # put it right. Last writer wins, by the only ordering two
+            # instances that cannot re-read their store share.
+            #
+            # It is a poor ordering, and it is why a backend that CAN re-read
+            # should report `entities_read_on_demand` and never reach this:
+            # the clock does not order the commits, so when the write that
+            # committed last carries the earlier stamp this keeps the two
+            # instances apart permanently rather than resolving anything.
             print(
                 f"Warning: ignoring an external change to node {node.id}: this "
                 f"instance holds a newer version of it"

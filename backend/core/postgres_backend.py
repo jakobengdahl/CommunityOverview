@@ -874,13 +874,19 @@ class PostgresGraphPersistenceBackend:
         catch-up; there is only the next announcement, which this build would
         not understand either.
 
-        Which is why the shape is checked *here*, before any of it is used.
-        Letting a malformed entry reach the read-back instead would raise out
-        of the reading thread, and the reload would arrive only as a side
-        effect of the reconnect that followed: the right outcome by the wrong
-        road. It costs the listening connection, it costs the backoff wait
-        that a drop now takes, and it is reported as a lost connection naming
-        a KeyError - a misdiagnosis in the one line an operator would read.
+        The shape is checked *here* because this is where the announcement is
+        already being parsed: the origin decides whether to deliver at all, so
+        `json.loads` and the origin lookup happen regardless, and reading the
+        entries is one comprehension inside the same `try`. It is not bought
+        by what it saves. The read-back is deferred, so a malformed entry left
+        to reach it raises only when the application asks for the content, and
+        what follows is the same whole-graph reload this road takes - measured
+        both ways, one drain and one reload each, indistinguishable on the
+        clock. What differs is the diagnosis, and not in this road's favour:
+        from there it is reported as a content read that failed, which is a
+        different thing to look for than an announcement this build cannot
+        parse, and from here it is reported as nothing at all - the weaker
+        half of that trade, and worth fixing on its own.
         """
         try:
             announcement = json.loads(payload)
@@ -895,25 +901,27 @@ class PostgresGraphPersistenceBackend:
         if pairs is None:
             self._deliver(ExternalChange.unknown())
             return
-        try:
-            change = self._resolve(pairs)
-        except Exception as exc:
-            # The announcement was read; the store would not answer for it -
-            # a pool timeout under contention, a connection dropped between
-            # the two. Left to propagate it would leave the reading thread,
-            # take the listening connection with it and cost a reconnect, so
-            # a transient read is amplified into the most expensive recovery
-            # this backend has. The change is real either way, so this
-            # instance says what it honestly knows: something changed.
-            print(
-                f"Warning: could not read back an announced change on "
-                f"{self._channel}: {type(exc).__name__}: {exc}"
-            )
-            self._deliver(ExternalChange.unknown())
-            return
-        self._deliver(change)
+        # Read ON DEMAND, not here. The application asks for the content once
+        # it has settled its own writes, so what gets read is the store's
+        # answer with that instance's work already in it - where reading now
+        # would hand over content that predates it, and leave the application
+        # arbitrating with a wall clock that does not order the commits.
+        #
+        # "Later", not "elsewhere": the application applies the report inline,
+        # so the read still happens on THIS thread, further down this call
+        # stack, inside _deliver. What makes that safe is not which thread it
+        # is on but what the application has done by then - it has drained its
+        # write queue and holds the lock every mutation needs in order to be
+        # queued, so nothing of its own is competing for the pool.
+        #
+        # A read that fails there is not this thread's to absorb, though: the
+        # application turns it into a reload, which is what this used to do
+        # here, and the listening connection is not in its path.
+        self._deliver(
+            ExternalChange.entities_read_on_demand(lambda: self._resolve(pairs))
+        )
 
-    def _resolve(self, pairs: Sequence[Tuple[str, str]]) -> ExternalChange:
+    def _resolve(self, pairs: Sequence[Tuple[str, str]]) -> List[EntityOperation]:
         """Turn named identifiers into operations, reading content from the store.
 
         The store decides what happened, not the announcement. An identifier
@@ -951,17 +959,23 @@ class PostgresGraphPersistenceBackend:
                 operations.append(
                     EntityOperation(kind, "upsert", entity_id, dict(doc))  # type: ignore[arg-type]
                 )
-        return ExternalChange.entities(operations)
+        return operations
 
     def _deliver(self, change: ExternalChange) -> None:
-        """Hand one change to the listener, holding nothing while it runs.
+        """Hand one change to the listener, holding nothing of ours while it runs.
 
         Nothing of ours is held here on purpose. The listener refreshes an
-        application that may wait for its own write queue, and that queue's
-        writes need this pool - so a pooled connection still held from the
-        read-back above would have the refresh waiting for a writer that is
-        waiting for the connection the refresh has. `_resolve` returns its
-        connection before this is called, and this is why.
+        application that waits for its own write queue first, and that queue's
+        writes need this pool - so a pooled connection held across this call
+        would have the refresh waiting for a writer that is waiting for the
+        connection the refresh has.
+
+        The read-back is inside the listener now rather than before it, which
+        is not the same hazard turned back on: it runs after that wait, with
+        the queue drained and the application's lock held, so there is no
+        writer of its own left to wait for. What must not happen is a
+        connection taken HERE and held across the call, which is why there is
+        none.
         """
         listener = self._listener
         if listener is None or self._listen_stop.is_set():

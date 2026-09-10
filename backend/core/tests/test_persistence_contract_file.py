@@ -92,3 +92,60 @@ def test_the_previous_version_fixture_is_the_shipped_example():
     assert data["nodes"] and data["edges"]
     assert "embedding" in data["nodes"][0]
     assert any(n.get("embedding") for n in data["nodes"]), "no inline vector to migrate"
+
+
+class TestTheDefaultBackendDidNotChange:
+    """The shared-store work's third acceptance criterion: the file backend is
+    unaffected by it.
+
+    Today that is true by ABSENCE - the eight change-notification clauses skip
+    for this backend, and a skip is silence, not a statement. If it ever
+    started declaring the capability the clauses would begin passing and
+    nothing would report that the default had quietly become a backend two
+    instances may share. It may not: two writers would fight over the
+    checkpoint that folds the journal back into `graph.json`, and the
+    `journal_id` binding a journal to its graph assumes one writer lineage.
+
+    So the absence is asserted rather than left to the skips.
+    """
+
+    def test_it_declares_incremental_writes_and_transactions_and_no_more(
+        self, tmp_path
+    ):
+        backend = FileGraphPersistenceBackend(tmp_path / "graph.json")
+        assert backend.capabilities() == storage_backends.BackendCapabilities(
+            incremental_writes=True, transactions=True
+        )
+
+    def test_it_is_not_a_change_notifying_backend(self, tmp_path):
+        backend = FileGraphPersistenceBackend(tmp_path / "graph.json")
+        assert not isinstance(backend, storage_backends.ChangeNotifyingBackend), (
+            "the default backend grew the notification protocol; one graph "
+            "file is not a store two instances can share"
+        )
+
+    def test_a_storage_on_it_never_starts_notification(self, tmp_path):
+        """The other half, and it has to WATCH rather than re-read the flag.
+
+        `capabilities_of` hands back the backend's own object, so asserting
+        `storage._backend_capabilities.change_notification` is False is the
+        same assertion as the equality above, made twice - it says nothing
+        about whether a listener was started. So the backend is given the
+        method and it is spied on: if `GraphStorage` ever starts notification
+        on some other condition, this is what notices.
+        """
+        from backend.core.storage import GraphStorage
+
+        started = []
+        backend = FileGraphPersistenceBackend(tmp_path / "graph.json")
+        backend.start_change_notification = lambda listener: started.append(listener)
+        backend.stop_change_notification = lambda: None
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert started == [], (
+                "the default backend was asked to start reporting external "
+                "changes, which it does not implement"
+            )
+        finally:
+            storage.shutdown_events()
