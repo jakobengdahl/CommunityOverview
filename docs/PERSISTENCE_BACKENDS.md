@@ -538,9 +538,23 @@ writing a backend of your own against a shared server:
   failure rather than proceed. Neither level is left to the environment for
   the save or the load — each states its own. Migration (`_ensure_schema()`)
   and `exists()` are not part of that guarantee: they run under whatever the
-  connection's environment defaults to, which is fine for what they do — a
-  single advisory lock and a single `SELECT`, neither exposed to the
-  statement-snapshot anomaly the save and the load guard against.
+  connection's environment defaults to, which is fine for what they do —
+  neither reads graph data, so neither is exposed to the statement-snapshot
+  anomaly the save and the load guard against. What they actually send
+  depends on whether the store has been migrated before. Cold (nothing
+  provisioned yet), `_ensure_schema()` issues one advisory-lock statement,
+  then one catalog lookup for the schema (`pg_namespace`) plus a
+  `CREATE SCHEMA IF NOT EXISTS` if it is missing, then for each of the three
+  tables one catalog lookup via `_create_missing()` (a `pg_class`/
+  `pg_namespace` join) plus a `CREATE TABLE IF NOT EXISTS` if it is missing:
+  up to four catalog lookups and four creates behind the one lock, not a
+  single `SELECT`. Once a process has migrated once, `self._migrated`
+  short-circuits every later call on that backend object: no advisory lock,
+  no catalog lookup, nothing sent to the server. `exists()` adds exactly one
+  further read on top of whichever of those two paths `_ensure_schema()`
+  took — the single-row `SELECT` against `graph_metadata` — so a warm
+  `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
+  that same `SELECT` plus everything above.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the

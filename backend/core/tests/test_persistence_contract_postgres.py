@@ -606,12 +606,16 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         backends.append(backend)
         blocker = psycopg.connect(DSN, autocommit=False)
         errors = []
+        second_returned = threading.Event()
 
-        def use():
+        def use(done: threading.Event | None = None) -> None:
             try:
                 backend.exists()
             except Exception as exc:
                 errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                if done is not None:
+                    done.set()
 
         try:
             blocker.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,))
@@ -625,17 +629,37 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
             assert _wait_until_blocking(blocker.info.backend_pid), (
                 "the first thread never blocked on the migration lock"
             )
-            second = threading.Thread(target=use, daemon=True)
+            # The first thread now holds `backend._migrate_lock` - it only
+            # reaches the advisory-lock wait below after acquiring it - and
+            # `_ensure_schema` holds that Python lock across its whole
+            # critical section, including the wait inside Postgres. So a
+            # second thread calling `exists()` from here blocks on that
+            # Python lock, in pure Python, before it ever opens a connection
+            # of its own: it can never become a second blocked backend in
+            # `pg_stat_activity`, which is why that is the wrong place to
+            # look for it - the assertion below checks the Python-level
+            # exclusion directly instead.
+            second = threading.Thread(target=use, args=(second_returned,), daemon=True)
             second.start()
-            # A memo set on the way in would let this thread sail past
-            # rather than block, so confirming a SECOND session is now
-            # waiting on `blocker` - not merely re-confirming the first - is
-            # what actually exercises the bug.
-            assert _wait_until_blocking(blocker.info.backend_pid, count=2), (
-                "the second thread never blocked on the migration lock - it "
-                "may have taken the memo's lock-free fast path instead"
+            # A memo set on the way in (`self._migrated = True` before the
+            # tables actually exist) would let this thread sail past the
+            # unlocked fast-path check and return almost immediately,
+            # instead of blocking on `_migrate_lock` until the migration
+            # finishes. Confirming it has NOT returned yet is what actually
+            # exercises that bug.
+            assert not second_returned.wait(timeout=1), (
+                "the second thread's exists() call returned before the "
+                "migration finished - it may have taken the memo's "
+                "lock-free fast path instead of waiting on the migrate lock"
             )
-            blocker.rollback()
+            # Confirm the first thread is still genuinely blocked, rather
+            # than assumed to still be: the wait above proves nothing about
+            # ordering if the first thread had somehow already finished.
+            assert _wait_until_blocking(blocker.info.backend_pid), (
+                "the first thread stopped blocking on the migration lock "
+                "while the second thread was still waiting on it"
+            )
+            blocker.rollback()  # releases the transaction-scoped lock
             first.join(30)
             second.join(30)
         finally:
@@ -644,6 +668,10 @@ class TestPostgresSchemaIsSafeToMigrateConcurrently:
         assert not first.is_alive() and not second.is_alive(), (
             "a thread never finished - a migration that hangs rather than "
             "raises would otherwise pass here"
+        )
+        assert second_returned.is_set(), (
+            "the second thread's exists() call never returned once the "
+            "migration lock was released"
         )
         assert errors == [], (
             f"a thread reached the tables before the migration created them: {errors}"
