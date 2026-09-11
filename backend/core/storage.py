@@ -1620,12 +1620,17 @@ class GraphStorage:
 
         # An edge cannot outlive an endpoint. The store may well have reported
         # the edge deletions too; deleting one twice is a no-op.
-        incident = [
-            edge.id
-            for edge in self.edges.values()
-            if edge.source == node_id or edge.target == node_id
-        ]
-        for edge_id in incident:
+        incident_set = set()
+        if self.graph.has_node(node_id):
+            # Use NetworkX localized edge lookup for O(degree) complexity
+            # Outgoing edges first
+            for _, _, data in self.graph.out_edges(node_id, data=True):
+                incident_set.add(data["data"].id)
+            # Incoming edges
+            for _, _, data in self.graph.in_edges(node_id, data=True):
+                incident_set.add(data["data"].id)
+
+        for edge_id in incident_set:
             self._external_delete_edge(edge_id)
 
         if self.graph.has_node(node_id):
