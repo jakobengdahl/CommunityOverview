@@ -77,15 +77,20 @@ def matching_dimension(
     }
 
 
-def _cosine_similarity_matrix(query, matrix):
-    """Cosine similarity of a (1, d) query against an (n, d) matrix -> (n,).
+def _cosine_to_unit_rows(query, unit_matrix):
+    """Cosine similarity of a (1, d) query against ALREADY UNIT-LENGTH rows.
+
+    The rows are normalised once, when the index changes, rather than once per
+    query - see VectorStore._update_matrix. Doing it here instead allocated a
+    full copy of the matrix on every search: 147 MiB per query at 100k nodes of
+    width 384, for a result that is the same on every query until the index
+    changes.
 
     Implemented with numpy so semantic search does not depend on scikit-learn.
     """
     np = _ensure_numpy()
     query_norm = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
-    matrix_norm = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12)
-    return (query_norm @ matrix_norm.T)[0]
+    return (query_norm @ unit_matrix.T)[0]
 
 
 class VectorStore:
@@ -117,8 +122,13 @@ class VectorStore:
         self.embeddings: Dict[str, Any] = {}  # node_id -> embedding (numpy array)
         self.node_ids: List[
             str
-        ] = []  # ordered list of node ids corresponding to embeddings matrix
-        self.embedding_matrix: Optional[Any] = None  # numpy array
+        ] = []  # ordered list of node ids corresponding to unit_matrix rows
+        # The index as UNIT-LENGTH rows, not as the vectors were given. Search
+        # needs them normalised and nothing else reads this; keeping the raw
+        # stack as well would double the largest allocation this class makes,
+        # on an instance whose ceiling is memory. The vectors as supplied are
+        # still in `embeddings`, which is what persistence and export read.
+        self.unit_matrix: Optional[Any] = None  # numpy array
         self.revision: int = 0
 
     @property
@@ -237,21 +247,30 @@ class VectorStore:
         """Update the numpy matrix for vectorized operations.
 
         Every path that changes the index goes through here, so this is also
-        where the persistence revision is bumped.
+        where the persistence revision is bumped - and where the rows are
+        normalised, for the same reason: it is the one place the index can
+        change, so it is the one place the normalisation can go stale.
+
+        Row order follows `embeddings` insertion order and is what `node_ids`
+        indexes. A stacking order that disagreed with `node_ids` would return
+        one node's score wearing another node's id.
         """
         self.revision += 1
 
         if not self.embeddings:
             self.node_ids = []
-            self.embedding_matrix = None
+            self.unit_matrix = None
             return
 
         np = _ensure_numpy()
         self.node_ids = list(self.embeddings.keys())
         # Stack embeddings into a matrix
-        self.embedding_matrix = np.vstack(
-            [self.embeddings[nid] for nid in self.node_ids]
-        )
+        matrix = np.vstack([self.embeddings[nid] for nid in self.node_ids])
+        # Normalised IN PLACE: vstack just built an array nobody else holds, so
+        # dividing into it keeps the rebuild's peak at one matrix rather than
+        # two. The epsilon keeps a zero row at zero instead of dividing by it.
+        matrix /= np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12
+        self.unit_matrix = matrix
 
     def _get_text_representation(self, node: Node) -> str:
         """Create a text representation of the node for embedding"""
@@ -317,7 +336,7 @@ class VectorStore:
         Returns:
             List of (node_id, score) tuples, sorted by score descending.
         """
-        if not self.embeddings or self.embedding_matrix is None:
+        if not self.embeddings or self.unit_matrix is None:
             return []
 
         np = _ensure_numpy()
@@ -347,23 +366,33 @@ class VectorStore:
         query_embedding = np.asarray(query_embedding).reshape(1, -1)
 
         # Calculate cosine similarity
-        similarities = _cosine_similarity_matrix(query_embedding, self.embedding_matrix)
+        similarities = _cosine_to_unit_rows(query_embedding, self.unit_matrix)
 
-        # Get indices of top results
-        # We can filter by threshold here
+        # Ordered in numpy rather than in Python, and walked only as far as the
+        # caller asked for. Scoring every node is unavoidable here - that is
+        # what an exact nearest-neighbour search is - but building a list of n
+        # tuples and sorting all of them to return `limit` of them was not.
+        # `stable` keeps equal scores in index order, which is the order the
+        # list-and-sort above produced and therefore the order callers have
+        # been seeing.
+        np_order = np.argsort(-similarities, kind="stable")
+
         results = []
-        for idx, score in enumerate(similarities):
-            if score >= threshold:
-                results.append((self.node_ids[idx], float(score)))
+        for idx in np_order:
+            score = float(similarities[idx])
+            # Descending, so the first score below the threshold means every
+            # score after it is too.
+            if score < threshold:
+                break
+            node_id = self.node_ids[idx]
+            # If query was a node in the database, drop it (similarity 1.0)
+            if query_node is not None and node_id == query_node.id:
+                continue
+            results.append((node_id, score))
+            if len(results) >= limit:
+                break
 
-        # Sort by score descending
-        results.sort(key=lambda x: x[1], reverse=True)
-
-        # If query was a node in the database, remove it from results (similarity 1.0)
-        if query_node:
-            results = [r for r in results if r[0] != query_node.id]
-
-        return results[:limit]
+        return results
 
     def get_embedding_count(self) -> int:
         """Get the number of stored embeddings"""

@@ -310,8 +310,15 @@ class TestVectorStorePersistenceSeam:
         assert store.node_ids == ["zeta", "alpha", "mid"]
         assert store.node_ids == list(store.embeddings)
         for row, node_id in enumerate(store.node_ids):
-            np.testing.assert_array_equal(
-                store.embedding_matrix[row], store.embeddings[node_id]
+            # The rows are unit length, so the vector as given is compared
+            # against its own direction rather than against itself. That is the
+            # only difference; which row belongs to which id is the property.
+            vector = store.embeddings[node_id]
+            np.testing.assert_allclose(
+                store.unit_matrix[row],
+                vector / np.linalg.norm(vector),
+                rtol=1e-6,
+                atol=1e-6,
             )
 
         # The consequence a user would see: zeta's nearest neighbour is alpha.
@@ -362,8 +369,8 @@ class TestVectorStoreMatrix:
         """Test that embedding matrix is updated when adding nodes"""
         temp_vector_store.update_nodes_embeddings(sample_nodes)
 
-        assert temp_vector_store.embedding_matrix is not None
-        assert temp_vector_store.embedding_matrix.shape[0] == 3
+        assert temp_vector_store.unit_matrix is not None
+        assert temp_vector_store.unit_matrix.shape[0] == 3
 
     @pytest.mark.slow
     def test_matrix_updated_on_remove(self, temp_vector_store, sample_nodes):
@@ -371,11 +378,11 @@ class TestVectorStoreMatrix:
         temp_vector_store.update_nodes_embeddings(sample_nodes)
         temp_vector_store.remove_node_embedding("node-1")
 
-        assert temp_vector_store.embedding_matrix.shape[0] == 2
+        assert temp_vector_store.unit_matrix.shape[0] == 2
 
     def test_empty_matrix(self, temp_vector_store):
         """Test that empty store has no matrix"""
-        assert temp_vector_store.embedding_matrix is None
+        assert temp_vector_store.unit_matrix is None
         assert temp_vector_store.node_ids == []
 
 
@@ -400,11 +407,11 @@ class TestVectorStoreNumpySearch:
         return store, nodes
 
     def test_cosine_similarity_matrix_matches_expected(self):
-        from backend.core.vector_store import _cosine_similarity_matrix
+        from backend.core.vector_store import _cosine_to_unit_rows
 
         store, _ = self._store_with_embeddings()
         query = np.array([[1.0, 0.0, 0.0]])
-        sims = _cosine_similarity_matrix(query, store.embedding_matrix)
+        sims = _cosine_to_unit_rows(query, store.unit_matrix)
 
         assert sims.shape == (3,)
         assert sims[0] == pytest.approx(1.0, abs=1e-6)  # identical vector
@@ -463,3 +470,131 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     after = store.export_vectors()
     assert set(after) == set(before), "a refused batch still changed the index"
     np.testing.assert_allclose(after["a"], before["a"])
+
+
+class TestSearchCostsNothingItDoesNotHaveTo:
+    """What normalising the index once instead of once per query has to buy,
+    and what it must not cost.
+
+    The rows are unit length before a query arrives, so a search multiplies
+    against them rather than building its own normalised copy of the whole
+    matrix first. That copy was the largest allocation the class made and it
+    was made on every search: 147 MiB per query at 100k nodes of width 384,
+    recomputed identically until the index changed.
+    """
+
+    @staticmethod
+    def _store(count, dim=64, seed=3):
+        rng = np.random.default_rng(seed)
+        store = VectorStore()
+        store.load_vectors(
+            {f"n{i}": rng.random(dim).astype(np.float32) for i in range(count)}
+        )
+        return store
+
+    def test_a_query_allocates_nothing_the_size_of_the_index(self):
+        """The property, measured rather than reasoned about: what one search
+        allocates must not grow with the matrix. It is checked against the
+        matrix's own size so the assertion cannot pass by the index being
+        small."""
+        import tracemalloc
+
+        store = self._store(4000, dim=256)
+        matrix_bytes = store.unit_matrix.nbytes
+        probe = store.embeddings["n0"]
+
+        store.search(query_text=None, query_node=None)  # warm the import path
+        tracemalloc.start()
+        store.search(query_node=Node(id="n0", type=NodeType.ACTOR, name="n0"), limit=10)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        assert probe is not None
+        assert peak < matrix_bytes / 4, (
+            f"one search allocated {peak} bytes against a {matrix_bytes}-byte "
+            f"index; it is building a copy of the matrix again"
+        )
+
+    def test_results_are_what_the_normalise_per_query_form_returned(self):
+        """Equivalence with the form this replaced, computed here rather than
+        recalled: normalise both sides at query time, rank in Python, and
+        require the shipped path to agree - ids, order and scores."""
+        store = self._store(300, dim=32, seed=11)
+        query = np.asarray(store.embeddings["n7"]).reshape(1, -1)
+
+        matrix = np.vstack([store.embeddings[nid] for nid in store.node_ids])
+        q = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
+        m = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-12)
+        sims = (q @ m.T)[0]
+        expected = [
+            (store.node_ids[i], float(score))
+            for i, score in enumerate(sims)
+            if score >= 0.72
+        ]
+        expected.sort(key=lambda pair: pair[1], reverse=True)
+        expected = [pair for pair in expected if pair[0] != "n7"][:25]
+
+        actual = store.search(
+            query_node=Node(id="n7", type=NodeType.ACTOR, name="n7"),
+            limit=25,
+            threshold=0.72,
+        )
+
+        assert [node_id for node_id, _ in actual] == [
+            node_id for node_id, _ in expected
+        ]
+        np.testing.assert_allclose(
+            [score for _, score in actual],
+            [score for _, score in expected],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_equal_scores_keep_index_order(self):
+        """The tie-break callers have been seeing. The list-and-sort this
+        replaced used Python's stable sort over rows appended in index order,
+        so equal scores came back in index order; an unstable sort would
+        reorder them for no reason a caller could see.
+
+        Ties MIXED WITH distinct scores, and enough of them, because neither
+        half alone can tell the two sorts apart: an all-equal array is left
+        untouched by quicksort's partitioning, and three rows are inside the
+        insertion-sort fallback. Measured: fifty rows over two distinct scores
+        is where `quicksort` first disagrees with `stable` here.
+        """
+        rng = np.random.default_rng(3)
+        scores = rng.integers(0, 2, size=50)
+        store = VectorStore()
+        # Two directions only, so half the rows tie with each other exactly.
+        store.load_vectors(
+            {
+                f"n{i}": ([1.0, 0.0] if score else [0.0, 1.0])
+                for i, score in enumerate(scores)
+            }
+        )
+
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+        results = store.search(query_node=probe, limit=50)
+
+        expected = [f"n{i}" for i, score in enumerate(scores) if score] + [
+            f"n{i}" for i, score in enumerate(scores) if not score
+        ]
+        assert [node_id for node_id, _ in results] == expected
+
+    def test_a_zero_row_does_not_become_a_nan(self):
+        """A zero vector has no direction. The per-query form divided by the
+        norm plus an epsilon, which left the row at zero rather than at nan,
+        and pre-normalising has to keep doing that - a nan would poison every
+        comparison it takes part in."""
+        store = VectorStore()
+        store.load_vectors({"zero": [0.0, 0.0], "real": [1.0, 0.0]})
+
+        assert not np.isnan(store.unit_matrix).any()
+        np.testing.assert_allclose(store.unit_matrix[0], [0.0, 0.0])
+
+        results = store.search(
+            query_node=Node(id="real", type=NodeType.ACTOR, name="real"), limit=5
+        )
+        assert dict(results)["zero"] == pytest.approx(0.0, abs=1e-6)
