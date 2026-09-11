@@ -510,10 +510,20 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # Python objects rather than in numpy: measured, ordering with
         # `sorted(range(n), key=...)` returns identical results at five times
         # the peak, and passed a matrix-derived budget at every size.
-        budget = rows * 64
+        # Sized to the measured peak of the shipped path (about 18 bytes per
+        # row at this width) rather than to something comfortable: a loose
+        # budget admits an ordering that is O(n) in Python objects, which is
+        # what G2 is about. Measured, `argsort(...).tolist()` peaks at nearly
+        # three times the shipped path and fitted inside a 64-byte budget.
+        budget = rows * 20
 
         probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        store.search(query_node=probe_node, limit=10)  # outside the measurement
+        # The FIRST search after the index was built, inside the measurement.
+        # A warm-up outside it hides anything cached per index revision - and
+        # `_update_matrix` runs on every add and every remove, so a workload
+        # that writes between searches pays such a cache every time. Measured,
+        # caching the transposed matrix per revision peaks at 155 MB on a cold
+        # search at 100k x 384 and at nothing at all on a warm one.
         tracemalloc.start()
         store.search(query_node=probe_node, limit=10)
         _, peak = tracemalloc.get_traced_memory()
@@ -661,12 +671,35 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
         store._update_matrix()
 
-        for result in store.search(query_node=probe, limit=9, threshold=0.4):
-            assert not np.isnan(result[1]), f"a NaN score reached the caller: {result}"
-        # And with room to spare: the walk runs out of real scores before the
-        # limit, which is exactly when a NaN would be reached.
-        for result in store.search(query_node=probe, limit=99, threshold=-1.0):
-            assert not np.isnan(result[1]), f"a NaN score reached the caller: {result}"
+        for threshold in (0.4, -1.0):
+            results = store.search(query_node=probe, limit=99, threshold=threshold)
+            # Three assertions, because each catches a different way of being
+            # wrong. No NaN in the output is the obvious one. The NaN-bearing
+            # id being ABSENT is the second: substituting a finite value for
+            # the NaN would satisfy the first while inventing a score. And the
+            # rest still being there is the third: `argsort` puts NaN last and
+            # the walk stops at the first rejection, so an ordering that put
+            # NaN first would let one corrupt row suppress every result.
+            assert not any(np.isnan(score) for _, score in results), results
+            assert "bad" not in dict(results), (
+                f"the NaN row came back with a fabricated score: {results}"
+            )
+            assert "good" in dict(results), (
+                f"one NaN row suppressed the whole result: {results}"
+            )
+
+    def test_a_threshold_that_is_not_a_number_matches_nothing(self):
+        """`nan >= nan` is False, so the filter this replaced rejected every
+        row against a NaN threshold. A predicate written as `score < threshold
+        or score != score` drops NaN scores - which is what makes it look
+        right - and then admits everything when the THRESHOLD is the NaN."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+
+        assert store.search(query_node=probe, limit=9, threshold=float("nan")) == []
 
     def test_asking_for_no_results_returns_none(self):
         """`limit=0` reaches here unguarded from search_graph over MCP. The
@@ -694,6 +727,12 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             "b",
             "c",
         ]
+        # At a threshold nothing can fail, too: dropping the query node by
+        # scoring it -inf rather than by skipping it passes every finite
+        # threshold and hands it back here.
+        assert "a" not in dict(
+            store.search(query_node=probe, limit=9, threshold=float("-inf"))
+        )
 
     def test_emptying_the_index_lets_go_of_the_matrix(self):
         """Removing every vector has to release the matrix, not just stop
@@ -779,3 +818,57 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
         assert store.unit_matrix is None
         assert store.search(query_node=probe, limit=5) == []
+
+    def test_the_rows_are_rebuilt_when_the_index_changes_without_growing(self):
+        """Row order is pinned above for a fresh index. This is the churn: a
+        removal and an addition leave the COUNT unchanged, and a re-embed
+        changes no id at all, so an index that rebuilt only on a size change
+        would keep serving directions that belong to nothing."""
+        store = VectorStore()
+        store.load_vectors({"keep": [1.0, 0.0], "drop": [0.0, 1.0]})
+
+        store.remove_node_embedding("drop")
+        store._absorb({"added": np.asarray([0.0, 1.0], dtype=np.float32)})
+        assert store.node_ids == ["keep", "added"]
+        for row, node_id in enumerate(store.node_ids):
+            vector = store.embeddings[node_id]
+            np.testing.assert_allclose(
+                store.unit_matrix[row], vector / np.linalg.norm(vector), atol=1e-6
+            )
+
+        # Same ids, same count, different direction for one of them - and read
+        # WITHOUT anything that would change the count again, because a later
+        # rebuild repairs the staleness before it can be observed. A text query
+        # needs no extra row, so nothing here disturbs the index.
+        class _Model:
+            def encode(self, text):
+                return np.asarray([0.0, 1.0], dtype=np.float32)
+
+        store.model = _Model()
+        assert dict(store.search(query_text="old direction", limit=9, threshold=0.5))
+
+        store._absorb({"added": np.asarray([1.0, 0.0], dtype=np.float32)})
+
+        assert (
+            dict(store.search(query_text="old direction", limit=9, threshold=0.5)) == {}
+        ), "a re-embedded node still matches the direction it used to have"
+
+    def test_a_text_query_can_reach_every_row(self):
+        """The `query_text` branch, which nothing else here exercises: every
+        other case queries BY A NODE that is itself in the index, so the
+        query-node drop already caps the answer at n-1 and a limit silently
+        capped at n-1 would look correct. A stub stands in for the model, which
+        is not installed on the base install."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.9, 0.1], "c": [0.8, 0.2]})
+        store.model = _Model()
+
+        results = store.search(query_text="anything", limit=3, threshold=-1.0)
+        assert [node_id for node_id, _ in results] == ["a", "b", "c"], (
+            f"a text query reached {len(results)} of {len(store.node_ids)} rows"
+        )
