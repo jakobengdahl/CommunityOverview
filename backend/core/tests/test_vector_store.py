@@ -505,16 +505,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         rows = len(store.node_ids)
         # What a query legitimately needs is proportional to the NUMBER of
         # nodes - the similarities, their negation, and the argsort's output -
-        # and not to the size of the index. Budgeting against the matrix's
-        # bytes instead leaves room for a per-query allocation that is O(n) in
-        # Python objects rather than in numpy: measured, ordering with
-        # `sorted(range(n), key=...)` returns identical results at five times
-        # the peak, and passed a matrix-derived budget at every size.
-        # Sized to the measured peak of the shipped path (about 18 bytes per
-        # row at this width) rather than to something comfortable: a loose
-        # budget admits an ordering that is O(n) in Python objects, which is
-        # what G2 is about. Measured, `argsort(...).tolist()` peaks at nearly
-        # three times the shipped path and fitted inside a 64-byte budget.
+        # and not to the size of the index. So the budget is sized to the
+        # shipped path's measured peak of 17.75 bytes a row, not to something
+        # comfortable: a loose budget admits an ordering that is O(n) in
+        # Python objects rather than in numpy, which is what G2 is about.
+        # Measured against that 17.75, `argsort(...).tolist()` costs 2.9 times
+        # it and `sorted(range(n), key=...)` 4.6 times - both return identical
+        # results, and both fitted inside the 64-byte-a-row budget this
+        # replaced, as they did inside a budget derived from the matrix's
+        # bytes at every size.
         budget = rows * 20
 
         probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
@@ -922,21 +921,25 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"reached {len(results)} of 3 rows"
         )
 
-    def test_the_query_is_compared_in_the_index_dtype(self):
+    def test_a_list_valued_query_does_not_promote_the_index(self):
         """A float64 query against a float32 index makes numpy promote the
         MATRIX to compare them, which is an index-sized allocation per query -
-        measured at 308 MB at 100k x 384. `generate_embedding` returns a
-        Python list, so the query_node path produces exactly that; the
-        query_text path never did, because the model returns float32."""
+        measured at 308 MB at 100k x 384. A Python list is what produces it,
+        and `generate_embedding` returns one; this reaches the same line by
+        putting a list where a looked-up row would be, which keeps the fixture
+        to one code path and the index self-consistent."""
         import tracemalloc
 
         store = self._store(4000, dim=256)
-        absent = Node(id="absent", type=NodeType.ACTOR, name="absent")
-        # A Python list of floats, which is what generate_embedding returns.
-        store.embeddings["absent"] = [float(x) for x in store.embeddings["n0"]]
+        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
+        # In place of n0's own row, not alongside it: the dict keeps the same
+        # ids as the matrix, so nothing here leaves the index disagreeing with
+        # itself for whoever extends this next.
+        store.embeddings["n0"] = [float(x) for x in store.embeddings["n0"]]
+        assert len(store.embeddings) == len(store.node_ids)
 
         tracemalloc.start()
-        store.search(query_node=absent, limit=5)
+        store.search(query_node=probe, limit=5)
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
