@@ -369,28 +369,40 @@ class VectorStore:
         similarities = _cosine_to_unit_rows(query_embedding, self.unit_matrix)
 
         # Ordered in numpy rather than in Python, and walked only as far as the
-        # caller asked for. Scoring every node is unavoidable here - that is
-        # what an exact nearest-neighbour search is - but building a list of n
-        # tuples and sorting all of them to return `limit` of them was not.
-        # `stable` keeps equal scores in index order, which is the order the
-        # list-and-sort above produced and therefore the order callers have
-        # been seeing.
+        # caller asked for. The ordering is still over all n - that is what an
+        # exact nearest-neighbour search is - but it happens in numpy instead
+        # of over a list of n Python tuples. `stable` keeps equal scores in
+        # index order, which is the order the list-and-sort this replaced
+        # produced and therefore the order callers have been seeing.
         np_order = np.argsort(-similarities, kind="stable")
 
         results = []
         for idx in np_order:
             score = float(similarities[idx])
-            # Descending, so the first score below the threshold means every
-            # score after it is too.
-            if score < threshold:
+            # Spelled as the negation of the old `score >= threshold` filter
+            # rather than as `score < threshold`, because the two differ on a
+            # NaN: a NaN is neither above the threshold nor below it, so the
+            # second admits it and the filter it replaced did not. A NaN score
+            # is reachable from a single corrupt float in the sidecar, and it
+            # reaches a caller that formats it as a percentage. argsort puts
+            # NaN last, so stopping here is still the same set as filtering.
+            if not (score >= threshold):
                 break
             node_id = self.node_ids[idx]
-            # If query was a node in the database, drop it (similarity 1.0)
+            # If query was a node in the database, drop it (similarity 1.0).
+            # Before the count below, so a dropped node does not use a slot.
             if query_node is not None and node_id == query_node.id:
                 continue
-            results.append((node_id, score))
+            # Counted BEFORE the append, which is what makes `limit=0` return
+            # nothing rather than the first candidate - and `limit` is not
+            # guarded on every road in here (search_graph over MCP does not
+            # constrain it). Asking for none, or for a negative none, gets
+            # none; the slice this replaced said `results[:limit]`, which
+            # returned everything-but-one for -1, slice arithmetic rather than
+            # an answer anyone wanted.
             if len(results) >= limit:
                 break
+            results.append((node_id, score))
 
         return results
 

@@ -503,13 +503,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         matrix_bytes = store.unit_matrix.nbytes
         probe = store.embeddings["n0"]
 
-        store.search(query_text=None, query_node=None)  # warm the import path
+        probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
+        assert probe is store.embeddings["n0"], "the probe is not the indexed row"
+        store.search(query_node=probe_node, limit=10)  # outside the measurement
         tracemalloc.start()
-        store.search(query_node=Node(id="n0", type=NodeType.ACTOR, name="n0"), limit=10)
+        store.search(query_node=probe_node, limit=10)
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        assert probe is not None
         assert peak < matrix_bytes / 4, (
             f"one search allocated {peak} bytes against a {matrix_bytes}-byte "
             f"index; it is building a copy of the matrix again"
@@ -598,3 +599,112 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             query_node=Node(id="real", type=NodeType.ACTOR, name="real"), limit=5
         )
         assert dict(results)["zero"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_threshold_excludes_rather_than_just_ordering(self):
+        """The threshold is a filter, and this is the only test of it that
+        RUNS: the existing one is marked slow and needs the embedding model, so
+        on the base install it skips - which is how a break that admitted a NaN
+        got past the suite once already. Nothing here needs a model."""
+        store = VectorStore()
+        store.load_vectors(
+            {
+                "same": [1.0, 0.0],
+                "half": [1.0, 1.0],
+                "orthogonal": [0.0, 1.0],
+            }
+        )
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+
+        assert [node_id for node_id, _ in store.search(query_node=probe, limit=9)] == [
+            "same",
+            "half",
+            "orthogonal",
+        ]
+        # 0.707 for half, 0.0 for orthogonal: a threshold between them keeps
+        # one and drops the other, so a threshold that stopped working shows up
+        # as a longer list rather than as a different order.
+        assert [
+            node_id
+            for node_id, _ in store.search(query_node=probe, limit=9, threshold=0.5)
+        ] == ["same", "half"]
+        assert store.search(query_node=probe, limit=9, threshold=1.5) == []
+
+    def test_a_nan_score_is_dropped_rather_than_returned(self):
+        """A NaN is neither above the threshold nor below it. The filter this
+        replaced asked `score >= threshold`, which is False for a NaN and
+        dropped it; asking `score < threshold` instead is False too, and admits
+        it. It is not hypothetical: one corrupt float in the sidecar loads as a
+        NaN, and a caller formats the score as `int(score * 100)`, which raises
+        on one."""
+        store = VectorStore()
+        store.load_vectors(
+            {"good": [1.0, 0.0], "bad": [float("nan"), 0.0], "other": [0.0, 1.0]}
+        )
+        assert np.isnan(store.unit_matrix).any(), "the fixture has no NaN in it"
+
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+
+        for result in store.search(query_node=probe, limit=9, threshold=0.4):
+            assert not np.isnan(result[1]), f"a NaN score reached the caller: {result}"
+        # And with room to spare: the walk runs out of real scores before the
+        # limit, which is exactly when a NaN would be reached.
+        for result in store.search(query_node=probe, limit=99, threshold=-1.0):
+            assert not np.isnan(result[1]), f"a NaN score reached the caller: {result}"
+
+    def test_asking_for_no_results_returns_none(self):
+        """`limit=0` reaches here unguarded from search_graph over MCP. The
+        slice this replaced returned nothing for it, and a count checked after
+        the append returns one - the first candidate is already in the list by
+        the time anything asks."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.9, 0.1], "c": [0.0, 1.0]})
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+
+        assert store.search(query_node=probe, limit=0) == []
+        assert store.search(query_node=probe, limit=-1) == []
+        assert len(store.search(query_node=probe, limit=1)) == 1
+
+    def test_the_query_node_does_not_use_one_of_the_slots(self):
+        """It is dropped, not counted. The slice this replaced dropped it
+        before slicing, so a caller asking for two got two."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.9, 0.1], "c": [0.8, 0.2]})
+        probe = Node(id="a", type=NodeType.ACTOR, name="a")
+
+        assert [node_id for node_id, _ in store.search(query_node=probe, limit=2)] == [
+            "b",
+            "c",
+        ]
+
+    def test_emptying_the_index_lets_go_of_the_matrix(self):
+        """Removing every vector has to release the matrix, not just stop
+        finding it. `search` returns early on an empty `embeddings`, so a
+        matrix left behind is invisible to every assertion about results - and
+        it is the largest allocation this class makes, on the axis this whole
+        change is about."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+        assert store.unit_matrix is not None
+
+        store.remove_nodes_embeddings(["a", "b"])
+
+        assert store.embeddings == {}
+        assert store.unit_matrix is None, "the matrix outlived every vector in it"
+        assert store.node_ids == []
+
+    def test_the_matrix_stays_float32(self):
+        """Width times four bytes is what the sizing in
+        docs/DATA_MANAGEMENT.md counts on, and a float64 matrix is twice the
+        resident cost for no gain - cosine over normalised rows does not need
+        the precision. The allocation budget above is derived from the
+        matrix's own size, so it scales with this rather than catching it."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+
+        assert store.unit_matrix.dtype == np.float32
