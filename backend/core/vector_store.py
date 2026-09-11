@@ -372,8 +372,15 @@ class VectorStore:
             )
             return []
 
-        # Reshape to (1, embedding_dim); handle both list and array inputs
-        query_embedding = np.asarray(query_embedding).reshape(1, -1)
+        # Reshape to (1, embedding_dim); handle both list and array inputs.
+        # In the INDEX's dtype, which is what keeps this query-shaped rather
+        # than index-shaped: `generate_embedding` returns a Python list, which
+        # becomes float64, and a float64 query against a float32 matrix makes
+        # numpy promote the whole matrix to compare them - measured at 308 MB
+        # for one query at 100k rows of width 384. The query_text path never
+        # saw it, because the model hands back float32 already.
+        query_embedding = np.asarray(query_embedding, dtype=self.unit_matrix.dtype)
+        query_embedding = query_embedding.reshape(1, -1)
 
         # Calculate cosine similarity
         similarities = _cosine_to_unit_rows(query_embedding, self.unit_matrix)

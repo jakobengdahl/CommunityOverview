@@ -606,6 +606,13 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"n{i}" for i, score in enumerate(scores) if not score
         ]
         assert [node_id for node_id, _ in results] == expected
+        # And at a limit far below the row count, which is where a partial
+        # selection would be used: `argpartition` returns the top k as a SET
+        # in no particular order, so it changes which rows come back and not
+        # merely their order. A limit at or above n never exercises it.
+        assert [
+            node_id for node_id, _ in store.search(query_node=probe, limit=10)
+        ] == expected[:10]
 
     def test_a_zero_row_does_not_become_a_nan(self):
         """A zero vector has no direction. The per-query form divided by the
@@ -671,7 +678,7 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
         store._update_matrix()
 
-        for threshold in (0.4, -1.0):
+        for threshold in (0.4, -1.0, float("-inf")):
             results = store.search(query_node=probe, limit=99, threshold=threshold)
             # Three assertions, because each catches a different way of being
             # wrong. No NaN in the output is the obvious one. The NaN-bearing
@@ -778,6 +785,11 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         assert results, "the zero query returned nothing at all"
         for node_id, score in results:
             assert not np.isnan(score), f"{node_id} scored nan against a zero query"
+        # And it is still dropped from its own results. A drop keyed on the
+        # score being 1.0 rather than on the id looks right everywhere else -
+        # a node matches itself exactly - and fails precisely here, where the
+        # query has no direction to match.
+        assert "probe" not in dict(results)
 
     def test_a_score_is_a_float_the_rest_of_the_stack_can_serialise(self):
         """`np.float32` compares equal to a float and formats like one, so
@@ -824,11 +836,17 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         removal and an addition leave the COUNT unchanged, and a re-embed
         changes no id at all, so an index that rebuilt only on a size change
         would keep serving directions that belong to nothing."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([0.0, 1.0], dtype=np.float32)
+
         store = VectorStore()
-        store.load_vectors({"keep": [1.0, 0.0], "drop": [0.0, 1.0]})
+        store.load_vectors({"keep": [0.0, 1.0], "drop": [1.0, 0.0]})
+        store.model = _Model()
 
         store.remove_node_embedding("drop")
-        store._absorb({"added": np.asarray([0.0, 1.0], dtype=np.float32)})
+        store._absorb({"added": np.asarray([1.0, 0.0], dtype=np.float32)})
         assert store.node_ids == ["keep", "added"]
         for row, node_id in enumerate(store.node_ids):
             vector = store.embeddings[node_id]
@@ -836,21 +854,28 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 store.unit_matrix[row], vector / np.linalg.norm(vector), atol=1e-6
             )
 
-        # Same ids, same count, different direction for one of them - and read
-        # WITHOUT anything that would change the count again, because a later
-        # rebuild repairs the staleness before it can be observed. A text query
-        # needs no extra row, so nothing here disturbs the index.
-        class _Model:
-            def encode(self, text):
-                return np.asarray([0.0, 1.0], dtype=np.float32)
+        # `keep` points the way the query does, so it is found.
+        assert dict(
+            store.search(query_text="the query's direction", limit=9, threshold=0.5)
+        )
 
-        store.model = _Model()
-        assert dict(store.search(query_text="old direction", limit=9, threshold=0.5))
+        # Same ids, same count, a different direction for one of them - and
+        # the FIRST of the two deliberately: re-embedding the last one and then
+        # asserting the order cannot fail, because moving it to the end leaves
+        # it where it was. Read WITHOUT anything that would change the count
+        # again, since a later rebuild repairs the staleness before it can be
+        # observed; a text query needs no extra row.
+        store._absorb({"keep": np.asarray([1.0, 0.0], dtype=np.float32)})
 
-        store._absorb({"added": np.asarray([1.0, 0.0], dtype=np.float32)})
-
+        # Re-embedding a node must not MOVE it: node_ids is the tie order
+        # callers see, so an absorb that re-inserted the id at the end would
+        # reorder equal scores for a change that altered no ranking.
+        assert store.node_ids == ["keep", "added"]
         assert (
-            dict(store.search(query_text="old direction", limit=9, threshold=0.5)) == {}
+            dict(
+                store.search(query_text="the query's direction", limit=9, threshold=0.5)
+            )
+            == {}
         ), "a re-embedded node still matches the direction it used to have"
 
     def test_a_text_query_can_reach_every_row(self):
@@ -871,4 +896,51 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         results = store.search(query_text="anything", limit=3, threshold=-1.0)
         assert [node_id for node_id, _ in results] == ["a", "b", "c"], (
             f"a text query reached {len(results)} of {len(store.node_ids)} rows"
+        )
+
+    def test_a_query_node_absent_from_the_index_reaches_every_row(self):
+        """The sibling of the text-query case. A limit capped at n-1 is
+        invisible whenever the query node is IN the index, because the drop
+        already costs a row - so the cap has to be probed from outside it.
+        The node carries its own vector, so no model is needed."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.9, 0.1], "c": [0.8, 0.2]})
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        # Not in the index, so its vector is generated rather than looked up -
+        # which is the whole point, and which needs the model the base install
+        # does not have.
+        store.model = _Model()
+        outsider = Node(id="outsider", type=NodeType.ACTOR, name="outsider")
+        assert "outsider" not in store.embeddings
+
+        results = store.search(query_node=outsider, limit=3, threshold=-1.0)
+        assert [node_id for node_id, _ in results] == ["a", "b", "c"], (
+            f"reached {len(results)} of 3 rows"
+        )
+
+    def test_the_query_is_compared_in_the_index_dtype(self):
+        """A float64 query against a float32 index makes numpy promote the
+        MATRIX to compare them, which is an index-sized allocation per query -
+        measured at 308 MB at 100k x 384. `generate_embedding` returns a
+        Python list, so the query_node path produces exactly that; the
+        query_text path never did, because the model returns float32."""
+        import tracemalloc
+
+        store = self._store(4000, dim=256)
+        absent = Node(id="absent", type=NodeType.ACTOR, name="absent")
+        # A Python list of floats, which is what generate_embedding returns.
+        store.embeddings["absent"] = [float(x) for x in store.embeddings["n0"]]
+
+        tracemalloc.start()
+        store.search(query_node=absent, limit=5)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        assert peak < store.unit_matrix.nbytes / 4, (
+            f"a list-valued query allocated {peak} bytes against a "
+            f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
