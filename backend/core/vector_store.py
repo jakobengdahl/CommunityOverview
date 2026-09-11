@@ -333,6 +333,16 @@ class VectorStore:
         Search for similar nodes.
         Can search by query text or by existing node.
 
+        `limit` of zero or less returns nothing. The slice this replaced said
+        `results[:limit]`, which returned everything-but-one for -1 - slice
+        arithmetic rather than an answer - and `limit` reaches here unguarded
+        from search_graph over MCP. Note the lexical path still slices, so the
+        two halves of one `search_graph(limit=...)` differ for a negative
+        limit; both are degenerate, and only this half is defined.
+
+        A score that is not a number is dropped rather than returned, which is
+        what the `score >= threshold` filter this replaced did with one.
+
         Returns:
             List of (node_id, score) tuples, sorted by score descending.
         """
@@ -390,7 +400,10 @@ class VectorStore:
                 break
             node_id = self.node_ids[idx]
             # If query was a node in the database, drop it (similarity 1.0).
-            # Before the count below, so a dropped node does not use a slot.
+            # It costs no slot because the count below is over `len(results)`
+            # rather than over iterations - not because of where this sits;
+            # swapping the two is behaviour-neutral, since the break can only
+            # fire once the list is already full.
             if query_node is not None and node_id == query_node.id:
                 continue
             # Counted BEFORE the append, which is what makes `limit=0` return

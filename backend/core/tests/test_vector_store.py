@@ -494,9 +494,11 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
     def test_a_query_allocates_nothing_the_size_of_the_index(self):
         """The property, measured rather than reasoned about: what one search
-        allocates must not grow with the matrix. It is checked against the
-        matrix's own size so the assertion cannot pass by the index being
-        small."""
+        allocates must not grow with the matrix. Budgeted against the NUMBER of
+        rows rather than against the matrix's bytes - see the comment below for
+        what a bytes-derived budget let through - with a second assertion that
+        the budget is far under the index, so it cannot pass by being
+        generous."""
         import tracemalloc
 
         store = self._store(4000, dim=256)
@@ -509,10 +511,8 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # `sorted(range(n), key=...)` returns identical results at five times
         # the peak, and passed a matrix-derived budget at every size.
         budget = rows * 64
-        probe = store.embeddings["n0"]
 
         probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        assert probe is store.embeddings["n0"], "the probe is not the indexed row"
         store.search(query_node=probe_node, limit=10)  # outside the measurement
         tracemalloc.start()
         store.search(query_node=probe_node, limit=10)
@@ -569,11 +569,12 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         so equal scores came back in index order; an unstable sort would
         reorder them for no reason a caller could see.
 
-        Ties MIXED WITH distinct scores, and enough of them, because neither
-        half alone can tell the two sorts apart: an all-equal array is left
-        untouched by quicksort's partitioning, and three rows are inside the
-        insertion-sort fallback. Measured: fifty rows over two distinct scores
-        is where `quicksort` first disagrees with `stable` here.
+        Ties MIXED WITH distinct scores, because neither half alone can tell
+        the two sorts apart: an all-equal array is left untouched by
+        quicksort's partitioning however long it is, and three rows are inside
+        the insertion-sort fallback. Measured with this construction, the two
+        sorts first disagree at FOUR data rows; fifty is margin, not the
+        boundary.
         """
         rng = np.random.default_rng(3)
         scores = rng.integers(0, 2, size=50)
@@ -714,8 +715,8 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         """Width times four bytes is what the sizing in
         docs/DATA_MANAGEMENT.md counts on, and a float64 matrix is twice the
         resident cost for no gain - cosine over normalised rows does not need
-        the precision. The allocation budget above is derived from the
-        matrix's own size, so it scales with this rather than catching it."""
+        the precision. Asserted here rather than left to the allocation budget:
+        that budget counts rows, so it says nothing about how wide a row is."""
         store = VectorStore()
         store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
 
@@ -755,8 +756,10 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         results = store.search(query_node=probe, limit=9, threshold=-1.0)
         assert results
         for _, score in results:
-            # `is float`, not isinstance: np.float64 is a subclass of float and
-            # would satisfy isinstance while still being the wrong thing here.
+            # `is float`, not isinstance: np.float64 subclasses float, so it
+            # satisfies isinstance - and json.dumps takes it, so it is not what
+            # this is about either. np.float32 does NOT subclass float and is
+            # what raises; `is float` is the assertion that says so directly.
             assert type(score) is float, f"score is {type(score).__name__}"
         json.dumps(results)
 
@@ -770,8 +773,9 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store.remove_node_embedding("a")
 
         probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        # Written WITHOUT rebuilding, so the dict holds a row and the matrix
+        # holds nothing: that is the state the guard is for, and the half a
+        # guard of `not self.embeddings` alone would walk straight past.
         store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
-        # Deliberately NOT rebuilt: an index whose matrix and dict disagree is
-        # exactly the state the guard exists for.
-        store.unit_matrix = None
+        assert store.unit_matrix is None
         assert store.search(query_node=probe, limit=5) == []
