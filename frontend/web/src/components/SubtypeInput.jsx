@@ -123,6 +123,8 @@ function SubtypeInput({ value = [], onChange, existingSubtypes = [], label = 'Su
                 e.stopPropagation();
                 removeSubtype(index);
               }}
+              aria-label={`Remove ${subtype}`}
+              title={`Remove ${subtype}`}
             >
               ×
             </button>
