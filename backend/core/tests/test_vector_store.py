@@ -947,3 +947,33 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"a list-valued query allocated {peak} bytes against a "
             f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
+
+    def test_the_narrower_arithmetic_does_not_move_the_top_of_the_ranking(self):
+        """The cost of not promoting the matrix is that a list-valued query is
+        scored at the index's width instead of in float64. That is a real
+        difference in the scores, so pin what it is allowed to disturb: rows
+        that reorder must be ones the float64 form could not separate either,
+        and the answer the caller actually receives must be identical."""
+        store = self._store(2000, dim=128, seed=17)
+        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
+        store.embeddings["n0"] = [float(x) for x in store.embeddings["n0"]]
+
+        shipped = store.search(query_node=probe, limit=50, threshold=-1.0)
+
+        # The same query scored the way a promoted matrix would have scored it.
+        q = np.asarray(store.embeddings["n0"]).reshape(1, -1)
+        q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
+        promoted = (q @ store.unit_matrix.astype(np.float64).T)[0]
+        order = np.argsort(-promoted, kind="stable")
+        expected = [
+            (store.node_ids[i], float(promoted[i]))
+            for i in order
+            if store.node_ids[i] != "n0"
+        ][:50]
+
+        assert [i for i, _ in shipped] == [i for i, _ in expected], (
+            "the narrower arithmetic changed which rows come back, or in what "
+            "order - not only by how much they score"
+        )
+        for (_, got), (_, want) in zip(shipped, expected):
+            assert abs(got - want) < 1e-6, f"{got} vs {want}: more than float32 noise"

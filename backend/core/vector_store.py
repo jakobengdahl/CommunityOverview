@@ -379,6 +379,13 @@ class VectorStore:
         # numpy promote the whole matrix to compare them - measured at 308 MB
         # for one query at 100k rows of width 384. The query_text path never
         # saw it, because the model hands back float32 already.
+        #
+        # The scoring therefore happens at the index's width rather than being
+        # promoted to float64, so a list-valued query's scores move by about
+        # one float32 epsilon (measured: max 1.8e-7 at 100k x 384). Rows that
+        # reorder are ones that differ by less than that - effective ties - and
+        # the top of the ranking is unaffected; storing the index in float64 to
+        # avoid it would double the largest allocation this class makes.
         query_embedding = np.asarray(query_embedding, dtype=self.unit_matrix.dtype)
         query_embedding = query_embedding.reshape(1, -1)
 
