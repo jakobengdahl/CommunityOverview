@@ -500,7 +500,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         import tracemalloc
 
         store = self._store(4000, dim=256)
-        matrix_bytes = store.unit_matrix.nbytes
+        rows = len(store.node_ids)
+        # What a query legitimately needs is proportional to the NUMBER of
+        # nodes - the similarities, their negation, and the argsort's output -
+        # and not to the size of the index. Budgeting against the matrix's
+        # bytes instead leaves room for a per-query allocation that is O(n) in
+        # Python objects rather than in numpy: measured, ordering with
+        # `sorted(range(n), key=...)` returns identical results at five times
+        # the peak, and passed a matrix-derived budget at every size.
+        budget = rows * 64
         probe = store.embeddings["n0"]
 
         probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
@@ -511,10 +519,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        assert peak < matrix_bytes / 4, (
-            f"one search allocated {peak} bytes against a {matrix_bytes}-byte "
-            f"index; it is building a copy of the matrix again"
+        assert peak < budget, (
+            f"one search allocated {peak} bytes for {rows} rows, over the "
+            f"{budget}-byte budget: it is allocating per node rather than per "
+            f"query, or copying the matrix again"
         )
+        # And the budget is not passing by being generous: the index it is
+        # measured against is far larger than it.
+        assert budget < store.unit_matrix.nbytes / 8
 
     def test_results_are_what_the_normalise_per_query_form_returned(self):
         """Equivalence with the form this replaced, computed here rather than
@@ -708,3 +720,58 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
 
         assert store.unit_matrix.dtype == np.float32
+
+    def test_a_query_with_no_direction_is_not_a_nan_either(self):
+        """The zero-vector case on the OTHER side. A zero row in the index is
+        covered above; a zero QUERY divides by its own norm, and the epsilon
+        that keeps the index safe is a separate one. Reachable the same way -
+        a corrupt row read back from the sidecar and then used as the query
+        node's own vector."""
+        store = VectorStore()
+        store.load_vectors({"real": [1.0, 0.0], "other": [0.0, 1.0]})
+
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([0.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+        results = store.search(query_node=probe, limit=9, threshold=-1.0)
+
+        assert results, "the zero query returned nothing at all"
+        for node_id, score in results:
+            assert not np.isnan(score), f"{node_id} scored nan against a zero query"
+
+    def test_a_score_is_a_float_the_rest_of_the_stack_can_serialise(self):
+        """`np.float32` compares equal to a float and formats like one, so
+        every assertion about scores passes either way - and then json.dumps
+        raises on it. The conversion is load-bearing at an API boundary, which
+        is the one place nothing here would otherwise look."""
+        import json
+
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        store._update_matrix()
+
+        results = store.search(query_node=probe, limit=9, threshold=-1.0)
+        assert results
+        for _, score in results:
+            # `is float`, not isinstance: np.float64 is a subclass of float and
+            # would satisfy isinstance while still being the wrong thing here.
+            assert type(score) is float, f"score is {type(score).__name__}"
+        json.dumps(results)
+
+    def test_an_index_that_was_emptied_is_not_searched(self):
+        """The guard that stops a query reaching a matrix that is not there.
+        It IS covered today, but only by api_host and service tests that
+        happen to have an embedder - delete it and this module still passes.
+        The class that owns the invariant should be the one that fails."""
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0]})
+        store.remove_node_embedding("a")
+
+        probe = Node(id="probe", type=NodeType.ACTOR, name="probe")
+        store.embeddings["probe"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        # Deliberately NOT rebuilt: an index whose matrix and dict disagree is
+        # exactly the state the guard exists for.
+        store.unit_matrix = None
+        assert store.search(query_node=probe, limit=5) == []
