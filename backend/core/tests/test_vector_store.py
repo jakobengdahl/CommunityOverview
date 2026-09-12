@@ -1196,7 +1196,10 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         0.661 - so the 200 is decided by the limit, which is the point: it is
         the limit-and-tail combination that production produces."""
         eps = float(np.finfo(np.float32).eps)
-        store = self._store(2000, dim=128, seed=9)
+        # Seed 55 on purpose: it is one of the four in 200 where the ordered
+        # comparison this test used to make actually fails, so reverting to
+        # that form breaks here immediately rather than at 2% per seed.
+        store = self._store(2000, dim=128, seed=55)
         vector = np.asarray(store.embeddings["n0"], dtype=np.float32)
 
         class _Model:
@@ -1234,8 +1237,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # nothing about membership: dropping the single best-scoring row leaves
         # every remaining pair correctly ordered, and passed this test until
         # this assertion existed.
+        #
+        # Compared as a SET, deliberately. The first version of this compared
+        # the ordered lists, which asserts the float64 order exactly - the very
+        # property the loop above permits violations of, and which the test
+        # named in that loop's docstring documents as untrue. It passed at this
+        # seed by luck and fails at 4 seeds in 200 (55, 67, 102, 155) on
+        # correct code. Order is the loop's job; membership is this line's.
         best = sorted(reference, key=lambda node_id: -reference[node_id])[:200]
-        assert [node_id for node_id, _ in returned] == best, (
+        assert set(node_id for node_id, _ in returned) == set(best), (
             "the returned set is not the top 200 by score - rows are being "
             "dropped or admitted, which no pairwise check can see"
         )
@@ -1244,8 +1254,11 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         """`test_equal_scores_keep_index_order` builds 51 rows, so an unstable
         sort switched on above a size gate passes it. That is not a contrived
         mutant: exact ties arise whenever two nodes carry identical text, and
-        on a 1000-row index seeded with duplicates `kind="quicksort"` diverges
-        from stable at rank 1 and moves a seventh of the rows.
+        on this 1000-row index `kind="quicksort"` first diverges from stable at
+        rank 6 and moves 269 rows - 27% of the index, which is what 2 rows in 7
+        being duplicates buys. (Measured on the fixture below. The figures here
+        previously described the pairs fixture this one replaced, in the same
+        commit that replaced it.)
 
         Same invariant as the small test, at a size no plausible gate sits
         above, and in groups of three rather than pairs - see the fixture."""
@@ -1292,7 +1305,9 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
         What it costs shows up only where ties straddle the limit: with a block
         of identical vectors it does not merely reorder, it returns a different
-        SET - 127 of the 200 nodes the stable form returns are absent. So this
+        SET - about half of the 200 nodes the stable form returns are absent
+        (95 measured here, and the exact count depends on numpy's partition
+        rather than on anything this pins). So this
         asserts the set as well as the order, on a fixture built to straddle:
         a 400-row block of one repeated vector, at limits inside that block.
 
