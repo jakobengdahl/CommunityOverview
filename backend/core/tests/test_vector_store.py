@@ -539,14 +539,19 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # Again at the shapes production asks for. The measurement above uses
         # the default threshold of 0.0, and so did every other allocation
         # budget here - so a pre-filter gated on `threshold > 0` allocated 33
-        # bytes a row against this 20-byte budget and no test looked. Both
-        # production shapes are measured, not one: `semantic_search_nodes`
-        # asks for 200 rows above 0.3, and `find_similar_nodes` for 5 above
-        # `max(0.4, threshold - 0.2)`, which is 0.5 at its own default of 0.7.
-        # A pre-filter gated at or above 0.4 allocates 28 bytes a row, is
-        # bit-identical in its results, and costs a constant number of Python
-        # lines - so neither the tracer nor the 0.3 measurement sees it.
-        for floor, floored_limit in ((0.3, 200), (0.5, 5)):
+        # bytes a row against this 20-byte budget and no test looked.
+        #
+        # EVERY production floor is measured, not one and not two.
+        # `semantic_search_nodes` asks for 200 rows above 0.3.
+        # `find_similar_nodes` asks for 5 above `max(0.4, threshold - 0.2)`,
+        # and both ends of that expression matter: 0.5 is what its own default
+        # of 0.7 gives, but 0.4 is the CLAMP, which every threshold of 0.6 or
+        # below lands on - so the clamp is the common case and the derived
+        # value is the rare one. Measuring 0.5 alone left a pre-filter gated on
+        # `0.4 <= threshold < 0.5` allocating 28 bytes a row against this
+        # 20-byte budget, bit-identical in its results and costing a constant
+        # number of Python lines, so the tracer could not see it either.
+        for floor, floored_limit in ((0.3, 200), (0.4, 5), (0.5, 5)):
             tracemalloc.start()
             store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
             _, floored_peak = tracemalloc.get_traced_memory()
@@ -676,8 +681,17 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # width 32 via `query_node` - a reorder gated on a larger index, a
         # different width, or on the text branch slipped past all of it.
         eps = float(np.finfo(np.float32).eps)
+        # Asking for MORE rows than the index holds, not exactly as many.
+        # Every full-ranking assertion here used to sit on that boundary, and
+        # production sits past it routinely: `queries.py` widens the window to
+        # `get_node_count()` and `semantic_search_nodes` then over-fetches
+        # `limit*4`, so the request is always larger than the index; and
+        # `find_similar_nodes(limit=5)` exceeds any graph with fewer than five
+        # embedded nodes. A clamp of `len(node_ids) - 1` - an ordinary
+        # off-by-one in code meant to bound the walk - drops the last
+        # qualifying row and was invisible to all of them.
         every_row = store.search(
-            query_text="anything", limit=len(store.node_ids), threshold=-2.0
+            query_text="anything", limit=4 * len(store.node_ids), threshold=-2.0
         )
         assert len(every_row) == len(store.node_ids)
 
