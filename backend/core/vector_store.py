@@ -380,12 +380,23 @@ class VectorStore:
         # for one query at 100k rows of width 384. The query_text path never
         # saw it, because the model hands back float32 already.
         #
-        # The scoring therefore happens at the index's width rather than being
-        # promoted to float64, so a list-valued query's scores move by about
-        # one float32 epsilon (measured: max 1.8e-7 at 100k x 384). Rows that
-        # reorder are ones that differ by less than that - effective ties - and
-        # the top of the ranking is unaffected; storing the index in float64 to
-        # avoid it would double the largest allocation this class makes.
+        # This does not narrow the arithmetic so much as make one path agree
+        # with the other two: `model.encode` returns float32, and every writer
+        # into `embeddings` coerces to float32, so the text query and the
+        # looked-up node were ALREADY scored at float32 width. Only a query
+        # vector from `generate_embedding` was ever promoted.
+        #
+        # Against that promoted result the scores here differ by at most about
+        # one float32 epsilon (measured: max 1.8e-7 at 100k x 384). The
+        # ordering can differ by more than a score comparison suggests: rows
+        # float32 cannot separate come out exactly equal, and a stable sort
+        # then returns them in index order, which need not be the order float64
+        # would have given. That can land anywhere in the ranking, the top
+        # included - one seed in eight of the fixture the tests use moves a row
+        # at rank 7. What is bounded is the score, not the position, and
+        # keeping the float64 order instead would mean storing the index in
+        # float64: double the largest allocation this class makes, to reorder
+        # rows that differ by 1e-8.
         query_embedding = np.asarray(query_embedding, dtype=self.unit_matrix.dtype)
         query_embedding = query_embedding.reshape(1, -1)
 

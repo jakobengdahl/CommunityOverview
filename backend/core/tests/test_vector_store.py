@@ -506,14 +506,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # What a query legitimately needs is proportional to the NUMBER of
         # nodes - the similarities, their negation, and the argsort's output -
         # and not to the size of the index. So the budget is sized to the
-        # shipped path's measured peak of 17.75 bytes a row, not to something
+        # shipped path's measured peak of 17.50 bytes a row, not to something
         # comfortable: a loose budget admits an ordering that is O(n) in
         # Python objects rather than in numpy, which is what G2 is about.
-        # Measured against that 17.75, `argsort(...).tolist()` costs 2.9 times
-        # it and `sorted(range(n), key=...)` 4.6 times - both return identical
-        # results, and both fitted inside the 64-byte-a-row budget this
-        # replaced, as they did inside a budget derived from the matrix's
-        # bytes at every size.
+        # Measured at this fixture's own size, both returning results identical
+        # to the shipped path: `argsort(...).tolist()` costs 50.07 bytes a row
+        # (2.9x) and `sorted(range(n), key=...)` 82.05 (4.7x). The first fits
+        # inside the 64-byte-a-row budget this replaced; the second does not,
+        # but it did fit a budget derived from the matrix's BYTES at every size
+        # tried, which is the budget shape this one exists to reject.
         budget = rows * 20
 
         probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
@@ -921,59 +922,118 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"reached {len(results)} of 3 rows"
         )
 
-    def test_a_list_valued_query_does_not_promote_the_index(self):
+    def test_a_generated_query_does_not_promote_the_index(self):
         """A float64 query against a float32 index makes numpy promote the
         MATRIX to compare them, which is an index-sized allocation per query -
-        measured at 308 MB at 100k x 384. A Python list is what produces it,
-        and `generate_embedding` returns one; this reaches the same line by
-        putting a list where a looked-up row would be, which keeps the fixture
-        to one code path and the index self-consistent."""
+        measured at 308 MB at 100k x 384.
+
+        Reached through the branch that actually produces one: a query node
+        absent from the index is embedded by `generate_embedding`, which ends
+        in `.tolist()`, so the query arrives as a Python list and becomes
+        float64. That matters for what this test can catch - planting a list
+        into `embeddings` instead would exercise the LOOKUP branch, a state no
+        production writer creates (both coerce to float32), and would pass
+        against a cast applied only to that branch."""
         import tracemalloc
 
         store = self._store(4000, dim=256)
-        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        # In place of n0's own row, not alongside it: the dict keeps the same
-        # ids as the matrix, so nothing here leaves the index disagreeing with
-        # itself for whoever extends this next.
-        store.embeddings["n0"] = [float(x) for x in store.embeddings["n0"]]
-        assert len(store.embeddings) == len(store.node_ids)
+        row = np.asarray(store.embeddings["n0"])
+
+        class _Model:
+            def encode(self, text):
+                return row
+
+        store.model = _Model()
+        outsider = Node(id="outsider", type=NodeType.ACTOR, name="outsider")
+        assert "outsider" not in store.embeddings
 
         tracemalloc.start()
-        store.search(query_node=probe, limit=5)
+        store.search(query_node=outsider, limit=5)
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
         assert peak < store.unit_matrix.nbytes / 4, (
-            f"a list-valued query allocated {peak} bytes against a "
+            f"a generated query allocated {peak} bytes against a "
             f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
 
-    def test_the_narrower_arithmetic_does_not_move_the_top_of_the_ranking(self):
-        """The cost of not promoting the matrix is that a list-valued query is
-        scored at the index's width instead of in float64. That is a real
-        difference in the scores, so pin what it is allowed to disturb: rows
-        that reorder must be ones the float64 form could not separate either,
-        and the answer the caller actually receives must be identical."""
-        store = self._store(2000, dim=128, seed=17)
-        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        store.embeddings["n0"] = [float(x) for x in store.embeddings["n0"]]
-
-        shipped = store.search(query_node=probe, limit=50, threshold=-1.0)
-
-        # The same query scored the way a promoted matrix would have scored it.
-        q = np.asarray(store.embeddings["n0"]).reshape(1, -1)
-        q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
-        promoted = (q @ store.unit_matrix.astype(np.float64).T)[0]
-        order = np.argsort(-promoted, kind="stable")
-        expected = [
-            (store.node_ids[i], float(promoted[i]))
-            for i in order
-            if store.node_ids[i] != "n0"
-        ][:50]
-
-        assert [i for i, _ in shipped] == [i for i, _ in expected], (
-            "the narrower arithmetic changed which rows come back, or in what "
-            "order - not only by how much they score"
+    def test_the_rows_are_unit_length_to_float32_resolution(self):
+        """G4 stated directly, at the precision the rows are actually stored
+        at. The suite's other row assertions compare DIRECTIONS with atol=1e-6,
+        which a systematic scale error of ~1e-6 slips through - and such an
+        error moves every score by up to 8.9e-7, about five times the bound the
+        cast's comment claims. Nothing else in the suite measures the norms."""
+        store = self._store(1500, dim=192, seed=5)
+        norms = np.linalg.norm(store.unit_matrix, axis=1)
+        worst = float(np.abs(norms - 1.0).max())
+        assert worst < 4 * float(np.finfo(np.float32).eps), (
+            f"rows are off unit length by {worst}, more than float32 rounding "
+            f"accounts for: the normalisation is systematically wrong"
         )
-        for (_, got), (_, want) in zip(shipped, expected):
-            assert abs(got - want) < 1e-6, f"{got} vs {want}: more than float32 noise"
+
+    def test_the_narrower_arithmetic_only_reorders_what_it_cannot_separate(self):
+        """What scoring at the index's width costs, stated as the property that
+        holds rather than as one lucky draw.
+
+        An earlier version of this test asserted that the top of the ranking is
+        IDENTICAL to the float64-promoted order. That is not true and the test
+        only passed because seed 17 happens to leave a 1.9x margin: at seed 67
+        the same construction moves a row at rank 7. Rows float32 cannot
+        separate score exactly equal, the stable sort then returns them in
+        index order, and that pair can sit anywhere - including the top.
+
+        So pin the two things that are actually invariant: the scores stay
+        within float32 resolution of the promoted ones, and the order never
+        inverts a pair that float32 DID separate. Swept over seeds rather than
+        fixed to one, because a single seed is what hid the defect."""
+        eps = float(np.finfo(np.float32).eps)
+
+        for seed in (17, 67, 3, 128):
+            store = self._store(2000, dim=128, seed=seed)
+            row = np.asarray(store.embeddings["n0"])
+
+            class _Model:
+                def encode(self, text):
+                    return row
+
+            store.model = _Model()
+            outsider = Node(id="outsider", type=NodeType.ACTOR, name="outsider")
+            shipped = store.search(query_node=outsider, limit=50, threshold=-1.0)
+            assert len(shipped) == 50
+
+            # The reference is built from `embeddings`, NOT by promoting
+            # `unit_matrix` back to float64: reading the shipped matrix back
+            # would move the reference with any error in how the rows were
+            # normalised, so a row-side mistake would cancel itself out here.
+            # Stacking the dict instead makes this an independent ranking.
+            query = np.asarray(row.tolist()).reshape(1, -1)
+            query = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
+            rows = np.vstack(
+                [
+                    np.asarray(store.embeddings[i], dtype=np.float64)
+                    for i in store.node_ids
+                ]
+            )
+            rows = rows / (np.linalg.norm(rows, axis=1, keepdims=True) + 1e-12)
+            promoted = (query @ rows.T)[0]
+            reference = {
+                node_id: float(promoted[i]) for i, node_id in enumerate(store.node_ids)
+            }
+
+            for node_id, score in shipped:
+                assert abs(score - reference[node_id]) < 4 * eps, (
+                    f"seed {seed}: {node_id} scored {score} against a promoted "
+                    f"{reference[node_id]} - further apart than float32 can "
+                    f"account for"
+                )
+
+            for (first, first_score), (second, second_score) in zip(
+                shipped, shipped[1:]
+            ):
+                if reference[first] < reference[second]:
+                    assert first_score == second_score, (
+                        f"seed {seed}: {second} outranks {first} in float64 but "
+                        f"came back after it, and float32 did separate them "
+                        f"({first_score} vs {second_score}) - this is a real "
+                        f"reordering, not a tie broken by index order"
+                    )
