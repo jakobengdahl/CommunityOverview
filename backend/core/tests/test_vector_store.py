@@ -623,9 +623,10 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
         `test_a_text_query_does_not_promote_the_index_either` watches that
         branch's ALLOCATION, and the 3-row text tests check directions - so
-        nothing pinned what the text path actually returns. Narrowing only that
-        query to float16 passed the whole suite while costing 206 eps of score
-        accuracy and moving 3 of the top 50 ids.
+        nothing pinned what the text path actually returns. Narrowing the
+        VECTOR the model hands back to float16 - not the scoring, which is a
+        far larger break - passed the whole suite while costing 206 eps of
+        score accuracy and moving 3 of the top 50 ids.
 
         Both of those numbers are fixture-specific, which is why this seed is
         not arbitrary: at seed 21 the same mutation moves NO ids at all (185
@@ -1088,12 +1089,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
     def test_a_text_query_does_not_promote_the_index_either(self):
         """The cast's third branch. `test_a_generated_query_...` covers the
-        generated one, but every text-query test in this class uses a 3-row,
-        2-D index where a promoted matrix is 24 bytes - so dropping the cast on
-        the text branch alone is invisible there. Sized here, with a stub whose
-        `encode` returns float64: the shipped model returns float32, which is
-        why this branch's cast reads as a no-op and needs a fixture that can
-        tell the difference."""
+        generated one; nothing covered this one, and the reason is the stubs
+        rather than the fixtures. Every other text-query test in this class
+        hands `encode` a float32 array, so no promotion can happen on that
+        branch at all and removing its cast changes nothing they measure -
+        true of the 3-row fixtures and equally of the 2000- and 10000-row ones
+        added later. Hence the stub here returns float64, which is the only
+        input that makes the cast do anything: the shipped model returns
+        float32, so this branch's cast is a no-op against real input and needs
+        a fixture built to tell the difference."""
         import tracemalloc
 
         store = self._store(4000, dim=256)
