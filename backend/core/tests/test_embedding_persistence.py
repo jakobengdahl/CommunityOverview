@@ -793,7 +793,7 @@ def test_a_model_change_leaves_the_index_coherent_and_writable(storage, tmpdir_p
     vectors = storage.vector_store.export_vectors()
     assert {len(v) for v in vectors.values()} == {DIM + 4}
     assert set(storage.vector_store.node_ids) == set(vectors)
-    assert storage.vector_store.embedding_matrix.shape == (len(vectors), DIM + 4)
+    assert storage.vector_store.unit_matrix.shape == (len(vectors), DIM + 4)
 
     # The sidecar reflects it rather than freezing at the previous state.
     assert set(FileEmbeddingSidecar(_sidecar_path(tmpdir_path)).load()) == set(vectors)
