@@ -1109,15 +1109,17 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         proxy for it, and it is exactly flat at 2 000 rows and at 20 000 alike.
         An O(n) walk moves the number by thousands however it reads its arrays.
 
-        Lines are counted in every `vector_store` frame, not only in `search`.
-        Scoping it to one code object left the obvious door open: moving the
-        walk into a module-level helper made it O(n) - 14.5 ms to 57.7 ms at
-        100k rows - while `search` itself executed one flat call line.
+        Lines are counted in every frame belonging to this package, not only
+        in `search` and not only in `vector_store`. Each narrower scoping left
+        a door open and each was walked through: one code object missed a
+        module-level helper (14.5 ms to 57.7 ms at 100k rows), and one module
+        missed the same helper moved to a sibling file. Naming any boundary
+        smaller than the package invites the next one.
 
         Both exits are exercised, because only one fires in any given call, and
         the threshold one is what fires in production - both callers in
         `storage_search.py` pass a floor."""
-        module = VectorStore.__module__
+        package = VectorStore.__module__.split(".")[0] + "."
 
         def executed_lines(store, **kwargs):
             counted = [0]
@@ -1130,7 +1132,8 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             def top(frame, event, arg):
                 if event != "call":
                     return None
-                return local if frame.f_globals.get("__name__") == module else None
+                name = frame.f_globals.get("__name__") or ""
+                return local if name.startswith(package) else None
 
             previous = sys.gettrace()
             sys.settrace(top)
@@ -1291,7 +1294,10 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         of identical vectors it does not merely reorder, it returns a different
         SET - 127 of the 200 nodes the stable form returns are absent. So this
         asserts the set as well as the order, on a fixture built to straddle:
-        a 400-row block of one repeated vector, at a limit inside that block.
+        a 400-row block of one repeated vector, at limits inside that block.
+
+        And at more than one limit and floor, because index size is not the
+        only gate available - see the comment on the loop below.
         """
         rng = np.random.default_rng(77)
         vectors = {f"n{i}": rng.random(96).astype(np.float32) for i in range(10000)}
@@ -1308,17 +1314,31 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 return vector
 
         store.model = _Model()
-        returned = store.search(query_text="anything", limit=200, threshold=0.3)
-        assert len(returned) == 200
 
-        # The block scores 1.0, so the stable answer is its first 200 members
-        # in index order - and a partial selection is free to return any 200 of
-        # the 400, which is the difference this pins.
-        expected = [f"n{i}" for i in range(3000, 3200)]
-        assert [node_id for node_id, _ in returned] == expected, (
-            "the ranking over a tie block that straddles the limit is not the "
-            "stable top-k: either the order or the set of rows changed"
-        )
+        # Three shapes, because size is not the only gate a fast path can hide
+        # behind. 200 above a 0.3 floor is what `search_graph(limit=50)`
+        # produces through `semantic_search_nodes`; 204 is the same caller one
+        # limit higher, and a selection gated on `limit > 200` sat exactly in
+        # that crack; 25 above a 0.4 floor is `find_similar_nodes`, whose
+        # threshold is `max(0.4, threshold - 0.2)` and so never below 0.4 -
+        # nothing else in the suite asserts membership at that floor on an
+        # index this size, and a mutation dropping the single best-scoring row
+        # there went unseen.
+        for limit, threshold in ((200, 0.3), (204, 0.4), (25, 0.4)):
+            returned = store.search(
+                query_text="anything", limit=limit, threshold=threshold
+            )
+            assert len(returned) == limit
+
+            # The block scores 1.0, so the stable answer is its first `limit`
+            # members in index order - and a partial selection is free to
+            # return any `limit` of the 400, which is the difference this pins.
+            expected = [f"n{i}" for i in range(3000, 3000 + limit)]
+            assert [node_id for node_id, _ in returned] == expected, (
+                f"at limit={limit}, threshold={threshold}: the ranking over a "
+                f"tie block that straddles the limit is not the stable top-k - "
+                f"either the order or the set of rows changed"
+            )
 
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
