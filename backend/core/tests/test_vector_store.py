@@ -1436,6 +1436,60 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 f"either the order or the set of rows changed"
             )
 
+    def test_a_search_does_not_rewrite_the_vectors_it_reads(self):
+        """`embeddings` is the source of truth - what `export_vectors` returns
+        and what the sidecar persists - and a read must not touch it.
+
+        Nothing else asserts this, and the neighbouring invariants that ARE
+        asserted do not reach it: `_update_matrix` normalising the stored rows
+        is caught by eight persistence tests, and `export_vectors` handing out
+        its own dict rather than a copy is caught too, but the route through
+        `search` is open. One character does it - `query /=` instead of
+        `query /`, an in-place division of the array the lookup branch just
+        handed over - and the stored vector's norm goes from 11.4 to 1.0 while
+        120 tests pass.
+
+        It is worth a guard precisely because the idiom is already in this
+        file: `_update_matrix` divides in place deliberately, on an array
+        `vstack` has just built and nobody else holds. That makes in-place
+        division look locally idiomatic, and the query vector is the one place
+        it is not."""
+        rng = np.random.default_rng(19)
+        store = VectorStore()
+        store.load_vectors(
+            {f"n{i}": (rng.random(32) * 5).astype(np.float32) for i in range(40)}
+        )
+        before = {
+            node_id: np.array(vector, dtype=np.float32, copy=True)
+            for node_id, vector in store.embeddings.items()
+        }
+
+        vector = np.asarray(store.embeddings["n1"], dtype=np.float32)
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+
+        # Every route to a query vector: looked up, generated, and from text.
+        store.search(query_node=Node(id="n1", type=NodeType.ACTOR, name="n1"), limit=3)
+        store.search(
+            query_node=Node(id="outsider", type=NodeType.ACTOR, name="outsider"),
+            limit=3,
+        )
+        store.search(query_text="anything", limit=3)
+
+        for node_id, original in before.items():
+            np.testing.assert_array_equal(
+                np.asarray(store.embeddings[node_id], dtype=np.float32),
+                original,
+                err_msg=(
+                    f"{node_id} was modified by a search - the source of truth "
+                    f"is being written to by a read"
+                ),
+            )
+
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
         at. The suite's other row assertions compare DIRECTIONS with atol=1e-6,
