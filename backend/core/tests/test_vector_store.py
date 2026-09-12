@@ -407,7 +407,7 @@ class TestVectorStoreNumpySearch:
         store.rebuild_index(nodes)
         return store, nodes
 
-    def test_cosine_similarity_matrix_matches_expected(self):
+    def test_cosine_to_unit_rows_matches_expected(self):
         from backend.core.vector_store import _cosine_to_unit_rows
 
         store, _ = self._store_with_embeddings()
@@ -1259,9 +1259,10 @@ class TestSearchCostsNothingItDoesNotHaveTo:
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
         at. The suite's other row assertions compare DIRECTIONS with atol=1e-6,
-        which a systematic scale error of ~1e-6 slips through - and such an
-        error moves every score by up to 8.9e-7, about five times the bound the
-        cast's comment claims. Nothing else in the suite measures the norms."""
+        which a systematic scale error of ~1e-6 slips through. Such an
+        error scales every score, so what it costs is the largest cosine in the
+        index: 8.2e-7 on this fixture, four times the 1.9e-7 the cast's comment
+        bounds the width at. Nothing else in the suite measures the norms."""
         store = self._store(1500, dim=192, seed=5)
         norms = np.linalg.norm(store.unit_matrix, axis=1)
         worst = float(np.abs(norms - 1.0).max())
@@ -1292,9 +1293,9 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         allowance below has roughly 20x margin.
 
         Swept over seeds rather than fixed to one, because a single seed is
-        what hid the original defect - but note that the sweep is not what
-        makes this sound. Under the bound everything passes at every seed;
-        over it, it fails. The bound is the test."""
+        what hid the original defect: it held at 17 and failed at 155. But the
+        sweep is not what makes this sound - under the bound everything passes
+        at every seed, over it it fails. The bound is the test."""
         eps = float(np.finfo(np.float32).eps)
 
         for seed in (17, 67, 3, 128, 155):
