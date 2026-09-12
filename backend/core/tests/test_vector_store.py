@@ -535,6 +535,21 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"{budget}-byte budget: it is allocating per node rather than per "
             f"query, or copying the matrix again"
         )
+
+        # Again at the shape production asks for. The measurement above uses
+        # the default threshold of 0.0, and so did every other allocation
+        # budget here - so a pre-filter gated on `threshold > 0` allocated 33
+        # bytes a row against this 20-byte budget and no test looked.
+        tracemalloc.start()
+        store.search(query_node=probe_node, limit=200, threshold=0.3)
+        _, floored_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        assert floored_peak < budget, (
+            f"a search above a 0.3 floor allocated {floored_peak} bytes for "
+            f"{rows} rows, over the {budget}-byte budget: the floor is being "
+            f"applied by building something the size of the index"
+        )
         # And the budget is not passing by being generous: the index it is
         # measured against is far larger than it.
         assert budget < store.unit_matrix.nbytes / 8
@@ -1093,7 +1108,11 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         )
 
     def test_the_walk_does_not_lengthen_with_the_index(self):
-        """G2's time half, measured where nothing can step around it.
+        """G2's time half, measured on the walk rather than on a proxy for it.
+
+        Not unsteppable-around - `sys.settrace` is per-thread, so a walk moved
+        onto a worker thread reports nothing here. That is contrived rather
+        than plausible, and it is recorded rather than guarded.
 
         Two earlier versions of this test instrumented an object - `node_ids`,
         then the similarities array - and both were bypassable, because the
@@ -1156,10 +1175,17 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
         small, large = stubbed(2000), stubbed(20000)
 
-        # A floor nothing clears, and a limit with no floor: the two exits.
+        # A floor nothing clears, a limit with no floor - and the shape
+        # production actually asks for, which is neither. Both original shapes
+        # sit at an extreme: at 0.99 almost nothing clears the floor, at -1.0
+        # the floor is off. A refactor that pre-filters the candidates when
+        # `threshold > 0` is O(n) in exactly the crack between them, and was
+        # invisible to every instrument here - the allocation budgets all run
+        # at the default threshold of 0.0 too.
         for threshold, limit, exit_name in (
             (0.99, 10, "threshold"),
             (-1.0, 10, "limit"),
+            (0.3, 200, "production floor"),
         ):
             near = executed_lines(
                 small, query_text="x", limit=limit, threshold=threshold
@@ -1172,9 +1198,13 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 f"{far} over 20000: the walk grows with the index instead of "
                 f"stopping once it is done"
             )
-            assert far < 200, (
+            # Proportional to what was asked for, not a flat number: the
+            # walk is O(limit), so 10 rows and 200 rows cannot share a bound.
+            ceiling = 50 + 10 * limit
+            assert far < ceiling, (
                 f"the {exit_name} exit walked {far} lines to return at most "
-                f"{limit} rows: it is not stopping early at all"
+                f"{limit} rows, over the {ceiling} this shape allows: it is "
+                f"not stopping early at all"
             )
 
     def test_the_ranking_holds_at_the_shape_production_asks_for(self):
@@ -1193,7 +1223,7 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         is invisible to every other order assertion here, and at this shape it
         puts 150 of the 200 returned rows in the wrong place, starting at rank
         51. The floor does not bite on this fixture - the lowest cosine is
-        0.661 - so the 200 is decided by the limit, which is the point: it is
+        0.666 - so the 200 is decided by the limit, which is the point: it is
         the limit-and-tail combination that production produces."""
         eps = float(np.finfo(np.float32).eps)
         # Seed 55 on purpose: it is one of the four in 200 where the ordered
@@ -1241,14 +1271,34 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # Compared as a SET, deliberately. The first version of this compared
         # the ordered lists, which asserts the float64 order exactly - the very
         # property the loop above permits violations of, and which the test
-        # named in that loop's docstring documents as untrue. It passed at this
-        # seed by luck and fails at 4 seeds in 200 (55, 67, 102, 155) on
-        # correct code. Order is the loop's job; membership is this line's.
+        # named in that loop's docstring documents as untrue. It fails at 4
+        # seeds in 200 on correct code - 55, 67, 102 and 155 - and this test
+        # deliberately runs at the first of them, so the ordered form cannot
+        # come back unnoticed. Order is the loop's job; membership is this
+        # line's.
+        # Compared against the cutoff rather than as an exact set, for the
+        # same reason the loop above has a tolerance: at the 200th place two
+        # rows can sit closer together than float32 can resolve, and then which
+        # of them lands inside is not a property of correct code. Measured over
+        # 1200 seeds, the exact set comparison fails at one (700, a 0.29-eps
+        # swap at ranks 199/200) and this one at none. So: everything clearly
+        # above the cutoff must be there, and nothing clearly below it may be.
         best = sorted(reference, key=lambda node_id: -reference[node_id])[:200]
-        assert set(node_id for node_id, _ in returned) == set(best), (
-            "the returned set is not the top 200 by score - rows are being "
-            "dropped or admitted, which no pairwise check can see"
+        cutoff = reference[best[-1]]
+        returned_ids = set(node_id for node_id, _ in returned)
+
+        clearly_inside = {n for n in best if reference[n] - cutoff > 4 * eps}
+        assert clearly_inside <= returned_ids, (
+            f"{len(clearly_inside - returned_ids)} rows that outscore the "
+            f"cutoff by more than float32 can round away are missing from the "
+            f"result - rows are being dropped, which no pairwise check sees"
         )
+        for node_id in returned_ids:
+            assert reference[node_id] >= cutoff - 4 * eps, (
+                f"{node_id} came back despite scoring {reference[node_id]} "
+                f"against a cutoff of {cutoff} - further below it than float32 "
+                f"can account for, so a row is being admitted that should not"
+            )
 
     def test_equal_scores_keep_index_order_at_scale(self):
         """`test_equal_scores_keep_index_order` builds 51 rows, so an unstable
