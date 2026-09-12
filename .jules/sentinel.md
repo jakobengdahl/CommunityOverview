@@ -14,3 +14,7 @@
 **Vulnerability:** In `backend/api_host/middleware.py`, authentication exclusion for the `/api/sessions/{id}/stream` endpoint was implemented using `"/api/sessions/" in request.url.path`. This allowed an attacker to bypass authentication for an unrelated endpoint by including the substring anywhere in the URL (e.g., `/admin/api/sessions/stream`).
 **Learning:** Using substring matching (`in`) for authentication and authorization logic on URL paths is a critical vulnerability that allows attackers to craft paths that bypass security controls while still routing to sensitive handlers.
 **Prevention:** Always use strict prefix matching (e.g. `.startswith()`) and/or exact matching, anchored to the configured base URL paths (like `config.api_prefix`), when writing security middleware rules.
+## 2026-09-02 - SSRF in Fetch Tool
+**Vulnerability:** Server-Side Request Forgery (SSRF) in `fetch` tool execution.
+**Learning:** Tools that make HTTP requests based on user-provided URLs must validate those URLs against an allowlist or safe-URL checker to prevent internal network scanning or metadata service exploitation.
+**Prevention:** Always use `is_safe_url` to validate user-provided URLs before fetching them in MCP tools or webhook handlers.
