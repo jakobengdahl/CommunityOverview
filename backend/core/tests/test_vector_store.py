@@ -1205,9 +1205,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # production actually asks for, which is neither. Both original shapes
         # sit at an extreme: at 0.99 almost nothing clears the floor, at -1.0
         # the floor is off. A refactor that pre-filters the candidates when
-        # `threshold > 0` is O(n) in exactly the crack between them, and was
-        # invisible to every instrument here - the allocation budgets all run
-        # at the default threshold of 0.0 too.
+        # `threshold > 0` is O(n) in exactly the crack between them, and when
+        # that was found the allocation budgets all ran at the default
+        # threshold of 0.0, so no instrument here saw it at all. They sample
+        # the production floors now - and which instrument fires depends on
+        # how the pre-filter is written: one that builds a Python list of the
+        # kept ids trips this line count too, while a pure numpy one costs a
+        # constant number of lines and is caught by the allocation budget
+        # alone. Neither instrument subsumes the other.
         for threshold, limit, exit_name in (
             (0.99, 10, "threshold"),
             (-1.0, 10, "limit"),
