@@ -536,20 +536,28 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"query, or copying the matrix again"
         )
 
-        # Again at the shape production asks for. The measurement above uses
+        # Again at the shapes production asks for. The measurement above uses
         # the default threshold of 0.0, and so did every other allocation
         # budget here - so a pre-filter gated on `threshold > 0` allocated 33
-        # bytes a row against this 20-byte budget and no test looked.
-        tracemalloc.start()
-        store.search(query_node=probe_node, limit=200, threshold=0.3)
-        _, floored_peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+        # bytes a row against this 20-byte budget and no test looked. Both
+        # production shapes are measured, not one: `semantic_search_nodes`
+        # asks for 200 rows above 0.3, and `find_similar_nodes` for 5 above
+        # `max(0.4, threshold - 0.2)`, which is 0.5 at its own default of 0.7.
+        # A pre-filter gated at or above 0.4 allocates 28 bytes a row, is
+        # bit-identical in its results, and costs a constant number of Python
+        # lines - so neither the tracer nor the 0.3 measurement sees it.
+        for floor, floored_limit in ((0.3, 200), (0.5, 5)):
+            tracemalloc.start()
+            store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
+            _, floored_peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
 
-        assert floored_peak < budget, (
-            f"a search above a 0.3 floor allocated {floored_peak} bytes for "
-            f"{rows} rows, over the {budget}-byte budget: the floor is being "
-            f"applied by building something the size of the index"
-        )
+            assert floored_peak < budget, (
+                f"a search for {floored_limit} rows above a {floor} floor "
+                f"allocated {floored_peak} bytes for {rows} rows, over the "
+                f"{budget}-byte budget: the floor is being applied by building "
+                f"something the size of the index"
+            )
         # And the budget is not passing by being generous: the index it is
         # measured against is far larger than it.
         assert budget < store.unit_matrix.nbytes / 8
