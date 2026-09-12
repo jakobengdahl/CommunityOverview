@@ -12,9 +12,10 @@ import json
 import logging
 import subprocess
 import threading
+from backend.core.events.delivery import is_safe_url
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
-import httpx2 as httpx
+import httpx
 
 from .config import MCPIntegration, MCPTransport
 
@@ -761,6 +762,9 @@ class MCPLoader:
             url = input_args.get("url")
             if not url:
                 return {"error": "URL required"}
+
+            if not is_safe_url(url):
+                return {"error": "Invalid or unsafe URL"}
 
             try:
                 response = httpx.get(url, timeout=30, follow_redirects=True)
