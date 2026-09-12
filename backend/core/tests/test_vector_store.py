@@ -637,6 +637,41 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                     np.finfo(np.float32).eps
                 ), f"{node_id}: text path scored {score}, node path {shared[node_id]}"
 
+        # And the whole ranking on THIS path, because this is the one that
+        # ships: `storage_search.py` reaches the index only through
+        # `query_text`, and over-fetches limit*4, so ranks 51-200 of a default
+        # search are consumed by production and were checked by nothing. The
+        # equivalence test covers the full ranking too, but at 300 rows of
+        # width 32 via `query_node` - a reorder gated on a larger index, a
+        # different width, or on the text branch slipped past all of it.
+        eps = float(np.finfo(np.float32).eps)
+        every_row = store.search(
+            query_text="anything", limit=len(store.node_ids), threshold=-2.0
+        )
+        assert len(every_row) == len(store.node_ids)
+
+        query = np.asarray(row, dtype=np.float64).reshape(1, -1)
+        query = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
+        rows = np.vstack(
+            [np.asarray(store.embeddings[i], dtype=np.float64) for i in store.node_ids]
+        )
+        rows = rows / (np.linalg.norm(rows, axis=1, keepdims=True) + 1e-12)
+        reference = {
+            node_id: float((query @ rows.T)[0][i])
+            for i, node_id in enumerate(store.node_ids)
+        }
+        for (first, first_score), (second, second_score) in zip(
+            every_row, every_row[1:]
+        ):
+            if reference[first] < reference[second]:
+                gap = reference[second] - reference[first]
+                assert first_score == second_score or gap < 4 * eps, (
+                    f"{second} outranks {first} in float64 by {gap}, wider than "
+                    f"float32 rounding accounts for, yet came back after it - "
+                    f"at rank {every_row.index((first, first_score))} of "
+                    f"{len(every_row)}, past what any other test inspects"
+                )
+
     def test_equal_scores_keep_index_order(self):
         """The tie-break callers have been seeing. The list-and-sort this
         replaced used Python's stable sort over rows appended in index order,
@@ -1056,14 +1091,23 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         either `break` into `continue` returns byte-identical results while
         visiting every row.
 
-        Counted rather than timed, because a wall-clock assertion flakes - but
-        counted on the SCORES, not on the ids. An earlier version of this test
-        counted `node_ids` reads, which sit after the threshold check, so the
-        threshold exit could be removed without moving the number at all: the
-        test named that mutation in its own docstring and could not see it.
-        Both exits are exercised here, because only one of them fires in any
-        given call, and it is the threshold one that fires for the caller in
-        `storage_search.py` that passes a floor."""
+        Counted rather than timed, because a wall-clock assertion flakes. The
+        instrument sits on the SIMILARITIES, which are touched before the
+        threshold check - an earlier version counted `node_ids` reads, which
+        happen after it, so the threshold exit could be deleted without moving
+        the number at all. Both the walk over `np_order` and the score lookup
+        feed the count, since `argsort` preserves the subclass; `__getitem__`,
+        `item` and `__iter__` are all instrumented because each is a way to
+        read an element, and a walk that used one of the others would
+        otherwise report nothing while visiting every row.
+
+        Hence the lower bound as well as the upper one: a count of zero means
+        the instrument was bypassed, not that the walk was cheap, and this test
+        should fail rather than pass in that case.
+
+        Both exits are exercised, because only one of them fires in any given
+        call - and the threshold one is what fires in production, where both
+        callers in `storage_search.py` pass a floor."""
         import backend.core.vector_store as vector_store_module
 
         class _CountingScores(np.ndarray):
@@ -1072,6 +1116,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             def __getitem__(self, index):
                 _CountingScores.reads += 1
                 return np.ndarray.__getitem__(self, index)
+
+            def item(self, *args):
+                _CountingScores.reads += 1
+                return np.ndarray.item(self, *args)
+
+            def __iter__(self):
+                for value in np.ndarray.__iter__(self):
+                    _CountingScores.reads += 1
+                    yield value
 
         store = self._store(4000, dim=256)
         probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
@@ -1096,14 +1149,16 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         finally:
             vector_store_module._cosine_to_unit_rows = original
 
-        assert on_threshold < 50, (
-            f"the walk scored {on_threshold} of {len(store.node_ids)} rows "
-            f"against a threshold nothing clears: it is not stopping at the "
-            f"first row below the floor"
+        assert 0 < on_threshold < 50, (
+            f"the walk touched {on_threshold} of {len(store.node_ids)} rows "
+            f"against a threshold nothing clears: either it is not stopping at "
+            f"the first row below the floor, or - at zero - it is reading the "
+            f"scores by a route this test does not watch"
         )
-        assert on_limit < 50, (
-            f"the walk scored {on_limit} of {len(store.node_ids)} rows to "
-            f"return 10: it is not stopping once the caller is satisfied"
+        assert 0 < on_limit < 50, (
+            f"the walk touched {on_limit} of {len(store.node_ids)} rows to "
+            f"return 10: either it is not stopping once the caller is "
+            f"satisfied, or - at zero - the instrument was bypassed"
         )
 
     def test_the_rows_are_unit_length_to_float32_resolution(self):
