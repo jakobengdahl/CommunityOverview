@@ -6,6 +6,7 @@ which may take time on first run. Tests are designed to be skippable
 if the model is not available.
 """
 
+import sys
 import pytest
 from unittest.mock import patch
 import numpy as np
@@ -1091,81 +1092,169 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
 
-    def test_the_walk_stops_early_at_both_of_its_exits(self):
-        """G2's time half. The budget tests measure allocation; nothing
-        measured how far the Python walk actually goes, so an edit turning
-        either `break` into `continue` returns byte-identical results while
-        visiting every row.
+    def test_the_walk_does_not_lengthen_with_the_index(self):
+        """G2's time half, measured where nothing can step around it.
 
-        Counted rather than timed, because a wall-clock assertion flakes. The
-        instrument sits on the SIMILARITIES, which are touched before the
-        threshold check - an earlier version counted `node_ids` reads, which
-        happen after it, so the threshold exit could be deleted without moving
-        the number at all. Both the walk over `np_order` and the score lookup
-        feed the count, since `argsort` preserves the subclass; `__getitem__`,
-        `item` and `__iter__` are all instrumented because each is a way to
-        read an element, and a walk that used one of the others would
-        otherwise report nothing while visiting every row.
+        Two earlier versions of this test instrumented an object - `node_ids`,
+        then the similarities array - and both were bypassable, because the
+        production code chooses how it reads them. Counting `node_ids` put the
+        instrument after the threshold check, so that exit could be deleted
+        unseen. Counting the scores through `__getitem__`, `item` and
+        `__iter__` was better but still evadable: reading them once through
+        `np.asarray` hands back a base-class view, and the walk then visits
+        every row while the counter reports 1 - inside any bound that is not
+        zero.
 
-        Hence the lower bound as well as the upper one: a count of zero means
-        the instrument was bypassed, not that the walk was cheap, and this test
-        should fail rather than pass in that case.
+        So count executed LINES of `search` instead. That is the walk itself
+        rather than a proxy for it, and it is exactly flat: 24 lines on the
+        threshold exit and 90 on the limit exit, at 2 000 rows and at 20 000
+        alike. An O(n) walk moves those numbers by thousands however it reads
+        its arrays.
 
-        Both exits are exercised, because only one of them fires in any given
-        call - and the threshold one is what fires in production, where both
-        callers in `storage_search.py` pass a floor."""
-        import backend.core.vector_store as vector_store_module
+        Both exits are exercised, because only one fires in any given call, and
+        the threshold one is what fires in production - both callers in
+        `storage_search.py` pass a floor."""
+        code = VectorStore.search.__code__
 
-        class _CountingScores(np.ndarray):
-            reads = 0
+        def executed_lines(store, **kwargs):
+            counted = [0]
 
-            def __getitem__(self, index):
-                _CountingScores.reads += 1
-                return np.ndarray.__getitem__(self, index)
+            def local(frame, event, arg):
+                if event == "line":
+                    counted[0] += 1
+                return local
 
-            def item(self, *args):
-                _CountingScores.reads += 1
-                return np.ndarray.item(self, *args)
+            def top(frame, event, arg):
+                return local if event == "call" and frame.f_code is code else None
 
-            def __iter__(self):
-                for value in np.ndarray.__iter__(self):
-                    _CountingScores.reads += 1
-                    yield value
+            previous = sys.gettrace()
+            sys.settrace(top)
+            try:
+                store.search(**kwargs)
+            finally:
+                sys.settrace(previous)
+            return counted[0]
 
-        store = self._store(4000, dim=256)
-        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        original = vector_store_module._cosine_to_unit_rows
+        def stubbed(rows):
+            store = self._store(rows, dim=64, seed=3)
+            vector = np.asarray(store.embeddings["n0"], dtype=np.float32)
 
-        def counting(query, unit_matrix):
-            return original(query, unit_matrix).view(_CountingScores)
+            class _Model:
+                def encode(self, text):
+                    return vector
 
-        vector_store_module._cosine_to_unit_rows = counting
-        try:
-            # The threshold exit: a floor nothing clears, so the walk should
-            # stop at the first row below it rather than testing all 4000.
-            _CountingScores.reads = 0
-            assert store.search(query_node=probe, limit=10, threshold=0.99) == []
-            on_threshold = _CountingScores.reads
+            store.model = _Model()
+            return store
 
-            # The limit exit: no floor, so the walk should stop once the
-            # caller has its ten.
-            _CountingScores.reads = 0
-            assert len(store.search(query_node=probe, limit=10, threshold=-1.0)) == 10
-            on_limit = _CountingScores.reads
-        finally:
-            vector_store_module._cosine_to_unit_rows = original
+        small, large = stubbed(2000), stubbed(20000)
 
-        assert 0 < on_threshold < 50, (
-            f"the walk touched {on_threshold} of {len(store.node_ids)} rows "
-            f"against a threshold nothing clears: either it is not stopping at "
-            f"the first row below the floor, or - at zero - it is reading the "
-            f"scores by a route this test does not watch"
+        # A floor nothing clears, and a limit with no floor: the two exits.
+        for threshold, limit, exit_name in (
+            (0.99, 10, "threshold"),
+            (-1.0, 10, "limit"),
+        ):
+            near = executed_lines(
+                small, query_text="x", limit=limit, threshold=threshold
+            )
+            far = executed_lines(
+                large, query_text="x", limit=limit, threshold=threshold
+            )
+            assert near == far, (
+                f"the {exit_name} exit walked {near} lines over 2000 rows and "
+                f"{far} over 20000: the walk grows with the index instead of "
+                f"stopping once it is done"
+            )
+            assert far < 200, (
+                f"the {exit_name} exit walked {far} lines to return at most "
+                f"{limit} rows: it is not stopping early at all"
+            )
+
+    def test_the_ranking_holds_at_the_shape_production_asks_for(self):
+        """The full-ranking assertions elsewhere pass `threshold=-2.0` and
+        `limit=len(node_ids)`. Production asks for neither: both callers in
+        `storage_search.py` pass a positive floor and a limit far below n -
+        `semantic_search_nodes` over-fetches `limit*4`, so a default
+        `search_graph(limit=50)` asks for 200 rows above a 0.4 floor.
+
+        That gap is not theoretical. A tail reorder gated on `threshold > 0`
+        is invisible to every other order assertion here, and at this exact
+        shape it puts 150 of the 200 returned rows in the wrong place, starting
+        at rank 51."""
+        eps = float(np.finfo(np.float32).eps)
+        store = self._store(2000, dim=128, seed=9)
+        vector = np.asarray(store.embeddings["n0"], dtype=np.float32)
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+        returned = store.search(query_text="anything", limit=200, threshold=0.4)
+        assert len(returned) == 200, (
+            f"the fixture returned {len(returned)} rows, so this is no longer "
+            f"the production shape it claims to test"
         )
-        assert 0 < on_limit < 50, (
-            f"the walk touched {on_limit} of {len(store.node_ids)} rows to "
-            f"return 10: either it is not stopping once the caller is "
-            f"satisfied, or - at zero - the instrument was bypassed"
+
+        query = np.asarray(vector, dtype=np.float64).reshape(1, -1)
+        query = query / (np.linalg.norm(query, axis=1, keepdims=True) + 1e-12)
+        rows = np.vstack(
+            [np.asarray(store.embeddings[i], dtype=np.float64) for i in store.node_ids]
         )
+        rows = rows / (np.linalg.norm(rows, axis=1, keepdims=True) + 1e-12)
+        reference = {
+            node_id: float((query @ rows.T)[0][i])
+            for i, node_id in enumerate(store.node_ids)
+        }
+        for rank, ((first, first_score), (second, second_score)) in enumerate(
+            zip(returned, returned[1:])
+        ):
+            if reference[first] < reference[second]:
+                gap = reference[second] - reference[first]
+                assert first_score == second_score or gap < 4 * eps, (
+                    f"at rank {rank} of {len(returned)}: {second} outranks "
+                    f"{first} in float64 by {gap}, yet came back after it"
+                )
+
+    def test_equal_scores_keep_index_order_at_scale(self):
+        """`test_equal_scores_keep_index_order` builds 51 rows, so an unstable
+        sort switched on above a size gate passes it. That is not a contrived
+        mutant: exact ties arise whenever two nodes carry identical text, and
+        on a 1000-row index seeded with duplicates `kind="quicksort"` diverges
+        from stable at rank 1 and moves a seventh of the rows.
+
+        Same invariant as the small test, at a size no plausible gate sits
+        above."""
+        rng = np.random.default_rng(31)
+        vectors = {}
+        for i in range(1000):
+            # One row in seven repeats the row before it, so the index carries
+            # blocks of exact ties rather than a single pair.
+            if i % 7 == 0 and i:
+                vectors[f"n{i}"] = np.array(vectors[f"n{i - 1}"], dtype=np.float32)
+            else:
+                vectors[f"n{i}"] = rng.random(48).astype(np.float32)
+        store = VectorStore()
+        store.load_vectors(vectors)
+
+        vector = np.asarray(store.embeddings["n0"], dtype=np.float32)
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+        returned = store.search(
+            query_text="anything", limit=len(store.node_ids), threshold=-2.0
+        )
+
+        position = {node_id: i for i, node_id in enumerate(store.node_ids)}
+        for (first, first_score), (second, second_score) in zip(returned, returned[1:]):
+            if first_score == second_score:
+                assert position[first] < position[second], (
+                    f"{first} and {second} score identically but came back in "
+                    f"index positions {position[first]} and {position[second]} "
+                    f"- the sort is not stable"
+                )
 
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
