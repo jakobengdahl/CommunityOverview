@@ -388,8 +388,10 @@ class VectorStore:
         #
         # Against that promoted result the scores here differ by about one
         # float32 epsilon: at 100k x 384, at most 1.2e-7 over the rows a
-        # caller actually receives (1.0 eps) and 1.9e-7 over all of them
-        # (1.5 eps), across three seeds.
+        # caller actually receives and 1.9e-7 over all of them - 1.0 and 1.6
+        # float32 eps respectively - across three seeds. At the 200 rows the
+        # over-fetching caller asks for rather than the 5 measured there, the
+        # first number is 1.4e-7.
         #
         # The ORDER is not bounded by that, in two ways. Rows float32 cannot
         # separate come out exactly equal and a stable sort returns them in

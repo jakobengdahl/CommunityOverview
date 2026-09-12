@@ -1105,16 +1105,19 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         every row while the counter reports 1 - inside any bound that is not
         zero.
 
-        So count executed LINES of `search` instead. That is the walk itself
-        rather than a proxy for it, and it is exactly flat: 24 lines on the
-        threshold exit and 90 on the limit exit, at 2 000 rows and at 20 000
-        alike. An O(n) walk moves those numbers by thousands however it reads
-        its arrays.
+        So count executed LINES instead. That is the walk itself rather than a
+        proxy for it, and it is exactly flat at 2 000 rows and at 20 000 alike.
+        An O(n) walk moves the number by thousands however it reads its arrays.
+
+        Lines are counted in every `vector_store` frame, not only in `search`.
+        Scoping it to one code object left the obvious door open: moving the
+        walk into a module-level helper made it O(n) - 14.5 ms to 57.7 ms at
+        100k rows - while `search` itself executed one flat call line.
 
         Both exits are exercised, because only one fires in any given call, and
         the threshold one is what fires in production - both callers in
         `storage_search.py` pass a floor."""
-        code = VectorStore.search.__code__
+        module = VectorStore.__module__
 
         def executed_lines(store, **kwargs):
             counted = [0]
@@ -1125,7 +1128,9 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 return local
 
             def top(frame, event, arg):
-                return local if event == "call" and frame.f_code is code else None
+                if event != "call":
+                    return None
+                return local if frame.f_globals.get("__name__") == module else None
 
             previous = sys.gettrace()
             sys.settrace(top)
@@ -1171,15 +1176,22 @@ class TestSearchCostsNothingItDoesNotHaveTo:
 
     def test_the_ranking_holds_at_the_shape_production_asks_for(self):
         """The full-ranking assertions elsewhere pass `threshold=-2.0` and
-        `limit=len(node_ids)`. Production asks for neither: both callers in
-        `storage_search.py` pass a positive floor and a limit far below n -
-        `semantic_search_nodes` over-fetches `limit*4`, so a default
-        `search_graph(limit=50)` asks for 200 rows above a 0.4 floor.
+        `limit=len(node_ids)`. Production asks for neither.
+
+        The shape here is the over-fetching caller's:
+        `search_graph(limit=50)` reaches `semantic_search_nodes` without a
+        threshold, so it takes `DEFAULT_SEMANTIC_THRESHOLD` of 0.3, and that
+        function asks the index for `max(limit*4, limit)` - 200 rows above a
+        0.3 floor. (The 0.4 floor elsewhere in `storage_search.py` belongs to
+        `find_similar_nodes`, which does not over-fetch; an earlier version of
+        this docstring built one shape out of both.)
 
         That gap is not theoretical. A tail reorder gated on `threshold > 0`
-        is invisible to every other order assertion here, and at this exact
-        shape it puts 150 of the 200 returned rows in the wrong place, starting
-        at rank 51."""
+        is invisible to every other order assertion here, and at this shape it
+        puts 150 of the 200 returned rows in the wrong place, starting at rank
+        51. The floor does not bite on this fixture - the lowest cosine is
+        0.661 - so the 200 is decided by the limit, which is the point: it is
+        the limit-and-tail combination that production produces."""
         eps = float(np.finfo(np.float32).eps)
         store = self._store(2000, dim=128, seed=9)
         vector = np.asarray(store.embeddings["n0"], dtype=np.float32)
@@ -1189,7 +1201,7 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 return vector
 
         store.model = _Model()
-        returned = store.search(query_text="anything", limit=200, threshold=0.4)
+        returned = store.search(query_text="anything", limit=200, threshold=0.3)
         assert len(returned) == 200, (
             f"the fixture returned {len(returned)} rows, so this is no longer "
             f"the production shape it claims to test"
@@ -1215,6 +1227,16 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                     f"{first} in float64 by {gap}, yet came back after it"
                 )
 
+        # WHICH rows come back, not only in what order. Pairwise order says
+        # nothing about membership: dropping the single best-scoring row leaves
+        # every remaining pair correctly ordered, and passed this test until
+        # this assertion existed.
+        best = sorted(reference, key=lambda node_id: -reference[node_id])[:200]
+        assert [node_id for node_id, _ in returned] == best, (
+            "the returned set is not the top 200 by score - rows are being "
+            "dropped or admitted, which no pairwise check can see"
+        )
+
     def test_equal_scores_keep_index_order_at_scale(self):
         """`test_equal_scores_keep_index_order` builds 51 rows, so an unstable
         sort switched on above a size gate passes it. That is not a contrived
@@ -1223,13 +1245,15 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         from stable at rank 1 and moves a seventh of the rows.
 
         Same invariant as the small test, at a size no plausible gate sits
-        above."""
+        above, and in groups of three rather than pairs - see the fixture."""
         rng = np.random.default_rng(31)
         vectors = {}
         for i in range(1000):
-            # One row in seven repeats the row before it, so the index carries
-            # blocks of exact ties rather than a single pair.
-            if i % 7 == 0 and i:
+            # Groups of THREE, not pairs. An earlier version repeated each row
+            # once, and a reordering that keeps a group's first member and
+            # reverses the rest is a no-op on a pair - it only bites at three
+            # or more, which is what two nodes sharing text with a third gives.
+            if i % 7 in (1, 2) and i > 1:
                 vectors[f"n{i}"] = np.array(vectors[f"n{i - 1}"], dtype=np.float32)
             else:
                 vectors[f"n{i}"] = rng.random(48).astype(np.float32)
@@ -1256,13 +1280,56 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                     f"- the sort is not stable"
                 )
 
+    def test_the_ranking_holds_on_an_index_larger_than_the_other_fixtures(self):
+        """Index size is the one dimension the order assertions do not vary:
+        every one of them runs at 2 000 rows or fewer, so a selection fast path
+        gated one row above that is invisible. `np.argpartition` for the top
+        `limit+1` followed by a stable sort of that slice is the obvious such
+        path, and it is FASTER, so no timing or allocation guard objects.
+
+        What it costs shows up only where ties straddle the limit: with a block
+        of identical vectors it does not merely reorder, it returns a different
+        SET - 127 of the 200 nodes the stable form returns are absent. So this
+        asserts the set as well as the order, on a fixture built to straddle:
+        a 400-row block of one repeated vector, at a limit inside that block.
+        """
+        rng = np.random.default_rng(77)
+        vectors = {f"n{i}": rng.random(96).astype(np.float32) for i in range(10000)}
+        shared = rng.random(96).astype(np.float32)
+        for i in range(3000, 3400):
+            vectors[f"n{i}"] = np.array(shared, dtype=np.float32)
+        store = VectorStore()
+        store.load_vectors(vectors)
+
+        vector = np.array(shared, dtype=np.float32)
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+        returned = store.search(query_text="anything", limit=200, threshold=0.3)
+        assert len(returned) == 200
+
+        # The block scores 1.0, so the stable answer is its first 200 members
+        # in index order - and a partial selection is free to return any 200 of
+        # the 400, which is the difference this pins.
+        expected = [f"n{i}" for i in range(3000, 3200)]
+        assert [node_id for node_id, _ in returned] == expected, (
+            "the ranking over a tie block that straddles the limit is not the "
+            "stable top-k: either the order or the set of rows changed"
+        )
+
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
         at. The suite's other row assertions compare DIRECTIONS with atol=1e-6,
         which a systematic scale error of ~1e-6 slips through. Such an
         error scales every score, so what it costs is the largest cosine in the
-        index: 8.2e-7 on this fixture, four times the 1.9e-7 the cast's comment
-        bounds the width at. Nothing else in the suite measures the norms."""
+        index: 0.849 on this fixture, hence 8.5e-7 - four and a half times the
+        1.9e-7 the cast's comment bounds the width at. (Twice corrected: the
+        figure was first quoted from a different fixture, then from row n0's
+        largest cosine rather than the whole index's.) Nothing else in the
+        suite measures the norms."""
         store = self._store(1500, dim=192, seed=5)
         norms = np.linalg.norm(store.unit_matrix, axis=1)
         worst = float(np.abs(norms - 1.0).max())
