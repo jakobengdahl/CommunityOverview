@@ -600,12 +600,18 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         `test_a_text_query_does_not_promote_the_index_either` watches that
         branch's ALLOCATION, and the 3-row text tests check directions - so
         nothing pinned what the text path actually returns. Narrowing only that
-        query to float16 moves 3 of the top 50 ids and costs 218 eps of score
-        accuracy, and passed the whole suite.
+        query to float16 passed the whole suite while costing 206 eps of score
+        accuracy and moving 3 of the top 50 ids.
+
+        Both of those numbers are fixture-specific, which is why this seed is
+        not arbitrary: at seed 21 the same mutation moves NO ids at all (185
+        eps, identical order), so the id assertion below would have been dead
+        weight and the score assertion would have been carrying the test alone.
+        Seed 3 puts teeth in both.
 
         The stub returns float32, which is what the shipped model returns, so
         this is the real path rather than a hypothetical one."""
-        store = self._store(2000, dim=128, seed=21)
+        store = self._store(2000, dim=128, seed=3)
         row = np.asarray(store.embeddings["n0"], dtype=np.float32)
 
         class _Model:
