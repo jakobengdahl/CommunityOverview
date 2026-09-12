@@ -573,6 +573,70 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             atol=1e-6,
         )
 
+        # And the WHOLE ranking, not just the head of it. Every ordering
+        # assertion above stops at a few dozen rows, so an edit that leaves the
+        # top intact and scrambles the tail passes them all - `np_order[50:]`
+        # re-sorted into index order survives the entire suite otherwise. That
+        # tail is a live path: `search_graph` defaults to limit=50 and
+        # `storage_search` over-fetches limit*4, so ranks 51-200 are what a
+        # default search actually consumes. 300 rows costs nothing.
+        every_row = store.search(
+            query_node=Node(id="n7", type=NodeType.ACTOR, name="n7"),
+            limit=len(store.node_ids),
+            threshold=-2.0,
+        )
+        full_expected = [
+            store.node_ids[i]
+            for i in np.argsort(-sims, kind="stable")
+            if store.node_ids[i] != "n7"
+        ]
+        assert [node_id for node_id, _ in every_row] == full_expected, (
+            "the ranking past the head does not match the form this replaced"
+        )
+
+    def test_the_text_path_scores_what_the_node_path_would_have(self):
+        """The query_text branch, on its scores rather than its bytes.
+
+        `test_a_text_query_does_not_promote_the_index_either` watches that
+        branch's ALLOCATION, and the 3-row text tests check directions - so
+        nothing pinned what the text path actually returns. Narrowing only that
+        query to float16 moves 3 of the top 50 ids and costs 218 eps of score
+        accuracy, and passed the whole suite.
+
+        The stub returns float32, which is what the shipped model returns, so
+        this is the real path rather than a hypothetical one."""
+        store = self._store(2000, dim=128, seed=21)
+        row = np.asarray(store.embeddings["n0"], dtype=np.float32)
+
+        class _Model:
+            def encode(self, text):
+                return row
+
+        store.model = _Model()
+
+        by_text = store.search(query_text="anything", limit=50, threshold=-2.0)
+        by_node = store.search(
+            query_node=Node(id="n0", type=NodeType.ACTOR, name="n0"),
+            limit=50,
+            threshold=-2.0,
+        )
+
+        # n0 is in the index, so the node query drops it from its own results
+        # and takes one more row to reach 50, while the text query keeps n0 and
+        # therefore stops one row earlier. Compare the common prefix.
+        text_ids = [i for i, _ in by_text if i != "n0"]
+        node_ids = [i for i, _ in by_node][: len(text_ids)]
+        assert len(text_ids) == 49
+        assert text_ids == node_ids, (
+            "the text path ranks the same vector differently from the node path"
+        )
+        shared = {i: s for i, s in by_node}
+        for node_id, score in by_text:
+            if node_id in shared:
+                assert abs(score - shared[node_id]) < 4 * float(
+                    np.finfo(np.float32).eps
+                ), f"{node_id}: text path scored {score}, node path {shared[node_id]}"
+
     def test_equal_scores_keep_index_order(self):
         """The tie-break callers have been seeing. The list-and-sort this
         replaced used Python's stable sort over rows appended in index order,
