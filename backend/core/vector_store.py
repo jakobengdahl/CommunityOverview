@@ -386,9 +386,10 @@ class VectorStore:
         # looked-up node were ALREADY scored at float32 width. Only a query
         # vector from `generate_embedding` was ever promoted.
         #
-        # Against that promoted result the scores here differ by at most about
-        # one float32 epsilon (measured: max 1.8e-7 over the returned rows at
-        # 100k x 384, 1.5-2 eps over all of them).
+        # Against that promoted result the scores here differ by about one
+        # float32 epsilon: at 100k x 384, at most 1.2e-7 over the rows a
+        # caller actually receives (1.0 eps) and 1.9e-7 over all of them
+        # (1.5 eps), across three seeds.
         #
         # The ORDER is not bounded by that, in two ways. Rows float32 cannot
         # separate come out exactly equal and a stable sort returns them in
@@ -400,9 +401,10 @@ class VectorStore:
         # somewhere, 0.6% inside the top 50, 0.2% inside the top 8.
         #
         # So what is bounded is the score, not the position. Keeping the
-        # float64 order instead would mean storing the index in float64:
-        # double the largest allocation this class makes, to reorder rows that
-        # differ by 2e-8.
+        # float64 order instead would mean storing the index in float64 -
+        # double the largest allocation this class makes - to reorder pairs
+        # that are genuinely adjacent: measured over 300 seeds, the pairs that
+        # do come back inverted differ by a median 3.1e-8 in float64.
         query_embedding = np.asarray(query_embedding, dtype=self.unit_matrix.dtype)
         query_embedding = query_embedding.reshape(1, -1)
 

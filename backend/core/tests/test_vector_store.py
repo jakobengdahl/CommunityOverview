@@ -986,30 +986,60 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
 
-    def test_the_walk_stops_early_instead_of_visiting_every_row(self):
-        """G2's other half. The budget tests measure allocation; nothing
-        measured TIME, so an edit turning the early `break` into `continue`
-        returns identical results while making the Python walk O(n) - 0.024s to
-        0.059s at 200k rows, widening with the index. Counted rather than
-        timed, because a wall-clock assertion is a flake waiting to happen."""
-        store = self._store(4000, dim=256)
+    def test_the_walk_stops_early_at_both_of_its_exits(self):
+        """G2's time half. The budget tests measure allocation; nothing
+        measured how far the Python walk actually goes, so an edit turning
+        either `break` into `continue` returns byte-identical results while
+        visiting every row.
 
-        class _CountingIds(list):
+        Counted rather than timed, because a wall-clock assertion flakes - but
+        counted on the SCORES, not on the ids. An earlier version of this test
+        counted `node_ids` reads, which sit after the threshold check, so the
+        threshold exit could be removed without moving the number at all: the
+        test named that mutation in its own docstring and could not see it.
+        Both exits are exercised here, because only one of them fires in any
+        given call, and it is the threshold one that fires for the caller in
+        `storage_search.py` that passes a floor."""
+        import backend.core.vector_store as vector_store_module
+
+        class _CountingScores(np.ndarray):
             reads = 0
 
             def __getitem__(self, index):
-                _CountingIds.reads += 1
-                return list.__getitem__(self, index)
+                _CountingScores.reads += 1
+                return np.ndarray.__getitem__(self, index)
 
-        store.node_ids = _CountingIds(store.node_ids)
+        store = self._store(4000, dim=256)
         probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        _CountingIds.reads = 0
-        store.search(query_node=probe, limit=10, threshold=-1.0)
+        original = vector_store_module._cosine_to_unit_rows
 
-        assert _CountingIds.reads < 50, (
-            f"the walk read {_CountingIds.reads} ids to return 10 of "
-            f"{len(store.node_ids)} rows: it is visiting the whole index "
-            f"rather than stopping once the caller is satisfied"
+        def counting(query, unit_matrix):
+            return original(query, unit_matrix).view(_CountingScores)
+
+        vector_store_module._cosine_to_unit_rows = counting
+        try:
+            # The threshold exit: a floor nothing clears, so the walk should
+            # stop at the first row below it rather than testing all 4000.
+            _CountingScores.reads = 0
+            assert store.search(query_node=probe, limit=10, threshold=0.99) == []
+            on_threshold = _CountingScores.reads
+
+            # The limit exit: no floor, so the walk should stop once the
+            # caller has its ten.
+            _CountingScores.reads = 0
+            assert len(store.search(query_node=probe, limit=10, threshold=-1.0)) == 10
+            on_limit = _CountingScores.reads
+        finally:
+            vector_store_module._cosine_to_unit_rows = original
+
+        assert on_threshold < 50, (
+            f"the walk scored {on_threshold} of {len(store.node_ids)} rows "
+            f"against a threshold nothing clears: it is not stopping at the "
+            f"first row below the floor"
+        )
+        assert on_limit < 50, (
+            f"the walk scored {on_limit} of {len(store.node_ids)} rows to "
+            f"return 10: it is not stopping once the caller is satisfied"
         )
 
     def test_the_rows_are_unit_length_to_float32_resolution(self):
@@ -1026,7 +1056,7 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"accounts for: the normalisation is systematically wrong"
         )
 
-    def test_the_narrower_arithmetic_only_reorders_what_it_cannot_separate(self):
+    def test_the_narrower_arithmetic_stays_inside_float32_resolution(self):
         """What scoring at the index's width costs, stated as the property that
         holds rather than as one lucky draw.
 
@@ -1043,7 +1073,7 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         float32 error itself. The second half matters and an earlier version of
         this test got it wrong, asserting that only exact ties may reorder; at
         seed 155 float32 strictly inverts a pair it separated, because its own
-        error (1.5-2 eps) is the larger quantity. Measured over 400 seeds, the
+        error (1.0 eps here) is the larger quantity. Measured over 400 seeds, the
         widest float64 gap across such an inversion is 0.20 eps, so the 4-eps
         allowance below has roughly 20x margin.
 
