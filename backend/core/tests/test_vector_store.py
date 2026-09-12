@@ -957,6 +957,61 @@ class TestSearchCostsNothingItDoesNotHaveTo:
             f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
         )
 
+    def test_a_text_query_does_not_promote_the_index_either(self):
+        """The cast's third branch. `test_a_generated_query_...` covers the
+        generated one, but every text-query test in this class uses a 3-row,
+        2-D index where a promoted matrix is 24 bytes - so dropping the cast on
+        the text branch alone is invisible there. Sized here, with a stub whose
+        `encode` returns float64: the shipped model returns float32, which is
+        why this branch's cast reads as a no-op and needs a fixture that can
+        tell the difference."""
+        import tracemalloc
+
+        store = self._store(4000, dim=256)
+        wide = np.asarray(store.embeddings["n0"], dtype=np.float64)
+
+        class _Model:
+            def encode(self, text):
+                return wide
+
+        store.model = _Model()
+
+        tracemalloc.start()
+        store.search(query_text="anything", limit=5)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        assert peak < store.unit_matrix.nbytes / 4, (
+            f"a float64 text query allocated {peak} bytes against a "
+            f"{store.unit_matrix.nbytes}-byte index: the matrix was promoted"
+        )
+
+    def test_the_walk_stops_early_instead_of_visiting_every_row(self):
+        """G2's other half. The budget tests measure allocation; nothing
+        measured TIME, so an edit turning the early `break` into `continue`
+        returns identical results while making the Python walk O(n) - 0.024s to
+        0.059s at 200k rows, widening with the index. Counted rather than
+        timed, because a wall-clock assertion is a flake waiting to happen."""
+        store = self._store(4000, dim=256)
+
+        class _CountingIds(list):
+            reads = 0
+
+            def __getitem__(self, index):
+                _CountingIds.reads += 1
+                return list.__getitem__(self, index)
+
+        store.node_ids = _CountingIds(store.node_ids)
+        probe = Node(id="n0", type=NodeType.ACTOR, name="n0")
+        _CountingIds.reads = 0
+        store.search(query_node=probe, limit=10, threshold=-1.0)
+
+        assert _CountingIds.reads < 50, (
+            f"the walk read {_CountingIds.reads} ids to return 10 of "
+            f"{len(store.node_ids)} rows: it is visiting the whole index "
+            f"rather than stopping once the caller is satisfied"
+        )
+
     def test_the_rows_are_unit_length_to_float32_resolution(self):
         """G4 stated directly, at the precision the rows are actually stored
         at. The suite's other row assertions compare DIRECTIONS with atol=1e-6,
@@ -982,13 +1037,23 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         separate score exactly equal, the stable sort then returns them in
         index order, and that pair can sit anywhere - including the top.
 
-        So pin the two things that are actually invariant: the scores stay
-        within float32 resolution of the promoted ones, and the order never
-        inverts a pair that float32 DID separate. Swept over seeds rather than
-        fixed to one, because a single seed is what hid the defect."""
+        So pin what the width actually bounds - the SCORE - and allow the
+        order to differ exactly where float32 has no standing to decide: a pair
+        it scored equal, or one whose float64 separation is smaller than the
+        float32 error itself. The second half matters and an earlier version of
+        this test got it wrong, asserting that only exact ties may reorder; at
+        seed 155 float32 strictly inverts a pair it separated, because its own
+        error (1.5-2 eps) is the larger quantity. Measured over 400 seeds, the
+        widest float64 gap across such an inversion is 0.20 eps, so the 4-eps
+        allowance below has roughly 20x margin.
+
+        Swept over seeds rather than fixed to one, because a single seed is
+        what hid the original defect - but note that the sweep is not what
+        makes this sound. Under the bound everything passes at every seed;
+        over it, it fails. The bound is the test."""
         eps = float(np.finfo(np.float32).eps)
 
-        for seed in (17, 67, 3, 128):
+        for seed in (17, 67, 3, 128, 155):
             store = self._store(2000, dim=128, seed=seed)
             row = np.asarray(store.embeddings["n0"])
 
@@ -1031,9 +1096,11 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 shipped, shipped[1:]
             ):
                 if reference[first] < reference[second]:
-                    assert first_score == second_score, (
-                        f"seed {seed}: {second} outranks {first} in float64 but "
-                        f"came back after it, and float32 did separate them "
-                        f"({first_score} vs {second_score}) - this is a real "
-                        f"reordering, not a tie broken by index order"
+                    gap = reference[second] - reference[first]
+                    assert first_score == second_score or gap < 4 * eps, (
+                        f"seed {seed}: {second} outranks {first} in float64 by "
+                        f"{gap} - wider than float32 rounding can account for - "
+                        f"yet came back after it, and float32 separated them "
+                        f"({first_score} vs {second_score}). That is a real "
+                        f"reordering, not the width running out of resolution"
                     )

@@ -387,16 +387,22 @@ class VectorStore:
         # vector from `generate_embedding` was ever promoted.
         #
         # Against that promoted result the scores here differ by at most about
-        # one float32 epsilon (measured: max 1.8e-7 at 100k x 384). The
-        # ordering can differ by more than a score comparison suggests: rows
-        # float32 cannot separate come out exactly equal, and a stable sort
-        # then returns them in index order, which need not be the order float64
-        # would have given. That can land anywhere in the ranking, the top
-        # included - one seed in eight of the fixture the tests use moves a row
-        # at rank 7. What is bounded is the score, not the position, and
-        # keeping the float64 order instead would mean storing the index in
-        # float64: double the largest allocation this class makes, to reorder
-        # rows that differ by 1e-8.
+        # one float32 epsilon (measured: max 1.8e-7 over the returned rows at
+        # 100k x 384, 1.5-2 eps over all of them).
+        #
+        # The ORDER is not bounded by that, in two ways. Rows float32 cannot
+        # separate come out exactly equal and a stable sort returns them in
+        # index order; and where the float32 error exceeds the float64 gap -
+        # which it can, the error being the larger of the two - float32 orders
+        # a separated pair the other way round outright. Either can land
+        # anywhere in the ranking. Measured over 1000 seeds of the fixture the
+        # tests use (2000 rows x 128): two thirds of them reorder something
+        # somewhere, 0.6% inside the top 50, 0.2% inside the top 8.
+        #
+        # So what is bounded is the score, not the position. Keeping the
+        # float64 order instead would mean storing the index in float64:
+        # double the largest allocation this class makes, to reorder rows that
+        # differ by 2e-8.
         query_embedding = np.asarray(query_embedding, dtype=self.unit_matrix.dtype)
         query_embedding = query_embedding.reshape(1, -1)
 
