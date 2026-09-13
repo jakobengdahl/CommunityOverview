@@ -8,6 +8,7 @@ search/similarity/related methods here and passes ``self.nodes``,
 """
 
 import threading
+import time
 from types import MappingProxyType
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -90,7 +91,10 @@ _MIN_SELECTIVE_HITS = 64
 # Snapshot attempts before a rebuild gives up and lets the walk answer.
 # A retry costs one pass over the records; spinning here would block a
 # query, and declining is always correct.
-_REBUILD_SNAPSHOT_TRIES = 3
+# How many times over a rebuild must have repaid its own cost before the
+# next one is started. 10 caps the corpus's share of a write-heavy load at
+# roughly a tenth, where rebuilding on every write made it the whole load.
+_REBUILD_BUDGET = 10
 
 
 class LexicalIndex:
@@ -108,13 +112,30 @@ class LexicalIndex:
     `str.find` over a joined copy is the same test at C speed - 3.8 ms over
     17.5 MB - and the same test, so what matches does not change.
 
-    It is rebuilt lazily and whole. Incremental maintenance of a joined string
-    means splicing at an offset and shifting every offset after it, which is
-    the same O(total) as rebuilding; doing it on read means a burst of writes
-    pays for one rebuild rather than one per write.
+    Two properties took four review rounds to get right, and both are about
+    what happens when the corpus is NOT current:
+
+    A stale corpus is never readable. `_built` holds the corpus, the ids it
+    came from and their offsets as one value, and every write drops it to None
+    under the same lock that rebuilds it. So a reader either sees a corpus that
+    matches the records exactly, or sees None and falls back to the walk, which
+    reads the live dict. There is no third state. Earlier versions kept a
+    `_dirty` flag cleared at the start of the rebuild, which meant every other
+    thread spent the rebuild answering from the previous corpus - a node
+    committed before the query came back as no match at all.
+
+    Rebuilding is amortised, not automatic. The corpus is rebuilt whole, so one
+    write costs a full rebuild; with a write between every two queries that is
+    a rebuild per query, and the index becomes slower than the scan it
+    replaces - measured 1.6x slower than the plain walk at 30k nodes on an
+    interleaved read/write load, and worse as the graph grows. So a rebuild is
+    only started when the time since the last one has repaid its cost
+    `_REBUILD_BUDGET` times over. Between those, queries decline and the walk
+    answers, exactly as before this index existed. The index therefore wins
+    where reads dominate and costs a bounded fraction where they do not.
     """
 
-    __slots__ = ("_fields", "_records", "_built", "_dirty", "_lock")
+    __slots__ = ("_fields", "_records", "_built", "_lock", "_rebuilt_at", "_cost")
 
     def __init__(self) -> None:
         self._fields: Dict[str, MatchFields] = {}
@@ -127,19 +148,20 @@ class LexicalIndex:
         # earlier revisions of this comment carried two, both wrong. It is a
         # rounding error next to what the prepared fields save either way.
         self._records = MappingProxyType(self._fields)
-        # The corpus, the ids it was built from and their start offsets, as
-        # ONE value. They only mean anything together: an id list from one
-        # build read against offsets from another maps every hit to the wrong
-        # record. Publishing them in three assignments let two rebuilds
-        # interleave and do exactly that, and the wrong record is then filtered
-        # out by the caller's own re-check - so the node that really matched
-        # just disappears, with no error. One assignment, read once into a
-        # local, cannot tear.
-        self._built: Optional[Tuple[List[str], str, object]] = None
-        self._dirty = True
-        # Serialises rebuilds only. Readers never take it, and writers only set
-        # a flag, so a search still runs lock-free against a settled corpus.
+        # The corpus, the ids it was built from and their start offsets, as ONE
+        # value. They only mean anything together: an id list from one build
+        # read against offsets from another maps every hit to the wrong record,
+        # the caller's own re-check discards it, and the node that really
+        # matched disappears with no error. One assignment, read once into a
+        # local, cannot tear. None means "no usable corpus" - the walk answers.
+        self._built: Optional[Tuple[List[str], str, Any]] = None
+        # Guards `_fields` and `_built` together. A write and its invalidation
+        # must be one step relative to a rebuild, or the rebuild publishes a
+        # corpus that is missing the write and marks it current. Readers never
+        # take it: they read `_built` once, and a published tuple is complete.
         self._lock = threading.Lock()
+        self._rebuilt_at = 0.0
+        self._cost = 0.0
 
     # -- the dict surface this replaces ------------------------------------
     def __iter__(self):
@@ -155,26 +177,27 @@ class LexicalIndex:
         return self._fields[node_id]
 
     def __setitem__(self, node_id: str, fields: MatchFields) -> None:
-        self._fields[node_id] = fields
-        # After the write, never before: a rebuild that clears the flag first
-        # and snapshots second then either sees this record or sees the flag.
-        self._dirty = True
+        with self._lock:
+            self._fields[node_id] = fields
+            self._built = None
 
     def get(self, node_id: str, default=None):
         return self._fields.get(node_id, default)
 
     def pop(self, node_id: str, default=None):
-        removed = self._fields.pop(node_id, default)
-        self._dirty = True
-        return removed
+        with self._lock:
+            self._built = None
+            return self._fields.pop(node_id, default)
 
     def clear(self) -> None:
-        self._fields.clear()
-        self._dirty = True
+        with self._lock:
+            self._fields.clear()
+            self._built = None
 
     def update(self, other) -> None:
-        self._fields.update(other)
-        self._dirty = True
+        with self._lock:
+            self._fields.update(other)
+            self._built = None
 
     @property
     def records(self):
@@ -188,45 +211,25 @@ class LexicalIndex:
         return self._fields.items()
 
     # -- the corpus --------------------------------------------------------
-    def _rebuild(self) -> None:
-        """Rebuild the corpus, under the lock, and publish it in one piece.
+    def _rebuild_if_affordable(self) -> None:
+        """Rebuild the corpus, if it has been long enough since the last one.
 
-        Two things have to hold at once, and each was got wrong on its own way
-        here before. The flag is cleared BEFORE the snapshot, never after: a
-        writer that lands mid-rebuild sets it again, so the worst case is a
-        wasted rebuild rather than a node that silently never appears. And the
-        three derived structures are published as one value, because a corpus
-        read against another build's offsets maps every hit to the wrong
-        record - which the caller's own re-check then discards, so the node
-        that genuinely matched simply vanishes, with no error to notice.
-
-        The lock covers only this. `GraphStorage.search_nodes` holds no lock
-        while all fifteen writers do, so rebuilds genuinely overlap; a second
-        thread that waits here finds the flag already clear and returns without
-        doing the work twice.
+        The budget is what keeps a write-heavy load from paying for the index
+        without using it. A rebuild is O(total text); charging one to every
+        query that follows a write is how this became slower than the scan it
+        replaces. Waiting until the last rebuild's cost has been repaid
+        `_REBUILD_BUDGET` times bounds the overhead to a fraction of the work
+        the queries were going to do anyway, whatever the write rate.
         """
         with self._lock:
-            if not self._dirty:
-                # Another thread rebuilt while this one waited.
+            if self._built is not None:
+                # Another thread rebuilt while this one waited for the lock.
                 return
-            for _ in range(_REBUILD_SNAPSHOT_TRIES):
-                self._dirty = False
-                try:
-                    records = list(self._fields.items())
-                except RuntimeError:
-                    # Resized mid-iteration by a concurrent writer. Retry
-                    # against a settled dict.
-                    self._dirty = True
-                    continue
-                break
-            else:
-                # Writes are landing faster than a snapshot completes. Decline
-                # rather than guess - the walk is the same answer - and stay
-                # dirty so the next query tries again.
-                self._built = None
-                self._dirty = True
+            now = time.monotonic()
+            if now - self._rebuilt_at < self._cost * _REBUILD_BUDGET:
                 return
-
+            # Nothing can mutate `_fields` here: every mutator takes this lock.
+            records = list(self._fields.items())
             ids = [node_id for node_id, _ in records]
             corpus = _CORPUS_SEPARATOR.join(fields.text for _, fields in records)
             starts, position = [], 0
@@ -244,12 +247,11 @@ class LexicalIndex:
                 # without a single test noticing. Untestable code that claims
                 # to be a safety net is worse than none. Declining degrades to
                 # the plain walk, which is the same answer and is well covered.
-                self._built = None
+                self._rebuilt_at = time.monotonic()
                 return
-            # The one publish. `_dirty` is deliberately NOT cleared here - it
-            # was cleared before the snapshot, and anything set since is a
-            # write this build did not see.
             self._built = (ids, corpus, offsets)
+            self._rebuilt_at = time.monotonic()
+            self._cost = self._rebuilt_at - now
 
     def candidates(self, term: str) -> Optional[List[str]]:
         """Node ids whose text contains *term*, or None to say "scan instead".
@@ -261,11 +263,12 @@ class LexicalIndex:
         """
         if _CORPUS_SEPARATOR in term or not term:
             return None
-        if self._dirty:
-            self._rebuild()
+        if self._built is None:
+            self._rebuild_if_affordable()
         # Read the triple ONCE. A concurrent rebuild may replace it a moment
         # from now; what must never happen is reading half of one build and
-        # half of the next.
+        # half of the next. None means no corpus matches the records right now
+        # - decline, and let the walk read the live dict.
         built = self._built
         if built is None:
             return None
@@ -511,12 +514,19 @@ def search_nodes(
         and single_term is not None
         and hasattr(searchable_text_cache, "candidates")
         # The index can only offer ids it holds records for, so it may only
-        # answer while it covers `nodes` exactly. Every write to `nodes` in
-        # storage.py is paired with a write here, but the pair is two
-        # statements and this function takes no lock, so a reader can land
-        # between them. Sizes are O(1) and disagree exactly then; the walk
-        # answers for that one query.
-        and len(searchable_text_cache) == len(nodes)
+        # answer while it covers every id in `nodes`. GraphStorage maintains
+        # that as an invariant rather than leaving it to chance: adds write
+        # the index first, removals write it last, and the bulk swap in
+        # `load` unions before it prunes, so the index is a superset at every
+        # instant - which matters because this function takes no lock and a
+        # reader can land between any two of those statements.
+        #
+        # The size test is a backstop for that invariant, not the invariant
+        # itself. A superset is never shorter, so shorter means something has
+        # broken the ordering above and the walk should answer. Equal sizes
+        # with different id sets would slip past it, which is exactly why the
+        # ordering, and not this line, is what the correctness rests on.
+        and len(searchable_text_cache) >= len(nodes)
     ):
         candidate_ids = searchable_text_cache.candidates(single_term)
 

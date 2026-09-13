@@ -8,8 +8,6 @@ the answer changes; these tests are mostly about that, and about the index
 noticing every way its corpus can go stale.
 """
 
-import threading
-
 import pytest
 
 from backend.core.models import Node, NodeType
@@ -41,6 +39,20 @@ def _index(nodes):
     for node in nodes:
         index[node.id] = build_match_fields(node, TYPE_TEXT)
     return index
+
+
+def _spend_the_rebuild_budget(index):
+    """Let the next query rebuild instead of declining.
+
+    A rebuild is held back until the previous one has repaid its cost several
+    times over, which is what stops a write-heavy load paying for a corpus it
+    never gets to use. In a test the previous rebuild cost microseconds and the
+    next line runs immediately, so the budget would decline - correctly, but it
+    would answer the wrong question. Tests about what the CORPUS holds spend it
+    first; tests about what a SEARCH returns must not, because declining is one
+    of the right answers there.
+    """
+    index._rebuilt_at, index._cost = 0.0, 0.0
 
 
 class TestTheIndexAnswersWhatTheWalkWouldHave:
@@ -161,6 +173,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
         assert index.candidates("doomed") == ["a"]
 
         index.pop("a")
+        _spend_the_rebuild_budget(index)
         assert index.candidates("doomed") == [], (
             "the corpus still holds the removed node's text"
         )
@@ -262,6 +275,7 @@ class TestTheGateAndTheCorpusAtSizesTheFixturesAboveDoNotReach:
 
         index.clear()
         index.update({"new": build_match_fields(_node("new", "arrived"), TYPE_TEXT)})
+        _spend_the_rebuild_budget(index)
 
         assert index.candidates("arrived") == ["new"]
         assert index.candidates("departed") == [], (
@@ -406,249 +420,229 @@ class TestTheIndexIsActuallyConsulted:
         )
 
 
-class TestAWriteThatLandsWhileTheCorpusIsBeingRebuilt:
-    """`search_nodes` holds no lock; all fifteen writers in GraphStorage do.
-    So a write genuinely overlaps a rebuild, and the rebuild takes ~100 ms at
-    100k nodes. Clearing `_dirty` unconditionally at the end of a rebuild
-    discarded that writer's flag: the corpus was marked clean without the new
-    node in it, and the node stayed invisible to the candidate path until some
-    unrelated write happened to dirty the index again.
+class TestAStaleCorpusIsNeverTheAnswer:
+    """The corpus is rebuilt whole, so between a write and the next rebuild it
+    does not describe the records. Every earlier version of this class got that
+    window wrong in a different way: one cleared the staleness flag at the END
+    of the rebuild and lost a write that landed inside it; the next cleared it
+    at the START, which meant every OTHER thread spent the rebuild answering
+    from the previous corpus - a node committed before the query came back as
+    no match at all.
 
-    These drive the overlap deterministically - no threads, no timing - by
-    letting a write land inside the corpus join, which is the widest part of
-    the rebuild window.
+    The property that replaced both: there is no flag. A corpus is published
+    only when it matches the records, and any write drops it. So a reader sees
+    a corpus that is exactly right, or sees none and walks.
     """
 
-    @staticmethod
-    def _during_rebuild(monkeypatch, index, land):
-        """Run `land()` once, from inside the rebuild's corpus join."""
-        from backend.core import storage_search
-
-        separator = storage_search._CORPUS_SEPARATOR
-        real_join = separator.join
-        fired = []
-
-        class _LandsMidJoin(str):
-            def join(self, parts):
-                joined = real_join(parts)
-                if not fired:
-                    fired.append(True)
-                    land()
-                return joined
-
-        monkeypatch.setattr(
-            storage_search, "_CORPUS_SEPARATOR", _LandsMidJoin(separator)
-        )
-        index._rebuild()
-        assert fired, "the write never landed - the test proves nothing"
-
-    def test_a_node_written_mid_rebuild_is_still_found_afterwards(self, monkeypatch):
-        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
-        index._dirty = True
-
-        def land():
-            index["late"] = build_match_fields(
-                _node("late", "arrivedlate needle"), TYPE_TEXT
-            )
-
-        self._during_rebuild(monkeypatch, index, land)
-
-        # The corpus that was just built cannot contain `late`; the point is
-        # that the index knows it, so the next question rebuilds.
-        assert index._dirty, "the rebuild cleared the flag the writer had set"
-        assert index.candidates("arrivedlate") == ["late"]
-
-    def test_the_lost_node_stays_lost_which_is_why_the_flag_matters(self, monkeypatch):
-        """Pin the consequence, not just the flag. Without the version check
-        the node is invisible on every later query, not merely the next one -
-        nothing re-dirties the index on its own."""
-        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
-        index._dirty = True
-
-        def land():
-            index["late"] = build_match_fields(
-                _node("late", "arrivedlate needle"), TYPE_TEXT
-            )
-
-        self._during_rebuild(monkeypatch, index, land)
-
-        for _ in range(3):
-            assert index.candidates("arrivedlate") == ["late"]
-
-    def test_a_record_removed_mid_rebuild_does_not_break_the_rebuild(self, monkeypatch):
-        """The old rebuild snapshotted the ids and then looked each one up
-        again, so a `pop` in between raised KeyError out of an ordinary
-        search. Building from a snapshot of the items cannot."""
-        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
-        index._dirty = True
-
-        self._during_rebuild(monkeypatch, index, lambda: index.pop("n3"))
-
-        assert index._dirty
-        assert "n3" not in index.candidates("shared")
-        assert len(index.candidates("shared")) == 9
-
-    def test_a_rebuild_with_no_write_in_it_still_settles(self, monkeypatch):
-        """The counter must not leave the index permanently dirty - that would
-        rebuild the corpus on every single query."""
-        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
-        index._dirty = True
-
-        assert len(index.candidates("shared")) == 10
-        assert not index._dirty
-
-        # and a second query must not rebuild again
-        before = index._built
+    def test_a_write_drops_the_corpus_rather_than_leaving_it_readable(self):
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(5)])
         index.candidates("shared")
-        assert index._built is before
+        assert index._built is not None
+
+        index["late"] = build_match_fields(_node("late", "arrivedlate"), TYPE_TEXT)
+
+        assert index._built is None, (
+            "the previous corpus is still readable, and it does not contain "
+            "the node that was just written"
+        )
+
+    def test_the_new_node_is_found_and_never_reported_missing(self):
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(5)])
+        index.candidates("shared")
+
+        index["late"] = build_match_fields(_node("late", "arrivedlate"), TYPE_TEXT)
+
+        # Either answer is correct - rebuild and find it, or decline and let
+        # the walk find it. `[]` is the one answer that is not.
+        for _ in range(3):
+            answer = index.candidates("arrivedlate")
+            assert answer in (["late"], None), answer
 
     @pytest.mark.parametrize(
-        "mutate,then",
+        "mutate,term,expected",
         [
             pytest.param(
-                lambda i, n: i.__setitem__("x", n),
-                lambda i: i.candidates("sentinel") == ["x"],
-                id="setitem",
+                lambda i, n: i.__setitem__("x", n), "sentinel", ["x"], id="setitem"
             ),
+            pytest.param(lambda i, n: i.pop("n1"), "node 1 ", [], id="pop"),
+            pytest.param(lambda i, n: i.clear(), "shared", [], id="clear"),
             pytest.param(
-                lambda i, n: i.pop("n1"),
-                lambda i: i.candidates("shared") == ["n0", "n2"],
-                id="pop",
-            ),
-            pytest.param(
-                lambda i, n: i.clear(),
-                lambda i: i.candidates("shared") == [],
-                id="clear",
-            ),
-            pytest.param(
-                lambda i, n: i.update({"x": n}),
-                lambda i: i.candidates("sentinel") == ["x"],
-                id="update",
+                lambda i, n: i.update({"x": n}), "sentinel", ["x"], id="update"
             ),
         ],
     )
-    def test_every_mutator_is_visible_to_a_rebuild_already_in_flight(
-        self, monkeypatch, mutate, then
-    ):
-        """Each of the four, landing mid-rebuild, must still be seen. Asserting
-        on a counter would pin the mechanism rather than the behaviour, and
-        would pass against code that kept the counter and lost the write."""
-        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(3)])
+    def test_every_mutator_drops_the_corpus(self, mutate, term, expected):
+        """All four, individually. A mutator that changed the records but left
+        the corpus published would serve answers from text that no longer
+        describes the graph."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(5)])
         index.candidates("shared")
-        index._dirty = True
 
-        sentinel = build_match_fields(_node("x", "x sentinel shared"), TYPE_TEXT)
-        self._during_rebuild(monkeypatch, index, lambda: mutate(index, sentinel))
+        mutate(index, build_match_fields(_node("x", "x sentinel shared"), TYPE_TEXT))
 
-        assert then(index)
+        assert index._built is None
+        _spend_the_rebuild_budget(index)
+        assert index.candidates(term) == expected
 
+    def test_a_reader_cannot_see_a_corpus_a_rebuild_has_not_finished(self):
+        """The publish is one assignment of one tuple, so a reader that catches
+        a rebuild mid-flight reads either the old value or the new - never a
+        corpus from one build against offsets from another, which maps every
+        hit to the wrong record and loses the node that really matched."""
+        index = _index([_node(f"n{i}", f"node{i} needle{i:03d}") for i in range(40)])
+        seen = []
 
-class TestTwoRebuildsAtOnceCannotPublishHalfOfEach:
-    """The corpus, the ids it came from and their offsets only mean anything
-    together. Published as three assignments, two overlapping rebuilds could
-    leave one build's ids against another's offsets - and then every hit maps
-    to the wrong record, the caller's own `term in fields.text` re-check
-    discards it, and the node that genuinely matched simply disappears. No
-    exception, no wrong node returned: just a missing one.
-    """
-
-    @staticmethod
-    def _second_rebuild_lands_inside_the_first(index, add):
-        """Hold the first rebuild inside its corpus join, run a whole second
-        rebuild against a larger record set, then let the first finish."""
         from backend.core import storage_search
 
         separator = storage_search._CORPUS_SEPARATOR
         real_join = separator.join
-        armed, gate = [True], threading.Event()
 
-        class _HoldsTheFirstBuild(str):
+        class _ReadsWhileTheBuildIsHalfDone(str):
             def join(self, parts):
-                joined = real_join(parts)
-                if armed[0]:
-                    armed[0] = False
-                    gate.wait(10)
-                return joined
+                seen.append(index._built)  # mid-rebuild, before the publish
+                return real_join(parts)
 
-        def second():
-            threading.Event().wait(0.2)
-            add()
-            storage_search._CORPUS_SEPARATOR = separator
-            index._dirty = True
-            index._rebuild()
-            storage_search._CORPUS_SEPARATOR = holder
-            gate.set()
-
-        holder = _HoldsTheFirstBuild(separator)
-        storage_search._CORPUS_SEPARATOR = holder
-        worker = threading.Thread(target=second)
-        worker.start()
+        monkey = _ReadsWhileTheBuildIsHalfDone(separator)
+        storage_search._CORPUS_SEPARATOR = monkey
         try:
-            index._dirty = True
-            index._rebuild()
+            index["x"] = build_match_fields(_node("x", "x needle999"), TYPE_TEXT)
+            _spend_the_rebuild_budget(index)
+            index.candidates("needle999")
         finally:
-            worker.join(timeout=15)
             storage_search._CORPUS_SEPARATOR = separator
-        assert not armed[0], "the first build was never held - nothing was raced"
 
-    def test_the_published_corpus_ids_and_offsets_are_always_one_build(self):
-        index = _index(
-            [_node(f"n{i}", f"node{i} needle{i:03d} pad") for i in range(60)]
+        assert seen == [None], (
+            "a half-built corpus was readable; it must stay None until the "
+            "whole triple is published at once"
         )
-        index.candidates("needle005")
-
-        def add():
-            for i in range(60, 90):
-                node = _node(f"n{i}", f"node{i} needle{i:03d} pad")
-                index._fields[node.id] = build_match_fields(node, TYPE_TEXT)
-
-        self._second_rebuild_lands_inside_the_first(index, add)
-
         ids, corpus, starts = index._built
         assert len(ids) == len(starts) == corpus.count("\x00") + 1
 
-    def test_a_node_is_not_lost_when_two_rebuilds_overlap(self):
-        """The consequence, not just the shape. `needle070` belongs to a record
-        only the second build saw; against the first build's offsets its hit
-        maps to some other record and is then filtered out."""
-        index = _index(
-            [_node(f"n{i}", f"node{i} needle{i:03d} pad") for i in range(60)]
-        )
-        index.candidates("needle005")
 
-        def add():
-            for i in range(60, 90):
-                node = _node(f"n{i}", f"node{i} needle{i:03d} pad")
-                index._fields[node.id] = build_match_fields(node, TYPE_TEXT)
-
-        self._second_rebuild_lands_inside_the_first(index, add)
-
-        assert index.candidates("needle070") == ["n70"]
-        assert index.candidates("needle005") == ["n5"]
-
-
-class TestTheIndexOnlyAnswersWhileItCoversTheNodes:
-    """Every write to `nodes` is paired with a write to the index, but the pair
-    is two statements and `search_nodes` takes no lock - so a reader can land
-    between them. The index can only offer ids it holds records for, so on the
-    candidate path a node in `nodes` but not yet in the index would be silently
-    absent from the answer. The walk builds its record on demand instead.
+class TestRebuildingIsAmortisedAgainstWhatItCosts:
+    """One write invalidates the whole corpus, so charging a rebuild to the
+    next query means one rebuild per write. With a write between every two
+    queries that made this index 1.6x SLOWER than the plain walk at 30k nodes,
+    and worse as the graph grows - it stopped being an optimisation and became
+    an overhead. A rebuild now waits until the last one has repaid its cost.
     """
 
-    def test_a_node_the_index_has_not_seen_yet_is_still_found(self):
+    def test_a_write_between_queries_does_not_buy_a_rebuild_each_time(self):
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(200)])
+        index.candidates("shared")
+
+        rebuilds = []
+        real = type(index)._rebuild_if_affordable
+
+        def counting(self):
+            before = self._built
+            real(self)
+            if self._built is not before:
+                rebuilds.append(True)
+
+        type(index)._rebuild_if_affordable = counting
+        try:
+            index._cost = 1.0  # a rebuild that cost a second is not repaid yet
+            for i in range(20):
+                index[f"n{i}"] = build_match_fields(
+                    _node(f"n{i}", f"node {i} shared changed"), TYPE_TEXT
+                )
+                index.candidates("shared")
+        finally:
+            type(index)._rebuild_if_affordable = real
+
+        assert rebuilds == [], (
+            f"{len(rebuilds)} rebuilds for 20 writes - the budget is not "
+            f"holding any of them back"
+        )
+
+    def test_declining_is_not_a_wrong_answer(self):
+        """What the budget buys is paid for by the walk, so the query must
+        still be answered correctly while the corpus is out of date."""
+        nodes = [_node(f"n{i}", f"node {i} shared") for i in range(5)]
+        by_id = {n.id: n for n in nodes}
+        index = _index(nodes)
+        index.candidates("shared")
+
+        newcomer = _node("late", "late arrivedlate shared")
+        by_id["late"] = newcomer
+        index["late"] = build_match_fields(newcomer, TYPE_TEXT)
+        index._cost = 1.0  # force the decline
+
+        assert index.candidates("arrivedlate") is None
+        found = search_nodes(by_id, index, TYPE_TEXT, query="arrivedlate", limit=10)
+        assert [n.id for n in found] == ["late"]
+
+    def test_the_budget_lets_go_once_the_cost_is_repaid(self):
+        """It must not decline for ever, or the index is dead after the first
+        write the graph ever takes."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(5)])
+        index.candidates("shared")
+        index["late"] = build_match_fields(_node("late", "arrivedlate"), TYPE_TEXT)
+
+        _spend_the_rebuild_budget(index)
+        assert index.candidates("arrivedlate") == ["late"]
+
+
+class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
+    """The candidate path can only offer ids the index holds records for, so a
+    node in `nodes` that the index has not got would simply be absent from the
+    answer. GraphStorage keeps the index a superset instead of leaving it to a
+    size check: adds write the index first, removals write it last.
+    """
+
+    def test_a_node_the_index_has_not_seen_is_still_found(self):
         nodes = [_node("a", "alpha findmehere"), _node("b", "beta findmehere")]
         by_id = {node.id: node for node in nodes}
-        index = _index([nodes[0]])  # `b` reached `nodes` but not the index yet
+        index = _index([nodes[0]])
 
         found = search_nodes(by_id, index, TYPE_TEXT, query="findmehere", limit=10)
 
         assert [n.id for n in found] == ["a", "b"]
 
-    def test_a_record_the_nodes_no_longer_have_does_not_stop_the_index(self):
+    def test_a_record_for_a_departed_node_does_not_stop_the_index(self):
+        """The mirror case: the index is a superset, which is the state the
+        write ordering deliberately produces, and it must still answer."""
         nodes = [_node("a", "alpha findmehere")]
         by_id = {node.id: node for node in nodes}
         index = _index(nodes + [_node("gone", "gone findmehere")])
-
-        found = search_nodes(by_id, index, TYPE_TEXT, query="findmehere", limit=10)
+        consulted = []
+        real = type(index).candidates
+        type(index).candidates = lambda self, term: (
+            consulted.append(term) or real(self, term)
+        )
+        try:
+            found = search_nodes(by_id, index, TYPE_TEXT, query="findmehere", limit=10)
+        finally:
+            type(index).candidates = real
 
         assert [n.id for n in found] == ["a"]
+        assert consulted, "the index declined; a superset must still answer"
+
+    def test_every_storage_write_path_keeps_the_index_a_superset(self, tmp_path):
+        """The invariant lives in storage.py, at six call sites, and a reader
+        can land between any two statements there. Checked after each kind of
+        write rather than trusting the ordering by eye."""
+        import os
+
+        from backend.core.storage import GraphStorage
+
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            storage = GraphStorage()
+        finally:
+            os.chdir(cwd)
+
+        def covered(where):
+            missing = set(storage.nodes) - set(storage._searchable_text_cache)
+            assert not missing, f"{where}: index missing {sorted(missing)[:5]}"
+
+        storage.add_nodes([_node("a", "alpha"), _node("b", "beta")], [])
+        covered("after add_nodes")
+
+        storage.update_node("a", {"name": "alpha renamed"})
+        covered("after update_node")
+
+        storage.delete_nodes(["b"], confirmed=True)
+        covered("after delete_nodes")

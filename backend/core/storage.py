@@ -638,12 +638,22 @@ class GraphStorage:
                 # place, so anything holding a reference to one still sees the
                 # graph this instance serves.
                 self.graph_metadata = graph_metadata
+                # The index goes first and as a UNION, so it is never missing
+                # an id `nodes` holds - not even for the statements in between.
+                # Clearing it first, or swapping `nodes` first, leaves a window
+                # where the two hold different id sets of the SAME size, which
+                # no cheap check can tell from agreement.
+                self._searchable_text_cache.update(searchable)
                 self.nodes.clear()
                 self.nodes.update(nodes)
                 self.edges.clear()
                 self.edges.update(edges)
-                self._searchable_text_cache.clear()
-                self._searchable_text_cache.update(searchable)
+                for departed in [
+                    node_id
+                    for node_id in self._searchable_text_cache
+                    if node_id not in nodes
+                ]:
+                    self._searchable_text_cache.pop(departed, None)
 
                 self.graph.clear()
                 for node in nodes.values():
@@ -1602,12 +1612,17 @@ class GraphStorage:
         touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
         self._inline_fallback.pop(node.id, None)
 
+        # Index BEFORE `nodes`, here and everywhere that adds: the search's
+        # candidate path can only offer ids the index holds records for, and it
+        # takes no lock, so a reader landing between these two statements would
+        # silently drop a node if `nodes` were the one to get it first.
+        # Removals are the mirror image - `nodes` first, index after.
+        self._searchable_text_cache[node.id] = self._build_match_fields(node)
         self.nodes[node.id] = node
         # add_node on an existing id replaces the attributes, which is what
         # repoints `data` at the new object; every read path that walks the
         # graph would otherwise still hand out the old one.
         self.graph.add_node(node.id, data=node)
-        self._searchable_text_cache[node.id] = self._build_match_fields(node)
 
         self._emit_event(
             event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
@@ -1931,16 +1946,15 @@ class GraphStorage:
                             message=f"Node with ID {node.id} already exists",
                         )
 
+                    # Index before `nodes` - see add_node for why.
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
                     unpersisted_nodes.append(node)
-
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_match_fields(
-                        node
-                    )
 
                 # A caller may pass `embedding` on the node itself. The
                 # serialized payload no longer carries that field, so adopt it

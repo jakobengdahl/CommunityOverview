@@ -3082,10 +3082,17 @@ class TestFaultInjectionOnlyPaths:
         backend = _IncrementalBackend()
         storage = _storage(backend)
 
-        def boom(self, node):
+        # The window this test is named for is AFTER the node lands in
+        # `self.nodes` and before the node-phase persist. `_build_match_fields`
+        # used to sit there; it now runs before the node lands, deliberately,
+        # so that the search index can never be missing an id `nodes` holds.
+        # Injecting there would prove the opposite of what this test is for -
+        # that nothing landed. `_adopt_supplied_vectors` is the call that sits
+        # in the window now.
+        def boom(self, nodes):
             raise RuntimeError("boom-before-node-persist")
 
-        monkeypatch.setattr(GraphStorage, "_build_match_fields", boom)
+        monkeypatch.setattr(GraphStorage, "_adopt_supplied_vectors", boom)
 
         result = storage.add_nodes([_node("a")], [])
         storage.flush()
