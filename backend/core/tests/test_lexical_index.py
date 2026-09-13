@@ -1089,7 +1089,8 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         from the candidate path, but only the one whose delete is already in
         flight - which a search racing that delete could miss anyway, so it is
         not a loss a reader is owed. What it really breaks is the index being a
-        superset of `nodes` at every instant, which is the property the size
+        superset of `nodes` through every incremental write, which is the
+        property the size
         test in `search_nodes` is a backstop for. Asserting the consequence
         instead would pin a guarantee the system does not make."""
         import os
@@ -1122,4 +1123,45 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         assert not early, (
             f"{early} left the index while still in `nodes`, so the index is "
             f"no longer a superset - the state the size test assumes away"
+        )
+
+
+class TestARenameLandingMidScanDoesNotReturnANonMatch:
+    """The sibling of the delete case, in the opposite direction.
+
+    `update_node` mutates the node under the storage lock and then writes the
+    new record; `search_nodes` holds no lock. So a rename can land after the
+    candidate list was computed and before the scan reads the record, leaving a
+    candidate whose text no longer contains the term. The scan's own
+    `single_term not in fields.text` re-check is the only thing that discards
+    it - a comment here once described that test as already established on the
+    candidate path, which invited removing it.
+    """
+
+    def test_the_renamed_node_is_not_returned(self, monkeypatch):
+        nodes = {f"n{i}": _node(f"n{i}", f"n{i} unique{i:03d}") for i in range(200)}
+        index = _index(list(nodes.values()))
+        _let_the_index_rebuild(index)
+
+        real = LexicalIndex.candidates
+        landed = []
+
+        def _rename_lands_after_the_candidate_list(self, term):
+            offered = real(self, term)
+            if offered and not landed:
+                landed.append(True)
+                renamed = _node("n7", "n7 renamedaway")
+                nodes["n7"] = renamed
+                self["n7"] = build_match_fields(renamed, TYPE_TEXT)
+            return offered
+
+        monkeypatch.setattr(
+            LexicalIndex, "candidates", _rename_lands_after_the_candidate_list
+        )
+        found = search_nodes(nodes, index, TYPE_TEXT, query="unique007", limit=5)
+
+        assert landed, "the rename never landed - the test proves nothing"
+        assert "unique007" not in index["n7"].text, "the record was not replaced"
+        assert found == [], (
+            f"returned {[n.id for n in found]} for a term none of them contain"
         )

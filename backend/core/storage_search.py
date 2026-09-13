@@ -646,8 +646,14 @@ def search_nodes(
             fields = build_match_fields(node, type_searchable_text)
 
         if single_term is not None:
-            # Already established when the candidates came from the index; the
-            # test is kept for the fallback walk, and is cheap on a candidate.
+            # Load-bearing on BOTH paths, which is not obvious: the index
+            # established it when the candidate list was computed, and the
+            # record can be replaced between then and this line. `update_node`
+            # mutates the node under the storage lock and then writes the new
+            # record, while this function holds no lock - so a rename can land
+            # in that gap and leave a candidate whose text no longer contains
+            # the term. Skipping the test here returns a node that does not
+            # match the query at all.
             if single_term not in fields.text:
                 continue
             bonus = type_bonuses.get(fields.type_key)
