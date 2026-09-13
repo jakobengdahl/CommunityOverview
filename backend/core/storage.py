@@ -223,7 +223,11 @@ class GraphStorage:
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
         # Cache for searchable text to speed up search_nodes
-        self._searchable_text_cache: Dict[str, str] = {}
+        # Keyed by node id; the value is everything matching and ranking read
+        # off that node, lowered once. It was the flat searchable string alone
+        # until the scorer's per-query re-lowering showed up as a third of a
+        # large query's cost.
+        self._searchable_text_cache = storage_search.LexicalIndex()
 
         # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
         self._type_searchable_text: Dict[str, str] = {}
@@ -337,8 +341,14 @@ class GraphStorage:
             # Config not available; type matching will use type name only
             pass
 
-    def _build_searchable_text(self, node: "Node") -> str:
-        return storage_search.build_searchable_text(node, self._type_searchable_text)
+    def _build_match_fields(self, node: "Node") -> storage_search.MatchFields:
+        """Prepare everything search matches and ranks a node on, lowered once.
+
+        Renamed from `_build_searchable_text`, which returned only the flat
+        string: keeping that name while widening what it returns is the quiet
+        kind of break - a reader would go on believing the cache holds a str.
+        """
+        return storage_search.build_match_fields(node, self._type_searchable_text)
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -613,12 +623,12 @@ class GraphStorage:
                 # would report that as merely being behind the store.
                 nodes: Dict[str, Node] = {}
                 edges: Dict[str, Edge] = {}
-                searchable: Dict[str, str] = {}
+                searchable: Dict[str, storage_search.MatchFields] = {}
 
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
                     nodes[node.id] = node
-                    searchable[node.id] = self._build_searchable_text(node)
+                    searchable[node.id] = self._build_match_fields(node)
 
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
@@ -628,11 +638,36 @@ class GraphStorage:
                 # place, so anything holding a reference to one still sees the
                 # graph this instance serves.
                 self.graph_metadata = graph_metadata
+                # Order matters three ways here, and two of them fight.
+                #
+                # The index must never be MISSING an id `nodes` holds, or the
+                # search's candidate path silently drops that node. And it must
+                # iterate in step with `nodes`, or the `-index` tie-break puts
+                # equal-scoring results in a different order than the walk
+                # does - with a limit, a different set of results entirely.
+                #
+                # Unioning the new records in and pruning afterwards keeps the
+                # first and breaks the second: `dict.update` leaves an existing
+                # key in its existing slot, so every id that survives a reload
+                # keeps its OLD position while `nodes` is rebuilt in the
+                # store's order.
+                #
+                # Emptying the index first keeps both. While it is empty it is
+                # shorter than `nodes`, which is exactly what the size test in
+                # `search_nodes` declines on, so the walk answers for that
+                # window and reads the live dict. Then it refills in
+                # `searchable` order - the same order `nodes` was just built
+                # in. At no point are the two the same size with different ids.
+                #
+                # The refill only lands in that order because the walk does not
+                # write records back (see `search_nodes`). A walk in this window
+                # would otherwise insert the ids that passed its filters, in its
+                # own order, and `update` would leave them there.
+                self._searchable_text_cache.clear()
                 self.nodes.clear()
                 self.nodes.update(nodes)
                 self.edges.clear()
                 self.edges.update(edges)
-                self._searchable_text_cache.clear()
                 self._searchable_text_cache.update(searchable)
 
                 self.graph.clear()
@@ -1592,12 +1627,42 @@ class GraphStorage:
         touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
         self._inline_fallback.pop(node.id, None)
 
+        # Index BEFORE `nodes`, here and everywhere that adds; removals are the
+        # mirror image, `nodes` first and the index after. Together those keep
+        # the index a superset of `nodes` through every incremental write,
+        # which is what lets the search's candidate path - which can only offer
+        # ids it holds records for, and takes no lock - be trusted. `load`
+        # replaces everything at once and is the one path that steps outside
+        # it, deliberately and visibly: it empties the index first, so the size
+        # test declines for the whole swap. See the comment there.
+        #
+        # One half-done write on its own would be caught anyway: `nodes` first
+        # would leave the index SHORTER, and the size test in `search_nodes`
+        # sends the query to the walk. What the ordering is really for is two
+        # writes in flight at once, where the sizes cancel out and that test
+        # cannot tell the two dicts apart.
+        #
+        # The two halves are not equally urgent, and it is worth being exact
+        # about which. Reverse the ADD and a node that has reached `nodes` -
+        # one a reader is owed - is missing from the index, and the candidate
+        # path returns [] for it. Measured. Reverse the REMOVAL and the node
+        # that goes missing is the one whose delete is already in flight,
+        # which a search racing that delete could fail to see anyway; no
+        # reader is owed it.
+        #
+        # The removal half is still written this way, because what it keeps is
+        # the invariant rather than any single query: index a superset of
+        # `nodes` for every incremental write, which is what the size test is a
+        # backstop FOR. An invariant that holds except where somebody has
+        # argued the exception away is one nobody can reason about later -
+        # which is why `load`'s exception is not argued away but arranged to
+        # fail the size test outright.
+        self._searchable_text_cache[node.id] = self._build_match_fields(node)
         self.nodes[node.id] = node
         # add_node on an existing id replaces the attributes, which is what
         # repoints `data` at the new object; every read path that walks the
         # graph would otherwise still hand out the old one.
         self.graph.add_node(node.id, data=node)
-        self._searchable_text_cache[node.id] = self._build_searchable_text(node)
 
         self._emit_event(
             event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
@@ -1921,16 +1986,15 @@ class GraphStorage:
                             message=f"Node with ID {node.id} already exists",
                         )
 
+                    # Index before `nodes` - see _external_upsert_node for why.
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
                     unpersisted_nodes.append(node)
-
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
-                        node
-                    )
 
                 # A caller may pass `embedding` on the node itself. The
                 # serialized payload no longer carries that field, so adopt it
@@ -2214,7 +2278,7 @@ class GraphStorage:
             self.graph.nodes[node_id]["data"] = node
 
             # Update searchable text cache
-            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+            self._searchable_text_cache[node.id] = self._build_match_fields(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
             if any(
