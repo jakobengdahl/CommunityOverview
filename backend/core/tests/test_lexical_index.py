@@ -669,3 +669,71 @@ class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
 
         storage.delete_nodes(["b"], confirmed=True)
         covered("after delete_nodes")
+
+
+class TestTheWalkDoesNotWriteBackIntoTheIndex:
+    """`load` empties the index before refilling it, and the walk answers for
+    that window. If the walk also STORED what it built, it would repopulate the
+    index with only the ids that passed its filters, in its own order, and the
+    refill would leave them there - so the index would stop iterating in step
+    with `nodes`, which is what the `-index` tie-break needs to reproduce the
+    old stable sort.
+    """
+
+    def test_a_walk_over_an_empty_index_leaves_it_empty(self):
+        nodes = [
+            _node(f"n{i}", f"n{i} widget", archived=(i % 2 == 1)) for i in range(20)
+        ]
+        by_id = {node.id: node for node in nodes}
+        index = LexicalIndex()  # the state `load` leaves behind mid-swap
+
+        search_nodes(by_id, index, TYPE_TEXT, query="widget", limit=50)
+
+        assert len(index) == 0, (
+            f"the walk wrote {len(index)} records back; a refill after this "
+            f"would put them out of step with `nodes`"
+        )
+
+    def test_the_index_still_iterates_in_step_after_a_walk_in_the_window(self):
+        """The consequence the previous test protects against."""
+        nodes = [
+            _node(f"n{i}", f"n{i} widget", archived=(i % 2 == 1)) for i in range(20)
+        ]
+        by_id = {node.id: node for node in nodes}
+        index = LexicalIndex()
+
+        search_nodes(by_id, index, TYPE_TEXT, query="widget", limit=50)
+        for node in nodes:  # what `load` does next
+            index[node.id] = build_match_fields(node, TYPE_TEXT)
+
+        assert list(index) == list(by_id)
+
+
+class TestOnlyAnsweredQueriesCountTowardsTheNextRebuild:
+    """The rebuild policy asks how many queries the previous corpus answered.
+    Counting the ones it REFUSED - a term matching most of the graph, which the
+    selectivity gate declines - made a corpus that answered nothing at all look
+    worth rebuilding, which is exactly the case where a rebuild buys nothing.
+    """
+
+    def test_a_query_the_gate_declines_is_not_an_answer(self):
+        # every node matches, so the selectivity gate declines
+        index = _index([_node(f"n{i}", "shared everywhere") for i in range(300)])
+        _let_the_index_rebuild(index)
+        assert index.candidates("shared") is None
+
+        before = index._served
+        for _ in range(20):
+            index.candidates("shared")
+        assert index._served == before, (
+            f"{index._served - before} declined queries were counted as answers"
+        )
+
+    def test_a_query_the_corpus_does_answer_counts(self):
+        index = _index([_node(f"n{i}", f"n{i} unique{i:03d}") for i in range(300)])
+        _let_the_index_rebuild(index)
+
+        before = index._served
+        assert index.candidates("unique007") == ["n7"]
+        assert index.candidates("nothingmatchesthis") == []
+        assert index._served == before + 2, "a hit and a miss are both answers"

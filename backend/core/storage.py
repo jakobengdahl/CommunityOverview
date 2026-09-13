@@ -653,11 +653,16 @@ class GraphStorage:
                 # store's order.
                 #
                 # Emptying the index first keeps both. While it is empty it is
-                # shorter than `nodes`, which is exactly what the size backstop
-                # in `search_nodes` declines on, so the walk answers for that
+                # shorter than `nodes`, which is exactly what the size test in
+                # `search_nodes` declines on, so the walk answers for that
                 # window and reads the live dict. Then it refills in
                 # `searchable` order - the same order `nodes` was just built
                 # in. At no point are the two the same size with different ids.
+                #
+                # The refill only lands in that order because the walk does not
+                # write records back (see `search_nodes`). A walk in this window
+                # would otherwise insert the ids that passed its filters, in its
+                # own order, and `update` would leave them there.
                 self._searchable_text_cache.clear()
                 self.nodes.clear()
                 self.nodes.update(nodes)

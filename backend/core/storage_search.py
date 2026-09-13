@@ -310,8 +310,8 @@ class LexicalIndex:
         if built is None:
             return None
         ids, corpus, starts = built
-        self._served += 1
         if not ids:
+            self._served += 1
             return []
         # One C-level pass to decide whether to take this path at all. The
         # index wins by not visiting most nodes, so it stops winning when the
@@ -325,6 +325,7 @@ class LexicalIndex:
         # than it strictly must, which is the safe direction.
         occurrences = corpus.count(term)
         if occurrences == 0:
+            self._served += 1
             return []
         # The floor matters as much as the fraction. Measured, without it a
         # single-occurrence query is declined for n <= 3 (where `n // 4` is
@@ -336,6 +337,13 @@ class LexicalIndex:
         # scan that short, so there is nothing to decline for.
         if occurrences > max(_MIN_SELECTIVE_HITS, len(ids) // 4):
             return None
+        # Counted here, past every way this can still decline: what the rebuild
+        # policy needs to know is how many queries the corpus ANSWERED, and a
+        # query it refused is not one of them. Counting consultations instead
+        # let a corpus that answered nothing at all - every query declined on
+        # selectivity - still look worth rebuilding, which is precisely the
+        # case where rebuilding buys nothing.
+        self._served += 1
 
         found, position = [], corpus.find(term)
         while position != -1:
@@ -552,18 +560,19 @@ def search_nodes(
         and single_term is not None
         and hasattr(searchable_text_cache, "candidates")
         # The index can only offer ids it holds records for, so it may only
-        # answer while it covers every id in `nodes`. GraphStorage maintains
-        # that as an invariant rather than leaving it to chance: adds write
-        # the index first, removals write it last, and the bulk swap in
-        # `load` unions before it prunes, so the index is a superset at every
-        # instant - which matters because this function takes no lock and a
-        # reader can land between any two of those statements.
+        # answer while it covers every id in `nodes`. This function takes no
+        # lock, so a reader can land between any two statements of a write,
+        # and the size test is what holds it off when one has.
         #
-        # The size test is a backstop for that invariant, not the invariant
-        # itself. A superset is never shorter, so shorter means something has
-        # broken the ordering above and the walk should answer. Equal sizes
-        # with different id sets would slip past it, which is exactly why the
-        # ordering, and not this line, is what the correctness rests on.
+        # It works because GraphStorage never leaves the index the same size
+        # as `nodes` with a different id set. Adds write the index first and
+        # removals write it last, so a half-done single write leaves the index
+        # a superset - never shorter. `load` is the one that swaps everything:
+        # it EMPTIES the index first, so for the whole swap the index is
+        # shorter and this test sends the query to the walk, and only then
+        # refills it. During that window this line is not a backstop for
+        # something else - it is the only thing standing between a reader and
+        # a corpus for a graph that is no longer there.
         and len(searchable_text_cache) >= len(nodes)
     ):
         candidate_ids = searchable_text_cache.candidates(single_term)
@@ -602,17 +611,22 @@ def search_nodes(
             results.append(node)
             continue
 
-        # Reachable on the fallback walk; the candidate path is now gated on
-        # the index covering `nodes`, so it cannot reach here with a miss. The
-        # walk builds the record on demand rather than dropping the node -
-        # which is what `apply_external_change` documents as "a miss is
-        # refilled on demand". The same pairing that keeps the two dicts the
-        # same size keeps them iterating in step, which is what lets the
-        # `-index` tie-break reproduce the old stable sort.
+        # Reachable on the fallback walk; the candidate path is gated on the
+        # index covering `nodes`, so it cannot reach here with a miss. The walk
+        # builds the record on demand rather than dropping the node.
+        #
+        # It deliberately does NOT store it. Writing back from here looks free
+        # and is not: `load` empties the index before refilling it, and a walk
+        # landing in that window would repopulate it with only the ids that
+        # passed the `node_types` and archived filters, in walk order. The
+        # refill that follows leaves those in their new slots, and the index
+        # stops iterating in step with `nodes` - which is what the `-index`
+        # tie-break needs to reproduce the old stable sort. Reproduced: half a
+        # graph archived, one search in the window, and the index comes back
+        # ['n0','n2','n4',...] against nodes' ['n0','n1','n2',...].
         fields = records_get(node.id)
         if fields is None:
             fields = build_match_fields(node, type_searchable_text)
-            searchable_text_cache[node.id] = fields
 
         if single_term is not None:
             # Already established when the candidates came from the index; the
