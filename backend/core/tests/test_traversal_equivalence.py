@@ -472,6 +472,54 @@ class TestTheStoreIsActuallyTheOneAnswering:
             storage.flush()
             backend.close()
 
+    def test_the_store_also_answers_for_an_archived_anchor(self, schema):
+        """The anchor exemption is the one place where a wrong answer is not
+        the failure mode: dropping it makes every archived-anchor traversal
+        look like a vanished node, fall through to the walk, and return the
+        same thing - the store branch quietly dead for a whole class of
+        anchor, which is the unfalsifiability this class exists to close.
+        """
+        from backend.core import storage as storage_module
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a", archived=True),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+            assert storage.nodes["a"].archived, "the anchor has to be archived"
+
+            original = storage_module.storage_search.get_related_nodes
+
+            def _refuse(*args, **kwargs):
+                raise AssertionError("the walk answered; the store did not")
+
+            storage_module.storage_search.get_related_nodes = _refuse
+            try:
+                result = storage.get_related_nodes("a", depth=1)
+            finally:
+                storage_module.storage_search.get_related_nodes = original
+
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
 
 class TestTheTraversalTerminatesAndNotJustCorrectly:
     """Equivalence says the two engines return the same SET. It says nothing
@@ -1023,20 +1071,23 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
             backend.close()
 
     def test_a_huge_depth_costs_no_more_than_the_graph_allows(self, schema):
-        """The shape matters more than the number here. A chain shorter than
-        the requested depth passes for any implementation that stops at the
-        graph's SIZE, which is not the same as stopping when it converges: a
-        500-node graph with 5000 edges is bounded by 5000 levels and answers
-        completely at 5. So this is dense and small-diameter, and asks for
-        1000 levels it does not need.
+        """Counted, not timed. A wall-clock budget is the obvious way to write
+        this and a bad one: it measures the server rather than the property,
+        it is the first thing to go flaky on a loaded runner, and a budget
+        loose enough not to be flaky is loose enough to miss the regression -
+        an earlier version of this test allowed 3 s at depth 1000, where
+        removing the convergence check costs 0.15 s and only becomes visible
+        at depths the test does not use. Meanwhile `mcp_tools` caps depth
+        nowhere, so the depth a caller can ask for is unbounded.
 
-        Measured on exactly this graph: 16.3 s for a depth-limited recursion
-        that runs every level asked for, against 0.08 s once the walk stops
-        when a level reaches nothing new. Both return the identical set, so
-        only the clock can tell them apart.
+        The property is that the number of levels walked is the graph's, not
+        the caller's, and that is exactly the number of queries issued. On a
+        500-node / 5000-edge graph, complete at depth 5, asking for 1000
+        levels must cost the same queries as asking for 5.
         """
         import random
-        import time
+
+        import psycopg
 
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
@@ -1055,19 +1106,36 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
             for k in range(5_000)
         }
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        original = psycopg.Connection.execute
+        counted = []
+
+        def _counting(self, query, *args, **kwargs):
+            counted.append(query)
+            return original(self, query, *args, **kwargs)
+
         try:
             _load(backend, nodes, edges)
-            shallow = backend.traverse("n0", 5)
-            start = time.perf_counter()
-            deep = backend.traverse("n0", 1_000)
-            elapsed = time.perf_counter() - start
-            assert elapsed < 3.0, (
-                f"depth 1000 took {elapsed:.1f}s on a graph that answers "
-                f"completely at depth 5; the walk is running the caller's "
-                f"number of levels rather than the graph's"
+
+            psycopg.Connection.execute = _counting
+            try:
+                counted.clear()
+                shallow = backend.traverse("n0", 5)
+                shallow_queries = len(counted)
+                counted.clear()
+                deep = backend.traverse("n0", 1_000)
+                deep_queries = len(counted)
+            finally:
+                psycopg.Connection.execute = original
+
+            assert deep_queries == shallow_queries, (
+                f"depth 1000 issued {deep_queries} statements where depth 5 "
+                f"issued {shallow_queries}, on a graph that answers completely "
+                f"at depth 5; the walk is running the caller's number of "
+                f"levels rather than the graph's"
             )
             # and the answer is the same one the shallow traversal gave
             assert set(deep["node_ids"]) == set(shallow["node_ids"])
             assert set(deep["edge_ids"]) == set(shallow["edge_ids"])
         finally:
+            psycopg.Connection.execute = original
             backend.close()
