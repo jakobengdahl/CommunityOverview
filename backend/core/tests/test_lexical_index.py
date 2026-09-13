@@ -831,3 +831,100 @@ class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
         finally:
             os.chdir(cwd)
             reset_loader()
+
+
+class TestTwoWritesInFlightCannotHideEachOther:
+    """Adds write the index before `nodes` and removals write it after, which
+    keeps the index a superset at every instant.
+
+    A single half-done write needs no such care: `nodes` first would leave the
+    index shorter, and the size test sends the query to the walk. The ordering
+    is for two writes at once, where the sizes cancel. An add and a delete that
+    have both reached `nodes` and neither reached the index leave the two the
+    same size with different ids - the one state the size test cannot tell from
+    agreement - and the candidate path then answers for a graph that is missing
+    the added node.
+    """
+
+    @staticmethod
+    def _mixed_writes_half_done(index_first):
+        nodes = {f"n{i}": _node(f"n{i}", f"n{i} filler{i:03d}") for i in range(200)}
+        index = _index(list(nodes.values()))
+        newcomer = _node("brandnew", "brandnew uniqueneedle")
+        if index_first:
+            index[newcomer.id] = build_match_fields(newcomer, TYPE_TEXT)
+        nodes["brandnew"] = newcomer
+        del nodes["n5"]  # the delete has reached `nodes`, not yet the index
+        _let_the_index_rebuild(index)
+        return nodes, index
+
+    def test_the_shipped_ordering_still_finds_the_added_node(self):
+        nodes, index = self._mixed_writes_half_done(index_first=True)
+        assert len(index) >= len(nodes), "the index must stay a superset"
+
+        found = search_nodes(nodes, index, TYPE_TEXT, query="uniqueneedle", limit=5)
+
+        assert [n.id for n in found] == ["brandnew"]
+
+    def test_the_reversed_ordering_is_what_loses_it(self):
+        """Pins why the ordering is there, not just that it works. Without this
+        the ordering can be reversed and no test in the repo objects."""
+        nodes, index = self._mixed_writes_half_done(index_first=False)
+        assert len(index) == len(nodes), (
+            "this test is meaningless unless the sizes cancel out - that is "
+            "the state the size test cannot detect"
+        )
+
+        found = search_nodes(nodes, index, TYPE_TEXT, query="uniqueneedle", limit=5)
+
+        assert found == [], (
+            "if this finds the node, the size test caught the interleaving "
+            "after all and the ordering above is load-bearing for some other "
+            "reason than the one it claims"
+        )
+
+    def test_the_add_path_writes_the_index_before_nodes(self, tmp_path):
+        """The property above says why the ordering matters; this says where.
+        Constructing the interleaved state by hand cannot catch a call site
+        that has been reordered, so watch the real writes as they happen.
+
+        Only a NEW id is checked. For one already in both dicts the ordering
+        cannot matter, and asserting on it would fail `update_node` for no
+        reason."""
+        import os
+
+        from backend.config.config_loader import reset_loader
+        from backend.core.storage import GraphStorage
+        from backend.core.storage_search import LexicalIndex
+
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            storage = GraphStorage()
+            seen = []
+            real = LexicalIndex.__setitem__
+
+            def watching(self, node_id, fields):
+                if self is storage._searchable_text_cache and node_id not in self:
+                    seen.append((node_id, node_id in storage.nodes))
+                return real(self, node_id, fields)
+
+            LexicalIndex.__setitem__ = watching
+            try:
+                storage.add_nodes(
+                    [_node("one", "one node"), _node("two", "two node")], []
+                )
+            finally:
+                LexicalIndex.__setitem__ = real
+        finally:
+            os.chdir(cwd)
+            reset_loader()
+
+        assert [node_id for node_id, _ in seen] == ["one", "two"], (
+            f"expected an index write per new node, saw {seen}"
+        )
+        late = [node_id for node_id, in_nodes in seen if in_nodes]
+        assert not late, (
+            f"{late} reached `nodes` before the index; a reader landing there, "
+            f"with a delete also in flight, gets a graph that is missing them"
+        )

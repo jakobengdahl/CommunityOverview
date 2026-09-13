@@ -1627,11 +1627,21 @@ class GraphStorage:
         touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
         self._inline_fallback.pop(node.id, None)
 
-        # Index BEFORE `nodes`, here and everywhere that adds: the search's
-        # candidate path can only offer ids the index holds records for, and it
-        # takes no lock, so a reader landing between these two statements would
-        # silently drop a node if `nodes` were the one to get it first.
-        # Removals are the mirror image - `nodes` first, index after.
+        # Index BEFORE `nodes`, here and everywhere that adds; removals are the
+        # mirror image, `nodes` first and the index after. Together those keep
+        # the index a superset of `nodes` at every instant, which is what lets
+        # the search's candidate path - which can only offer ids it holds
+        # records for, and takes no lock - be trusted.
+        #
+        # One half-done write on its own would be caught anyway: `nodes` first
+        # would leave the index SHORTER, and the size test in `search_nodes`
+        # sends the query to the walk. What the ordering is really for is two
+        # writes in flight at once, where the sizes cancel out. An add and a
+        # delete, both having reached `nodes` and neither having reached the
+        # index, leave the two the same size with different ids - the one state
+        # no cheap check can tell from agreement. Measured: the candidate path
+        # then returns [] for the added node. Index-first makes the same
+        # interleaving leave a superset, and the node is found.
         self._searchable_text_cache[node.id] = self._build_match_fields(node)
         self.nodes[node.id] = node
         # add_node on an existing id replaces the attributes, which is what

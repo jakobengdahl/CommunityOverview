@@ -169,8 +169,15 @@ class LexicalIndex:
         self._built: Optional[Tuple[List[str], str, Any]] = None
         # Guards `_fields` and `_built` together. A write and its invalidation
         # must be one step relative to a rebuild, or the rebuild publishes a
-        # corpus that is missing the write and marks it current. Readers never
-        # take it: they read `_built` once, and a published tuple is complete.
+        # corpus that is missing the write and marks it current.
+        #
+        # A query that finds a corpus takes no lock - it reads `_built` once,
+        # and a published tuple is complete. A query that finds none takes it,
+        # to build one, and holds it for the whole build: measured 134 ms at
+        # 100k nodes, which stalls a concurrent writer for as long. That is new
+        # - this cache was a plain dict on the old path and a search could
+        # never block a write - and it is the cost `_REBUILD_WORTH_IT_AFTER`
+        # exists to keep rare rather than to remove.
         self._lock = threading.Lock()
         # How many queries the current corpus has answered, and how many the
         # one before it managed before a write dropped it. The second is the
@@ -180,6 +187,12 @@ class LexicalIndex:
         self._declines = 0
 
     # -- the dict surface this replaces ------------------------------------
+    # Only what something actually calls. `get`, `values` and `items` were here
+    # too, to make this a complete stand-in for the dict it replaced, and
+    # nothing ever called any of them: the scan reads through `records`, the
+    # rebuild reads `self._fields` directly, and GraphStorage uses item
+    # assignment, `pop`, `clear` and `update`. A method no caller can falsify
+    # is a method that can quietly start returning the wrong thing.
     def __iter__(self):
         return iter(self._fields)
 
@@ -196,9 +209,6 @@ class LexicalIndex:
         with self._lock:
             self._fields[node_id] = fields
             self._drop_the_corpus()
-
-    def get(self, node_id: str, default=None):
-        return self._fields.get(node_id, default)
 
     def pop(self, node_id: str, default=None):
         with self._lock:
@@ -219,12 +229,6 @@ class LexicalIndex:
     def records(self):
         """Read-only view of the records, for hot read paths. See __init__."""
         return self._records
-
-    def values(self):
-        return self._fields.values()
-
-    def items(self):
-        return self._fields.items()
 
     # -- the corpus --------------------------------------------------------
     def _drop_the_corpus(self) -> None:
