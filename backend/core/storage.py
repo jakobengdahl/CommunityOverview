@@ -1629,9 +1629,12 @@ class GraphStorage:
 
         # Index BEFORE `nodes`, here and everywhere that adds; removals are the
         # mirror image, `nodes` first and the index after. Together those keep
-        # the index a superset of `nodes` at every instant, which is what lets
-        # the search's candidate path - which can only offer ids it holds
-        # records for, and takes no lock - be trusted.
+        # the index a superset of `nodes` through every incremental write,
+        # which is what lets the search's candidate path - which can only offer
+        # ids it holds records for, and takes no lock - be trusted. `load`
+        # replaces everything at once and is the one path that steps outside
+        # it, deliberately and visibly: it empties the index first, so the size
+        # test declines for the whole swap. See the comment there.
         #
         # One half-done write on its own would be caught anyway: `nodes` first
         # would leave the index SHORTER, and the size test in `search_nodes`
@@ -1649,9 +1652,11 @@ class GraphStorage:
         #
         # The removal half is still written this way, because what it keeps is
         # the invariant rather than any single query: index a superset of
-        # `nodes`, always, which is what the size test is a backstop FOR. An
-        # invariant that holds except in one case somebody has argued is
-        # harmless is one nobody can reason about later.
+        # `nodes` for every incremental write, which is what the size test is a
+        # backstop FOR. An invariant that holds except where somebody has
+        # argued the exception away is one nobody can reason about later -
+        # which is why `load`'s exception is not argued away but arranged to
+        # fail the size test outright.
         self._searchable_text_cache[node.id] = self._build_match_fields(node)
         self.nodes[node.id] = node
         # add_node on an existing id replaces the attributes, which is what

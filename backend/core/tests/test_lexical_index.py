@@ -835,7 +835,9 @@ class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
 
 class TestTwoWritesInFlightCannotHideEachOther:
     """Adds write the index before `nodes` and removals write it after, which
-    keeps the index a superset at every instant.
+    keeps the index a superset of `nodes` through every incremental write.
+    (`load` replaces everything at once and steps outside this deliberately -
+    it empties the index first so the size test declines for the whole swap.)
 
     A single half-done write needs no such care: `nodes` first would leave the
     index shorter, and the size test sends the query to the walk. The ordering
@@ -1034,6 +1036,52 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         assert not late, (
             f"{late} reached `nodes` before the index; with a delete also in "
             f"flight the sizes cancel and the candidate path loses them"
+        )
+
+    def test_the_external_delete_path_removes_from_the_index_at_all(self, tmp_path):
+        """The fourth site, and the only one with neither its ordering nor its
+        content watched. Deleting its `pop` outright passed the whole suite:
+        the search still answers correctly, because the scan drops a candidate
+        that has left `nodes` - so the cost is not a wrong result but a record
+        and its corpus text living for ever on any instance that receives
+        deletes over the seam, behind a size count that stays inflated."""
+        import os
+
+        from backend.core.storage_backends import EntityOperation, ExternalChange
+        from backend.core.storage_search import LexicalIndex
+
+        storage, cwd, reset = self._storage(tmp_path)
+        try:
+            storage.add_nodes([_node("keep", "keep me"), _node("gone", "gone me")], [])
+
+            popped = []
+            real = LexicalIndex.pop
+
+            def watching(self, node_id, default=None):
+                if self is storage._searchable_text_cache:
+                    popped.append((node_id, node_id in storage.nodes))
+                return real(self, node_id, default)
+
+            LexicalIndex.pop = watching
+            try:
+                storage.apply_external_change(
+                    ExternalChange.entities([EntityOperation.delete_node("gone")])
+                )
+            finally:
+                LexicalIndex.pop = real
+        finally:
+            os.chdir(cwd)
+            reset()
+
+        assert [node_id for node_id, _ in popped] == ["gone"], (
+            f"the external delete never reached the index; the record and its "
+            f"corpus text stay for ever. Saw: {popped}"
+        )
+        assert "gone" not in storage._searchable_text_cache
+        early = [node_id for node_id, in_nodes in popped if in_nodes]
+        assert not early, (
+            f"{early} left the index while still in `nodes`, so the index is "
+            f"no longer a superset - the state the size test assumes away"
         )
 
     def test_a_removal_writes_the_index_after_nodes(self, tmp_path):
