@@ -928,3 +928,96 @@ class TestTwoWritesInFlightCannotHideEachOther:
             f"{late} reached `nodes` before the index; a reader landing there, "
             f"with a delete also in flight, gets a graph that is missing them"
         )
+
+
+class TestADeleteLandingMidScanDoesNotLoseTheNode:
+    """Removals write `nodes` first and the index second, so a delete can land
+    after `candidates()` has returned and before the scan reads the record -
+    leaving the id in the candidate list with its record already popped. The
+    scan builds the record rather than dropping the node.
+
+    This is the one interleaving that reaches the on-demand build from the
+    candidate path, and a comment here once claimed it could not happen.
+    """
+
+    def test_the_node_is_still_returned(self, monkeypatch):
+        nodes = {f"n{i}": _node(f"n{i}", f"n{i} unique{i:03d}") for i in range(200)}
+        index = _index(list(nodes.values()))
+        _let_the_index_rebuild(index)
+
+        real = LexicalIndex.candidates
+        landed = []
+
+        def _delete_lands_after_the_candidate_list(self, term):
+            offered = real(self, term)
+            if offered and not landed:
+                landed.append(True)
+                self.pop("n7")  # the delete's index write
+            return offered
+
+        monkeypatch.setattr(
+            LexicalIndex, "candidates", _delete_lands_after_the_candidate_list
+        )
+        found = search_nodes(nodes, index, TYPE_TEXT, query="unique007", limit=5)
+
+        assert landed, "the delete never landed - the test proves nothing"
+        assert "n7" not in index, "the record should be gone by scan time"
+        assert [n.id for n in found] == ["n7"]
+
+
+class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
+    """The ordering rule is "index first on an add, index last on a removal",
+    at every site. Only `add_nodes` was watched; reversing any of the other
+    three passed the whole suite.
+    """
+
+    @staticmethod
+    def _storage(tmp_path):
+        import os
+
+        from backend.config.config_loader import reset_loader
+        from backend.core.storage import GraphStorage
+
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            return GraphStorage(), cwd, reset_loader
+        except Exception:
+            os.chdir(cwd)
+            raise
+
+    def test_a_removal_writes_the_index_after_nodes(self, tmp_path):
+        """The mirror of the add rule. An index-first removal, with an add also
+        in flight, leaves the two the same size with the removed id missing
+        from the index - the same loss the add ordering prevents."""
+        import os
+
+        from backend.core.storage_search import LexicalIndex
+
+        storage, cwd, reset_loader = self._storage(tmp_path)
+        try:
+            storage.add_nodes([_node("keep", "keep me"), _node("drop", "drop me")], [])
+
+            still_in_nodes = []
+            real = LexicalIndex.pop
+
+            def watching(self, node_id, default=None):
+                if self is storage._searchable_text_cache:
+                    still_in_nodes.append((node_id, node_id in storage.nodes))
+                return real(self, node_id, default)
+
+            LexicalIndex.pop = watching
+            try:
+                storage.delete_nodes(["drop"], confirmed=True)
+            finally:
+                LexicalIndex.pop = real
+        finally:
+            os.chdir(cwd)
+            reset_loader()
+
+        assert still_in_nodes, "no index removal seen"
+        early = [i for i, in_nodes in still_in_nodes if in_nodes]
+        assert not early, (
+            f"{early} left the index while still in `nodes`; with an add also "
+            f"in flight the sizes cancel and the id is lost from the index"
+        )

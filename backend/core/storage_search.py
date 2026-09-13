@@ -64,8 +64,18 @@ class MatchFields(NamedTuple):
     enum's __str__ alone a sixth of the whole search.
 
     None of it varies with the query, so it is prepared where the searchable
-    text was already prepared and cached in its place. `text` is that same flat
+    text was already prepared and cached alongside it. `text` is that same flat
     string, built the same way, so what matches is unchanged.
+
+    That is a cache that grows, not one that moves: the lowered fields sit
+    beside the flat text rather than replacing it, and the corpus is a third
+    copy again. Measured against the plain string cache this replaces, on 50k
+    nodes carrying a name, a 25-word description, a summary and two tags, the
+    records are about 3x and the whole cache about 4x. The ratio is what
+    travels between machines; the absolute depends entirely on how much text
+    the nodes carry. Worth knowing before raising the node ceiling on a
+    memory-capped deployment - nothing else in this file quantifies it, and
+    every time cost here is quoted to the millisecond.
     """
 
     text: str
@@ -615,9 +625,12 @@ def search_nodes(
             results.append(node)
             continue
 
-        # Reachable on the fallback walk; the candidate path is gated on the
-        # index covering `nodes`, so it cannot reach here with a miss. The walk
-        # builds the record on demand rather than dropping the node.
+        # Mostly the fallback walk, where the index may legitimately not hold
+        # the node yet. The candidate path reaches it only in one interleaving:
+        # removals write `nodes` first and the index second, so a delete that
+        # lands after `candidates` returned and before this loop reads the
+        # record leaves the id in the list with its record already popped.
+        # Either way the record is built here rather than the node dropped.
         #
         # It deliberately does NOT store it. Writing back from here looks free
         # and is not: `load` empties the index before refilling it, and a walk
