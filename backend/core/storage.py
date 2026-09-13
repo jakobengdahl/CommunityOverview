@@ -210,6 +210,13 @@ class GraphStorage:
         # load() and save() wait on the queue while holding it, so a writer
         # that did would deadlock the process.
         self._resync_pending = False
+        # The most recent persist. Writes go to a background executor, so
+        # `self.nodes` is ahead of the store between a mutation and its
+        # write landing. A traversal answered BY the store in that window
+        # would not see the caller's own write - the two engines would be
+        # answering different questions rather than disagreeing. This is
+        # what get_related_nodes checks before it uses the store.
+        self._last_write: Optional["Future[None]"] = None
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
@@ -1133,9 +1140,11 @@ class GraphStorage:
         if len(operations) > 1 and not caps.transactions:
             return self.save()
         vectors, vector_revision = self._take_vector_snapshot()
-        return self._io_executor.submit(
+        # Kept so a read can ask whether the store has caught up with us.
+        self._last_write = self._io_executor.submit(
             self._do_apply, tuple(operations), vectors, vector_revision
         )
+        return self._last_write
 
     def _do_apply(
         self,
@@ -1891,7 +1900,51 @@ class GraphStorage:
         depth: int = 1,
         include_archived: bool = False,
     ) -> Dict[str, Any]:
-        """Get nodes connected to the given node.  Delegates to storage_search."""
+        """Get nodes connected to the given node.
+
+        Two engines answer this, and which one does is not visible in the
+        result: `test_traversal_equivalence.py` holds the store's traversal to
+        the in-memory walk's answer, set for set, and neither may change
+        without the other (`dec-oc-traversal-recursive-cte`).
+
+        The store answers only when it is CURRENT. Writes go to a background
+        executor, so between a mutation and its write landing `self.nodes` is
+        ahead of the store; a traversal answered there would not see the
+        caller's own write. That is not the two engines disagreeing, it is them
+        being asked about different moments, and no equivalence test can cover
+        it. So a pending write sends the query to the walk, which reads the
+        live dictionaries - correct, and no slower than it was before any of
+        this existed.
+        """
+        if self._store_traversal_is_current():
+            try:
+                found = self._persistence_backend.traverse(  # type: ignore[union-attr]
+                    node_id,
+                    depth,
+                    relationship_types=[
+                        getattr(t, "value", t) for t in (relationship_types or [])
+                    ]
+                    or None,
+                    include_archived=include_archived,
+                )
+            except Exception as exc:
+                # A store that cannot answer is not a failed request. The walk
+                # is still here and still right; the store is the optimisation.
+                print(f"Warning: store traversal failed, walking instead: {exc}")
+            else:
+                return {
+                    "nodes": [
+                        self.nodes[nid]
+                        for nid in found["node_ids"]
+                        if nid in self.nodes
+                    ],
+                    "edges": [
+                        self.edges[eid]
+                        for eid in found["edge_ids"]
+                        if eid in self.edges
+                    ],
+                }
+
         return storage_search.get_related_nodes(
             self.nodes,
             self.edges,
@@ -1901,6 +1954,17 @@ class GraphStorage:
             depth,
             include_archived=include_archived,
         )
+
+    def _store_traversal_is_current(self) -> bool:
+        """Whether the store can be trusted to answer a traversal right now."""
+        if not self._backend_capabilities.store_traversal:
+            return False
+        if self._resync_pending:
+            # The last write failed and the whole graph is owed to the store;
+            # what is there now is not what we hold.
+            return False
+        write = self._last_write
+        return write is None or write.done()
 
     def find_similar_nodes(
         self,

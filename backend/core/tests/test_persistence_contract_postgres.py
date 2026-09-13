@@ -1171,15 +1171,20 @@ class TestPostgresDeclaresWhatItImplements:
     assertion outside the contract can see it.
     """
 
-    def test_the_declaration_names_all_three_capabilities(self, schema, backends):
-        """Equality, not three flag reads: a capability added to the dataclass
-        and left undeclared here would pass every `is True` in the file."""
+    def test_the_declaration_names_every_capability(self, schema, backends):
+        """Equality, not a flag read each: a capability added to the dataclass
+        and left undeclared here would pass every `is True` in the file.
+
+        It did its job once already - `store_traversal` was added and this
+        assertion is what asked for it to be declared on purpose rather than
+        picked up by accident."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         assert backend.capabilities() == BackendCapabilities(
             incremental_writes=True,
             transactions=True,
             change_notification=True,
+            store_traversal=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):

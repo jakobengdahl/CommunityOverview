@@ -353,7 +353,111 @@ class PostgresGraphPersistenceBackend:
             incremental_writes=True,
             transactions=True,
             change_notification=True,
+            store_traversal=True,
         )
+
+    # -- traversal contract --------------------------------------------------
+
+    _TRAVERSE = """
+    WITH RECURSIVE reach(id, d) AS (
+        SELECT %(anchor)s::text, 0
+      UNION
+        SELECT far.id, r.d + 1
+        FROM reach r
+        JOIN {edges} e
+          ON (e.doc->>'source' = r.id OR e.doc->>'target' = r.id)
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN e.doc->>'source' = r.id
+                      THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
+        ) far
+        LEFT JOIN {nodes} fn ON fn.id = far.id
+        WHERE r.d < %(depth)s
+          AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
+          AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
+          AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
+               OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
+    ),
+    expanded AS (SELECT DISTINCT id FROM reach WHERE d < %(depth)s),
+    hit_edges AS (
+        SELECT DISTINCT e.id
+        FROM expanded x
+        JOIN {edges} e
+          ON (e.doc->>'source' = x.id OR e.doc->>'target' = x.id)
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN e.doc->>'source' = x.id
+                      THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
+        ) far
+        LEFT JOIN {nodes} fn ON fn.id = far.id
+        WHERE (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
+          AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
+          AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
+               OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
+    )
+    SELECT
+      (SELECT array_agg(n.id) FROM (SELECT DISTINCT id FROM reach) r
+         JOIN {nodes} n ON n.id = r.id) AS node_ids,
+      (SELECT array_agg(id) FROM hit_edges) AS edge_ids
+    """
+
+    def traverse(
+        self,
+        anchor_id: str,
+        depth: int,
+        relationship_types: Optional[Sequence[str]] = None,
+        include_archived: bool = False,
+    ) -> Dict[str, List[str]]:
+        """Bounded-depth traversal in the store. See `TraversingBackend`.
+
+        Two passes over the same recursion rather than one. The node set is
+        everything reached; the edge set is everything incident to a node that
+        was EXPANDED, which is a strictly smaller set - a node exactly `depth`
+        away is reached but never expanded, so an edge between two such nodes
+        belongs to neither endpoint's expansion and is not returned. Collapsing
+        the two into one pass returns those edges and quietly disagrees with
+        the in-memory walk.
+
+        `reach` is keyed on (id, d), so a node found by two paths of different
+        length appears twice. That is bounded by `depth` and it is not a
+        correctness problem: the second appearance is at a greater distance and
+        either expands to the same neighbours or is past the limit and does not
+        expand at all.
+        """
+        self._ensure_schema()
+        if depth <= 0:
+            depth = 0
+        query = sql.SQL(self._TRAVERSE).format(
+            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
+        )
+        # `.value`, never `str()`. RelationshipType is a str-Enum, and str()
+        # of one is "RelationshipType.RELATES_TO" while the stored document
+        # holds "RELATES_TO" - so a filter built with str() silently matches
+        # nothing and the traversal returns the anchor alone. The protocol asks
+        # for strings; this coerces an enum that arrives anyway, correctly.
+        types = [getattr(t, "value", t) for t in (relationship_types or [])]
+        params = {
+            "anchor": anchor_id,
+            "depth": depth,
+            "archived_ok": bool(include_archived),
+            "any_type": not types,
+            "types": types,
+        }
+        with self._pool.connection() as conn:
+            # The anchor has to exist, and an anchor that does not is not an
+            # empty traversal but no traversal: the in-memory walk returns
+            # nothing at all rather than a lone anchor.
+            present = conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
+                    self._table("graph_nodes")
+                ),
+                (anchor_id,),
+            ).fetchone()
+            if not present:
+                return {"node_ids": [], "edge_ids": []}
+            row = conn.execute(query, params).fetchone()
+        return {
+            "node_ids": list(row[0] or []),
+            "edge_ids": list(row[1] or []),
+        }
 
     def exists(self) -> bool:
         self._ensure_schema()
