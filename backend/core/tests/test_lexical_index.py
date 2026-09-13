@@ -993,7 +993,6 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         that loses a node a reader is owed."""
         import os
 
-        from backend.config.config_loader import reset_loader
         from backend.core.storage_backends import EntityOperation, ExternalChange
         from backend.core.storage_search import LexicalIndex
 
