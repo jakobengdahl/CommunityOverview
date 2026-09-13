@@ -5,3 +5,6 @@
 ## 2024-09-02 - Custom Dialog Accessibility
 **Learning:** Standard ARIA attributes (`role="dialog"`, `aria-modal="true"`, and `aria-labelledby` linked to an `id` on the title element) are required for custom dialog components in React to ensure they are properly identified and read by screen readers. Some legacy components like `ConfirmDialog`, `InputDialog`, and `SettingsDialog` were missing these properties.
 **Action:** When creating or updating custom dialog components in the frontend, strictly include these standard ARIA attributes.
+## 2024-05-18 - Missing Dialog ARIA Attributes in Custom Modals
+**Learning:** React custom overlay components implementing dialogs (like `CreateNodeDialog` and `EditNodeDialog`) lack the standard `role="dialog"`, `aria-modal="true"`, and `aria-labelledby` attributes by default, rendering them invisible or confusing to screen reader navigation. A native hover tooltip `title="Close"` is also often missing on icon-only close buttons.
+**Action:** When auditing or constructing custom modal components, strictly enforce the inclusion of `role="dialog"`, `aria-modal="true"`, and a structurally linked `aria-labelledby` pointing to the modal's primary `id`. Additionally, ensure icon-only buttons supply an accessible label (e.g., `title="Close"`) alongside any semantic ARIA descriptions to support visual hover intent.
