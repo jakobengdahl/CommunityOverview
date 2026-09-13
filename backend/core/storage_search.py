@@ -86,6 +86,11 @@ _CORPUS_SEPARATOR = "\x00"
 # takes the index. See the selectivity gate in LexicalIndex.candidates.
 _MIN_SELECTIVE_HITS = 64
 
+# Snapshot attempts before a rebuild gives up and lets the walk answer.
+# A retry costs one pass over the records; spinning here would block a
+# query, and declining is always correct.
+_REBUILD_SNAPSHOT_TRIES = 3
+
 
 class LexicalIndex:
     """The per-node match records, plus one joined copy of their text.
@@ -108,21 +113,35 @@ class LexicalIndex:
     pays for one rebuild rather than one per write.
     """
 
-    __slots__ = ("_fields", "_records", "_corpus", "_ids", "_starts", "_dirty")
+    __slots__ = (
+        "_fields",
+        "_records",
+        "_corpus",
+        "_ids",
+        "_starts",
+        "_dirty",
+        "_version",
+    )
 
     def __init__(self) -> None:
         self._fields: Dict[str, MatchFields] = {}
         # A read-only view for the scan to look records up through. It cannot
         # be written through, so the index still sees every change that would
-        # invalidate its corpus - that is why it exists. The speed is a minor
-        # second reason: this class's own `get` is a Python-level call where
-        # the proxy delegates at C speed, measured at 6 ms over 100k lookups
-        # against the 308 ms the prepared fields save, so about 2% of it.
+        # invalidate its corpus - that is why it exists. Going via this class's
+        # own `get` would also put a Python-level call where the proxy
+        # delegates at C speed, but that difference is small and swings by
+        # several times with node shape and machine, so no figure is quoted:
+        # earlier revisions of this comment carried two, both wrong. It is a
+        # rounding error next to what the prepared fields save either way.
         self._records = MappingProxyType(self._fields)
         self._corpus: Optional[str] = None
         self._ids: List[str] = []
         self._starts = None
         self._dirty = True
+        # Counts writes, so a rebuild can tell whether one landed while it
+        # was running. `_dirty` alone cannot: the rebuild clears it, which
+        # would discard a concurrent writer's flag. See _rebuild.
+        self._version = 0
 
     # -- the dict surface this replaces ------------------------------------
     def __iter__(self):
@@ -140,21 +159,25 @@ class LexicalIndex:
     def __setitem__(self, node_id: str, fields: MatchFields) -> None:
         self._fields[node_id] = fields
         self._dirty = True
+        self._version += 1
 
     def get(self, node_id: str, default=None):
         return self._fields.get(node_id, default)
 
     def pop(self, node_id: str, default=None):
         self._dirty = True
+        self._version += 1
         return self._fields.pop(node_id, default)
 
     def clear(self) -> None:
         self._fields.clear()
         self._dirty = True
+        self._version += 1
 
     def update(self, other) -> None:
         self._fields.update(other)
         self._dirty = True
+        self._version += 1
 
     @property
     def records(self):
@@ -169,14 +192,37 @@ class LexicalIndex:
 
     # -- the corpus --------------------------------------------------------
     def _rebuild(self) -> None:
-        self._ids = list(self._fields)
-        self._corpus = _CORPUS_SEPARATOR.join(
-            self._fields[node_id].text for node_id in self._ids
-        )
+        # Read the write counter BEFORE snapshotting, and end by asking whether
+        # it moved. Clearing `_dirty` unconditionally loses a write that lands
+        # mid-rebuild: the writer sets the flag, the rebuild then clears it, and
+        # the corpus is marked clean without that node in it - invisible to the
+        # candidate path until some unrelated write happens to dirty the index
+        # again. `GraphStorage.search_nodes` holds no lock while all fifteen
+        # writers do, and the rebuild takes ~100 ms at 100k nodes, so that
+        # overlap is ordinary rather than a narrow race. Reading the counter
+        # first makes the failure mode a wasted rebuild, never a lost one.
+        for _ in range(_REBUILD_SNAPSHOT_TRIES):
+            version = self._version
+            try:
+                records = list(self._fields.items())
+            except RuntimeError:
+                # Resized mid-iteration by a concurrent writer. Retry: the next
+                # attempt reads a fresh counter and a settled dict.
+                continue
+            break
+        else:
+            # Writes are landing faster than a snapshot completes. Decline
+            # rather than guess - the walk is the same answer - and stay dirty
+            # so the next query tries again.
+            self._corpus, self._ids, self._starts = None, [], None
+            self._dirty = True
+            return
+        self._ids = [node_id for node_id, _ in records]
+        self._corpus = _CORPUS_SEPARATOR.join(fields.text for _, fields in records)
         starts, position = [], 0
-        for node_id in self._ids:
+        for _, fields in records:
             starts.append(position)
-            position += len(self._fields[node_id].text) + 1
+            position += len(fields.text) + 1
         try:
             import numpy as np
 
@@ -189,7 +235,7 @@ class LexicalIndex:
             # net is worse than none. Declining degrades to the plain walk,
             # which is the same answer and is well covered.
             self._starts = None
-        self._dirty = False
+        self._dirty = self._version != version
 
     def candidates(self, term: str) -> Optional[List[str]]:
         """Node ids whose text contains *term*, or None to say "scan instead".
@@ -288,9 +334,9 @@ def build_match_fields(node: Node, type_searchable_text: Dict[str, str]) -> Matc
 def score_type(type_name: str, type_text: str, query_lower: str) -> int:
     """The type tier's contribution, which depends only on the TYPE and the
     query - never on the node. Node types are schema-defined, not fixed by the
-    legacy enum: the shipped profiles carry between 10 and 18 of them, so a
-    scan over 100k nodes was recomputing at most that many distinct answers
-    100k times; :func:`search_nodes` memoises it per query instead."""
+    legacy enum: the shipped profiles carry 3 to 18 of them, so a scan over
+    100k nodes was recomputing at most that many distinct answers 100k times;
+    :func:`search_nodes` memoises it per query instead."""
     if type_name == query_lower:
         return 700
     if type_name.startswith(query_lower):

@@ -165,9 +165,10 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
         assert index.candidates("surviving") == ["b"]
 
     def test_the_read_only_view_cannot_be_written_through(self):
-        """The scan looks records up through this view because a Python-level
-        `get` in that loop cost 75 ms over 100k nodes. It must stay a view: a
-        write that landed here would not mark the corpus stale."""
+        """The scan looks records up through this view. What it must stay is a
+        view: a write that landed here would not mark the corpus stale, and
+        that is the reason - the speed difference is small and fixture-
+        dependent, which an earlier version of this docstring overstated."""
         index = _index([_node("a", "alpha")])
         with pytest.raises(TypeError):
             index.records["b"] = None
@@ -401,3 +402,120 @@ class TestTheIndexIsActuallyConsulted:
         assert 0 < len(looked_up) < 10, (
             f"the search looked up {len(looked_up)} nodes to return one"
         )
+
+
+class TestAWriteThatLandsWhileTheCorpusIsBeingRebuilt:
+    """`search_nodes` holds no lock; all fifteen writers in GraphStorage do.
+    So a write genuinely overlaps a rebuild, and the rebuild takes ~100 ms at
+    100k nodes. Clearing `_dirty` unconditionally at the end of a rebuild
+    discarded that writer's flag: the corpus was marked clean without the new
+    node in it, and the node stayed invisible to the candidate path until some
+    unrelated write happened to dirty the index again.
+
+    These drive the overlap deterministically - no threads, no timing - by
+    letting a write land inside the corpus join, which is the widest part of
+    the rebuild window.
+    """
+
+    @staticmethod
+    def _during_rebuild(monkeypatch, index, land):
+        """Run `land()` once, from inside the rebuild's corpus join."""
+        from backend.core import storage_search
+
+        separator = storage_search._CORPUS_SEPARATOR
+        real_join = separator.join
+        fired = []
+
+        class _LandsMidJoin(str):
+            def join(self, parts):
+                joined = real_join(parts)
+                if not fired:
+                    fired.append(True)
+                    land()
+                return joined
+
+        monkeypatch.setattr(
+            storage_search, "_CORPUS_SEPARATOR", _LandsMidJoin(separator)
+        )
+        index._rebuild()
+        assert fired, "the write never landed - the test proves nothing"
+
+    def test_a_node_written_mid_rebuild_is_still_found_afterwards(self, monkeypatch):
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
+        index._dirty = True
+
+        def land():
+            index["late"] = build_match_fields(
+                _node("late", "arrivedlate needle"), TYPE_TEXT
+            )
+
+        self._during_rebuild(monkeypatch, index, land)
+
+        # The corpus that was just built cannot contain `late`; the point is
+        # that the index knows it, so the next question rebuilds.
+        assert index._dirty, "the rebuild cleared the flag the writer had set"
+        assert index.candidates("arrivedlate") == ["late"]
+
+    def test_the_lost_node_stays_lost_which_is_why_the_flag_matters(self, monkeypatch):
+        """Pin the consequence, not just the flag. Without the version check
+        the node is invisible on every later query, not merely the next one -
+        nothing re-dirties the index on its own."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
+        index._dirty = True
+
+        def land():
+            index["late"] = build_match_fields(
+                _node("late", "arrivedlate needle"), TYPE_TEXT
+            )
+
+        self._during_rebuild(monkeypatch, index, land)
+
+        for _ in range(3):
+            assert index.candidates("arrivedlate") == ["late"]
+
+    def test_a_record_removed_mid_rebuild_does_not_break_the_rebuild(self, monkeypatch):
+        """The old rebuild snapshotted the ids and then looked each one up
+        again, so a `pop` in between raised KeyError out of an ordinary
+        search. Building from a snapshot of the items cannot."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
+        index._dirty = True
+
+        self._during_rebuild(monkeypatch, index, lambda: index.pop("n3"))
+
+        assert index._dirty
+        assert "n3" not in index.candidates("shared")
+        assert len(index.candidates("shared")) == 9
+
+    def test_a_rebuild_with_no_write_in_it_still_settles(self, monkeypatch):
+        """The counter must not leave the index permanently dirty - that would
+        rebuild the corpus on every single query."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(10)])
+        index._dirty = True
+
+        assert len(index.candidates("shared")) == 10
+        assert not index._dirty
+
+        # and a second query must not rebuild again
+        before = index._corpus
+        index.candidates("shared")
+        assert index._corpus is before
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda i, n: i.__setitem__("x", n), id="setitem"),
+            pytest.param(lambda i, n: i.pop("n1"), id="pop"),
+            pytest.param(lambda i, n: i.clear(), id="clear"),
+            pytest.param(lambda i, n: i.update({"x": n}), id="update"),
+        ],
+    )
+    def test_every_mutator_moves_the_counter_a_rebuild_reads(self, mutate):
+        """Each of the four must bump it individually. A mutator that only set
+        `_dirty` would be invisible to a rebuild already in flight, which is
+        exactly the hole these tests exist to close."""
+        index = _index([_node(f"n{i}", f"node {i} shared") for i in range(3)])
+        index.candidates("shared")
+
+        before = index._version
+        mutate(index, build_match_fields(_node("x", "x shared"), TYPE_TEXT))
+        assert index._version != before
