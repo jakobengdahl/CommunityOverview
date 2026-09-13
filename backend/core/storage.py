@@ -210,12 +210,13 @@ class GraphStorage:
         # load() and save() wait on the queue while holding it, so a writer
         # that did would deadlock the process.
         self._resync_pending = False
-        # The most recent persist. Writes go to a background executor, so
-        # `self.nodes` is ahead of the store between a mutation and its
-        # write landing. A traversal answered BY the store in that window
-        # would not see the caller's own write - the two engines would be
-        # answering different questions rather than disagreeing. This is
-        # what get_related_nodes checks before it uses the store.
+        # The most recent write of any kind - incremental or whole-graph.
+        # Writes go to a background executor, so `self.nodes` is ahead of the
+        # store between a mutation and its write landing. A traversal answered
+        # BY the store in that window would not see the caller's own write -
+        # the two engines answering different questions rather than
+        # disagreeing. This is what get_related_nodes checks before it uses
+        # the store, and it has to cover every route a write can take.
         self._last_write: Optional["Future[None]"] = None
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
@@ -761,7 +762,12 @@ class GraphStorage:
             # Offload blocking I/O to background thread to avoid blocking event
             # loop. Returns the Future so callers that must wait (e.g. load())
             # can call .result().
-            return self._io_executor.submit(
+            # Recorded here as well as in _persist. A snapshot save is a write
+            # like any other as far as a reader is concerned, and _persist
+            # routes here for three documented cases - so watching only the
+            # incremental path left the guard open on exactly the writes that
+            # had already gone wrong once.
+            self._last_write = self._io_executor.submit(
                 self._do_save_to_disk,
                 data,
                 node_count,
@@ -769,6 +775,7 @@ class GraphStorage:
                 vectors,
                 vector_revision,
             )
+            return self._last_write
 
     def _snapshot_data(self) -> Dict[str, Any]:
         """The whole graph as a backend snapshot. Callers must hold _lock."""
@@ -1932,16 +1939,47 @@ class GraphStorage:
                 # is still here and still right; the store is the optimisation.
                 print(f"Warning: store traversal failed, walking instead: {exc}")
             else:
+                # Membership was decided by the store, at the store's moment;
+                # the payloads are resolved here, at ours. Between the two a
+                # node can be archived, and returning it then would be a state
+                # neither engine ever held - the store said include, the
+                # payload says archived. The walk cannot produce that, because
+                # it decides and resolves from the same dictionary in one pass.
+                # Re-applying the filter to what we actually return is what
+                # makes the answer self-consistent whenever it was decided.
+                # The anchor keeps its exemption, as it does in the walk.
+                def _still_visible(node: "Node") -> bool:
+                    if include_archived or node.id == node_id:
+                        return True
+                    return not getattr(node, "archived", False)
+
+                nodes = [
+                    self.nodes[nid]
+                    for nid in found["node_ids"]
+                    if nid in self.nodes and _still_visible(self.nodes[nid])
+                ]
+                visible = {n.id for n in nodes}
                 return {
-                    "nodes": [
-                        self.nodes[nid]
-                        for nid in found["node_ids"]
-                        if nid in self.nodes
-                    ],
+                    "nodes": nodes,
                     "edges": [
                         self.edges[eid]
                         for eid in found["edge_ids"]
                         if eid in self.edges
+                        and (
+                            include_archived
+                            or not getattr(self.edges[eid], "archived", False)
+                        )
+                        # An edge whose endpoint we just dropped goes with it.
+                        # A far endpoint that is not in `nodes` at all is a
+                        # dangling edge, which the walk does return.
+                        and (
+                            self.edges[eid].source in visible
+                            or self.edges[eid].source not in self.nodes
+                        )
+                        and (
+                            self.edges[eid].target in visible
+                            or self.edges[eid].target not in self.nodes
+                        )
                     ],
                 }
 

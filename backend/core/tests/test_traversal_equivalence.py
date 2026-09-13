@@ -354,3 +354,145 @@ class TestTheStoreOnlyAnswersWhenItIsCurrent:
         finally:
             storage.flush()
             backend.close()
+
+
+class TestTheGuardCoversEveryRouteAWriteCanTake:
+    """The first version watched only `_persist`'s incremental branch, and
+    `_persist` itself falls back to `save()` in three documented cases - so the
+    guard was open on exactly the writes that had already gone wrong once. A
+    backend declaring `store_traversal` without `incremental_writes`, which the
+    capability flags explicitly permit, never set the marker at all.
+    """
+
+    def test_a_snapshot_save_is_a_write_the_guard_can_see(self, schema):
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="a")], [])
+            storage.flush()
+            assert storage._store_traversal_is_current()
+
+            storage.save()  # the whole-graph route, not _persist's
+            assert not storage._store_traversal_is_current(), (
+                "a snapshot save is a write like any other; a traversal "
+                "answered by the store before it lands would be reading the "
+                "graph as it was"
+            )
+        finally:
+            storage.flush()
+            backend.close()
+
+
+class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
+    """Membership comes from the store's moment and the payloads from ours, so
+    a node archived in between would be returned while its own payload says
+    archived - a state neither engine ever held. The walk cannot produce it: it
+    decides and resolves from the same dictionary in one pass.
+    """
+
+    def test_a_node_archived_after_the_store_answered_is_not_returned(self, schema):
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="c", type=NodeType.ACTOR, name="c"),
+                ],
+                [
+                    Edge(
+                        id="ac",
+                        source="a",
+                        target="c",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            # The store still says `c` is visible; memory already knows better.
+            storage.nodes["c"].archived = True
+
+            result = storage.get_related_nodes("a", depth=1)
+            returned = {n.id for n in result["nodes"]}
+            assert "c" not in returned, (
+                "returned a node whose own payload says archived=True under "
+                f"include_archived=False: {returned}"
+            )
+            assert {e.id for e in result["edges"]} == set(), (
+                "and the edge that reached it goes with it"
+            )
+        finally:
+            storage.flush()
+            backend.close()
+
+
+class TestADeclaredCapabilityMustBeImplemented:
+    def test_declaring_store_traversal_without_traverse_is_refused(self):
+        """It fails quietly otherwise: every traversal warns and walks, for the
+        life of the process, with nothing to say the declaration was wrong."""
+        from backend.core.storage_backends import (
+            BackendCapabilities,
+            capabilities_of,
+        )
+
+        class _Liar:
+            def capabilities(self):
+                return BackendCapabilities(store_traversal=True)
+
+        with pytest.raises(TypeError, match="store_traversal"):
+            capabilities_of(_Liar())
+
+
+class TestDepthIsBoundedByTheGraphNotByTheCaller:
+    """`reach` is keyed on (id, d), so the recursion never converges early: it
+    runs the full `depth` iterations however small the graph. REST caps depth
+    at 5, the MCP tool does not cap it at all, so the bound lives in the store.
+    """
+
+    def test_a_huge_depth_costs_no_more_than_the_graph_allows(self, schema):
+        import time
+
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        # 40 nodes at depth 200_000 was chosen by measuring both sides. With
+        # the clamp: 0.006s. Without it: 20.4s on one run, and on a second the
+        # backend process was OOM-killed, which takes the whole cluster down
+        # with it. A smaller shape does not separate the two -- 12 nodes at
+        # depth 50_000 costs 1.4s unclamped, under any threshold loose enough
+        # not to be flaky.
+        nodes = {
+            f"n{i}": Node(id=f"n{i}", type=NodeType.ACTOR, name=f"n{i}")
+            for i in range(40)
+        }
+        edges = {
+            f"e{i}": Edge(
+                id=f"e{i}",
+                source=f"n{i}",
+                target=f"n{i + 1}",
+                type=RelationshipType.RELATES_TO,
+            )
+            for i in range(39)
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            _load(backend, nodes, edges)
+            start = time.perf_counter()
+            deep = backend.traverse("n0", 200_000)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 2.0, (
+                f"depth 200000 on a 40-node graph took {elapsed:.1f}s; the "
+                f"recursion is running the caller's number of levels rather "
+                f"than the graph's"
+            )
+            # and the answer is still the whole chain
+            assert set(deep["node_ids"]) == set(nodes)
+            assert set(deep["node_ids"]) == set(backend.traverse("n0", 39)["node_ids"])
+        finally:
+            backend.close()

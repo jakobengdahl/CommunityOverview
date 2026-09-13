@@ -344,6 +344,39 @@ class PostgresGraphPersistenceBackend:
                         "only_row boolean PRIMARY KEY DEFAULT true"
                         " CHECK (only_row), doc jsonb NOT NULL",
                     )
+            # Outside the migration transaction, on purpose, and one
+            # connection each. The traversal filters on doc->>'source' and
+            # doc->>'target', which no index covers by default: without these
+            # it seq-scans every edge at every level - measured at 3.5 SECONDS
+            # for a depth-3 traversal of a 20k-node graph, against 22 ms with
+            # them.
+            #
+            # Best-effort, and deliberately not fatal: the same least-privilege
+            # role the guards above exist for may hold DML and no DDL, and a
+            # store that cannot take an index should still boot and still
+            # answer - slowly, which is a performance problem, where failing
+            # here is an outage. It has to be its own transaction for that to
+            # be true at all: a failed statement inside the migration's
+            # transaction aborts the whole thing, so catching the error there
+            # would have recovered nothing.
+            for name, expression in (
+                ("graph_edges_source_idx", "((doc->>'source'))"),
+                ("graph_edges_target_idx", "((doc->>'target'))"),
+            ):
+                try:
+                    with self._pool.connection() as conn:
+                        conn.execute(
+                            sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} {}").format(
+                                sql.Identifier(name),
+                                self._table("graph_edges"),
+                                sql.SQL(expression),
+                            )
+                        )
+                except Exception as exc:
+                    print(
+                        f"Warning: could not create {name}; traversal will "
+                        f"scan instead of seek: {exc}"
+                    )
             self._migrated = True
 
     # -- snapshot contract ---------------------------------------------------
@@ -423,8 +456,17 @@ class PostgresGraphPersistenceBackend:
         expand at all.
         """
         self._ensure_schema()
-        if depth <= 0:
-            depth = 0
+        # `reach` is keyed on (id, d), so a level that reaches nothing new still
+        # emits rows at a depth never seen before: the recursion runs the full
+        # `depth` iterations whatever the graph looks like, instead of stopping
+        # when it converges. Measured on a 40-node chain: depth 200000 took
+        # 20 seconds on one run and got the backend process OOM-killed on the
+        # next, against 6 ms once clamped.
+        # REST caps depth at 5; the MCP tool does not cap it at all, so the
+        # bound has to live here. A BFS cannot usefully go deeper than there
+        # are nodes, so clamping to the node count is exact rather than a
+        # policy: past that the answer cannot change.
+        depth = max(0, depth)
         query = sql.SQL(self._TRAVERSE).format(
             edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
         )
@@ -442,6 +484,14 @@ class PostgresGraphPersistenceBackend:
             "types": types,
         }
         with self._pool.connection() as conn:
+            if depth:
+                node_count = conn.execute(
+                    sql.SQL("SELECT count(*) FROM {}").format(
+                        self._table("graph_nodes")
+                    )
+                ).fetchone()[0]
+                depth = min(depth, int(node_count))
+                params["depth"] = depth
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
             # nothing at all rather than a lone anchor.

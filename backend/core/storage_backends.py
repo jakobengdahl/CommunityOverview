@@ -434,7 +434,10 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
     at all; it is a snapshot-only backend and is treated as one. A backend
     that declares incremental writes without implementing the entity
     operations would fail on the first mutation, after the graph has already
-    changed in memory, so it is refused here instead.
+    changed in memory, so it is refused here instead. A backend that declares
+    store_traversal without `traverse` fails more quietly still - every
+    traversal warns and falls back, for the life of the process - which is why
+    that one is checked here too rather than left to the caller's except.
     """
     declare = getattr(backend, "capabilities", None)
     if declare is None:
@@ -461,6 +464,15 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
         if missing:
             raise TypeError(
                 f"{type(backend).__name__} declares change_notification but does "
+                f"not implement: {', '.join(missing)}"
+            )
+    if caps.store_traversal:
+        missing = [
+            m for m in _TRAVERSAL_METHODS if not callable(getattr(backend, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"{type(backend).__name__} declares store_traversal but does "
                 f"not implement: {', '.join(missing)}"
             )
     return caps
