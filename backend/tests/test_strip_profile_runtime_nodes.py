@@ -128,10 +128,20 @@ class TestCli:
         )
 
         assert result.returncode == 0, result.stderr
-        assert "removed metadata.journal_id: 1" in result.stdout
-        assert "removed SavedView: 1" in result.stdout
-        assert "dangling edges: 0" in result.stdout
-        assert "(dry run)" in result.stdout
+        # Compare the full stdout, not substrings: the "=== path ===" header
+        # and the "nodes X -> Y   edges X -> Y" summary line were previously
+        # unchecked by anything, so a mutation dropping or garbling either
+        # would still pass every other assertion here.
+        expected_stdout = (
+            f"=== {seed} ===\n"
+            "nodes 4 -> 2   edges 3 -> 1\n"
+            "  removed EventSubscription: 1\n"
+            "  removed SavedView: 1\n"
+            "  removed metadata.journal_id: 1\n"
+            "  dangling edges: 0\n"
+            "  (dry run)\n"
+        )
+        assert result.stdout == expected_stdout
         assert seed.read_bytes() == before
 
     def test_write_strips_the_file(self, tmp_path):
@@ -178,6 +188,30 @@ class TestCli:
         assert result.returncode != 0
         assert "ABORT" in result.stderr
         assert seed.read_bytes() == before
+
+    def test_importing_the_module_does_not_run_the_cli(self):
+        """Guards the `if __name__ == "__main__":` gate directly: a fresh
+        interpreter imports the module with an argv that would blow up if
+        main() executed on import (argv[1] is not an openable path), so a
+        regression here fails loudly instead of merely happening to survive
+        collection under pytest's own argv."""
+        probe = (
+            "import sys\n"
+            "sys.argv = ['not-the-cli', '--this-would-blow-up-if-main-ran']\n"
+            "import scripts.strip_profile_runtime_nodes\n"
+            "print('IMPORT_OK')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "IMPORT_OK\n"
+        assert result.stderr == ""
 
 
 COMMITTED_SEEDS = sorted(REPO_ROOT.glob("config/*/graph.json")) + sorted(
