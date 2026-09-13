@@ -986,15 +986,70 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
             os.chdir(cwd)
             raise
 
+    def test_the_external_upsert_path_writes_the_index_before_nodes(self, tmp_path):
+        """The OTHER add site, on the persistence seam - a second instance's
+        writes arriving here. Reversing it passed the whole suite: the watcher
+        on `add_nodes` does not look at this one, and the add half is the half
+        that loses a node a reader is owed."""
+        import os
+
+        from backend.config.config_loader import reset_loader
+        from backend.core.storage_backends import EntityOperation, ExternalChange
+        from backend.core.storage_search import LexicalIndex
+
+        storage, cwd, reset = self._storage(tmp_path)
+        try:
+            seen = []
+            real = LexicalIndex.__setitem__
+
+            def watching(self, node_id, fields):
+                if self is storage._searchable_text_cache and node_id not in self:
+                    seen.append((node_id, node_id in storage.nodes))
+                return real(self, node_id, fields)
+
+            LexicalIndex.__setitem__ = watching
+            try:
+                storage.apply_external_change(
+                    ExternalChange.entities(
+                        [
+                            EntityOperation.upsert_node(
+                                {
+                                    "id": "fromelsewhere",
+                                    "type": "Actor",
+                                    "name": "from elsewhere",
+                                }
+                            )
+                        ]
+                    )
+                )
+            finally:
+                LexicalIndex.__setitem__ = real
+        finally:
+            os.chdir(cwd)
+            reset()
+
+        assert [node_id for node_id, _ in seen] == ["fromelsewhere"], (
+            f"expected one index write for the external upsert, saw {seen}"
+        )
+        late = [node_id for node_id, in_nodes in seen if in_nodes]
+        assert not late, (
+            f"{late} reached `nodes` before the index; with a delete also in "
+            f"flight the sizes cancel and the candidate path loses them"
+        )
+
     def test_a_removal_writes_the_index_after_nodes(self, tmp_path):
-        """The mirror of the add rule. An index-first removal, with an add also
-        in flight, leaves the two the same size with the removed id missing
-        from the index - the same loss the add ordering prevents."""
+        """Pins the invariant, not a query. Reversing this does lose a node
+        from the candidate path, but only the one whose delete is already in
+        flight - which a search racing that delete could miss anyway, so it is
+        not a loss a reader is owed. What it really breaks is the index being a
+        superset of `nodes` at every instant, which is the property the size
+        test in `search_nodes` is a backstop for. Asserting the consequence
+        instead would pin a guarantee the system does not make."""
         import os
 
         from backend.core.storage_search import LexicalIndex
 
-        storage, cwd, reset_loader = self._storage(tmp_path)
+        storage, cwd, reset = self._storage(tmp_path)
         try:
             storage.add_nodes([_node("keep", "keep me"), _node("drop", "drop me")], [])
 
@@ -1013,11 +1068,11 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
                 LexicalIndex.pop = real
         finally:
             os.chdir(cwd)
-            reset_loader()
+            reset()
 
         assert still_in_nodes, "no index removal seen"
         early = [i for i, in_nodes in still_in_nodes if in_nodes]
         assert not early, (
-            f"{early} left the index while still in `nodes`; with an add also "
-            f"in flight the sizes cancel and the id is lost from the index"
+            f"{early} left the index while still in `nodes`, so the index is "
+            f"no longer a superset - the state the size test assumes away"
         )

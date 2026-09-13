@@ -1636,12 +1636,22 @@ class GraphStorage:
         # One half-done write on its own would be caught anyway: `nodes` first
         # would leave the index SHORTER, and the size test in `search_nodes`
         # sends the query to the walk. What the ordering is really for is two
-        # writes in flight at once, where the sizes cancel out. An add and a
-        # delete, both having reached `nodes` and neither having reached the
-        # index, leave the two the same size with different ids - the one state
-        # no cheap check can tell from agreement. Measured: the candidate path
-        # then returns [] for the added node. Index-first makes the same
-        # interleaving leave a superset, and the node is found.
+        # writes in flight at once, where the sizes cancel out and that test
+        # cannot tell the two dicts apart.
+        #
+        # The two halves are not equally urgent, and it is worth being exact
+        # about which. Reverse the ADD and a node that has reached `nodes` -
+        # one a reader is owed - is missing from the index, and the candidate
+        # path returns [] for it. Measured. Reverse the REMOVAL and the node
+        # that goes missing is the one whose delete is already in flight,
+        # which a search racing that delete could fail to see anyway; no
+        # reader is owed it.
+        #
+        # The removal half is still written this way, because what it keeps is
+        # the invariant rather than any single query: index a superset of
+        # `nodes`, always, which is what the size test is a backstop FOR. An
+        # invariant that holds except in one case somebody has argued is
+        # harmless is one nobody can reason about later.
         self._searchable_text_cache[node.id] = self._build_match_fields(node)
         self.nodes[node.id] = node
         # add_node on an existing id replaces the attributes, which is what
