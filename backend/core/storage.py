@@ -638,22 +638,32 @@ class GraphStorage:
                 # place, so anything holding a reference to one still sees the
                 # graph this instance serves.
                 self.graph_metadata = graph_metadata
-                # The index goes first and as a UNION, so it is never missing
-                # an id `nodes` holds - not even for the statements in between.
-                # Clearing it first, or swapping `nodes` first, leaves a window
-                # where the two hold different id sets of the SAME size, which
-                # no cheap check can tell from agreement.
-                self._searchable_text_cache.update(searchable)
+                # Order matters three ways here, and two of them fight.
+                #
+                # The index must never be MISSING an id `nodes` holds, or the
+                # search's candidate path silently drops that node. And it must
+                # iterate in step with `nodes`, or the `-index` tie-break puts
+                # equal-scoring results in a different order than the walk
+                # does - with a limit, a different set of results entirely.
+                #
+                # Unioning the new records in and pruning afterwards keeps the
+                # first and breaks the second: `dict.update` leaves an existing
+                # key in its existing slot, so every id that survives a reload
+                # keeps its OLD position while `nodes` is rebuilt in the
+                # store's order.
+                #
+                # Emptying the index first keeps both. While it is empty it is
+                # shorter than `nodes`, which is exactly what the size backstop
+                # in `search_nodes` declines on, so the walk answers for that
+                # window and reads the live dict. Then it refills in
+                # `searchable` order - the same order `nodes` was just built
+                # in. At no point are the two the same size with different ids.
+                self._searchable_text_cache.clear()
                 self.nodes.clear()
                 self.nodes.update(nodes)
                 self.edges.clear()
                 self.edges.update(edges)
-                for departed in [
-                    node_id
-                    for node_id in self._searchable_text_cache
-                    if node_id not in nodes
-                ]:
-                    self._searchable_text_cache.pop(departed, None)
+                self._searchable_text_cache.update(searchable)
 
                 self.graph.clear()
                 for node in nodes.values():
@@ -1946,7 +1956,7 @@ class GraphStorage:
                             message=f"Node with ID {node.id} already exists",
                         )
 
-                    # Index before `nodes` - see add_node for why.
+                    # Index before `nodes` - see _external_upsert_node for why.
                     self._searchable_text_cache[node.id] = self._build_match_fields(
                         node
                     )

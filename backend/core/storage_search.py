@@ -8,7 +8,6 @@ search/similarity/related methods here and passes ``self.nodes``,
 """
 
 import threading
-import time
 from types import MappingProxyType
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -91,19 +90,27 @@ _MIN_SELECTIVE_HITS = 64
 # Snapshot attempts before a rebuild gives up and lets the walk answer.
 # A retry costs one pass over the records; spinning here would block a
 # query, and declining is always correct.
-# How many times over a rebuild must have repaid its own cost before the
-# next one is started. 10 caps the corpus's share of a write-heavy load at
-# roughly a tenth, where rebuilding on every write made it the whole load.
-_REBUILD_BUDGET = 10
+# Queries the previous corpus had to answer before building another one is
+# worth it. A corpus costs O(total text) to build and saves a fraction of a
+# query each time it answers one, so it only pays on a load that reads many
+# times per write. Ten is the ratio below which the walk is simply the better
+# answer.
+_REBUILD_WORTH_IT_AFTER = 10
+
+# Declined queries before building one anyway, to re-measure. Without it a
+# workload that was write-bound once would keep the index switched off for
+# ever, however quiet it later became. One rebuild per this many queries is
+# the standing cost of noticing.
+_PROBE_AFTER_DECLINES = 64
 
 
 class LexicalIndex:
     """The per-node match records, plus one joined copy of their text.
 
     Dict-like, because it replaces the plain dict this cache used to be and is
-    written at six places in `GraphStorage`. Making it an object rather than a
+    written at seven places in `GraphStorage`. Making it an object rather than a
     dict with a separate corpus beside it is the point: a derived structure
-    invalidated at six call sites is invalidated correctly only as long as
+    invalidated at seven call sites is invalidated correctly only as long as
     everyone remembers, and there is nowhere else to write to here.
 
     The corpus exists because scanning was the whole cost of a query that
@@ -124,18 +131,26 @@ class LexicalIndex:
     thread spent the rebuild answering from the previous corpus - a node
     committed before the query came back as no match at all.
 
-    Rebuilding is amortised, not automatic. The corpus is rebuilt whole, so one
-    write costs a full rebuild; with a write between every two queries that is
-    a rebuild per query, and the index becomes slower than the scan it
-    replaces - measured 1.6x slower than the plain walk at 30k nodes on an
-    interleaved read/write load, and worse as the graph grows. So a rebuild is
-    only started when the time since the last one has repaid its cost
-    `_REBUILD_BUDGET` times over. Between those, queries decline and the walk
-    answers, exactly as before this index existed. The index therefore wins
-    where reads dominate and costs a bounded fraction where they do not.
+    A corpus is only built for a load that will read it. Rebuilding is whole,
+    so one write costs O(total text); where a write precedes every read, that
+    buys a corpus which answers one query and is thrown away, and the index
+    becomes slower than the scan it replaces - measured 1.6x slower than the
+    plain walk at 30k nodes. So a rebuild waits until the previous corpus has
+    answered `_REBUILD_WORTH_IT_AFTER` queries. Below that the index stays out
+    of the way and the walk answers, exactly as before this index existed.
+    See :meth:`_rebuild_if_worth_it` for why that is counted in queries and not
+    in elapsed time.
     """
 
-    __slots__ = ("_fields", "_records", "_built", "_lock", "_rebuilt_at", "_cost")
+    __slots__ = (
+        "_fields",
+        "_records",
+        "_built",
+        "_lock",
+        "_served",
+        "_served_by_the_last_corpus",
+        "_declines",
+    )
 
     def __init__(self) -> None:
         self._fields: Dict[str, MatchFields] = {}
@@ -160,8 +175,12 @@ class LexicalIndex:
         # corpus that is missing the write and marks it current. Readers never
         # take it: they read `_built` once, and a published tuple is complete.
         self._lock = threading.Lock()
-        self._rebuilt_at = 0.0
-        self._cost = 0.0
+        # How many queries the current corpus has answered, and how many the
+        # one before it managed before a write dropped it. The second is the
+        # only evidence available about whether building another is worth it.
+        self._served = 0
+        self._served_by_the_last_corpus = _REBUILD_WORTH_IT_AFTER
+        self._declines = 0
 
     # -- the dict surface this replaces ------------------------------------
     def __iter__(self):
@@ -179,25 +198,25 @@ class LexicalIndex:
     def __setitem__(self, node_id: str, fields: MatchFields) -> None:
         with self._lock:
             self._fields[node_id] = fields
-            self._built = None
+            self._drop_the_corpus()
 
     def get(self, node_id: str, default=None):
         return self._fields.get(node_id, default)
 
     def pop(self, node_id: str, default=None):
         with self._lock:
-            self._built = None
+            self._drop_the_corpus()
             return self._fields.pop(node_id, default)
 
     def clear(self) -> None:
         with self._lock:
             self._fields.clear()
-            self._built = None
+            self._drop_the_corpus()
 
     def update(self, other) -> None:
         with self._lock:
             self._fields.update(other)
-            self._built = None
+            self._drop_the_corpus()
 
     @property
     def records(self):
@@ -211,22 +230,44 @@ class LexicalIndex:
         return self._fields.items()
 
     # -- the corpus --------------------------------------------------------
-    def _rebuild_if_affordable(self) -> None:
-        """Rebuild the corpus, if it has been long enough since the last one.
+    def _drop_the_corpus(self) -> None:
+        """Discard the corpus, remembering how much use it was. Caller holds
+        the lock."""
+        if self._built is not None:
+            self._served_by_the_last_corpus = self._served
+            self._built = None
+            self._served = 0
 
-        The budget is what keeps a write-heavy load from paying for the index
-        without using it. A rebuild is O(total text); charging one to every
-        query that follows a write is how this became slower than the scan it
-        replaces. Waiting until the last rebuild's cost has been repaid
-        `_REBUILD_BUDGET` times bounds the overhead to a fraction of the work
-        the queries were going to do anyway, whatever the write rate.
+    def _rebuild_if_worth_it(self) -> None:
+        """Rebuild the corpus, if the last one earned its keep.
+
+        One write drops the whole corpus, so on a load that writes before every
+        read the index can never pay: it would spend O(total text) building
+        something that answers one query and is then thrown away. Charging that
+        to the query made this 1.6x SLOWER than the walk it replaces.
+
+        An earlier attempt spent a wall-clock budget instead - rebuild once the
+        last one has had time to repay itself. That reads as if it bounds the
+        cost, and does not: an idle gap between two queries repays nothing but
+        passes the test just the same, so a write-then-query trickle - one user
+        editing and searching - rebuilt on every query and measured twice the
+        walk. Elapsed time is not work done.
+
+        What is measured here is the only evidence there is: how many queries
+        the previous corpus answered before a write dropped it. Below
+        `_REBUILD_WORTH_IT_AFTER` the walk is simply the better answer and the
+        index stays out of the way, at no cost beyond one probe every
+        `_PROBE_AFTER_DECLINES` queries to notice if the load has changed.
         """
         with self._lock:
             if self._built is not None:
                 # Another thread rebuilt while this one waited for the lock.
                 return
-            now = time.monotonic()
-            if now - self._rebuilt_at < self._cost * _REBUILD_BUDGET:
+            self._declines += 1
+            if (
+                self._served_by_the_last_corpus < _REBUILD_WORTH_IT_AFTER
+                and self._declines < _PROBE_AFTER_DECLINES
+            ):
                 return
             # Nothing can mutate `_fields` here: every mutator takes this lock.
             records = list(self._fields.items())
@@ -247,11 +288,10 @@ class LexicalIndex:
                 # without a single test noticing. Untestable code that claims
                 # to be a safety net is worse than none. Declining degrades to
                 # the plain walk, which is the same answer and is well covered.
-                self._rebuilt_at = time.monotonic()
                 return
             self._built = (ids, corpus, offsets)
-            self._rebuilt_at = time.monotonic()
-            self._cost = self._rebuilt_at - now
+            self._served = 0
+            self._declines = 0
 
     def candidates(self, term: str) -> Optional[List[str]]:
         """Node ids whose text contains *term*, or None to say "scan instead".
@@ -264,7 +304,7 @@ class LexicalIndex:
         if _CORPUS_SEPARATOR in term or not term:
             return None
         if self._built is None:
-            self._rebuild_if_affordable()
+            self._rebuild_if_worth_it()
         # Read the triple ONCE. A concurrent rebuild may replace it a moment
         # from now; what must never happen is reading half of one build and
         # half of the next. None means no corpus matches the records right now
@@ -273,6 +313,7 @@ class LexicalIndex:
         if built is None:
             return None
         ids, corpus, starts = built
+        self._served += 1
         if not ids:
             return []
         # One C-level pass to decide whether to take this path at all. The

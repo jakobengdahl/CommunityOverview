@@ -13,6 +13,8 @@ import pytest
 from backend.core.models import Node, NodeType
 from backend.core.storage import GraphStorage
 from backend.core.storage_search import (
+    _PROBE_AFTER_DECLINES,
+    _REBUILD_WORTH_IT_AFTER,
     LexicalIndex,
     build_match_fields,
     score_fields,
@@ -41,18 +43,18 @@ def _index(nodes):
     return index
 
 
-def _spend_the_rebuild_budget(index):
-    """Let the next query rebuild instead of declining.
+def _let_the_index_rebuild(index):
+    """Say that the last corpus earned its keep, so the next query rebuilds.
 
-    A rebuild is held back until the previous one has repaid its cost several
-    times over, which is what stops a write-heavy load paying for a corpus it
-    never gets to use. In a test the previous rebuild cost microseconds and the
-    next line runs immediately, so the budget would decline - correctly, but it
-    would answer the wrong question. Tests about what the CORPUS holds spend it
-    first; tests about what a SEARCH returns must not, because declining is one
-    of the right answers there.
+    A rebuild waits until the previous corpus has answered enough queries to be
+    worth another one, which is what keeps the index out of the way on a load
+    that writes before every read. A test fixture has answered none, so it
+    would decline - correctly, but it would answer the wrong question. Tests
+    about what the CORPUS holds say this first; tests about what a SEARCH
+    returns must not, because declining is one of the right answers there.
     """
-    index._rebuilt_at, index._cost = 0.0, 0.0
+    index._served_by_the_last_corpus = _REBUILD_WORTH_IT_AFTER
+    index._declines = 0
 
 
 class TestTheIndexAnswersWhatTheWalkWouldHave:
@@ -173,7 +175,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
         assert index.candidates("doomed") == ["a"]
 
         index.pop("a")
-        _spend_the_rebuild_budget(index)
+        _let_the_index_rebuild(index)
         assert index.candidates("doomed") == [], (
             "the corpus still holds the removed node's text"
         )
@@ -275,7 +277,7 @@ class TestTheGateAndTheCorpusAtSizesTheFixturesAboveDoNotReach:
 
         index.clear()
         index.update({"new": build_match_fields(_node("new", "arrived"), TYPE_TEXT)})
-        _spend_the_rebuild_budget(index)
+        _let_the_index_rebuild(index)
 
         assert index.candidates("arrived") == ["new"]
         assert index.candidates("departed") == [], (
@@ -481,7 +483,7 @@ class TestAStaleCorpusIsNeverTheAnswer:
         mutate(index, build_match_fields(_node("x", "x sentinel shared"), TYPE_TEXT))
 
         assert index._built is None
-        _spend_the_rebuild_budget(index)
+        _let_the_index_rebuild(index)
         assert index.candidates(term) == expected
 
     def test_a_reader_cannot_see_a_corpus_a_rebuild_has_not_finished(self):
@@ -506,7 +508,7 @@ class TestAStaleCorpusIsNeverTheAnswer:
         storage_search._CORPUS_SEPARATOR = monkey
         try:
             index["x"] = build_match_fields(_node("x", "x needle999"), TYPE_TEXT)
-            _spend_the_rebuild_budget(index)
+            _let_the_index_rebuild(index)
             index.candidates("needle999")
         finally:
             storage_search._CORPUS_SEPARATOR = separator
@@ -519,12 +521,16 @@ class TestAStaleCorpusIsNeverTheAnswer:
         assert len(ids) == len(starts) == corpus.count("\x00") + 1
 
 
-class TestRebuildingIsAmortisedAgainstWhatItCosts:
-    """One write invalidates the whole corpus, so charging a rebuild to the
-    next query means one rebuild per write. With a write between every two
-    queries that made this index 1.6x SLOWER than the plain walk at 30k nodes,
-    and worse as the graph grows - it stopped being an optimisation and became
-    an overhead. A rebuild now waits until the last one has repaid its cost.
+class TestACorpusIsOnlyBuiltForALoadThatWillReadIt:
+    """One write drops the whole corpus, so charging a rebuild to the next
+    query means one rebuild per write. With a write between every two queries
+    that made this index 1.6x SLOWER than the plain walk at 30k nodes - it
+    stopped being an optimisation and became an overhead. A rebuild now waits
+    until the previous corpus has actually answered queries.
+
+    Counted in queries, deliberately, not in elapsed time: a wall-clock budget
+    passes on an idle gap, which repays nothing, so a write-then-query trickle
+    rebuilt on every query and measured twice the walk.
     """
 
     def test_a_write_between_queries_does_not_buy_a_rebuild_each_time(self):
@@ -532,7 +538,7 @@ class TestRebuildingIsAmortisedAgainstWhatItCosts:
         index.candidates("shared")
 
         rebuilds = []
-        real = type(index)._rebuild_if_affordable
+        real = type(index)._rebuild_if_worth_it
 
         def counting(self):
             before = self._built
@@ -540,16 +546,19 @@ class TestRebuildingIsAmortisedAgainstWhatItCosts:
             if self._built is not before:
                 rebuilds.append(True)
 
-        type(index)._rebuild_if_affordable = counting
+        type(index)._rebuild_if_worth_it = counting
         try:
-            index._cost = 1.0  # a rebuild that cost a second is not repaid yet
+            # The corpus in this fixture has answered nothing, which is the
+            # state a write-before-every-read load keeps it in.
+            index._served_by_the_last_corpus = 0
+            index._declines = 0
             for i in range(20):
                 index[f"n{i}"] = build_match_fields(
                     _node(f"n{i}", f"node {i} shared changed"), TYPE_TEXT
                 )
                 index.candidates("shared")
         finally:
-            type(index)._rebuild_if_affordable = real
+            type(index)._rebuild_if_worth_it = real
 
         assert rebuilds == [], (
             f"{len(rebuilds)} rebuilds for 20 writes - the budget is not "
@@ -567,20 +576,26 @@ class TestRebuildingIsAmortisedAgainstWhatItCosts:
         newcomer = _node("late", "late arrivedlate shared")
         by_id["late"] = newcomer
         index["late"] = build_match_fields(newcomer, TYPE_TEXT)
-        index._cost = 1.0  # force the decline
+        index._served_by_the_last_corpus = 0  # force the decline
+        index._declines = 0
 
         assert index.candidates("arrivedlate") is None
         found = search_nodes(by_id, index, TYPE_TEXT, query="arrivedlate", limit=10)
         assert [n.id for n in found] == ["late"]
 
-    def test_the_budget_lets_go_once_the_cost_is_repaid(self):
-        """It must not decline for ever, or the index is dead after the first
-        write the graph ever takes."""
+    def test_it_probes_again_rather_than_declining_for_ever(self):
+        """A load that was write-bound once must not keep the index switched
+        off however quiet it later becomes."""
         index = _index([_node(f"n{i}", f"node {i} shared") for i in range(5)])
         index.candidates("shared")
         index["late"] = build_match_fields(_node("late", "arrivedlate"), TYPE_TEXT)
+        index._served_by_the_last_corpus = 0
 
-        _spend_the_rebuild_budget(index)
+        declined = 0
+        while index.candidates("arrivedlate") is None:
+            declined += 1
+            assert declined <= _PROBE_AFTER_DECLINES, "the index never probed again"
+        assert declined == _PROBE_AFTER_DECLINES - 1
         assert index.candidates("arrivedlate") == ["late"]
 
 
