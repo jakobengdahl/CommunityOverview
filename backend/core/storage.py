@@ -223,7 +223,11 @@ class GraphStorage:
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
         # Cache for searchable text to speed up search_nodes
-        self._searchable_text_cache: Dict[str, str] = {}
+        # Keyed by node id; the value is everything matching and ranking read
+        # off that node, lowered once. It was the flat searchable string alone
+        # until the scorer's per-query re-lowering showed up as a third of a
+        # large query's cost.
+        self._searchable_text_cache = storage_search.LexicalIndex()
 
         # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
         self._type_searchable_text: Dict[str, str] = {}
@@ -337,8 +341,14 @@ class GraphStorage:
             # Config not available; type matching will use type name only
             pass
 
-    def _build_searchable_text(self, node: "Node") -> str:
-        return storage_search.build_searchable_text(node, self._type_searchable_text)
+    def _build_match_fields(self, node: "Node") -> storage_search.MatchFields:
+        """Prepare everything search matches and ranks a node on, lowered once.
+
+        Renamed from `_build_searchable_text`, which returned only the flat
+        string: keeping that name while widening what it returns is the quiet
+        kind of break - a reader would go on believing the cache holds a str.
+        """
+        return storage_search.build_match_fields(node, self._type_searchable_text)
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -618,7 +628,7 @@ class GraphStorage:
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
                     nodes[node.id] = node
-                    searchable[node.id] = self._build_searchable_text(node)
+                    searchable[node.id] = self._build_match_fields(node)
 
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
@@ -1597,7 +1607,7 @@ class GraphStorage:
         # repoints `data` at the new object; every read path that walks the
         # graph would otherwise still hand out the old one.
         self.graph.add_node(node.id, data=node)
-        self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+        self._searchable_text_cache[node.id] = self._build_match_fields(node)
 
         self._emit_event(
             event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
@@ -1928,7 +1938,7 @@ class GraphStorage:
                     unpersisted_nodes.append(node)
 
                     # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
                         node
                     )
 
@@ -2214,7 +2224,7 @@ class GraphStorage:
             self.graph.nodes[node_id]["data"] = node
 
             # Update searchable text cache
-            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+            self._searchable_text_cache[node.id] = self._build_match_fields(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
             if any(

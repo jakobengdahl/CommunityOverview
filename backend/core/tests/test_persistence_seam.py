@@ -3085,7 +3085,7 @@ class TestFaultInjectionOnlyPaths:
         def boom(self, node):
             raise RuntimeError("boom-before-node-persist")
 
-        monkeypatch.setattr(GraphStorage, "_build_searchable_text", boom)
+        monkeypatch.setattr(GraphStorage, "_build_match_fields", boom)
 
         result = storage.add_nodes([_node("a")], [])
         storage.flush()
