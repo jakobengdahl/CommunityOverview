@@ -112,12 +112,12 @@ class LexicalIndex:
 
     def __init__(self) -> None:
         self._fields: Dict[str, MatchFields] = {}
-        # A read-only view for the scan to look records up through. Going via
-        # this class's own `get` puts a Python-level call in the hot loop where
-        # there used to be a C-level `dict.get`, which measured 75 ms over 100k
-        # nodes - most of what the prepared fields had just saved. The proxy
-        # delegates at C speed and cannot be written through, so the index
-        # still sees every change that would invalidate its corpus.
+        # A read-only view for the scan to look records up through. It cannot
+        # be written through, so the index still sees every change that would
+        # invalidate its corpus - that is why it exists. The speed is a minor
+        # second reason: this class's own `get` is a Python-level call where
+        # the proxy delegates at C speed, measured at 6 ms over 100k lookups
+        # against the 308 ms the prepared fields save, so about 2% of it.
         self._records = MappingProxyType(self._fields)
         self._corpus: Optional[str] = None
         self._ids: List[str] = []
@@ -285,15 +285,11 @@ def build_match_fields(node: Node, type_searchable_text: Dict[str, str]) -> Matc
     )
 
 
-def build_searchable_text(node: Node, type_searchable_text: Dict[str, str]) -> str:
-    """The flat searchable string alone, for callers that want only that."""
-    return build_match_fields(node, type_searchable_text).text
-
-
 def score_type(type_name: str, type_text: str, query_lower: str) -> int:
     """The type tier's contribution, which depends only on the TYPE and the
-    query - never on the node. There are a couple of dozen node types, so a
-    scan over 100k nodes was recomputing a couple of dozen distinct answers
+    query - never on the node. Node types are schema-defined, not fixed by the
+    legacy enum: the shipped profiles carry between 10 and 18 of them, so a
+    scan over 100k nodes was recomputing at most that many distinct answers
     100k times; :func:`search_nodes` memoises it per query instead."""
     if type_name == query_lower:
         return 700
