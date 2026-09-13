@@ -8,7 +8,7 @@ search/similarity/related methods here and passes ``self.nodes``,
 """
 
 from types import MappingProxyType
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rapidfuzz.distance import Levenshtein
 
@@ -81,8 +81,9 @@ class MatchFields(NamedTuple):
 
 _CORPUS_SEPARATOR = "\x00"
 
-# Below this many hits the index is used whatever fraction of the graph they
-# are. See the selectivity gate in LexicalIndex.candidates.
+# Up to and including this many hits the index is used, whatever fraction of
+# the graph they are - the gate declines on `>`, so exactly this many still
+# takes the index. See the selectivity gate in LexicalIndex.candidates.
 _MIN_SELECTIVE_HITS = 64
 
 
@@ -180,8 +181,14 @@ class LexicalIndex:
             import numpy as np
 
             self._starts = np.asarray(starts, dtype="int64")
-        except ImportError:  # pragma: no cover - numpy is a base requirement
-            self._starts = starts
+        except ImportError:
+            # Decline rather than carry a second implementation. There was a
+            # `bisect` path here; numpy is a base requirement, so nothing could
+            # reach it and a review could mutate its body to `raise` without a
+            # single test noticing. Untestable code that claims to be a safety
+            # net is worse than none. Declining degrades to the plain walk,
+            # which is the same answer and is well covered.
+            self._starts = None
         self._dirty = False
 
     def candidates(self, term: str) -> Optional[List[str]]:
@@ -196,6 +203,8 @@ class LexicalIndex:
             return None
         if self._dirty:
             self._rebuild()
+        if self._starts is None:
+            return None
         if not self._ids:
             return []
 
@@ -213,11 +222,14 @@ class LexicalIndex:
         occurrences = corpus.count(term)
         if occurrences == 0:
             return []
-        # The floor matters as much as the fraction: a quarter of a five-node
-        # index is one, so without it the index declined every query on a small
-        # graph and was dead code below about eight nodes - which is most
-        # graphs. Nothing can dominate a scan that short, so there is nothing
-        # to decline for.
+        # The floor matters as much as the fraction. Measured, without it a
+        # single-occurrence query is declined for n <= 3 (where `n // 4` is
+        # zero) and answered from n = 4 up - so the index is dead below four
+        # nodes, not eight, and a small graph is not declined outright. What
+        # the floor actually buys is the band above that: at n = 8 the bare
+        # fraction tolerates two hits, at n = 12 three, so an ordinary query on
+        # a small graph keeps falling back for no gain. Nothing can dominate a
+        # scan that short, so there is nothing to decline for.
         if occurrences > max(_MIN_SELECTIVE_HITS, len(self._ids) // 4):
             return None
 
@@ -228,35 +240,20 @@ class LexicalIndex:
         if not found:
             return []
 
-        starts = self._starts
-        ids = self._ids
-        if isinstance(starts, list):
-            from bisect import bisect_right
+        import numpy as np
 
-            indices = [bisect_right(starts, p) - 1 for p in found]
-        else:
-            import numpy as np
-
-            indices = (
-                np.searchsorted(starts, np.asarray(found, dtype="int64"), side="right")
-                - 1
+        indices = (
+            np.searchsorted(
+                self._starts, np.asarray(found, dtype="int64"), side="right"
             )
+            - 1
+        )
+        ids = self._ids
         # One node can hold several occurrences. The positions come out
         # ascending, so the indices are non-decreasing and duplicates are
         # adjacent - dropping them needs no set and no membership test, and on
         # the numpy path no Python loop at all. Corpus order is insertion
         # order, which is the order the caller's stable ranking assumes.
-        if isinstance(starts, list):
-            out = []
-            previous = -1
-            for i in indices:
-                if i != previous:
-                    out.append(ids[i])
-                    previous = i
-            return out
-
-        import numpy as np
-
         if len(indices) > 1:
             indices = indices[np.concatenate(([True], indices[1:] != indices[:-1]))]
         return [ids[i] for i in indices]
@@ -392,7 +389,7 @@ def score_node_match(
 
 def search_nodes(
     nodes: Dict[str, Node],
-    searchable_text_cache: Dict[str, str],
+    searchable_text_cache: "Union[LexicalIndex, Dict[str, MatchFields]]",
     type_searchable_text: Dict[str, str],
     query: str,
     node_types: Optional[List[NodeType]] = None,
@@ -497,6 +494,14 @@ def search_nodes(
             results.append(node)
             continue
 
+        # Reachable on the fallback walk, not on the candidate path: the index
+        # offers ids it holds records for. So a node present in `nodes` but
+        # missing from the index is silently absent from a candidate-path
+        # answer, where the walk would have built its record and returned it.
+        # Nothing can produce that today - every write to `nodes` in
+        # storage.py is paired with a write here - and the same pairing is what
+        # makes the two dicts iterate in step, which is what lets the `-index`
+        # tie-break reproduce the old stable sort.
         fields = records_get(node.id)
         if fields is None:
             fields = build_match_fields(node, type_searchable_text)

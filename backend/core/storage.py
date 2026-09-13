@@ -623,7 +623,7 @@ class GraphStorage:
                 # would report that as merely being behind the store.
                 nodes: Dict[str, Node] = {}
                 edges: Dict[str, Edge] = {}
-                searchable: Dict[str, str] = {}
+                searchable: Dict[str, storage_search.MatchFields] = {}
 
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)

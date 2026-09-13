@@ -199,3 +199,205 @@ class TestRankingHasOneImplementation:
         for term in ("actor", "act", "node", "zzz"):
             bonus = score_type(fields.type_name, fields.type_text, term)
             assert score_fields(fields, term, bonus) == score_fields(fields, term)
+
+
+class TestTheGateAndTheCorpusAtSizesTheFixturesAboveDoNotReach:
+    """Every fixture above is a handful of nodes, which leaves two things
+    unexercised: the gate's declining branch (it needs more than 64 hits) and
+    any offset arithmetic whose error is smaller than one node's text."""
+
+    @staticmethod
+    def _many(count, shared="shared", text_length=3):
+        """Short texts on purpose. An off-by-one in the corpus offset step
+        drifts by one character per node, so a fixture whose texts are longer
+        than the node count hides it - every position still lands inside the
+        right node. Short texts make the drift visible."""
+        return [
+            Node(id=f"m{i}", type=NodeType.ACTOR, name=f"{shared}{i:0{text_length}d}")
+            for i in range(count)
+        ]
+
+    def test_a_term_matching_most_of_the_graph_still_returns_results(self):
+        """The gate declines above 64 hits, and declining must mean "walk
+        instead", not "no matches". Returning [] here instead of None costs
+        every result: 200 nodes sharing a term come back as zero."""
+        nodes = self._many(200)
+        by_id = {node.id: node for node in nodes}
+        index = _index(nodes)
+
+        assert index.candidates("shared") is None, (
+            "this fixture no longer exercises the declining branch"
+        )
+        found = search_nodes(by_id, index, TYPE_TEXT, query="shared", limit=50)
+        assert len(found) == 50, (
+            "the gate declined and the walk did not happen - a decline was "
+            "read as an empty result"
+        )
+
+    def test_every_node_maps_back_to_itself_across_a_long_corpus(self):
+        """The offset step adds one for the separator. Dropping that walks the
+        mapping off by one character per node, which the small fixtures cannot
+        see. Asserted over every node, not a sample - the head of the corpus is
+        correct under every off-by-one here, so only the tail shows it."""
+        nodes = self._many(200, shared="k")
+        index = _index(nodes)
+
+        for node in nodes:
+            term = node.name
+            assert index.candidates(term) == [node.id], (
+                f"{term!r} mapped to the wrong node - the corpus offsets have drifted"
+            )
+
+    def test_a_reload_replaces_the_corpus(self):
+        """`clear()` and `update()` are only ever called as a pair, on the
+        reload path, so removing the invalidation from either one alone is
+        invisible. Removing it from both leaves the pre-reload corpus live -
+        a search after an external refresh returns the departed node and
+        misses the arrived one."""
+        index = _index([_node("old", "departed")])
+        assert index.candidates("departed") == ["old"]
+
+        index.clear()
+        index.update({"new": build_match_fields(_node("new", "arrived"), TYPE_TEXT)})
+
+        assert index.candidates("arrived") == ["new"]
+        assert index.candidates("departed") == [], (
+            "the corpus still holds the records the reload replaced"
+        )
+
+
+class TestWhatGoesIntoTheMatchedText:
+    """`MatchFields.text` is what every term is tested against, so dropping a
+    field from it silently stops that field being searchable, and changing how
+    the fields are joined changes which cross-field substrings match."""
+
+    @pytest.mark.parametrize(
+        "kwargs,term",
+        [
+            ({"name": "uniquename"}, "uniquename"),
+            ({"name": "x", "description": "uniquedescription"}, "uniquedescription"),
+            ({"name": "x", "summary": "uniquesummary"}, "uniquesummary"),
+            ({"name": "x", "tags": ["uniquetag"]}, "uniquetag"),
+            ({"name": "x", "subtypes": ["uniquesubtype"]}, "uniquesubtype"),
+            ({"name": "x", "aliases": ["uniquealias"]}, "uniquealias"),
+        ],
+    )
+    def test_each_field_is_reachable_on_its_own(self, kwargs, term):
+        node = Node(id="a", type=NodeType.ACTOR, **kwargs)
+        assert term in build_match_fields(node, TYPE_TEXT).text, (
+            f"a term only in {list(kwargs)[-1]} is not searchable"
+        )
+
+    def test_the_fields_are_joined_with_a_space(self):
+        """Joining without one lets a term span two fields that are not
+        adjacent in any node's text: `ab` + `cd` would start matching `abcd`.
+        The space is what keeps the fields separate."""
+        node = Node(id="a", type=NodeType.ACTOR, name="ab", description="cd")
+        text = build_match_fields(node, TYPE_TEXT).text
+        assert "abcd" not in text
+        assert "ab cd" in text
+
+
+class TestTheRankingKeptItsOrderAndItsTieBreak:
+    """`test_the_whole_ranking_is_unchanged_by_going_through_the_index` cannot
+    reach these: they change the index path and the walk path identically, so
+    the two still agree with each other while both are wrong."""
+
+    def test_equal_scores_come_back_in_insertion_order(self):
+        """The sort this replaced was stable, so equal keys kept scan order.
+        The rewrite carries a decreasing index to reproduce that; flipping its
+        sign reverses every tie and nothing else notices."""
+        nodes = [_node(f"n{i}", "identical", "identical text") for i in range(6)]
+        by_id = {node.id: node for node in nodes}
+
+        found = search_nodes(
+            by_id, _index(nodes), TYPE_TEXT, query="identical", limit=10
+        )
+        assert [n.id for n in found] == [f"n{i}" for i in range(6)], (
+            "equal-scoring results are no longer in insertion order"
+        )
+
+    def test_matching_more_terms_breaks_a_tie_in_any_term_mode(self):
+        """The documented rule: a node scores by its single best term, and the
+        number of matched terms only breaks an exact tie. Nothing asserted the
+        second half, so `hit_count` could be dropped or pinned to 1."""
+        both = _node("both", "zzz", "alpha beta")
+        one = _node("one", "zzz", "alpha only")
+        by_id = {"one": one, "both": both}
+
+        found = search_nodes(
+            by_id,
+            _index([one, both]),
+            TYPE_TEXT,
+            query="alpha beta",
+            limit=10,
+            match_mode="any_term",
+        )
+        assert [n.id for n in found] == ["both", "one"], (
+            "the node matching both terms did not win the tie"
+        )
+
+    def test_a_node_is_ranked_by_its_strongest_term_not_its_last(self):
+        """`best` keeps the maximum over the matched terms. Assigning
+        unconditionally ranks a node by whichever term happened to come last in
+        the query, which reorders results on word order alone."""
+        # The node has to match BOTH terms, at DIFFERENT tiers - otherwise max
+        # and last-wins agree and the mutation is invisible. `strong` matches
+        # "alpha" on its name (300k+) and "beta" in its description (200); a
+        # node ranked by its last term therefore collapses to 200 and loses to
+        # a rival that was inserted first.
+        rival = _node("rival", "zzz", "alpha and beta both appear here")
+        strong = _node("strong", "alpha", "beta appears in the description")
+        by_id = {"rival": rival, "strong": strong}
+
+        for query in ("alpha beta", "beta alpha"):
+            found = search_nodes(
+                by_id,
+                _index([rival, strong]),
+                TYPE_TEXT,
+                query=query,
+                limit=10,
+                match_mode="any_term",
+            )
+            assert found[0].id == "strong", (
+                f"for {query!r} the name-tier node lost to a description match "
+                f"- the node was ranked by its last term, not its best"
+            )
+
+
+class TestTheIndexIsActuallyConsulted:
+    """G4 - per-query cost not growing with the nodes that do not match - is
+    the reason this change exists, and every assertion above passes just as
+    well when the index is never asked. Spied rather than timed: a wall-clock
+    assertion is a flake, and what matters is whether the walk was skipped."""
+
+    def test_a_selective_query_does_not_visit_every_node(self, monkeypatch):
+        nodes = [_node(f"n{i}", f"node number {i}") for i in range(200)]
+        nodes.append(_node("needle", "findmehere"))
+        by_id = {node.id: node for node in nodes}
+        index = _index(nodes)
+
+        looked_up = []
+        walked = []
+
+        class _CountingNodes(dict):
+            def get(self, key, default=None):
+                looked_up.append(key)
+                return dict.get(self, key, default)
+
+            def values(self):
+                walked.append(True)
+                return dict.values(self)
+
+        counting = _CountingNodes(by_id)
+        found = search_nodes(counting, index, TYPE_TEXT, query="findmehere", limit=10)
+
+        assert [n.id for n in found] == ["needle"]
+        # Both halves are needed. Counting only the lookups misses the case
+        # that matters most - a scan that never consults the index walks
+        # `values()` and never calls `get` at all, so the lookup count is ZERO
+        # and any "fewer than ten" bound passes.
+        assert not walked, "the search walked every node instead of asking the index"
+        assert 0 < len(looked_up) < 10, (
+            f"the search looked up {len(looked_up)} nodes to return one"
+        )
