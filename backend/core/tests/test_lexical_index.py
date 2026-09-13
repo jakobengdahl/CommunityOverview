@@ -737,3 +737,97 @@ class TestOnlyAnsweredQueriesCountTowardsTheNextRebuild:
         assert index.candidates("unique007") == ["n7"]
         assert index.candidates("nothingmatchesthis") == []
         assert index._served == before + 2, "a hit and a miss are both answers"
+
+
+class TestTheRebuildPolicyDecidesForItself:
+    """Deliberately touches none of the policy's counters.
+
+    Every other test here injects `_served_by_the_last_corpus` to put the index
+    in the state it wants, which tests the consumer of that value and not the
+    production code that computes it. Delete the one line that records it and
+    those tests still pass - against the value their own fixture wrote - while
+    the index rebuilds after every single write. So this one drives real writes
+    and real queries and asks only what came out.
+    """
+
+    @staticmethod
+    def _fraction_answered(queries_per_write, rounds=140):
+        index = _index(
+            [_node(f"n{i}", f"n{i} unique{i:03d} shared") for i in range(400)]
+        )
+        answered = asked = 0
+        for i in range(rounds):
+            if i % queries_per_write == 0:
+                node = _node(
+                    f"n{i % 400}", f"n{i % 400} unique{i % 400:03d} shared edited"
+                )
+                index[node.id] = build_match_fields(node, TYPE_TEXT)
+            asked += 1
+            if index.candidates(f"unique{i % 400:03d}") is not None:
+                answered += 1
+        return answered / asked
+
+    def test_a_read_heavy_load_gets_the_index(self):
+        assert self._fraction_answered(20) > 0.8
+
+    def test_a_write_heavy_load_does_not_pay_for_a_corpus_it_cannot_use(self):
+        """One write per five queries is below the ratio at which a rebuild can
+        repay itself, so the walk should be answering nearly everything."""
+        assert self._fraction_answered(5) < 0.3
+
+    def test_the_two_loads_are_told_apart(self):
+        """The pair, in one assertion: a policy stuck in either position - off
+        after every write, or rebuilding regardless - fails this even if it
+        happens to satisfy one of the two above."""
+        assert self._fraction_answered(20) > self._fraction_answered(5) + 0.5
+
+
+class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
+    """The `-index` tie-break reproduces the old stable sort only while the two
+    dicts iterate in the same order. A reload rebuilds `nodes` in the store's
+    order, so the index has to be emptied and refilled rather than updated in
+    place - `dict.update` would leave every surviving id in its old slot.
+
+    The corpus has to be live for this to bite: below the rebuild threshold the
+    query declines and the walk hides it. Hence the warm-up.
+    """
+
+    def test_equal_scoring_nodes_come_back_in_the_reloaded_order(self, tmp_path):
+        import json
+        import os
+
+        from backend.config.config_loader import reset_loader
+        from backend.core.storage import GraphStorage
+
+        ids = ["a", "b", "c", "d", "e"]
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            storage = GraphStorage()
+            storage.add_nodes([_node(i, f"{i} widget") for i in ids], [])
+
+            for _ in range(15):  # make the corpus worth rebuilding
+                storage.search_nodes(query="widget", limit=50)
+
+            (tmp_path / "graph.json").write_text(
+                json.dumps(
+                    {
+                        "nodes": [
+                            {"id": i, "type": "Actor", "name": f"{i} widget"}
+                            for i in reversed(ids)
+                        ],
+                        "edges": [],
+                    }
+                )
+            )
+            for stray in ("graph.journal.ndjson", "graph.history.ndjson"):
+                if (tmp_path / stray).exists():
+                    (tmp_path / stray).unlink()
+            storage.load()
+
+            assert list(storage._searchable_text_cache) == list(storage.nodes)
+            found = [n.id for n in storage.search_nodes(query="widget", limit=2)]
+            assert found == list(storage.nodes)[:2]
+        finally:
+            os.chdir(cwd)
+            reset_loader()
