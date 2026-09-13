@@ -987,6 +987,63 @@ class TestPostgresBootsForALeastPrivilegeRole:
         assert backend.exists()
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
+    def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
+        self, lowpriv, backends, capsys
+    ):
+        """The operator provisioned the store exactly as the docs prescribe -
+        tables AND the two traversal indexes - and the role owns none of it.
+        `CREATE INDEX IF NOT EXISTS` checks ownership before existence, so
+        without a catalog check first this boots with two warnings saying the
+        traversal will scan, while it seeks. A warning that fires when nothing
+        is wrong teaches an operator to ignore warnings.
+        """
+        name, schema, password = lowpriv
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table, columns in (
+                ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                (
+                    "graph_metadata",
+                    "only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),"
+                    " doc jsonb NOT NULL",
+                ),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(columns),
+                    )
+                )
+            for index, expression in (
+                ("graph_edges_source_idx", "((doc->>'source'))"),
+                ("graph_edges_target_idx", "((doc->>'target'))"),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE INDEX {} ON {}.graph_edges {}").format(
+                        psycopg.sql.Identifier(index),
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.SQL(expression),
+                    )
+                )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE"
+                    " ON ALL TABLES IN SCHEMA {} TO {}"
+                ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
+            )
+
+        low_dsn = _dsn_as_role(name, password)
+        backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
+        backends.append(backend)
+        capsys.readouterr()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        printed = capsys.readouterr().out
+        assert "scan instead of seek" not in printed, (
+            "warned about indexes the store already has: " + printed
+        )
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
 
 class TestPostgresLoadIsOneMomentInTime:
     """A load taken while another instance saves must not tear.

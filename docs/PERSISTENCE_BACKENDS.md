@@ -640,13 +640,18 @@ writing a backend of your own against a shared server:
   what two instances of the *same* graph mostly have.
 - **Two expression indexes carry the traversal**, on `doc->>'source'` and
   `doc->>'target'`. Nothing indexes those by default, so without them the
-  traversal scans every edge at every level: a depth-3 traversal of a
-  20 000-node graph measured 3.5 seconds against 22 ms with them. Migration
+  traversal scans every edge at every level. Measured at depth 3 on 20 000
+  nodes: 3.7 ms against 61 ms unindexed at 60 000 edges, and 89 ms against
+  258 ms at 300 000. Migration
   creates them best-effort, each in its own connection *outside* the
   migrating transaction — a failed statement inside that transaction aborts
   the whole thing, so catching the error there would recover nothing — and a
   failure is logged rather than raised, because a role with DML and no DDL
-  should still boot and still answer, slowly. `CREATE INDEX` without
+  should still boot and still answer, slowly. That role is asked about the
+  catalog first: `CREATE INDEX IF NOT EXISTS` checks ownership before
+  existence, so a store provisioned exactly as below — indexes included —
+  would otherwise warn on every boot that its traversals scan, while they
+  seek. `CREATE INDEX` without
   `CONCURRENTLY` holds a `ShareLock` on `graph_edges` while it builds, so on
   an existing large store the first boot after this upgrade blocks writes to
   that table for the duration and concurrent instances queue behind it.

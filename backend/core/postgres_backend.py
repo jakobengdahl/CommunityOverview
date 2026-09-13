@@ -345,11 +345,10 @@ class PostgresGraphPersistenceBackend:
                         " CHECK (only_row), doc jsonb NOT NULL",
                     )
             # Outside the migration transaction, on purpose, and one
-            # connection each. The traversal filters on doc->>'source' and
-            # doc->>'target', which no index covers by default: without these
-            # it seq-scans every edge at every level - measured at 3.5 SECONDS
-            # for a depth-3 traversal of a 20k-node graph, against 22 ms with
-            # them.
+            # connection each. Every level of the traversal filters on
+            # doc->>'source' and doc->>'target', which no index covers by
+            # default. Measured at depth 3 on 20k nodes: 3.7 ms against
+            # 61 ms unindexed at 60k edges, and 89 ms against 258 ms at 300k.
             #
             # Best-effort, and deliberately not fatal: the same least-privilege
             # role the guards above exist for may hold DML and no DDL, and a
@@ -359,12 +358,27 @@ class PostgresGraphPersistenceBackend:
             # be true at all: a failed statement inside the migration's
             # transaction aborts the whole thing, so catching the error there
             # would have recovered nothing.
+            #
+            # The catalog is asked first, for the same reason `_create_missing`
+            # asks it: `CREATE INDEX IF NOT EXISTS` checks ownership BEFORE it
+            # checks existence, so the role provisioned exactly as
+            # docs/PERSISTENCE_BACKENDS.md prescribes - indexes and all - got
+            # "must be owner of table graph_edges" on every boot, and a warning
+            # saying its traversals would scan when they were seeking. A
+            # warning that fires when nothing is wrong is worse than none.
             for name, expression in (
                 ("graph_edges_source_idx", "((doc->>'source'))"),
                 ("graph_edges_target_idx", "((doc->>'target'))"),
             ):
                 try:
                     with self._pool.connection() as conn:
+                        if conn.execute(
+                            "SELECT 1 FROM pg_class c"
+                            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                            " WHERE n.nspname = %s AND c.relname = %s",
+                            (self.schema, name),
+                        ).fetchone():
+                            continue
                         conn.execute(
                             sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} {}").format(
                                 sql.Identifier(name),

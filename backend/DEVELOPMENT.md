@@ -116,9 +116,11 @@ NetworkX graph, the searchable-text cache and the vector index — without a
 restart, emitting the ordinary events with `event_origin: external-change`.
 A fourth, `store_traversal`, is the backend saying it can answer a
 neighbourhood traversal itself: `get_related_nodes` asks the store instead of
-walking the in-memory graph, so the topology no longer has to be resident.
-The store is used only while it is current — every write landed, no resync
-owed — and the in-memory walk remains the reference and the fallback.
+walking the in-memory graph. The store is used only while it is current —
+every write landed, no resync owed — and the in-memory walk remains the
+reference and the fallback, so the graph is still loaded into memory today;
+what this moves is which copy answers a traversal, which is the step a
+later change needs before the resident copy can go.
 The default file backend declares the first two and not the last two: a
 mutation is one appended line in `graph.journal.ndjson` beside `graph.json`,
 folded back into it at a checkpoint (every 100 mutations, on flush, at
