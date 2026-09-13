@@ -1960,29 +1960,40 @@ class GraphStorage:
                 # answered is absent from the result, but that is a read at an
                 # earlier instant rather than an inconsistent one, which is
                 # what any snapshot read gives you.
-                def _vanished(nid: str) -> bool:
-                    node = self.nodes.get(nid)
-                    if node is None:
-                        return True
+                def _hidden(node: "Node", nid: str) -> bool:
                     if include_archived or nid == node_id:
                         return False
                     return bool(getattr(node, "archived", False))
 
-                def _edge_vanished(eid: str) -> bool:
-                    edge = self.edges.get(eid)
-                    if edge is None:
-                        return True
-                    return not include_archived and bool(
-                        getattr(edge, "archived", False)
-                    )
-
-                if not any(_vanished(nid) for nid in found["node_ids"]) and not any(
-                    _edge_vanished(eid) for eid in found["edge_ids"]
-                ):
-                    return {
-                        "nodes": [self.nodes[nid] for nid in found["node_ids"]],
-                        "edges": [self.edges[eid] for eid in found["edge_ids"]],
-                    }
+                # Resolved in the SAME pass that checks, not a second one.
+                # This path takes no lock while every mutator holds one, so a
+                # delete landing between a `nid in self.nodes` and a
+                # `self.nodes[nid]` turns a traversal into a KeyError out of
+                # the API. The walk is careful about exactly this
+                # (`storage_search.get_related_nodes` resolves with `if nid in
+                # nodes`); one dict lookup per id, its result carried forward,
+                # is what makes the check and the use the same observation.
+                nodes = []
+                for nid in found["node_ids"]:
+                    node = self.nodes.get(nid)
+                    if node is None or _hidden(node, nid):
+                        nodes = None
+                        break
+                    nodes.append(node)
+                edges = None
+                if nodes is not None:
+                    edges = []
+                    for eid in found["edge_ids"]:
+                        edge = self.edges.get(eid)
+                        if edge is None or (
+                            not include_archived
+                            and bool(getattr(edge, "archived", False))
+                        ):
+                            edges = None
+                            break
+                        edges.append(edge)
+                if nodes is not None and edges is not None:
+                    return {"nodes": nodes, "edges": edges}
 
         return storage_search.get_related_nodes(
             self.nodes,

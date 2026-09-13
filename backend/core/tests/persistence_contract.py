@@ -44,6 +44,7 @@ from backend.core.storage import GraphStorage
 from backend.core.storage_backends import (
     BackendCapabilities,
     ChangeNotifyingBackend,
+    TraversingBackend,
     EntityOperation,
     ExternalChange,
     IncrementalGraphPersistenceBackend,
@@ -311,6 +312,10 @@ class PersistenceBackendContract:
     def _incremental(backend) -> bool:
         return capabilities_of(backend).incremental_writes
 
+    @staticmethod
+    def _traversing(backend) -> bool:
+        return capabilities_of(backend).store_traversal
+
     def _require_incremental(self, backend) -> None:
         if not self._incremental(backend):
             pytest.skip("snapshot-only backend: the entity contract does not apply")
@@ -334,6 +339,12 @@ class PersistenceBackendContract:
         if not self._notifying(backend):
             pytest.skip("backend does not report external changes")
         assert isinstance(backend, ChangeNotifyingBackend)
+
+    def test_a_store_traversal_declaration_is_backed_by_the_protocol(self, factory):
+        backend = factory()
+        if not self._traversing(backend):
+            pytest.skip("backend does not answer traversals")
+        assert isinstance(backend, TraversingBackend)
 
     # -- the snapshot contract ------------------------------------------------
 

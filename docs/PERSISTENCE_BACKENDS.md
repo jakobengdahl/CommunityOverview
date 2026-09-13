@@ -215,8 +215,9 @@ against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares all
-three capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
-clauses skipping, then with the entity contract, then with notification. One
+four capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
+clauses skipping, then with the entity contract, then with notification, then
+with store traversal. One
 clause still skips for it — the backwards-compatibility one, because a store
 written by a previous release of this backend does not exist yet. Count it
 the way step 4 says to: a skipped clause is an unverified one whatever the
@@ -460,7 +461,7 @@ be resident, which is the ceiling a shared store exists to remove. A backend
 declaring `store_traversal` offers to answer the same question itself.
 
 ```python
-class TraversingBackend(GraphPersistenceBackend, Protocol):
+class TraversingBackend(Protocol):
     def traverse(
         self,
         anchor_id: str,
@@ -505,6 +506,15 @@ whatever was reachable only through it, and recomputing that is the walk.
 
 The walk is also the fallback when the store raises. A store that cannot
 answer is not a failed request.
+
+The store walks a level at a time rather than answering in one
+depth-limited recursive query. Both return the same set; only the second
+stops when a level reaches nothing new. A recursive CTE cannot: its working
+table is keyed on (id, depth), and a recursive term may not consult its own
+accumulated result to prune ids already seen, so it runs every level the
+caller asked for. On 500 nodes and 5000 edges, complete at depth 5, asking
+for 1000 levels cost 16.3 s that way and 0.08 s this way - and
+`mcp_tools.get_related_nodes` accepts a depth with no cap.
 
 `backend/core/tests/test_traversal_equivalence.py` holds the two
 implementations to the same answer by fuzzing randomised graphs against the
@@ -630,7 +640,7 @@ writing a backend of your own against a shared server:
   what two instances of the *same* graph mostly have.
 - **Two expression indexes carry the traversal**, on `doc->>'source'` and
   `doc->>'target'`. Nothing indexes those by default, so without them the
-  recursive CTE scans every edge at every level: a depth-3 traversal of a
+  traversal scans every edge at every level: a depth-3 traversal of a
   20 000-node graph measured 3.5 seconds against 22 ms with them. Migration
   creates them best-effort, each in its own connection *outside* the
   migrating transaction — a failed statement inside that transaction aborts
@@ -657,8 +667,14 @@ app role that owns nothing but DML on tables an operator provisioned — the
 ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
 store it has every permission it actually needs on.
 
-To provision it that way, create these three tables and grant the app role
-`USAGE` on the schema plus `SELECT, INSERT, UPDATE, DELETE` on them. The
+To provision it that way, create these three tables and their two indexes,
+and grant the app role `USAGE` on the schema plus
+`SELECT, INSERT, UPDATE, DELETE` on the tables. The grants cover the app's
+reads and writes; they do not cover maintenance. A role that owns nothing
+cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
+error - the backend now prints the warning, but keeping the statistics
+current is the operator's or autovacuum's job on a store provisioned this
+way, and stale statistics leave the two indexes below unused. The
 primary key on `graph_metadata.only_row` is not decoration: the save upserts
 that row `ON CONFLICT (only_row)`, so a table without it boots cleanly and
 then fails on **every** save.

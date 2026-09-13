@@ -793,9 +793,9 @@ class TestADeclaredCapabilityMustBeImplemented:
 
 
 class TestDepthIsBoundedByTheGraphNotByTheCaller:
-    """`reach` is keyed on (id, d), so the recursion never converges early: it
-    runs the full `depth` iterations however small the graph. REST caps depth
-    at 5, the MCP tool does not cap it at all, so the bound lives in the store.
+    """REST caps depth at 5; `mcp_tools.get_related_nodes` caps it nowhere, so
+    what a caller asks for is unbounded and the store has to stop on its own.
+    It stops by converging: a level that reaches nothing new ends the walk.
     """
 
     def test_the_bound_counts_edges_because_a_path_runs_through_non_nodes(self, schema):
@@ -832,56 +832,65 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:
             _load(backend, nodes, edges)
-            # Well above the threshold that decides whether a bound is taken
-            # at all, so the bound is in force for every one of these.
+            # Every depth from the exact one to far beyond it: a bound taken
+            # from the node count (2) would cut the path short at each.
             for depth in (3, 4, 100, 5_000):
                 got = backend.traverse("anchor", depth)
                 assert "far" in got["node_ids"], (
                     f"depth {depth}: the far node is 3 hops away through two "
-                    f"ids that are not nodes; a bound of 2 (the node count) "
-                    f"cut the path short. Got {sorted(got['node_ids'])}"
+                    f"ids that are not nodes; something bounded the walk by "
+                    f"the node count. Got {sorted(got['node_ids'])}"
                 )
                 assert set(got["edge_ids"]) == {"e1", "e2", "e3"}
         finally:
             backend.close()
 
     def test_a_huge_depth_costs_no_more_than_the_graph_allows(self, schema):
+        """The shape matters more than the number here. A chain shorter than
+        the requested depth passes for any implementation that stops at the
+        graph's SIZE, which is not the same as stopping when it converges: a
+        500-node graph with 5000 edges is bounded by 5000 levels and answers
+        completely at 5. So this is dense and small-diameter, and asks for
+        1000 levels it does not need.
+
+        Measured on exactly this graph: 16.3 s for a depth-limited recursion
+        that runs every level asked for, against 0.08 s once the walk stops
+        when a level reaches nothing new. Both return the identical set, so
+        only the clock can tell them apart.
+        """
+        import random
         import time
 
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
-        # 40 nodes at depth 200_000 was chosen by measuring both sides. With
-        # the clamp: 0.006s. Without it: 20.4s on one run, and on a second the
-        # backend process was OOM-killed, which takes the whole cluster down
-        # with it. A smaller shape does not separate the two -- 12 nodes at
-        # depth 50_000 costs 1.4s unclamped, under any threshold loose enough
-        # not to be flaky.
+        rng = random.Random(11)
         nodes = {
             f"n{i}": Node(id=f"n{i}", type=NodeType.ACTOR, name=f"n{i}")
-            for i in range(40)
+            for i in range(500)
         }
         edges = {
-            f"e{i}": Edge(
-                id=f"e{i}",
-                source=f"n{i}",
-                target=f"n{i + 1}",
+            f"e{k}": Edge(
+                id=f"e{k}",
+                source=f"n{rng.randrange(500)}",
+                target=f"n{rng.randrange(500)}",
                 type=RelationshipType.RELATES_TO,
             )
-            for i in range(39)
+            for k in range(5_000)
         }
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:
             _load(backend, nodes, edges)
+            shallow = backend.traverse("n0", 5)
             start = time.perf_counter()
-            deep = backend.traverse("n0", 200_000)
+            deep = backend.traverse("n0", 1_000)
             elapsed = time.perf_counter() - start
-            assert elapsed < 2.0, (
-                f"depth 200000 on a 40-node graph took {elapsed:.1f}s; the "
-                f"recursion is running the caller's number of levels rather "
-                f"than the graph's"
+            assert elapsed < 3.0, (
+                f"depth 1000 took {elapsed:.1f}s on a graph that answers "
+                f"completely at depth 5; the walk is running the caller's "
+                f"number of levels rather than the graph's"
             )
-            # and the answer is still the whole chain
-            assert set(deep["node_ids"]) == set(nodes)
-            assert set(deep["node_ids"]) == set(backend.traverse("n0", 39)["node_ids"])
+            # and the answer is the same one the shallow traversal gave
+            assert set(deep["node_ids"]) == set(shallow["node_ids"])
+            assert set(deep["edge_ids"]) == set(shallow["edge_ids"])
         finally:
             backend.close()

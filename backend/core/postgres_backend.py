@@ -73,12 +73,6 @@ from backend.core.storage_backends import (
 # nowhere else.
 MIGRATION_LOCK_KEY = 4_872_015_733_882_119_001
 
-# A traversal deeper than this pays one count(*) to bound itself against the
-# graph; below it it does not. See `traverse` for the trade: the count is a
-# sequential scan whose cost grows with the store, while the levels the bound
-# would have saved are only ever on a graph smaller than this threshold.
-_BOUND_DEPTH_ABOVE = 64
-
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
 # allows 100, three of them reserved for superusers. Ten instances at ten
@@ -397,45 +391,41 @@ class PostgresGraphPersistenceBackend:
 
     # -- traversal contract --------------------------------------------------
 
-    _TRAVERSE = """
-    WITH RECURSIVE reach(id, d) AS (
-        SELECT %(anchor)s::text, 0
-      UNION
-        SELECT far.id, r.d + 1
-        FROM reach r
-        JOIN {edges} e
-          ON (e.doc->>'source' = r.id OR e.doc->>'target' = r.id)
-        CROSS JOIN LATERAL (
-          SELECT CASE WHEN e.doc->>'source' = r.id
-                      THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
-        ) far
-        LEFT JOIN {nodes} fn ON fn.id = far.id
-        WHERE r.d < %(depth)s
-          AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
-          AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
-          AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
-               OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
-    ),
-    expanded AS (SELECT DISTINCT id FROM reach WHERE d < %(depth)s),
-    hit_edges AS (
-        SELECT DISTINCT e.id
-        FROM expanded x
-        JOIN {edges} e
-          ON (e.doc->>'source' = x.id OR e.doc->>'target' = x.id)
-        CROSS JOIN LATERAL (
-          SELECT CASE WHEN e.doc->>'source' = x.id
-                      THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
-        ) far
-        LEFT JOIN {nodes} fn ON fn.id = far.id
-        WHERE (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
-          AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
-          AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
-               OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
-    )
-    SELECT
-      (SELECT array_agg(n.id) FROM (SELECT DISTINCT id FROM reach) r
-         JOIN {nodes} n ON n.id = r.id) AS node_ids,
-      (SELECT array_agg(id) FROM hit_edges) AS edge_ids
+    # One level of the walk, not the whole traversal. The recursion this
+    # replaced was a single depth-limited `WITH RECURSIVE`, which is the
+    # obvious way to write it and cannot be made to stop early: its working
+    # table is keyed on (id, depth), so a level that reaches nothing new still
+    # emits rows at a depth never seen before, and PostgreSQL has no way to
+    # prune ids already reached - a recursive term may not reference its own
+    # accumulated result in a subquery. So it ran the caller's number of
+    # levels whatever the graph looked like. Measured on 500 nodes / 5000
+    # edges, where the answer is complete at depth 5 (0.06 s): depth 64 cost
+    # 1.05 s, depth 200 cost 3.3 s and depth 1000 cost 16.3 s, all returning
+    # the identical set. Clamping the depth to the graph's size does not fix
+    # that - the clamp only binds when the graph has FEWER edges than the
+    # requested depth, which is never the case on a store worth putting behind
+    # this - and `mcp_tools.get_related_nodes` takes a depth with no cap at
+    # all.
+    #
+    # Driving the levels from here converges instead: the loop stops the
+    # moment a level reaches nothing new, which is what the in-memory walk
+    # does and therefore what the equivalence contract already describes. It
+    # costs one round trip per level of the graph actually crossed, rather
+    # than one recursion step per level the caller asked for.
+    _LEVEL = """
+    SELECT DISTINCT e.id AS edge_id, far.id AS far_id, (fn.id IS NOT NULL) AS is_node
+    FROM {edges} e
+    CROSS JOIN LATERAL (
+      SELECT CASE WHEN e.doc->>'source' = ANY(%(frontier)s)
+                  THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
+    ) far
+    LEFT JOIN {nodes} fn ON fn.id = far.id
+    WHERE (e.doc->>'source' = ANY(%(frontier)s)
+           OR e.doc->>'target' = ANY(%(frontier)s))
+      AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
+      AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
+      AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
+           OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
     """
 
     def traverse(
@@ -447,77 +437,36 @@ class PostgresGraphPersistenceBackend:
     ) -> Dict[str, List[str]]:
         """Bounded-depth traversal in the store. See `TraversingBackend`.
 
-        Two passes over the same recursion rather than one. The node set is
-        everything reached; the edge set is everything incident to a node that
-        was EXPANDED, which is a strictly smaller set - a node exactly `depth`
-        away is reached but never expanded, so an edge between two such nodes
-        belongs to neither endpoint's expansion and is not returned. Collapsing
-        the two into one pass returns those edges and quietly disagrees with
-        the in-memory walk.
+        A level at a time, from here, exactly as the in-memory walk does it:
+        the ids a level reaches become the next level's frontier, and the loop
+        ends when a level reaches nothing new. That is what bounds the cost by
+        the graph rather than by the caller's `depth` - see `_LEVEL` for what
+        the single-query version cost instead.
 
-        `reach` is keyed on (id, d), so a node found by two paths of different
-        length appears twice. That is bounded by `depth` and it is not a
-        correctness problem: the second appearance is at a greater distance and
-        either expands to the same neighbours or is past the limit and does not
-        expand at all.
+        The edge set is everything incident to a node that was EXPANDED, which
+        is strictly smaller than everything incident to a node that was
+        reached: a node exactly `depth` away is reached but never expanded, so
+        an edge between two such nodes belongs to neither endpoint's expansion
+        and is not returned. Collecting each level's edges from the frontier
+        being expanded gives that for free; the single-query version needed a
+        second pass over the recursion to get it.
+
+        Ids that are not nodes are traversed THROUGH but not returned - the
+        dangling-endpoint rule - so a path can be longer than the graph has
+        nodes, and the frontier carries them while `node_ids` does not.
         """
         self._ensure_schema()
-        # `reach` is keyed on (id, d), so a level that reaches nothing new still
-        # emits rows at a depth never seen before: the recursion runs the full
-        # `depth` iterations whatever the graph looks like, instead of stopping
-        # when it converges. PostgreSQL offers no way to prune ids already
-        # reached - a recursive term cannot reference its own accumulated
-        # result in a subquery - so the bound has to be imposed from outside.
-        # Measured on a 40-node chain: depth 200000 took 20 seconds on one run
-        # and got the backend process OOM-killed on the next, against 6 ms
-        # once bounded. REST caps depth at 5; the MCP tool does not cap it at
-        # all, so this is where it lands.
         depth = max(0, depth)
-        query = sql.SQL(self._TRAVERSE).format(
-            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
-        )
         # `.value`, never `str()`. RelationshipType is a str-Enum, and str()
         # of one is "RelationshipType.RELATES_TO" while the stored document
         # holds "RELATES_TO" - so a filter built with str() silently matches
         # nothing and the traversal returns the anchor alone. The protocol asks
         # for strings; this coerces an enum that arrives anyway, correctly.
         types = [getattr(t, "value", t) for t in (relationship_types or [])]
-        params = {
-            "anchor": anchor_id,
-            "depth": depth,
-            "archived_ok": bool(include_archived),
-            "any_type": not types,
-            "types": types,
-        }
+        query = sql.SQL(self._LEVEL).format(
+            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
+        )
         with self._pool.connection() as conn:
-            if depth > _BOUND_DEPTH_ABOVE:
-                # Edges, not nodes. A traversal steps THROUGH an id that is not
-                # a node - the dangling-endpoint rule in the protocol says so -
-                # so a path can be longer than there are nodes, and bounding by
-                # the node count truncates it: a 2-node graph joined by a
-                # 3-edge chain of absent ids loses its far node and an edge.
-                # The edge count is sound because every level that reaches
-                # anything new consumes an edge no level consumed before: an
-                # edge already traversed has both its ends already visited, so
-                # it can introduce nothing later. Past that count the answer
-                # cannot change.
-                #
-                # Only above the threshold, because the count is a sequential
-                # scan and the traversal it guards is not: measured on 300k
-                # edges, 13-17 ms of count against a 2-4 ms depth-2 traversal,
-                # and on a store that size the bound cannot bind at these
-                # depths anyway. Below the threshold the price is running a few
-                # levels past convergence on a small graph - 5-6 ms at depth 64
-                # on a 19-edge chain, against 3 ms at its natural bound. Both
-                # are small; this is the one that stays small as the store
-                # grows.
-                edge_count = conn.execute(
-                    sql.SQL("SELECT count(*) FROM {}").format(
-                        self._table("graph_edges")
-                    )
-                ).fetchone()[0]
-                depth = min(depth, int(edge_count))
-                params["depth"] = depth
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
             # nothing at all rather than a lone anchor.
@@ -529,11 +478,37 @@ class PostgresGraphPersistenceBackend:
             ).fetchone()
             if not present:
                 return {"node_ids": [], "edge_ids": []}
-            row = conn.execute(query, params).fetchone()
-        return {
-            "node_ids": list(row[0] or []),
-            "edge_ids": list(row[1] or []),
-        }
+
+            seen = {anchor_id}
+            node_ids = [anchor_id]
+            edge_ids: List[str] = []
+            edges_seen: set = set()
+            frontier = [anchor_id]
+            for _ in range(depth):
+                if not frontier:
+                    break
+                rows = conn.execute(
+                    query,
+                    {
+                        "frontier": frontier,
+                        "anchor": anchor_id,
+                        "archived_ok": bool(include_archived),
+                        "any_type": not types,
+                        "types": types,
+                    },
+                ).fetchall()
+                reached = []
+                for edge_id, far_id, is_node in rows:
+                    if edge_id not in edges_seen:
+                        edges_seen.add(edge_id)
+                        edge_ids.append(edge_id)
+                    if far_id not in seen:
+                        seen.add(far_id)
+                        reached.append(far_id)
+                        if is_node:
+                            node_ids.append(far_id)
+                frontier = reached
+        return {"node_ids": node_ids, "edge_ids": edge_ids}
 
     def exists(self) -> bool:
         self._ensure_schema()
@@ -661,10 +636,7 @@ class PostgresGraphPersistenceBackend:
                 # store against itself, which is the case unknown() exists
                 # for: the other instances reload.
                 self._announce(conn, None)
-        # Outside the transaction: ANALYZE cannot run inside one that has
-        # written the table it analyses and have the result visible, and this
-        # must not be able to fail the save.
-        #
+
         # A whole-graph save replaces every row and leaves the planner's
         # statistics describing a table that no longer exists - an empty one,
         # for a store being written for the first time. The traversal's
@@ -673,17 +645,39 @@ class PostgresGraphPersistenceBackend:
         # statistics and 2.2 ms once they were current, an 85x difference the
         # indexes alone do not deliver. Autovacuum gets there on its own, but
         # not before an instance that has just loaded starts serving.
-        #
         # ~150 ms on that 300k table, against 10.4 s for the save it follows.
-        # Best-effort for the same reason as the indexes: ANALYZE needs more
-        # than the DML privileges an operator-provisioned role may carry.
+        #
+        # Outside the transaction so it cannot fail the save. That is the whole
+        # reason: ANALYZE is perfectly legal inside a transaction block and its
+        # result is visible there - unlike VACUUM - so a comment claiming
+        # otherwise would be wrong.
+        #
+        # The notice handler is not decoration. A role with the DML grants
+        # docs/PERSISTENCE_BACKENDS.md tells an operator to hand out, and no
+        # ownership, does not get an error from ANALYZE: the server emits
+        # `WARNING: permission denied to analyze "graph_edges", skipping it`
+        # and reports success. Without this, the one deployment most likely to
+        # hit it is the one that would never be told - and it would keep the
+        # stale-statistics regression this exists to close. CREATE INDEX in the
+        # same situation DOES raise, which is why the two are handled
+        # differently rather than alike.
+        def _report(diag: Any) -> None:
+            print(
+                f"Warning: ANALYZE after save: {diag.severity}: {diag.message_primary}"
+            )
+
         try:
             with self._pool.connection() as conn:
-                for table in ("graph_nodes", "graph_edges"):
-                    conn.execute(sql.SQL("ANALYZE {}").format(self._table(table)))
+                conn.add_notice_handler(_report)
+                try:
+                    for table in ("graph_nodes", "graph_edges"):
+                        conn.execute(sql.SQL("ANALYZE {}").format(self._table(table)))
+                finally:
+                    conn.remove_notice_handler(_report)
         except Exception as exc:
             print(
-                f"Warning: could not ANALYZE after save; the traversal's indexes may go unused: {exc}"
+                f"Warning: could not ANALYZE after save; the traversal's "
+                f"indexes may go unused: {exc}"
             )
 
     def default_graph_name(self) -> str:

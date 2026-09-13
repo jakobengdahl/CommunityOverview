@@ -124,7 +124,7 @@ mutation is one appended line in `graph.journal.ndjson` beside `graph.json`,
 folded back into it at a checkpoint (every 100 mutations, on flush, at
 shutdown), and one graph file is not a store two instances can share. The
 optional `PostgresGraphPersistenceBackend` declares all four, reporting over
-the server's own LISTEN/NOTIFY and traversing with a recursive CTE; nothing
+the server's own LISTEN/NOTIFY and traversing a level at a time; nothing
 selects it yet. See
 `docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against
 — executable as `backend/core/tests/persistence_contract.py`, which every
