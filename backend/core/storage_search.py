@@ -87,9 +87,6 @@ _CORPUS_SEPARATOR = "\x00"
 # takes the index. See the selectivity gate in LexicalIndex.candidates.
 _MIN_SELECTIVE_HITS = 64
 
-# Snapshot attempts before a rebuild gives up and lets the walk answer.
-# A retry costs one pass over the records; spinning here would block a
-# query, and declining is always correct.
 # Queries the previous corpus had to answer before building another one is
 # worth it. A corpus costs O(total text) to build and saves a fraction of a
 # query each time it answers one, so it only pays on a load that reads many

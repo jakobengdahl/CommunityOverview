@@ -640,6 +640,7 @@ class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
         write rather than trusting the ordering by eye."""
         import os
 
+        from backend.config.config_loader import reset_loader
         from backend.core.storage import GraphStorage
 
         cwd = os.getcwd()
@@ -648,6 +649,13 @@ class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
             storage = GraphStorage()
         finally:
             os.chdir(cwd)
+            # Building a GraphStorage resolves the config loader against the
+            # working directory and caches it process-wide. Restoring the
+            # directory does not undo that, and the stale loader carries no
+            # relationship types - so a later test's applicability check
+            # silently passes everything. Whether that surfaces depends on
+            # which file pytest runs next, which is not isolation.
+            reset_loader()
 
         def covered(where):
             missing = set(storage.nodes) - set(storage._searchable_text_cache)
