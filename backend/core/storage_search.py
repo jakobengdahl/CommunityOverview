@@ -7,6 +7,7 @@ search/similarity/related methods here and passes ``self.nodes``,
 ``self.edges``, ``self.graph``, etc. as arguments.
 """
 
+import threading
 from types import MappingProxyType
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -113,15 +114,7 @@ class LexicalIndex:
     pays for one rebuild rather than one per write.
     """
 
-    __slots__ = (
-        "_fields",
-        "_records",
-        "_corpus",
-        "_ids",
-        "_starts",
-        "_dirty",
-        "_version",
-    )
+    __slots__ = ("_fields", "_records", "_built", "_dirty", "_lock")
 
     def __init__(self) -> None:
         self._fields: Dict[str, MatchFields] = {}
@@ -134,14 +127,19 @@ class LexicalIndex:
         # earlier revisions of this comment carried two, both wrong. It is a
         # rounding error next to what the prepared fields save either way.
         self._records = MappingProxyType(self._fields)
-        self._corpus: Optional[str] = None
-        self._ids: List[str] = []
-        self._starts = None
+        # The corpus, the ids it was built from and their start offsets, as
+        # ONE value. They only mean anything together: an id list from one
+        # build read against offsets from another maps every hit to the wrong
+        # record. Publishing them in three assignments let two rebuilds
+        # interleave and do exactly that, and the wrong record is then filtered
+        # out by the caller's own re-check - so the node that really matched
+        # just disappears, with no error. One assignment, read once into a
+        # local, cannot tear.
+        self._built: Optional[Tuple[List[str], str, object]] = None
         self._dirty = True
-        # Counts writes, so a rebuild can tell whether one landed while it
-        # was running. `_dirty` alone cannot: the rebuild clears it, which
-        # would discard a concurrent writer's flag. See _rebuild.
-        self._version = 0
+        # Serialises rebuilds only. Readers never take it, and writers only set
+        # a flag, so a search still runs lock-free against a settled corpus.
+        self._lock = threading.Lock()
 
     # -- the dict surface this replaces ------------------------------------
     def __iter__(self):
@@ -158,26 +156,25 @@ class LexicalIndex:
 
     def __setitem__(self, node_id: str, fields: MatchFields) -> None:
         self._fields[node_id] = fields
+        # After the write, never before: a rebuild that clears the flag first
+        # and snapshots second then either sees this record or sees the flag.
         self._dirty = True
-        self._version += 1
 
     def get(self, node_id: str, default=None):
         return self._fields.get(node_id, default)
 
     def pop(self, node_id: str, default=None):
+        removed = self._fields.pop(node_id, default)
         self._dirty = True
-        self._version += 1
-        return self._fields.pop(node_id, default)
+        return removed
 
     def clear(self) -> None:
         self._fields.clear()
         self._dirty = True
-        self._version += 1
 
     def update(self, other) -> None:
         self._fields.update(other)
         self._dirty = True
-        self._version += 1
 
     @property
     def records(self):
@@ -192,50 +189,67 @@ class LexicalIndex:
 
     # -- the corpus --------------------------------------------------------
     def _rebuild(self) -> None:
-        # Read the write counter BEFORE snapshotting, and end by asking whether
-        # it moved. Clearing `_dirty` unconditionally loses a write that lands
-        # mid-rebuild: the writer sets the flag, the rebuild then clears it, and
-        # the corpus is marked clean without that node in it - invisible to the
-        # candidate path until some unrelated write happens to dirty the index
-        # again. `GraphStorage.search_nodes` holds no lock while all fifteen
-        # writers do, and the rebuild takes ~100 ms at 100k nodes, so that
-        # overlap is ordinary rather than a narrow race. Reading the counter
-        # first makes the failure mode a wasted rebuild, never a lost one.
-        for _ in range(_REBUILD_SNAPSHOT_TRIES):
-            version = self._version
-            try:
-                records = list(self._fields.items())
-            except RuntimeError:
-                # Resized mid-iteration by a concurrent writer. Retry: the next
-                # attempt reads a fresh counter and a settled dict.
-                continue
-            break
-        else:
-            # Writes are landing faster than a snapshot completes. Decline
-            # rather than guess - the walk is the same answer - and stay dirty
-            # so the next query tries again.
-            self._corpus, self._ids, self._starts = None, [], None
-            self._dirty = True
-            return
-        self._ids = [node_id for node_id, _ in records]
-        self._corpus = _CORPUS_SEPARATOR.join(fields.text for _, fields in records)
-        starts, position = [], 0
-        for _, fields in records:
-            starts.append(position)
-            position += len(fields.text) + 1
-        try:
-            import numpy as np
+        """Rebuild the corpus, under the lock, and publish it in one piece.
 
-            self._starts = np.asarray(starts, dtype="int64")
-        except ImportError:
-            # Decline rather than carry a second implementation. There was a
-            # `bisect` path here; numpy is a base requirement, so nothing could
-            # reach it and a review could mutate its body to `raise` without a
-            # single test noticing. Untestable code that claims to be a safety
-            # net is worse than none. Declining degrades to the plain walk,
-            # which is the same answer and is well covered.
-            self._starts = None
-        self._dirty = self._version != version
+        Two things have to hold at once, and each was got wrong on its own way
+        here before. The flag is cleared BEFORE the snapshot, never after: a
+        writer that lands mid-rebuild sets it again, so the worst case is a
+        wasted rebuild rather than a node that silently never appears. And the
+        three derived structures are published as one value, because a corpus
+        read against another build's offsets maps every hit to the wrong
+        record - which the caller's own re-check then discards, so the node
+        that genuinely matched simply vanishes, with no error to notice.
+
+        The lock covers only this. `GraphStorage.search_nodes` holds no lock
+        while all fifteen writers do, so rebuilds genuinely overlap; a second
+        thread that waits here finds the flag already clear and returns without
+        doing the work twice.
+        """
+        with self._lock:
+            if not self._dirty:
+                # Another thread rebuilt while this one waited.
+                return
+            for _ in range(_REBUILD_SNAPSHOT_TRIES):
+                self._dirty = False
+                try:
+                    records = list(self._fields.items())
+                except RuntimeError:
+                    # Resized mid-iteration by a concurrent writer. Retry
+                    # against a settled dict.
+                    self._dirty = True
+                    continue
+                break
+            else:
+                # Writes are landing faster than a snapshot completes. Decline
+                # rather than guess - the walk is the same answer - and stay
+                # dirty so the next query tries again.
+                self._built = None
+                self._dirty = True
+                return
+
+            ids = [node_id for node_id, _ in records]
+            corpus = _CORPUS_SEPARATOR.join(fields.text for _, fields in records)
+            starts, position = [], 0
+            for _, fields in records:
+                starts.append(position)
+                position += len(fields.text) + 1
+            try:
+                import numpy as np
+
+                offsets = np.asarray(starts, dtype="int64")
+            except ImportError:
+                # Decline rather than carry a second implementation. There was
+                # a `bisect` path here; numpy is a base requirement, so nothing
+                # could reach it and a review could mutate its body to `raise`
+                # without a single test noticing. Untestable code that claims
+                # to be a safety net is worse than none. Declining degrades to
+                # the plain walk, which is the same answer and is well covered.
+                self._built = None
+                return
+            # The one publish. `_dirty` is deliberately NOT cleared here - it
+            # was cleared before the snapshot, and anything set since is a
+            # write this build did not see.
+            self._built = (ids, corpus, offsets)
 
     def candidates(self, term: str) -> Optional[List[str]]:
         """Node ids whose text contains *term*, or None to say "scan instead".
@@ -249,12 +263,15 @@ class LexicalIndex:
             return None
         if self._dirty:
             self._rebuild()
-        if self._starts is None:
+        # Read the triple ONCE. A concurrent rebuild may replace it a moment
+        # from now; what must never happen is reading half of one build and
+        # half of the next.
+        built = self._built
+        if built is None:
             return None
-        if not self._ids:
+        ids, corpus, starts = built
+        if not ids:
             return []
-
-        corpus = self._corpus
         # One C-level pass to decide whether to take this path at all. The
         # index wins by not visiting most nodes, so it stops winning when the
         # term matches most of them: measured at 100k nodes it costs 4.25 us a
@@ -276,25 +293,19 @@ class LexicalIndex:
         # fraction tolerates two hits, at n = 12 three, so an ordinary query on
         # a small graph keeps falling back for no gain. Nothing can dominate a
         # scan that short, so there is nothing to decline for.
-        if occurrences > max(_MIN_SELECTIVE_HITS, len(self._ids) // 4):
+        if occurrences > max(_MIN_SELECTIVE_HITS, len(ids) // 4):
             return None
 
         found, position = [], corpus.find(term)
         while position != -1:
             found.append(position)
             position = corpus.find(term, position + 1)
-        if not found:
-            return []
 
         import numpy as np
 
         indices = (
-            np.searchsorted(
-                self._starts, np.asarray(found, dtype="int64"), side="right"
-            )
-            - 1
+            np.searchsorted(starts, np.asarray(found, dtype="int64"), side="right") - 1
         )
-        ids = self._ids
         # One node can hold several occurrences. The positions come out
         # ascending, so the indices are non-decreasing and duplicates are
         # adjacent - dropping them needs no set and no membership test, and on
@@ -499,6 +510,13 @@ def search_nodes(
         not match_all
         and single_term is not None
         and hasattr(searchable_text_cache, "candidates")
+        # The index can only offer ids it holds records for, so it may only
+        # answer while it covers `nodes` exactly. Every write to `nodes` in
+        # storage.py is paired with a write here, but the pair is two
+        # statements and this function takes no lock, so a reader can land
+        # between them. Sizes are O(1) and disagree exactly then; the walk
+        # answers for that one query.
+        and len(searchable_text_cache) == len(nodes)
     ):
         candidate_ids = searchable_text_cache.candidates(single_term)
 
@@ -536,14 +554,13 @@ def search_nodes(
             results.append(node)
             continue
 
-        # Reachable on the fallback walk, not on the candidate path: the index
-        # offers ids it holds records for. So a node present in `nodes` but
-        # missing from the index is silently absent from a candidate-path
-        # answer, where the walk would have built its record and returned it.
-        # Nothing can produce that today - every write to `nodes` in
-        # storage.py is paired with a write here - and the same pairing is what
-        # makes the two dicts iterate in step, which is what lets the `-index`
-        # tie-break reproduce the old stable sort.
+        # Reachable on the fallback walk; the candidate path is now gated on
+        # the index covering `nodes`, so it cannot reach here with a miss. The
+        # walk builds the record on demand rather than dropping the node -
+        # which is what `apply_external_change` documents as "a miss is
+        # refilled on demand". The same pairing that keeps the two dicts the
+        # same size keeps them iterating in step, which is what lets the
+        # `-index` tie-break reproduce the old stable sort.
         fields = records_get(node.id)
         if fields is None:
             fields = build_match_fields(node, type_searchable_text)

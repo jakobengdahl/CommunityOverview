@@ -8,6 +8,8 @@ the answer changes; these tests are mostly about that, and about the index
 noticing every way its corpus can go stale.
 """
 
+import threading
+
 import pytest
 
 from backend.core.models import Node, NodeType
@@ -496,26 +498,157 @@ class TestAWriteThatLandsWhileTheCorpusIsBeingRebuilt:
         assert not index._dirty
 
         # and a second query must not rebuild again
-        before = index._corpus
+        before = index._built
         index.candidates("shared")
-        assert index._corpus is before
+        assert index._built is before
 
     @pytest.mark.parametrize(
-        "mutate",
+        "mutate,then",
         [
-            pytest.param(lambda i, n: i.__setitem__("x", n), id="setitem"),
-            pytest.param(lambda i, n: i.pop("n1"), id="pop"),
-            pytest.param(lambda i, n: i.clear(), id="clear"),
-            pytest.param(lambda i, n: i.update({"x": n}), id="update"),
+            pytest.param(
+                lambda i, n: i.__setitem__("x", n),
+                lambda i: i.candidates("sentinel") == ["x"],
+                id="setitem",
+            ),
+            pytest.param(
+                lambda i, n: i.pop("n1"),
+                lambda i: i.candidates("shared") == ["n0", "n2"],
+                id="pop",
+            ),
+            pytest.param(
+                lambda i, n: i.clear(),
+                lambda i: i.candidates("shared") == [],
+                id="clear",
+            ),
+            pytest.param(
+                lambda i, n: i.update({"x": n}),
+                lambda i: i.candidates("sentinel") == ["x"],
+                id="update",
+            ),
         ],
     )
-    def test_every_mutator_moves_the_counter_a_rebuild_reads(self, mutate):
-        """Each of the four must bump it individually. A mutator that only set
-        `_dirty` would be invisible to a rebuild already in flight, which is
-        exactly the hole these tests exist to close."""
+    def test_every_mutator_is_visible_to_a_rebuild_already_in_flight(
+        self, monkeypatch, mutate, then
+    ):
+        """Each of the four, landing mid-rebuild, must still be seen. Asserting
+        on a counter would pin the mechanism rather than the behaviour, and
+        would pass against code that kept the counter and lost the write."""
         index = _index([_node(f"n{i}", f"node {i} shared") for i in range(3)])
         index.candidates("shared")
+        index._dirty = True
 
-        before = index._version
-        mutate(index, build_match_fields(_node("x", "x shared"), TYPE_TEXT))
-        assert index._version != before
+        sentinel = build_match_fields(_node("x", "x sentinel shared"), TYPE_TEXT)
+        self._during_rebuild(monkeypatch, index, lambda: mutate(index, sentinel))
+
+        assert then(index)
+
+
+class TestTwoRebuildsAtOnceCannotPublishHalfOfEach:
+    """The corpus, the ids it came from and their offsets only mean anything
+    together. Published as three assignments, two overlapping rebuilds could
+    leave one build's ids against another's offsets - and then every hit maps
+    to the wrong record, the caller's own `term in fields.text` re-check
+    discards it, and the node that genuinely matched simply disappears. No
+    exception, no wrong node returned: just a missing one.
+    """
+
+    @staticmethod
+    def _second_rebuild_lands_inside_the_first(index, add):
+        """Hold the first rebuild inside its corpus join, run a whole second
+        rebuild against a larger record set, then let the first finish."""
+        from backend.core import storage_search
+
+        separator = storage_search._CORPUS_SEPARATOR
+        real_join = separator.join
+        armed, gate = [True], threading.Event()
+
+        class _HoldsTheFirstBuild(str):
+            def join(self, parts):
+                joined = real_join(parts)
+                if armed[0]:
+                    armed[0] = False
+                    gate.wait(10)
+                return joined
+
+        def second():
+            threading.Event().wait(0.2)
+            add()
+            storage_search._CORPUS_SEPARATOR = separator
+            index._dirty = True
+            index._rebuild()
+            storage_search._CORPUS_SEPARATOR = holder
+            gate.set()
+
+        holder = _HoldsTheFirstBuild(separator)
+        storage_search._CORPUS_SEPARATOR = holder
+        worker = threading.Thread(target=second)
+        worker.start()
+        try:
+            index._dirty = True
+            index._rebuild()
+        finally:
+            worker.join(timeout=15)
+            storage_search._CORPUS_SEPARATOR = separator
+        assert not armed[0], "the first build was never held - nothing was raced"
+
+    def test_the_published_corpus_ids_and_offsets_are_always_one_build(self):
+        index = _index(
+            [_node(f"n{i}", f"node{i} needle{i:03d} pad") for i in range(60)]
+        )
+        index.candidates("needle005")
+
+        def add():
+            for i in range(60, 90):
+                node = _node(f"n{i}", f"node{i} needle{i:03d} pad")
+                index._fields[node.id] = build_match_fields(node, TYPE_TEXT)
+
+        self._second_rebuild_lands_inside_the_first(index, add)
+
+        ids, corpus, starts = index._built
+        assert len(ids) == len(starts) == corpus.count("\x00") + 1
+
+    def test_a_node_is_not_lost_when_two_rebuilds_overlap(self):
+        """The consequence, not just the shape. `needle070` belongs to a record
+        only the second build saw; against the first build's offsets its hit
+        maps to some other record and is then filtered out."""
+        index = _index(
+            [_node(f"n{i}", f"node{i} needle{i:03d} pad") for i in range(60)]
+        )
+        index.candidates("needle005")
+
+        def add():
+            for i in range(60, 90):
+                node = _node(f"n{i}", f"node{i} needle{i:03d} pad")
+                index._fields[node.id] = build_match_fields(node, TYPE_TEXT)
+
+        self._second_rebuild_lands_inside_the_first(index, add)
+
+        assert index.candidates("needle070") == ["n70"]
+        assert index.candidates("needle005") == ["n5"]
+
+
+class TestTheIndexOnlyAnswersWhileItCoversTheNodes:
+    """Every write to `nodes` is paired with a write to the index, but the pair
+    is two statements and `search_nodes` takes no lock - so a reader can land
+    between them. The index can only offer ids it holds records for, so on the
+    candidate path a node in `nodes` but not yet in the index would be silently
+    absent from the answer. The walk builds its record on demand instead.
+    """
+
+    def test_a_node_the_index_has_not_seen_yet_is_still_found(self):
+        nodes = [_node("a", "alpha findmehere"), _node("b", "beta findmehere")]
+        by_id = {node.id: node for node in nodes}
+        index = _index([nodes[0]])  # `b` reached `nodes` but not the index yet
+
+        found = search_nodes(by_id, index, TYPE_TEXT, query="findmehere", limit=10)
+
+        assert [n.id for n in found] == ["a", "b"]
+
+    def test_a_record_the_nodes_no_longer_have_does_not_stop_the_index(self):
+        nodes = [_node("a", "alpha findmehere")]
+        by_id = {node.id: node for node in nodes}
+        index = _index(nodes + [_node("gone", "gone findmehere")])
+
+        found = search_nodes(by_id, index, TYPE_TEXT, query="findmehere", limit=10)
+
+        assert [n.id for n in found] == ["a"]
