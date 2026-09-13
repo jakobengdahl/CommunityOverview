@@ -73,6 +73,12 @@ from backend.core.storage_backends import (
 # nowhere else.
 MIGRATION_LOCK_KEY = 4_872_015_733_882_119_001
 
+# A traversal deeper than this pays one count(*) to bound itself against the
+# graph; below it it does not. See `traverse` for the trade: the count is a
+# sequential scan whose cost grows with the store, while the levels the bound
+# would have saved are only ever on a graph smaller than this threshold.
+_BOUND_DEPTH_ABOVE = 64
+
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
 # allows 100, three of them reserved for superusers. Ten instances at ten
@@ -459,13 +465,13 @@ class PostgresGraphPersistenceBackend:
         # `reach` is keyed on (id, d), so a level that reaches nothing new still
         # emits rows at a depth never seen before: the recursion runs the full
         # `depth` iterations whatever the graph looks like, instead of stopping
-        # when it converges. Measured on a 40-node chain: depth 200000 took
-        # 20 seconds on one run and got the backend process OOM-killed on the
-        # next, against 6 ms once clamped.
-        # REST caps depth at 5; the MCP tool does not cap it at all, so the
-        # bound has to live here. A BFS cannot usefully go deeper than there
-        # are nodes, so clamping to the node count is exact rather than a
-        # policy: past that the answer cannot change.
+        # when it converges. PostgreSQL offers no way to prune ids already
+        # reached - a recursive term cannot reference its own accumulated
+        # result in a subquery - so the bound has to be imposed from outside.
+        # Measured on a 40-node chain: depth 200000 took 20 seconds on one run
+        # and got the backend process OOM-killed on the next, against 6 ms
+        # once bounded. REST caps depth at 5; the MCP tool does not cap it at
+        # all, so this is where it lands.
         depth = max(0, depth)
         query = sql.SQL(self._TRAVERSE).format(
             edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
@@ -484,13 +490,33 @@ class PostgresGraphPersistenceBackend:
             "types": types,
         }
         with self._pool.connection() as conn:
-            if depth:
-                node_count = conn.execute(
+            if depth > _BOUND_DEPTH_ABOVE:
+                # Edges, not nodes. A traversal steps THROUGH an id that is not
+                # a node - the dangling-endpoint rule in the protocol says so -
+                # so a path can be longer than there are nodes, and bounding by
+                # the node count truncates it: a 2-node graph joined by a
+                # 3-edge chain of absent ids loses its far node and an edge.
+                # The edge count is sound because every level that reaches
+                # anything new consumes an edge no level consumed before: an
+                # edge already traversed has both its ends already visited, so
+                # it can introduce nothing later. Past that count the answer
+                # cannot change.
+                #
+                # Only above the threshold, because the count is a sequential
+                # scan and the traversal it guards is not: measured on 300k
+                # edges, 13-17 ms of count against a 2-4 ms depth-2 traversal,
+                # and on a store that size the bound cannot bind at these
+                # depths anyway. Below the threshold the price is running a few
+                # levels past convergence on a small graph - 5-6 ms at depth 64
+                # on a 19-edge chain, against 3 ms at its natural bound. Both
+                # are small; this is the one that stays small as the store
+                # grows.
+                edge_count = conn.execute(
                     sql.SQL("SELECT count(*) FROM {}").format(
-                        self._table("graph_nodes")
+                        self._table("graph_edges")
                     )
                 ).fetchone()[0]
-                depth = min(depth, int(node_count))
+                depth = min(depth, int(edge_count))
                 params["depth"] = depth
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
@@ -635,6 +661,30 @@ class PostgresGraphPersistenceBackend:
                 # store against itself, which is the case unknown() exists
                 # for: the other instances reload.
                 self._announce(conn, None)
+        # Outside the transaction: ANALYZE cannot run inside one that has
+        # written the table it analyses and have the result visible, and this
+        # must not be able to fail the save.
+        #
+        # A whole-graph save replaces every row and leaves the planner's
+        # statistics describing a table that no longer exists - an empty one,
+        # for a store being written for the first time. The traversal's
+        # expression indexes are then present and unused: measured on 300k
+        # edges, a depth-2 traversal took 185 ms planned against stale
+        # statistics and 2.2 ms once they were current, an 85x difference the
+        # indexes alone do not deliver. Autovacuum gets there on its own, but
+        # not before an instance that has just loaded starts serving.
+        #
+        # ~150 ms on that 300k table, against 10.4 s for the save it follows.
+        # Best-effort for the same reason as the indexes: ANALYZE needs more
+        # than the DML privileges an operator-provisioned role may carry.
+        try:
+            with self._pool.connection() as conn:
+                for table in ("graph_nodes", "graph_edges"):
+                    conn.execute(sql.SQL("ANALYZE {}").format(self._table(table)))
+        except Exception as exc:
+            print(
+                f"Warning: could not ANALYZE after save; the traversal's indexes may go unused: {exc}"
+            )
 
     def default_graph_name(self) -> str:
         return self._graph_name

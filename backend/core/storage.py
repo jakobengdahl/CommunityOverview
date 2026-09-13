@@ -1940,48 +1940,49 @@ class GraphStorage:
                 print(f"Warning: store traversal failed, walking instead: {exc}")
             else:
                 # Membership was decided by the store, at the store's moment;
-                # the payloads are resolved here, at ours. Between the two a
-                # node can be archived, and returning it then would be a state
-                # neither engine ever held - the store said include, the
-                # payload says archived. The walk cannot produce that, because
-                # it decides and resolves from the same dictionary in one pass.
-                # Re-applying the filter to what we actually return is what
-                # makes the answer self-consistent whenever it was decided.
-                # The anchor keeps its exemption, as it does in the walk.
-                def _still_visible(node: "Node") -> bool:
-                    if include_archived or node.id == node_id:
+                # the payloads are resolved here, at ours. Between the two the
+                # graph can change, and then there is no sound way to patch
+                # the store's answer into one: dropping a node that has since
+                # been archived leaves behind whatever was only reachable
+                # THROUGH it, which is a state neither engine ever held - the
+                # same objection that made returning the archived node wrong.
+                # Recomputing reachability here would be reimplementing the
+                # walk beside the walk.
+                #
+                # So this does not patch. It asks one question - did anything
+                # the store decided on stop being what it was - and when the
+                # answer is yes it falls through to the walk, which decides and
+                # resolves from one dictionary in one pass and is therefore
+                # self-consistent by construction. That is the fallback G3
+                # already relies on; this is one more reason to take it.
+                #
+                # Only disappearances count. A node ADDED since the store
+                # answered is absent from the result, but that is a read at an
+                # earlier instant rather than an inconsistent one, which is
+                # what any snapshot read gives you.
+                def _vanished(nid: str) -> bool:
+                    node = self.nodes.get(nid)
+                    if node is None:
                         return True
-                    return not getattr(node, "archived", False)
+                    if include_archived or nid == node_id:
+                        return False
+                    return bool(getattr(node, "archived", False))
 
-                nodes = [
-                    self.nodes[nid]
-                    for nid in found["node_ids"]
-                    if nid in self.nodes and _still_visible(self.nodes[nid])
-                ]
-                visible = {n.id for n in nodes}
-                return {
-                    "nodes": nodes,
-                    "edges": [
-                        self.edges[eid]
-                        for eid in found["edge_ids"]
-                        if eid in self.edges
-                        and (
-                            include_archived
-                            or not getattr(self.edges[eid], "archived", False)
-                        )
-                        # An edge whose endpoint we just dropped goes with it.
-                        # A far endpoint that is not in `nodes` at all is a
-                        # dangling edge, which the walk does return.
-                        and (
-                            self.edges[eid].source in visible
-                            or self.edges[eid].source not in self.nodes
-                        )
-                        and (
-                            self.edges[eid].target in visible
-                            or self.edges[eid].target not in self.nodes
-                        )
-                    ],
-                }
+                def _edge_vanished(eid: str) -> bool:
+                    edge = self.edges.get(eid)
+                    if edge is None:
+                        return True
+                    return not include_archived and bool(
+                        getattr(edge, "archived", False)
+                    )
+
+                if not any(_vanished(nid) for nid in found["node_ids"]) and not any(
+                    _edge_vanished(eid) for eid in found["edge_ids"]
+                ):
+                    return {
+                        "nodes": [self.nodes[nid] for nid in found["node_ids"]],
+                        "edges": [self.edges[eid] for eid in found["edge_ids"]],
+                    }
 
         return storage_search.get_related_nodes(
             self.nodes,
@@ -1997,12 +1998,20 @@ class GraphStorage:
         """Whether the store can be trusted to answer a traversal right now."""
         if not self._backend_capabilities.store_traversal:
             return False
+        write = self._last_write
+        if write is not None and not write.done():
+            return False
+        # Read AFTER done(), not before. _do_apply sets this flag and then
+        # raises, so the flag is set before the Future finishes. Reading it
+        # first admits: flag False here -> the worker sets it and finishes ->
+        # done() True -> the guard calls a store it has just been told is
+        # stale. In this order, done() being true means the flag write has
+        # already happened, so the window closes for free.
         if self._resync_pending:
             # The last write failed and the whole graph is owed to the store;
             # what is there now is not what we hold.
             return False
-        write = self._last_write
-        return write is None or write.done()
+        return True
 
     def find_similar_nodes(
         self,

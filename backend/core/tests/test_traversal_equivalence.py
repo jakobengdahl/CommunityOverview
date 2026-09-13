@@ -266,14 +266,35 @@ class TestTheStoreAnswersWhatTheWalkWould:
             backend.close()
 
     def test_an_anchor_that_is_not_in_the_graph_returns_nothing(self, schema):
-        nodes = {"a": Node(id="a", type=NodeType.ACTOR, name="a")}
+        # The graph has to contain edges that NAME the absent anchor, or this
+        # asserts nothing: with no edges the CTE aggregates to NULL whether the
+        # pre-check runs or not, and deleting the pre-check leaves the test
+        # green while a ghost anchor returns the neighbourhood around it.
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b")}
+        edges = {
+            "ab": Edge(
+                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
+            ),
+            "ga": Edge(
+                id="ga",
+                source="nosuchnode",
+                target="a",
+                type=RelationshipType.RELATES_TO,
+            ),
+            "bg": Edge(
+                id="bg",
+                source="b",
+                target="nosuchnode",
+                type=RelationshipType.RELATES_TO,
+            ),
+        }
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:
-            _load(backend, nodes, {})
+            _load(backend, nodes, edges)
             got = backend.traverse("nosuchnode", 2)
             assert got == {"node_ids": [], "edge_ids": []}, (
                 "not an empty traversal but no traversal - the walk returns "
-                "nothing at all rather than a lone anchor"
+                f"nothing at all rather than a lone anchor, or its edges: {got}"
             )
         finally:
             backend.close()
@@ -356,6 +377,240 @@ class TestTheStoreOnlyAnswersWhenItIsCurrent:
             backend.close()
 
 
+class TestTheTraversalTerminatesAndNotJustCorrectly:
+    """Equivalence says the two engines return the same SET. It says nothing
+    about what the query costs to get there, and one edit inside the recursion
+    - `UNION` to `UNION ALL`, the textbook "this is faster" change - keeps
+    every answer identical on a small or acyclic graph and takes the server
+    down on a cyclic one. Measured on 60 nodes / 600 random edges: 9 ms as
+    shipped, and as `UNION ALL` the backend process died at depth 5. That
+    depth is inside the REST API's own cap, and the MCP tool caps nothing.
+
+    The statement timeout is the point of the test, not scaffolding: it makes
+    the failure a cancelled query instead of an out-of-memory kill that takes
+    the whole cluster with it.
+    """
+
+    def test_a_dense_cyclic_graph_at_the_rest_api_depth_cap(self, schema):
+        import random
+
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        rng = random.Random(7)
+        nodes = {
+            f"n{i}": Node(id=f"n{i}", type=NodeType.ACTOR, name=f"n{i}")
+            for i in range(60)
+        }
+        edges = {
+            f"e{k}": Edge(
+                id=f"e{k}",
+                source=f"n{rng.randrange(60)}",
+                target=f"n{rng.randrange(60)}",
+                type=RelationshipType.RELATES_TO,
+            )
+            for k in range(600)
+        }
+        bounded = (
+            DSN
+            + ("&" if "?" in DSN else "?")
+            + "options=-c%20statement_timeout%3D10000"
+        )
+        backend = PostgresGraphPersistenceBackend(bounded, schema=schema)
+        try:
+            _load(backend, nodes, edges)
+            got = backend.traverse("n0", 5)
+            assert len(got["node_ids"]) == 60
+            assert len(got["edge_ids"]) == 600
+        finally:
+            backend.close()
+
+
+class TestTheRoutingItselfIsCovered:
+    """The equivalence fuzz calls `backend.traverse` directly, so everything
+    `GraphStorage` does on the way there - coercing the type filter, deciding
+    whether to ask at all, coping with a store that raises - was reachable only
+    through two tests that used neither a filter nor a broken store. A mutation
+    round found each of these survivable: the code was right, and nothing would
+    have noticed if it stopped being.
+    """
+
+    def test_a_type_filter_survives_the_trip_to_the_store(self, schema):
+        """`str()` of a str-Enum is "RelationshipType.RELATES_TO", not
+        "RELATES_TO", so a filter built with it matches nothing and the
+        traversal returns the anchor alone. The store path coerces with
+        `.value`; without this test nothing exercised a filter through
+        `get_related_nodes` at all.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                    Node(id="c", type=NodeType.ACTOR, name="c"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                    Edge(
+                        id="ac",
+                        source="a",
+                        target="c",
+                        type=RelationshipType.PART_OF,
+                    ),
+                ],
+            )
+            storage.flush()
+            assert storage._store_traversal_is_current()
+
+            result = storage.get_related_nodes(
+                "a", relationship_types=[RelationshipType.RELATES_TO], depth=1
+            )
+            assert {n.id for n in result["nodes"]} == {"a", "b"}, (
+                "the filter either matched nothing (anchor alone) or was not "
+                f"applied (c present): {sorted(n.id for n in result['nodes'])}"
+            )
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_a_store_that_raises_is_answered_by_the_walk(self, schema):
+        """A store that cannot answer is not a failed request. Nothing made
+        `traverse` fail before, so neither half of this was covered: letting
+        the exception out, and swallowing it into an empty answer, both
+        passed.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            def _explode(*args, **kwargs):
+                raise RuntimeError("the store is having a day")
+
+            backend.traverse = _explode
+            result = storage.get_related_nodes("a", depth=1)
+            assert {n.id for n in result["nodes"]} == {"a", "b"}, (
+                "the walk answers when the store cannot; got "
+                f"{sorted(n.id for n in result['nodes'])}"
+            )
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_a_backend_that_cannot_traverse_is_never_asked(self):
+        """Not merely "the answer is the same either way": without the
+        capability check every traversal on a backend that does not declare it
+        raises inside the try, prints a warning and walks. Same answer, an
+        exception and a log line per call.
+
+        Assembled rather than constructed, so this touches no disk: a real
+        `GraphStorage()` would build the default file backend in the working
+        directory and answer for whatever graph and journal happen to be
+        sitting there.
+        """
+        from backend.core.storage import GraphStorage
+        from backend.core.storage_backends import BackendCapabilities
+
+        storage = GraphStorage.__new__(GraphStorage)
+        storage._backend_capabilities = BackendCapabilities(
+            incremental_writes=True, transactions=True
+        )
+        storage._resync_pending = False
+        storage._last_write = None
+
+        assert storage._store_traversal_is_current() is False, (
+            "a backend that has not declared store_traversal must not be "
+            "asked to traverse"
+        )
+
+    def test_a_failed_write_closes_the_guard_even_though_the_future_is_done(
+        self, schema
+    ):
+        """A write that raised leaves the Future `done()` while the store is
+        genuinely behind, so `done()` alone is not enough - the resync flag is
+        the only thing holding the freshness guarantee in that window.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [Node(id="a", type=NodeType.ACTOR, name="a")],
+                [],
+            )
+            storage.flush()
+
+            def _refuse(*args, **kwargs):
+                raise RuntimeError("write refused")
+
+            backend.apply_batch = _refuse
+            storage.add_nodes(
+                [Node(id="b", type=NodeType.ACTOR, name="b")],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            write = storage._last_write
+            if write is not None:
+                # Drain it; the exception is the point, not a problem here.
+                try:
+                    write.result()
+                except Exception:
+                    pass
+                assert write.done()
+
+            assert storage._resync_pending, (
+                "the failed write should have flagged the store as owed the whole graph"
+            )
+            assert storage._store_traversal_is_current() is False, (
+                "the Future is done and the store is still behind; only the "
+                "resync flag can tell these apart"
+            )
+            result = storage.get_related_nodes("a", depth=1)
+            assert {n.id for n in result["nodes"]} == {"a", "b"}, (
+                "the walk still holds the write the store never got; got "
+                f"{sorted(n.id for n in result['nodes'])}"
+            )
+        finally:
+            backend.apply_batch = None
+            backend.close()
+
+
 class TestTheGuardCoversEveryRouteAWriteCanTake:
     """The first version watched only `_persist`'s incremental branch, and
     `_persist` itself falls back to `save()` in three documented cases - so the
@@ -432,6 +687,93 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
+    def test_what_was_reachable_only_through_it_goes_too(self, schema):
+        """Dropping the archived node on its own is not enough. Whatever was
+        behind it was reachable only through it, and returning that leaves a
+        node the walk would never have reached - the same "state neither
+        engine held" the drop was meant to avoid. Answering from the walk is
+        the only self-consistent way out; recomputing reachability here would
+        be reimplementing it beside itself.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                    Node(id="z", type=NodeType.ACTOR, name="z"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                    Edge(
+                        id="bz",
+                        source="b",
+                        target="z",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                ],
+            )
+            storage.flush()
+
+            # a -> b -> z, and b is archived after the store decided.
+            storage.nodes["b"].archived = True
+
+            result = storage.get_related_nodes("a", depth=2)
+            returned = {n.id for n in result["nodes"]}
+            assert returned == {"a"}, (
+                "z was reachable only through the archived b, so the walk "
+                f"returns the anchor alone; got {returned}"
+            )
+            assert {e.id for e in result["edges"]} == set()
+        finally:
+            storage.flush()
+            backend.close()
+
+
+class TestTheGuardReadsItsSignalsInASafeOrder:
+    def test_done_is_read_before_the_resync_flag(self):
+        """_do_apply sets _resync_pending and THEN raises, so the flag is set
+        before the Future finishes. Reading the flag first admits: flag False
+        -> the worker sets it and completes -> done() True -> the guard calls
+        a store it has just been told is stale. Reading done() first makes
+        that impossible, because done() implies the flag write happened.
+        """
+        from backend.core.storage import GraphStorage
+        from backend.core.storage_backends import BackendCapabilities
+
+        storage = GraphStorage.__new__(GraphStorage)
+        storage._backend_capabilities = BackendCapabilities(store_traversal=True)
+
+        reads: list = []
+
+        class _Flag:
+            def __bool__(self):
+                reads.append("flag")
+                return False
+
+        class _Write:
+            def done(self):
+                reads.append("done")
+                return True
+
+        storage._resync_pending = _Flag()
+        storage._last_write = _Write()
+
+        assert storage._store_traversal_is_current() is True
+        assert reads == ["done", "flag"], (
+            f"the guard read its signals in the order {reads}; reading the "
+            f"flag before done() leaves the stale-store window open"
+        )
+
 
 class TestADeclaredCapabilityMustBeImplemented:
     def test_declaring_store_traversal_without_traverse_is_refused(self):
@@ -455,6 +797,53 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
     runs the full `depth` iterations however small the graph. REST caps depth
     at 5, the MCP tool does not cap it at all, so the bound lives in the store.
     """
+
+    def test_the_bound_counts_edges_because_a_path_runs_through_non_nodes(self, schema):
+        """A traversal steps THROUGH an id that is not a node - the protocol's
+        dangling-endpoint rule says the edge is returned and the missing id is
+        not, and the walk adds that id to its frontier all the same. So a path
+        can be longer than there are nodes, and a bound taken from the node
+        count truncates it. Here: two nodes, joined by a three-hop chain of
+        ids that are not nodes.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("anchor", "far")}
+        edges = {
+            "e1": Edge(
+                id="e1",
+                source="anchor",
+                target="ghost1",
+                type=RelationshipType.RELATES_TO,
+            ),
+            "e2": Edge(
+                id="e2",
+                source="ghost1",
+                target="ghost2",
+                type=RelationshipType.RELATES_TO,
+            ),
+            "e3": Edge(
+                id="e3",
+                source="ghost2",
+                target="far",
+                type=RelationshipType.RELATES_TO,
+            ),
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            _load(backend, nodes, edges)
+            # Well above the threshold that decides whether a bound is taken
+            # at all, so the bound is in force for every one of these.
+            for depth in (3, 4, 100, 5_000):
+                got = backend.traverse("anchor", depth)
+                assert "far" in got["node_ids"], (
+                    f"depth {depth}: the far node is 3 hops away through two "
+                    f"ids that are not nodes; a bound of 2 (the node count) "
+                    f"cut the path short. Got {sorted(got['node_ids'])}"
+                )
+                assert set(got["edge_ids"]) == {"e1", "e2", "e3"}
+        finally:
+            backend.close()
 
     def test_a_huge_depth_costs_no_more_than_the_graph_allows(self, schema):
         import time

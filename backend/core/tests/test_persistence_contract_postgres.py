@@ -2687,7 +2687,14 @@ class TestPostgresSaveWritesMetadataLast:
         # none. Narrowed when the announcement was added, rather than
         # relaxed: what the hooks depend on is that every row this save
         # writes has been written by the time the metadata upsert runs.
-        row_writes = [q for q in writes if _tables_named(q)]
+        # ANALYZE excluded on the same ground as the announcement, and not on
+        # a weaker one: it writes no graph row, and it runs after the
+        # transaction has committed rather than inside it. What the hooks
+        # depend on is unchanged - every row the save writes is written before
+        # the metadata upsert.
+        row_writes = [
+            q for q in writes if _tables_named(q) and "ANALYZE" not in q.upper()
+        ]
         assert row_writes, "the save wrote no graph table"
         assert "graph_metadata" in row_writes[-1] and "ON CONFLICT" in row_writes[-1], (
             "the metadata upsert is no longer the save's last write to a "
