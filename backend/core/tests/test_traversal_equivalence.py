@@ -265,6 +265,51 @@ class TestTheStoreAnswersWhatTheWalkWould:
         finally:
             backend.close()
 
+    def test_a_document_without_an_archived_key_is_not_treated_as_archived(
+        self, schema
+    ):
+        """Every fixture here round-trips through `model_dump()`, so every
+        document carries `archived: false` and the four COALESCEs that handle
+        its absence are never exercised - a mutation round removed all four
+        with the suite green. The shape is real: `Node.from_dict` and
+        `Edge.from_dict` both `setdefault("archived", False)` for data that
+        predates the flag, and the SQL is the one reader that does not go
+        through them. Without the COALESCE, `NOT NULL` is NULL and every such
+        row is filtered out - the store returns the anchor alone where the walk
+        returns the neighbourhood.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            # Written as raw documents, deliberately: the point is a store
+            # holding what an older release or a non-model writer put there.
+            backend.save_graph_data(
+                {
+                    "nodes": [
+                        {"id": "a", "type": "Actor", "name": "a"},
+                        {"id": "b", "type": "Actor", "name": "b"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "ab",
+                            "source": "a",
+                            "target": "b",
+                            "type": "RELATES_TO",
+                        }
+                    ],
+                    "metadata": {},
+                }
+            )
+            got = backend.traverse("a", 1)
+            assert set(got["node_ids"]) == {"a", "b"}, (
+                "a document with no `archived` key was read as archived; got "
+                f"{sorted(got['node_ids'])}"
+            )
+            assert set(got["edge_ids"]) == {"ab"}
+        finally:
+            backend.close()
+
     def test_an_anchor_that_is_not_in_the_graph_returns_nothing(self, schema):
         # The graph has to contain edges that NAME the absent anchor, or this
         # asserts nothing: with no edges the CTE aggregates to NULL whether the
@@ -370,6 +415,57 @@ class TestTheStoreOnlyAnswersWhenItIsCurrent:
                 "with nothing pending the store should be the one answering"
             )
             result = storage.get_related_nodes("a", depth=1)
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
+
+class TestTheStoreIsActuallyTheOneAnswering:
+    """Every other test here would pass with the store branch deleted, because
+    the walk it falls back to is correct. That makes the whole feature
+    unfalsifiable: a mutation round confirmed the branch can be made inert
+    (`if False:`) with the suite fully green. The only way to assert the store
+    answered is to make the walk unable to.
+    """
+
+    def test_the_answer_survives_a_walk_that_cannot_run(self, schema):
+        from backend.core import storage as storage_module
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+            assert storage._store_traversal_is_current()
+
+            original = storage_module.storage_search.get_related_nodes
+
+            def _refuse(*args, **kwargs):
+                raise AssertionError("the walk answered; the store did not")
+
+            storage_module.storage_search.get_related_nodes = _refuse
+            try:
+                result = storage.get_related_nodes("a", depth=1)
+            finally:
+                storage_module.storage_search.get_related_nodes = original
+
             assert {n.id for n in result["nodes"]} == {"a", "b"}
             assert {e.id for e in result["edges"]} == {"ab"}
         finally:
@@ -682,6 +778,87 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             )
             assert {e.id for e in result["edges"]} == set(), (
                 "and the edge that reached it goes with it"
+            )
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_an_edge_archived_after_the_store_answered_is_not_returned(self, schema):
+        """The node half of this was covered from the start and the edge half
+        was not, which a mutation round found: the edge check could be deleted
+        with the suite green, and an archived edge plus the node behind it came
+        back under include_archived=False.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            storage.edges["ab"].archived = True
+
+            result = storage.get_related_nodes("a", depth=1)
+            assert {e.id for e in result["edges"]} == set(), (
+                "returned an edge whose own payload says archived=True under "
+                f"include_archived=False: {[e.id for e in result['edges']]}"
+            )
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                "and b was reachable only across that edge; got "
+                f"{sorted(n.id for n in result['nodes'])}"
+            )
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_a_node_deleted_after_the_store_answered_does_not_crash(self, schema):
+        """Archiving is the case the comment names; deleting is the other one,
+        and it is the one that used to raise KeyError out of the API rather
+        than fall back - the branch resolved the ids in a second pass over
+        dictionaries it had already checked.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            del storage.nodes["b"]
+
+            result = storage.get_related_nodes("a", depth=1)
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                f"got {sorted(n.id for n in result['nodes'])}"
             )
         finally:
             storage.flush()
