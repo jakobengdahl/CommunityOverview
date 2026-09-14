@@ -561,7 +561,7 @@ which is the problem rather than the fix.
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Five things about it are worth knowing before
+should have an opinion about. Six things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same

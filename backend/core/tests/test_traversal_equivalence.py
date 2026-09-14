@@ -265,6 +265,38 @@ class TestTheStoreAnswersWhatTheWalkWould:
         finally:
             backend.close()
 
+    def test_the_backend_coerces_an_enum_type_filter_itself(self, schema):
+        """Both callers coerce with `.value` before calling, so the backend's
+        own coercion has no caller that can exercise it - `str(t)` there,
+        exactly the bug its comment warns about, passes the whole suite. The
+        protocol asks for strings; this pins the defensive copy that accepts
+        an enum anyway, since it is there.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b", "c")}
+        edges = {
+            "ab": Edge(
+                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
+            ),
+            "ac": Edge(id="ac", source="a", target="c", type=RelationshipType.PART_OF),
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            _load(backend, nodes, edges)
+            # The enum itself, not its .value: str() of it is
+            # "RelationshipType.RELATES_TO", which matches no stored document.
+            got = backend.traverse(
+                "a", 1, relationship_types=[RelationshipType.RELATES_TO]
+            )
+            assert set(got["node_ids"]) == {"a", "b"}, (
+                "an enum filter matched nothing (anchor alone) or was ignored "
+                f"(c present): {sorted(got['node_ids'])}"
+            )
+            assert set(got["edge_ids"]) == {"ab"}
+        finally:
+            backend.close()
+
     def test_a_document_without_an_archived_key_is_not_treated_as_archived(
         self, schema
     ):
@@ -311,10 +343,11 @@ class TestTheStoreAnswersWhatTheWalkWould:
             backend.close()
 
     def test_an_anchor_that_is_not_in_the_graph_returns_nothing(self, schema):
-        # The graph has to contain edges that NAME the absent anchor, or this
-        # asserts nothing: with no edges the CTE aggregates to NULL whether the
-        # pre-check runs or not, and deleting the pre-check leaves the test
-        # green while a ghost anchor returns the neighbourhood around it.
+        # Edges that NAME the absent anchor, because the anchor id alone is
+        # the weaker half of this. Without the pre-check the walk still starts
+        # from the id it was given and returns it as a node - which an empty
+        # graph would catch too - but only edges naming it show the other
+        # half: a ghost anchor expanding into the neighbourhood around it.
         nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b")}
         edges = {
             "ab": Edge(
@@ -472,6 +505,52 @@ class TestTheStoreIsActuallyTheOneAnswering:
             storage.flush()
             backend.close()
 
+    def test_the_store_also_answers_under_include_archived(self, schema):
+        """Same shape as the archived anchor, one exemption over: dropping
+        `include_archived` from the visibility check makes every archived node
+        in the store's answer look vanished, so the whole include_archived=True
+        class falls through to the walk and returns the identical answer.
+        """
+        from backend.core import storage as storage_module
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b", archived=True),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            original = storage_module.storage_search.get_related_nodes
+
+            def _refuse(*args, **kwargs):
+                raise AssertionError("the walk answered; the store did not")
+
+            storage_module.storage_search.get_related_nodes = _refuse
+            try:
+                result = storage.get_related_nodes("a", depth=1, include_archived=True)
+            finally:
+                storage_module.storage_search.get_related_nodes = original
+
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
     def test_the_store_also_answers_for_an_archived_anchor(self, schema):
         """The anchor exemption is the one place where a wrong answer is not
         the failure mode: dropping it makes every archived-anchor traversal
@@ -521,18 +600,52 @@ class TestTheStoreIsActuallyTheOneAnswering:
             backend.close()
 
 
+class TestTheTraversalHoldsOneConnection:
+    """`pool_size=1` is a supported configuration - the constructor accepts it
+    and the pool-size comment discusses it - and the traversal is the only
+    multi-statement read in the backend. Taking a second connection per level
+    would be the natural way to write the loop and would deadlock there
+    against its own pool, answering correctly on every larger pool and so on
+    every other test in this file.
+    """
+
+    def test_a_traversal_completes_on_a_pool_of_one(self, schema):
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b", "c")}
+        edges = {
+            "ab": Edge(
+                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
+            ),
+            "bc": Edge(
+                id="bc", source="b", target="c", type=RelationshipType.RELATES_TO
+            ),
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        try:
+            _load(backend, nodes, edges)
+            # Several levels, so a per-level checkout would need a second
+            # connection while the first is still held.
+            got = backend.traverse("a", 3)
+            assert set(got["node_ids"]) == {"a", "b", "c"}
+            assert set(got["edge_ids"]) == {"ab", "bc"}
+        finally:
+            backend.close()
+
+
 class TestTheTraversalTerminatesAndNotJustCorrectly:
     """Equivalence says the two engines return the same SET. It says nothing
-    about what the query costs to get there, and one edit inside the recursion
-    - `UNION` to `UNION ALL`, the textbook "this is faster" change - keeps
-    every answer identical on a small or acyclic graph and takes the server
-    down on a cyclic one. Measured on 60 nodes / 600 random edges: 9 ms as
-    shipped, and as `UNION ALL` the backend process died at depth 5. That
-    depth is inside the REST API's own cap, and the MCP tool caps nothing.
+    about what the query costs to get there, and a cyclic graph is where the
+    difference lives: every level re-reaches nodes the previous ones already
+    found, so an implementation that does not prune by `seen` revisits them
+    for as many levels as it is given. This one is dense, cyclic and asked for
+    5 levels - inside the REST API's cap, and the MCP tool caps nothing.
 
-    The statement timeout is the point of the test, not scaffolding: it makes
-    the failure a cancelled query instead of an out-of-memory kill that takes
-    the whole cluster with it.
+    The statement timeout is the point of the test, not scaffolding. It makes
+    a regression here a cancelled query rather than a query that grows without
+    bound: the implementation this replaced could take the backend process out
+    on this graph, and an OOM kill takes the whole cluster with it rather than
+    failing one test.
     """
 
     def test_a_dense_cyclic_graph_at_the_rest_api_depth_cap(self, schema):
@@ -623,6 +736,88 @@ class TestTheRoutingItselfIsCovered:
                 f"applied (c present): {sorted(n.id for n in result['nodes'])}"
             )
             assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_the_arguments_survive_the_trip_to_the_store(self, schema):
+        """`depth` and `include_archived` are passed through to the backend
+        and, until this test, were never exercised AS arguments: every
+        store-path test used depth 1 or 2 on a graph at most two hops deep,
+        and include_archived=False. A mutation round walked straight through
+        both - `depth + 1` on a three-node chain, and hardcoding
+        include_archived=False in the store call - each producing an answer
+        the walk does not give, with the suite green.
+
+        Compared against the walk directly rather than against a literal, so
+        this is the same G1 question the fuzz asks, asked one layer up.
+        """
+        from backend.core import storage_search
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                    Node(id="c", type=NodeType.ACTOR, name="c"),
+                    Node(id="d", type=NodeType.ACTOR, name="d", archived=True),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                    Edge(
+                        id="bc",
+                        source="b",
+                        target="c",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                    Edge(
+                        id="cd",
+                        source="c",
+                        target="d",
+                        type=RelationshipType.RELATES_TO,
+                    ),
+                ],
+            )
+            storage.flush()
+            assert storage._store_traversal_is_current()
+
+            for depth in (1, 2, 3, 4):
+                for include_archived in (False, True):
+                    routed = storage.get_related_nodes(
+                        "a", depth=depth, include_archived=include_archived
+                    )
+                    walked = storage_search.get_related_nodes(
+                        storage.nodes,
+                        storage.edges,
+                        storage.graph,
+                        "a",
+                        None,
+                        depth,
+                        include_archived=include_archived,
+                    )
+                    assert {n.id for n in routed["nodes"]} == {
+                        n.id for n in walked["nodes"]
+                    }, (
+                        f"depth={depth} include_archived={include_archived}: "
+                        f"nodes {sorted(n.id for n in routed['nodes'])} vs "
+                        f"walk {sorted(n.id for n in walked['nodes'])}"
+                    )
+                    assert {e.id for e in routed["edges"]} == {
+                        e.id for e in walked["edges"]
+                    }, (
+                        f"depth={depth} include_archived={include_archived}: "
+                        f"edges {sorted(e.id for e in routed['edges'])} vs "
+                        f"walk {sorted(e.id for e in walked['edges'])}"
+                    )
         finally:
             storage.flush()
             backend.close()
@@ -1132,6 +1327,15 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
                 f"issued {shallow_queries}, on a graph that answers completely "
                 f"at depth 5; the walk is running the caller's number of "
                 f"levels rather than the graph's"
+            )
+            # Absolute as well as relative. Equality alone passes for any
+            # constant multiple per level - re-querying the anchor at every
+            # level took this from 5 statements to 9 and the assertion above
+            # did not move. One anchor pre-check, then one query per level
+            # crossed, and this graph is crossed in four.
+            assert shallow_queries == 5, (
+                f"a depth-5 traversal of a graph 4 levels across should be "
+                f"one anchor check plus four levels; issued {shallow_queries}"
             )
             # and the answer is the same one the shallow traversal gave
             assert set(deep["node_ids"]) == set(shallow["node_ids"])

@@ -387,11 +387,47 @@ class PostgresGraphPersistenceBackend:
                             )
                         )
                 except Exception as exc:
-                    print(
-                        f"Warning: could not create {name}; traversal will "
-                        f"scan instead of seek: {exc}"
-                    )
+                    # Ask again before reporting. This loop runs outside the
+                    # migrating transaction, and the advisory lock is
+                    # transaction-scoped, so it was released before we got
+                    # here: N instances booting together all pass the check
+                    # above and all issue the statement, and the losers get a
+                    # duplicate-key error from the catalog insert. Measured:
+                    # 8 concurrent `CREATE INDEX IF NOT EXISTS` of one name,
+                    # 4 of them raised UniqueViolation and the index exists.
+                    # The window is the index build, so it widens with the
+                    # table - it is the upgrade of a large existing store
+                    # that hits this, not a toy one. The migration's own
+                    # docstring names the same mechanism for tables, where
+                    # the lock closes it.
+                    #
+                    # Nothing is lost when that happens: the index is there,
+                    # put there by whoever won. Reporting it would be the
+                    # defect this pre-check was added to fix - a warning that
+                    # fires when nothing is wrong - so the warning is for the
+                    # case where the index really is missing.
+                    if self._index_is_missing(name):
+                        print(
+                            f"Warning: could not create {name}; traversal will "
+                            f"scan instead of seek: {exc}"
+                        )
             self._migrated = True
+
+    def _index_is_missing(self, name: str) -> bool:
+        """Whether `name` is absent from this schema, asked on a fresh
+        connection. Used to tell a lost race from a real failure, so it must
+        not reuse the connection whose transaction just failed."""
+        try:
+            with self._pool.connection() as conn:
+                return not conn.execute(
+                    "SELECT 1 FROM pg_class c"
+                    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (self.schema, name),
+                ).fetchone()
+        except Exception:
+            # Cannot tell; say so by reporting the original failure.
+            return True
 
     # -- snapshot contract ---------------------------------------------------
 
