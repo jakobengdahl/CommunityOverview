@@ -307,19 +307,25 @@ The PR body follows `.github/pull_request_template.md`:
 - **Test plan** — which tests cover this, and how to verify manually.
 - **Screenshots affected** — see the Documentation section.
 
-**Push once per review round, not once per fix.** While the PR is a draft, the
-three heavy suites skip and their gates fail that skip rather than let it
-report green — see `.github/workflows/ci.yml` and
-`backend/tests/test_ci_gate_semantics.py`. So every push to a draft turns three
-required checks red on purpose, and GitHub mails the owner about each one. That
-is correct behaviour and must not be "fixed" in the workflow: a gate that
-skipped quietly instead of failing would report GREEN to branch protection,
-because GitHub counts a skipped required check as a pass. That is the exact bug
-the gate exists to prevent, and the test file pins it.
+**Push once per review round, not once per fix.** Every push runs CI, so a loop
+that pushes after each individual fix pays for that many runs — and on a review
+loop of any length that is the dominant cost of the change. Fix everything a
+round raised, verify locally per step 5, then push once. Several commits in one
+push is fine; step 6 asks for one commit per logical change, not one push.
 
-The only lever is on this side: fix everything a round raised, verify locally
-per step 5, then push once. A long loop that pushes after each individual fix
-turns the owner's CI mail into noise, which is how a real failure gets missed.
+On a **draft** PR the cost is also noise. When the diff touches service code the
+three heavy suites skip, and their gates fail that skip rather than let it report
+green, so each push turns three required checks red and mails the repository
+owner. (A draft whose diff is only `docs/` or `*.md` reports green instead:
+`detect-changes` resolves `service_code=false` and the gates pass that as a
+path-skip.) A stream of such alarms is how a real failure gets missed.
+
+That red must not be "fixed" in the workflow. A gate that skipped quietly
+instead of failing would report GREEN to branch protection, because GitHub
+counts a skipped required check as a pass — the exact defect the gate and
+`backend/tests/test_ci_gate_semantics.py` exist to prevent. It is cleared the
+way the gate's own message says: by marking the PR ready, which runs the suites
+for real. See "What to Do When CI Is Red".
 
 ### 8. Review Loop
 
@@ -638,6 +644,14 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 ---
 
 ## What to Do When CI Is Red
+
+**First: is it red by design?** On a draft PR whose diff touches service code,
+the three heavy suites skip and their gates fail that skip, with a message
+saying the suite "has NOT run" and to mark the PR ready for review. That is not
+a test failure, and the numbered steps below do not apply to it — it clears by
+marking the PR ready once the change genuinely is ready, which runs the suites
+for real. Step 10's checklist still governs the merge. The steps below are about
+a suite that ran and failed.
 
 1. Read the CI failure output before doing anything else.
 2. If the failure is in your code: fix it locally, run the failing tests, commit,
