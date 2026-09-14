@@ -3071,6 +3071,48 @@ class TestPostgresLoadIsolation:
             f"{after} != {baseline}"
         )
 
+    def test_the_traversal_runs_repeatable_read_and_leaves_nothing_behind(
+        self, schema, backends, monkeypatch
+    ):
+        """The same two halves as the load, and for the same reason: the
+        tearing test infers the level from an answer, which is true but weak.
+        It kills a drop to READ COMMITTED because that answer tears - but an
+        unnoticed change to SERIALIZABLE gives the right answer and the wrong
+        failure mode, and nothing would notice a level left behind on the
+        pooled connection either.
+        """
+        with psycopg.connect(DSN) as check:
+            baseline = check.execute("SHOW transaction_isolation").fetchone()[0]
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        seen = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if "ISOLATION LEVEL" in str(query).upper() and not seen:
+                seen.append(
+                    real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
+                )
+            return result
+
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        backend.traverse("a", 2)
+
+        assert seen == ["repeatable read"], (
+            f"the traversal did not run at REPEATABLE READ: {seen}"
+        )
+
+        with backend._pool.connection() as conn:
+            after = conn.execute("SHOW transaction_isolation").fetchone()[0]
+        assert after == baseline, (
+            f"the isolation level leaked onto the pooled connection: "
+            f"{after} != {baseline}"
+        )
+
 
 class TestPostgresLoadOnAVirginStore:
     def test_loading_before_anything_else_migrates_first(self, schema, backends):
