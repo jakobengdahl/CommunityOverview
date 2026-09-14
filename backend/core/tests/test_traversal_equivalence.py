@@ -7,9 +7,9 @@ code. This is that test.
 
 It is written as a fuzz against randomised graphs rather than as a list of
 cases, because the failure it exists to catch is the one nobody thought of.
-The four cases that are enumerated are the ones a reading of the in-memory walk
-does NOT make obvious, and each was confirmed against the reference before the
-SQL was written:
+The cases that are enumerated beside it are the ones a reading of the in-memory
+walk does NOT make obvious, or that the generator cannot produce. Four of them
+were confirmed against the reference before the SQL was written:
 
 - an edge between two nodes that are both exactly `depth` away is not returned,
   because neither endpoint was ever expanded;
@@ -1005,7 +1005,7 @@ class TestTheRoutingItselfIsCovered:
 
 class TestTheGuardCoversEveryRouteAWriteCanTake:
     """The first version watched only `_persist`'s incremental branch, and
-    `_persist` itself falls back to `save()` in three documented cases - so the
+    `_persist` itself falls back to `save()` in four documented cases - so the
     guard was open on exactly the writes that had already gone wrong once. A
     backend declaring `store_traversal` without `incremental_writes`, which the
     capability flags explicitly permit, never set the marker at all.

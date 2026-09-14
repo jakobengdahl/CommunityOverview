@@ -508,7 +508,7 @@ The walk is also the fallback when the store raises. A store that cannot
 answer is not a failed request.
 
 The store walks a level at a time rather than answering in one
-depth-limited recursive query. Both return the same set; only the second
+depth-limited recursive query. Both return the same set; only the first
 stops when a level reaches nothing new. A recursive CTE cannot: its working
 table is keyed on (id, depth), and a recursive term may not consult its own
 accumulated result to prune ids already seen, so it runs every level the

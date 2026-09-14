@@ -764,7 +764,7 @@ class GraphStorage:
             # can call .result().
             # Recorded here as well as in _persist. A snapshot save is a write
             # like any other as far as a reader is concerned, and _persist
-            # routes here for three documented cases - so watching only the
+            # routes here for four documented cases - so watching only the
             # incremental path left the guard open on exactly the writes that
             # had already gone wrong once.
             self._last_write = self._io_executor.submit(
@@ -1969,10 +1969,16 @@ class GraphStorage:
                 # This path takes no lock while every mutator holds one, so a
                 # delete landing between a `nid in self.nodes` and a
                 # `self.nodes[nid]` turns a traversal into a KeyError out of
-                # the API. The walk is careful about exactly this
-                # (`storage_search.get_related_nodes` resolves with `if nid in
-                # nodes`); one dict lookup per id, its result carried forward,
-                # is what makes the check and the use the same observation.
+                # the API. One dict lookup per id, its result carried forward,
+                # makes the check and the use the same observation.
+                #
+                # Not copied from the walk - the walk has the same window.
+                # `storage_search.get_related_nodes` resolves with
+                # `if nid in nodes` and then indexes, which is the same
+                # check-then-use; that guard is there for the dangling-endpoint
+                # rule, not for a concurrent delete, and feeding it a dict that
+                # loses the key between the two raises KeyError exactly as this
+                # path used to. That is pre-existing and left alone here.
                 nodes = []
                 for nid in found["node_ids"]:
                     node = self.nodes.get(nid)
