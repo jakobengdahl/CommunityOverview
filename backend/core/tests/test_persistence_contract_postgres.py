@@ -1112,12 +1112,115 @@ class TestPostgresIndexCreationLosesRacesQuietly:
     def test_a_create_that_really_failed_is_still_reported(
         self, schema, backends, capsys
     ):
-        printed = self._boot_with_a_losing_create(
-            schema, backends, capsys, really_create=False
+        # The same index name exists in ANOTHER schema first. The re-check asks
+        # the catalog by name and schema; by name alone it finds the neighbour's
+        # and stays silent about this store's missing one, forever. Two schemas
+        # in one database is a supported shape here - `self.schema` exists for
+        # exactly that.
+        neighbour = schema + "_neighbour"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(neighbour)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_edges"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(neighbour))
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE INDEX graph_edges_source_idx ON {}.graph_edges"
+                    " ((doc->>'source'))"
+                ).format(psycopg.sql.Identifier(neighbour))
+            )
+        try:
+            printed = self._boot_with_a_losing_create(
+                schema, backends, capsys, really_create=False
+            )
+            assert "scan instead of seek" in printed, (
+                "an index that is genuinely missing was not reported: " + printed
+            )
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(neighbour)
+                    )
+                )
+
+
+class TestPostgresIndexWorkIsDoneOnce:
+    """Two properties of the boot path that the answer cannot show.
+
+    The catalog pre-check's own purpose is not to be correct - the re-check
+    after a failure covers that - but to stop issuing DDL that will fail on
+    every boot of a store that already has its indexes. Deleting it leaves
+    every test green while a least-privilege instance sends two doomed
+    statements per start, forever.
+
+    And the ANALYZE after a save is outside the save's transaction so that it
+    cannot fail the save. That is the whole reason it is where it is, and
+    nothing exercised the path where it raises.
+    """
+
+    def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
+        import psycopg as _psycopg
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend._ensure_schema()
+
+        # Second boot, same store: the indexes are there now.
+        again = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(again)
+        original = _psycopg.Connection.execute
+        issued = []
+
+        def _watching(self, query, *args, **kwargs):
+            issued.append(repr(query))
+            return original(self, query, *args, **kwargs)
+
+        _psycopg.Connection.execute = _watching
+        try:
+            again._ensure_schema()
+        finally:
+            _psycopg.Connection.execute = original
+
+        creates = [q for q in issued if "CREATE INDEX" in q]
+        assert not creates, (
+            "re-issued DDL for indexes that are already there; on a role that "
+            f"may not create them, that is a failure every boot: {creates}"
         )
-        assert "scan instead of seek" in printed, (
-            "an index that is genuinely missing was not reported: " + printed
+
+    def test_an_analyze_that_raises_does_not_fail_the_save(
+        self, schema, backends, capsys
+    ):
+        import psycopg as _psycopg
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend._ensure_schema()
+
+        original = _psycopg.Connection.execute
+
+        def _refuse_analyze(self, query, *args, **kwargs):
+            if "ANALYZE" in repr(query):
+                raise _psycopg.errors.InsufficientPrivilege("no ANALYZE for you")
+            return original(self, query, *args, **kwargs)
+
+        _psycopg.Connection.execute = _refuse_analyze
+        try:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        finally:
+            _psycopg.Connection.execute = original
+
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
+            "the save did not land"
         )
+        assert "could not ANALYZE after save" in capsys.readouterr().out
 
 
 class TestPostgresReportsAnIndexItCannotUse:

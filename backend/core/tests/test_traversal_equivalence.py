@@ -342,6 +342,24 @@ class TestTheStoreAnswersWhatTheWalkWould:
         finally:
             backend.close()
 
+    def test_a_traversal_can_be_a_backends_first_call(self, schema):
+        """The contract pins this for writes (`test_an_entity_write_can_be_a
+        _backends_first_call`) and had no traversal equivalent. Without the
+        migration call, traversing an unprovisioned store raises UndefinedTable
+        instead of answering - hidden in product terms, because the storage
+        layer catches it and walks, which is also why no other test sees it.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            assert backend.traverse("nobody", 2) == {
+                "node_ids": [],
+                "edge_ids": [],
+            }
+        finally:
+            backend.close()
+
     def test_an_anchor_that_is_not_in_the_graph_returns_nothing(self, schema):
         # Edges that NAME the absent anchor, because the anchor id alone is
         # the weaker half of this. Without the pre-check the walk still starts
@@ -1230,7 +1248,17 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         can be longer than there are nodes, and a bound taken from the node
         count truncates it. Here: two nodes, joined by a three-hop chain of
         ids that are not nodes.
+
+        The statement count is asserted here and not only in the huge-depth
+        test, because that test cannot see this: its graph is dense and every
+        endpoint is a real node, so an implementation that records only NODE
+        ids as seen converges there and looks correct. Give it a dangling pair
+        and the frontier oscillates between them forever - identical answer,
+        one round trip per level the caller asked for. Measured on this graph
+        with that edit: 3 levels became 400 at depth 400.
         """
+        import psycopg
+
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
         nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("anchor", "far")}
@@ -1257,10 +1285,32 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:
             _load(backend, nodes, edges)
+            original = psycopg.Connection.execute
+            counted = []
+
+            def _counting(self, query, *args, **kwargs):
+                counted.append(query)
+                return original(self, query, *args, **kwargs)
+
             # Every depth from the exact one to far beyond it: a bound taken
             # from the node count (2) would cut the path short at each.
             for depth in (3, 4, 100, 5_000):
-                got = backend.traverse("anchor", depth)
+                psycopg.Connection.execute = _counting
+                try:
+                    counted.clear()
+                    got = backend.traverse("anchor", depth)
+                    issued = len(counted)
+                finally:
+                    psycopg.Connection.execute = original
+                # One anchor check, then a level per hop, plus the one that
+                # expands the far node and finds nothing new. Four levels is
+                # where this graph stops, so every depth beyond it costs the
+                # same five statements.
+                assert issued == min(depth, 4) + 1, (
+                    f"depth {depth}: this graph is crossed in four levels, so "
+                    f"it costs {min(depth, 4) + 1} statements however deep the "
+                    f"caller asks; issued {issued}"
+                )
                 assert "far" in got["node_ids"], (
                     f"depth {depth}: the far node is 3 hops away through two "
                     f"ids that are not nodes; something bounded the walk by "
