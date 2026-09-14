@@ -405,13 +405,23 @@ class PostgresGraphPersistenceBackend:
                             # dropped. It need not: REINDEX repairs it in
                             # place, and even removing it has a concurrent
                             # form.
+                            # Quoted, because the operator is meant to paste
+                            # it. `self.schema` reaches an identifier position
+                            # nowhere else in this file without going through
+                            # sql.Identifier, and a mixed-case schema is a
+                            # supported shape the contract parametrises over:
+                            # unquoted, the remedy fails with `schema
+                            # "colow_demo" does not exist`.
+                            qualified = sql.Identifier(self.schema, name).as_string(
+                                conn
+                            )
                             print(
                                 f"Warning: {name} exists but is not valid - a "
                                 f"concurrent build that failed, or one still "
                                 f"running. If no build is in progress, "
-                                f"REINDEX INDEX CONCURRENTLY {self.schema}."
-                                f"{name} repairs it; until it is valid the "
-                                f"traversal will scan instead of seek"
+                                f"REINDEX INDEX CONCURRENTLY {qualified} "
+                                f"repairs it; until it is valid the traversal "
+                                f"will scan instead of seek"
                             )
                             continue
                         conn.execute(
@@ -575,7 +585,23 @@ class PostgresGraphPersistenceBackend:
         query = sql.SQL(self._LEVEL).format(
             edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
         )
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            # One moment, like the load, and for the same reason. A traversal
+            # is N+1 statements on one connection, and PostgreSQL's default
+            # isolation takes its snapshot per STATEMENT: without this, level 2
+            # reads a graph level 1 never saw. Measured against a live server -
+            # a --ab--> b, with another connection committing `DELETE ab` and
+            # `INSERT bc` between the two levels - the store returned nodes
+            # a,b,c and edges ab,bc: the deleted edge AND the new one, an
+            # answer for neither the graph before the write nor the one after.
+            # The in-memory walk cannot produce that; it reads dictionaries it
+            # holds. On a shared store several writers is the case this backend
+            # exists for, so that interleaving is the normal case rather than a
+            # race to engineer - which is the argument load_graph_data already
+            # makes for itself, in this file. Stated rather than inherited,
+            # like the load and the save: leaving it to the environment was the
+            # asymmetry.
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
             # nothing at all rather than a lone anchor.

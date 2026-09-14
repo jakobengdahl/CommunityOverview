@@ -1363,6 +1363,13 @@ class TestPostgresReportsAnIndexItCannotUse:
             "named a failed build as the cause when the catalog cannot tell "
             "that from a healthy one still in progress: " + printed
         )
+        # The whole command, quoted. The operator is meant to paste it, and
+        # the least-privilege fixture above parametrises over a schema that
+        # only survives quoted for exactly this class of bug: unquoted, the
+        # remedy fails with `schema "..." does not exist`.
+        assert (
+            f'REINDEX INDEX CONCURRENTLY "{schema}"."graph_edges_source_idx"' in printed
+        ), "the remedy is not a command the operator can run: " + printed
         assert "REINDEX INDEX CONCURRENTLY" in printed, (
             "an invalid index is repairable in place; DROP is not the remedy "
             "and takes a stronger lock: " + printed

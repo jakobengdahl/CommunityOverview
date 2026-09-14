@@ -648,6 +648,84 @@ class TestTheStoreIsActuallyTheOneAnswering:
             backend.close()
 
 
+class TestTheTraversalIsOneMoment:
+    """N levels on one connection are N statements, and PostgreSQL's default
+    isolation takes its snapshot per statement - so without an isolation level
+    of its own, level 2 reads a graph level 1 never saw. `load_graph_data`
+    makes this argument for itself in the same file, for the same reason.
+
+    Measured before the fix, with another connection committing `DELETE ab`
+    and `INSERT bc` between the two levels of `traverse("a", 2)`: the store
+    returned nodes a,b,c and edges ab,bc - the deleted edge AND the new one,
+    which is the answer for neither graph.
+    """
+
+    def test_a_write_between_levels_does_not_tear_the_answer(self, schema):
+        import psycopg
+
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b", "c")}
+        edges = {
+            "ab": Edge(
+                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
+            )
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        original = psycopg.Connection.execute
+        levels = {"n": 0}
+
+        def _write_between_levels(self, query, *args, **kwargs):
+            result = original(self, query, *args, **kwargs)
+            if "far.id" in repr(query):
+                levels["n"] += 1
+                if levels["n"] == 1:
+                    with psycopg.connect(DSN, autocommit=True) as writer:
+                        writer.execute(
+                            psycopg.sql.SQL(
+                                "DELETE FROM {}.graph_edges WHERE id = %s"
+                            ).format(psycopg.sql.Identifier(schema)),
+                            ("ab",),
+                        )
+                        writer.execute(
+                            psycopg.sql.SQL(
+                                "INSERT INTO {}.graph_edges (id, doc) VALUES (%s, %s)"
+                            ).format(psycopg.sql.Identifier(schema)),
+                            (
+                                "bc",
+                                psycopg.types.json.Jsonb(
+                                    {
+                                        "id": "bc",
+                                        "source": "b",
+                                        "target": "c",
+                                        "type": "RELATES_TO",
+                                    }
+                                ),
+                            ),
+                        )
+            return result
+
+        try:
+            _load(backend, nodes, edges)
+            psycopg.Connection.execute = _write_between_levels
+            try:
+                got = backend.traverse("a", 2)
+            finally:
+                psycopg.Connection.execute = original
+            assert levels["n"] >= 2, (
+                "the traversal did not reach a second level, so nothing was "
+                "interleaved and this asserts nothing"
+            )
+            # The graph as the traversal began: a -> b, and c unconnected.
+            assert set(got["node_ids"]) == {"a", "b"}, (
+                "the answer mixes the graph before the write with the graph "
+                f"after it: {sorted(got['node_ids'])}"
+            )
+            assert set(got["edge_ids"]) == {"ab"}, f"got {sorted(got['edge_ids'])}"
+        finally:
+            backend.close()
+
+
 class TestTheTraversalHoldsOneConnection:
     """`pool_size=1` is a supported configuration - the constructor accepts it
     and the pool-size comment discusses it. Taking a second connection per
@@ -1510,13 +1588,13 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
                     issued = len(counted)
                 finally:
                     psycopg.Connection.execute = original
-                # One anchor check, then a level per hop, plus the one that
-                # expands the far node and finds nothing new. Four levels is
-                # where this graph stops, so every depth beyond it costs the
-                # same five statements.
-                assert issued == min(depth, 4) + 1, (
+                # One SET ISOLATION LEVEL, one anchor check, then a level per
+                # hop, plus the one that expands the far node and finds
+                # nothing new. Four levels is where this graph stops, so every
+                # depth beyond it costs the same six statements.
+                assert issued == min(depth, 4) + 2, (
                     f"depth {depth}: this graph is crossed in four levels, so "
-                    f"it costs {min(depth, 4) + 1} statements however deep the "
+                    f"it costs {min(depth, 4) + 2} statements however deep the "
                     f"caller asks; issued {issued}"
                 )
                 assert "far" in got["node_ids"], (
@@ -1593,12 +1671,14 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
             )
             # Absolute as well as relative. Equality alone passes for any
             # constant multiple per level - re-querying the anchor at every
-            # level took this from 5 statements to 9 and the assertion above
-            # did not move. One anchor pre-check, then one query per level
-            # crossed, and this graph is crossed in four.
-            assert shallow_queries == 5, (
-                f"a depth-5 traversal of a graph 4 levels across should be "
-                f"one anchor check plus four levels; issued {shallow_queries}"
+            # level took this from 6 statements to 10 and the assertion above
+            # did not move. One SET ISOLATION LEVEL, one anchor pre-check,
+            # then one query per level crossed, and this graph is crossed in
+            # four.
+            assert shallow_queries == 6, (
+                f"a depth-5 traversal of a graph 4 levels across should be one "
+                f"isolation statement, one anchor check and four levels; "
+                f"issued {shallow_queries}"
             )
             # and the answer is the same one the shallow traversal gave
             assert set(deep["node_ids"]) == set(shallow["node_ids"])
