@@ -3089,6 +3089,15 @@ class TestFaultInjectionOnlyPaths:
         # Injecting there would prove the opposite of what this test is for -
         # that nothing landed. `_adopt_supplied_vectors` is the call that sits
         # in the window now.
+        #
+        # This ties the test to that private method's name and to it being
+        # the sole unguarded call in the window: every other call add_nodes
+        # makes here (`vector_store.update_nodes_embeddings`) is wrapped in a
+        # try/except that swallows the raise before it reaches this test, so
+        # there is no public seam standing in for it. A future rename or a
+        # refactor that moves the window again breaks this test with no
+        # behavioral regression - expected, and the fix is to retarget the
+        # patch, not to read it as a real failure.
         def boom(self, nodes):
             raise RuntimeError("boom-before-node-persist")
 
@@ -3108,6 +3117,16 @@ class TestFaultInjectionOnlyPaths:
         backend = _IncrementalBackend()
         storage = _storage(backend)
 
+        # `_emit_event` is the only call in this window (after the edges have
+        # persisted, before add_nodes returns), and it is the sole seam that
+        # can reach it: emit_event() in storage_events.py wraps the history
+        # store, every system listener, and the webhook dispatcher each in
+        # their own try/except that swallows a raise and only prints a
+        # warning, so patching any of those would never propagate here. This
+        # ties the test to `_emit_event`'s private name; a rename or a
+        # refactor that moves those internal guards breaks this test with no
+        # behavioral regression - retarget the patch rather than treating
+        # that as a real failure.
         original_emit = storage._emit_event
         calls = {"count": 0}
 
