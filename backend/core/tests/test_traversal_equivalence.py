@@ -602,11 +602,16 @@ class TestTheStoreIsActuallyTheOneAnswering:
 
 class TestTheTraversalHoldsOneConnection:
     """`pool_size=1` is a supported configuration - the constructor accepts it
-    and the pool-size comment discusses it - and the traversal is the only
-    multi-statement read in the backend. Taking a second connection per level
-    would be the natural way to write the loop and would deadlock there
+    and the pool-size comment discusses it. Taking a second connection per
+    level would be the natural way to write the loop and would deadlock there
     against its own pool, answering correctly on every larger pool and so on
     every other test in this file.
+
+    This pins the narrower property, which is the one at risk: no NESTED
+    checkout while the outer connection is held. A rewrite that took one
+    connection per level and none around them would not deadlock and would
+    pass. `load_graph_data` holds one connection for four statements and is
+    the same shape, so it is not the only path that needs this care.
     """
 
     def test_a_traversal_completes_on_a_pool_of_one(self, schema):

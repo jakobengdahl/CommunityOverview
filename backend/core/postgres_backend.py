@@ -372,12 +372,25 @@ class PostgresGraphPersistenceBackend:
             ):
                 try:
                     with self._pool.connection() as conn:
-                        if conn.execute(
-                            "SELECT 1 FROM pg_class c"
-                            " JOIN pg_namespace n ON n.oid = c.relnamespace"
-                            " WHERE n.nspname = %s AND c.relname = %s",
-                            (self.schema, name),
-                        ).fetchone():
+                        state = self._index_state(conn, name)
+                        if state == "valid":
+                            continue
+                        if state == "invalid":
+                            # A CREATE INDEX CONCURRENTLY that failed leaves
+                            # the name behind with indisvalid = false. The
+                            # planner will not use it, and `IF NOT EXISTS`
+                            # matches on the name, so re-issuing it here is a
+                            # silent no-op: without this branch the store
+                            # scans every edge at every level and says
+                            # nothing. Only the operator can fix it - the
+                            # index has to be dropped before it can be built
+                            # again - so this reports rather than repairs.
+                            print(
+                                f"Warning: {name} exists but is invalid (a "
+                                f"CREATE INDEX CONCURRENTLY that failed); DROP "
+                                f"it and build it again, or the traversal will "
+                                f"scan instead of seek"
+                            )
                             continue
                         conn.execute(
                             sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} {}").format(
@@ -406,28 +419,47 @@ class PostgresGraphPersistenceBackend:
                     # defect this pre-check was added to fix - a warning that
                     # fires when nothing is wrong - so the warning is for the
                     # case where the index really is missing.
-                    if self._index_is_missing(name):
+                    if self._index_state(None, name) != "valid":
                         print(
                             f"Warning: could not create {name}; traversal will "
                             f"scan instead of seek: {exc}"
                         )
             self._migrated = True
 
-    def _index_is_missing(self, name: str) -> bool:
-        """Whether `name` is absent from this schema, asked on a fresh
-        connection. Used to tell a lost race from a real failure, so it must
-        not reuse the connection whose transaction just failed."""
+    _INDEX_STATE = (
+        "SELECT i.indisvalid FROM pg_class c"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " LEFT JOIN pg_index i ON i.indexrelid = c.oid"
+        " WHERE n.nspname = %s AND c.relname = %s"
+    )
+
+    def _index_state(self, conn, name: str) -> str:
+        """ "valid", "invalid" or "missing" for `name` in this schema.
+
+        Presence by name is not enough: an index left invalid by a failed
+        concurrent build is present, unusable by the planner, and matched by
+        `IF NOT EXISTS` - so treating it as there is how a store ends up
+        scanning silently.
+
+        `conn` may be None, which takes a fresh one from the pool. That is
+        what the failure path needs: the connection whose transaction just
+        failed cannot be asked anything until it is reset, and it has already
+        gone back to the pool by then.
+        """
         try:
-            with self._pool.connection() as conn:
-                return not conn.execute(
-                    "SELECT 1 FROM pg_class c"
-                    " JOIN pg_namespace n ON n.oid = c.relnamespace"
-                    " WHERE n.nspname = %s AND c.relname = %s",
-                    (self.schema, name),
-                ).fetchone()
+            if conn is not None:
+                row = conn.execute(self._INDEX_STATE, (self.schema, name)).fetchone()
+            else:
+                with self._pool.connection() as fresh:
+                    row = fresh.execute(
+                        self._INDEX_STATE, (self.schema, name)
+                    ).fetchone()
         except Exception:
-            # Cannot tell; say so by reporting the original failure.
-            return True
+            # Cannot tell. Say so, so the caller reports rather than hides.
+            return "missing"
+        if row is None:
+            return "missing"
+        return "valid" if row[0] else "invalid"
 
     # -- snapshot contract ---------------------------------------------------
 

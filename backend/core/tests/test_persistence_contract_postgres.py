@@ -1047,7 +1047,12 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # the notice handler the save reports success while the statistics it
         # exists to refresh were never touched. The docs promise the operator
         # this line; nothing else asserts it.
-        assert "permission denied to analyze" in printed, (
+        # Matched on the backend's own prefix, not on the server's wording:
+        # PostgreSQL 16 says "permission denied to analyze", 15 and earlier say
+        # "only table or database owner can analyze it", and both are
+        # lc_messages-dependent. What this test is about is that the notice
+        # reaches the operator at all.
+        assert "ANALYZE after save" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
@@ -1112,6 +1117,70 @@ class TestPostgresIndexCreationLosesRacesQuietly:
         )
         assert "scan instead of seek" in printed, (
             "an index that is genuinely missing was not reported: " + printed
+        )
+
+
+class TestPostgresReportsAnIndexItCannotUse:
+    """An index left invalid by a failed `CREATE INDEX CONCURRENTLY` is
+    present in the catalog, unusable by the planner, and matched by
+    `IF NOT EXISTS` - so a presence check by name alone accepts it, re-issuing
+    the statement is a no-op, and the store scans every edge at every level
+    with nothing printed. The docs tell an operator to use CONCURRENTLY on a
+    live store, which is exactly where a build can fail.
+    """
+
+    def test_an_invalid_index_is_reported_rather_than_taken_as_done(
+        self, schema, backends, capsys
+    ):
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_edges"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "INSERT INTO {}.graph_edges VALUES"
+                    " ('a', '{{\"source\": \"x\"}}'),"
+                    " ('b', '{{\"source\": \"x\"}}')"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            # A concurrent build that cannot succeed: the values collide, so
+            # the unique index is left behind with indisvalid = false. That is
+            # the shape a failed CONCURRENTLY build leaves in any case.
+            try:
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE UNIQUE INDEX CONCURRENTLY graph_edges_source_idx"
+                        " ON {}.graph_edges ((doc->>'source'))"
+                    ).format(psycopg.sql.Identifier(schema))
+                )
+            except psycopg.errors.UniqueViolation:
+                pass
+            valid = conn.execute(
+                "SELECT i.indisvalid FROM pg_class c"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " JOIN pg_index i ON i.indexrelid = c.oid"
+                " WHERE n.nspname = %s AND c.relname = %s",
+                (schema, "graph_edges_source_idx"),
+            ).fetchone()
+        assert valid == (False,), (
+            f"the fixture did not leave an invalid index behind: {valid}"
+        )
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        capsys.readouterr()
+        backend._ensure_schema()
+        printed = capsys.readouterr().out
+        assert "graph_edges_source_idx exists but is invalid" in printed, (
+            "an index the planner cannot use was taken as done: " + printed
         )
 
 
