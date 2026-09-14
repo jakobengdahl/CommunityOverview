@@ -307,13 +307,17 @@ The PR body follows `.github/pull_request_template.md`:
 - **Test plan** — which tests cover this, and how to verify manually.
 - **Screenshots affected** — see the Documentation section.
 
-**Push once per review round, not once per fix.** Every push runs CI, so a loop
-that pushes after each individual fix pays for that many runs — and on a review
-loop of any length that is the dominant cost of the change. Fix everything a
-round raised, verify locally per step 5, then push once. Several commits in one
-push is fine; step 6 asks for one commit per logical change, not one push.
+**Push once per review round, not once per fix.** A feature-branch push runs no
+CI at all until the PR exists — `ci.yml`'s `push` trigger covers only `main`,
+`preview` and `prod` — and after that every push restarts the workflow and
+cancels whatever was still in flight, because the workflow sets
+`concurrency: cancel-in-progress`. So a loop that pushes after each individual
+fix does not buy a verdict per fix; it keeps the required checks churning and
+leaves no settled head to review. Fix everything a round raised, verify locally
+per step 5, then push once. Several commits in one push is fine; step 6 asks
+for one commit per logical change, not one push.
 
-On a **draft** PR the cost is also noise. When the diff touches service code the
+On a **draft** PR there is noise on top of that. When the diff touches service code the
 three heavy suites skip, and their gates fail that skip rather than let it report
 green, so each push turns three required checks red and mails the repository
 owner. (A draft whose diff is only `docs/` or `*.md` reports green instead:
@@ -648,10 +652,11 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 **First: is it red by design?** On a draft PR whose diff touches service code,
 the three heavy suites skip and their gates fail that skip, with a message
 saying the suite "has NOT run" and to mark the PR ready for review. That is not
-a test failure, and the numbered steps below do not apply to it — it clears by
-marking the PR ready once the change genuinely is ready, which runs the suites
-for real. Step 10's checklist still governs the merge. The steps below are about
-a suite that ran and failed.
+a test failure, and the diagnosis in steps 1-3 below does not apply to it — it
+clears by marking the PR ready once the change genuinely is ready, which runs
+the suites for real. Step 10's checklist still governs the merge, and step 4
+binds whatever made a check red. Steps 1-3 are about a suite that ran and
+failed.
 
 1. Read the CI failure output before doing anything else.
 2. If the failure is in your code: fix it locally, run the failing tests, commit,
