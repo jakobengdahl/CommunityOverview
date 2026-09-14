@@ -307,6 +307,20 @@ The PR body follows `.github/pull_request_template.md`:
 - **Test plan** — which tests cover this, and how to verify manually.
 - **Screenshots affected** — see the Documentation section.
 
+**Push once per review round, not once per fix.** While the PR is a draft, the
+three heavy suites skip and their gates fail that skip rather than let it
+report green — see `.github/workflows/ci.yml` and
+`backend/tests/test_ci_gate_semantics.py`. So every push to a draft turns three
+required checks red on purpose, and GitHub mails the owner about each one. That
+is correct behaviour and must not be "fixed" in the workflow: a gate that
+skipped quietly instead of failing would report GREEN to branch protection,
+because GitHub counts a skipped required check as a pass. That is the exact bug
+the gate exists to prevent, and the test file pins it.
+
+The only lever is on this side: fix everything a round raised, verify locally
+per step 5, then push once. A long loop that pushes after each individual fix
+turns the owner's CI mail into noise, which is how a real failure gets missed.
+
 ### 8. Review Loop
 
 **Write the guarantees first.** G1…Gn, one line each: what this change must
