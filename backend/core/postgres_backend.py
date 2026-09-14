@@ -518,8 +518,11 @@ class PostgresGraphPersistenceBackend:
     # does and therefore what the equivalence contract already describes. It
     # costs one round trip per level of the graph actually crossed, rather
     # than one recursion step per level the caller asked for.
+    # No DISTINCT: the LATERAL emits one row per edge and `graph_nodes.id` is
+    # the primary key, so the LEFT JOIN matches at most once. There is nothing
+    # for it to remove, and asking for it buys a unique step per level.
     _LEVEL = """
-    SELECT DISTINCT e.id AS edge_id, far.id AS far_id, (fn.id IS NOT NULL) AS is_node
+    SELECT e.id AS edge_id, far.id AS far_id, (fn.id IS NOT NULL) AS is_node
     FROM {edges} e
     CROSS JOIN LATERAL (
       SELECT CASE WHEN e.doc->>'source' = ANY(%(frontier)s)
@@ -767,6 +770,11 @@ class PostgresGraphPersistenceBackend:
         # stale-statistics regression this exists to close. CREATE INDEX in the
         # same situation DOES raise, which is why the two are handled
         # differently rather than alike.
+        # Removed again in the `finally` below, not left on the connection.
+        # It goes back to the pool when this block exits, and a handler left
+        # behind attaches to whatever runs on it next: four saves leave four
+        # handlers, and an unrelated DROP's notices then print four times,
+        # each labelled as coming from ANALYZE.
         def _report(diag: Any) -> None:
             print(
                 f"Warning: ANALYZE after save: {diag.severity}: {diag.message_primary}"

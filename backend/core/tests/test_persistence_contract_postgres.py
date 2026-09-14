@@ -1057,6 +1057,26 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # save;" is the exception line, and matching both would let a mutation
         # that makes ANALYZE raise outright satisfy an assertion about the
         # handler.
+        # Exactly once per table per save, and no handler left on the
+        # connection afterwards. A handler that is installed and not removed
+        # attaches to whatever runs on that pooled connection next: four saves
+        # leave four handlers, and an unrelated statement's notices then print
+        # four times, each labelled as coming from ANALYZE - which a
+        # substring assertion is perfectly happy with.
+        assert printed.count("Warning: ANALYZE after save:") == 2, (
+            "one line per table, once: " + printed
+        )
+        # A second save must cost the same two lines, not four. A handler
+        # installed and never removed stays on the pooled connection and
+        # attaches to whatever runs on it next, so they accumulate: four saves
+        # leave four handlers, and an unrelated statement's notices then print
+        # four times, each labelled as coming from ANALYZE. A substring
+        # assertion is perfectly happy with that; a count is not.
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        again = capsys.readouterr().out
+        assert again.count("Warning: ANALYZE after save:") == 2, (
+            "the notice handler from the first save is still attached: " + again
+        )
         assert "Warning: ANALYZE after save:" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )

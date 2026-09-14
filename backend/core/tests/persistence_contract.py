@@ -344,6 +344,13 @@ class PersistenceBackendContract:
         backend = factory()
         if not self._traversing(backend):
             pytest.skip("backend does not answer traversals")
+        # A runtime_checkable Protocol with an empty body accepts everything,
+        # which would make the assertion below pass for a backend with no
+        # `traverse` at all. Asked as a negative because it is the same
+        # question on every Python: `__protocol_attrs__` is 3.12 and later.
+        assert not isinstance(object(), TraversingBackend), (
+            "TraversingBackend declares no members, so it checks nothing"
+        )
         assert isinstance(backend, TraversingBackend)
 
     # -- the snapshot contract ------------------------------------------------

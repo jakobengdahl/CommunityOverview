@@ -1125,6 +1125,67 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
+    def test_the_answer_does_not_depend_on_the_order_the_store_returns(self, schema):
+        """The protocol says order is not part of the contract, and nothing
+        held that sentence to anything: `PostgresGraphPersistenceBackend`
+        always seeds `node_ids` with the anchor, so every id-vs-position
+        question in this layer has the same answer for the only implementation
+        in the tree. A second backend ordering its answer differently would
+        find out the hard way - keying the anchor exemption on
+        `node_ids[0]` rather than on the anchor id passes the whole suite and
+        returns an archived node under include_archived=False.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="c", type=NodeType.ACTOR, name="c"),
+                ],
+                [
+                    Edge(
+                        id="ac",
+                        source="a",
+                        target="c",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            # Archived after the store decided, so the answer has to be the
+            # walk's - and the walk's answer does not depend on any order.
+            storage.nodes["c"].archived = True
+
+            straight = backend.traverse
+
+            def _reversed(*args, **kwargs):
+                got = straight(*args, **kwargs)
+                return {
+                    "node_ids": list(reversed(got["node_ids"])),
+                    "edge_ids": list(reversed(got["edge_ids"])),
+                }
+
+            backend.traverse = _reversed
+            try:
+                result = storage.get_related_nodes("a", depth=1)
+            finally:
+                backend.traverse = straight
+
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                "an archived node came back because the anchor was recognised "
+                "by its position rather than by its id: "
+                f"{sorted(n.id for n in result['nodes'])}"
+            )
+            assert {e.id for e in result["edges"]} == set()
+        finally:
+            storage.flush()
+            backend.close()
+
     def test_the_edge_check_does_not_borrow_the_anchor_exemption(self, schema):
         """The node rule exempts the anchor: an archived anchor is still
         returned. Edges have no such rule - an archived edge is dropped
