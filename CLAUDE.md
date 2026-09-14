@@ -308,14 +308,15 @@ The PR body follows `.github/pull_request_template.md`:
 - **Screenshots affected** — see the Documentation section.
 
 **Push once per review round, not once per fix.** A feature-branch push runs no
-CI at all until the PR exists — `ci.yml`'s `push` trigger covers only `main`,
-`preview` and `prod` — and after that every push restarts the workflow and
-cancels whatever was still in flight, because the workflow sets
-`concurrency: cancel-in-progress`. So a loop that pushes after each individual
-fix does not buy a verdict per fix; it keeps the required checks churning and
-leaves no settled head to review. Fix everything a round raised, verify locally
-per step 5, then push once. Several commits in one push is fine; step 6 asks
-for one commit per logical change, not one push.
+CI at all until the PR exists — `ci.yml`'s `push` trigger covers only the
+`main`, `preview` and `prod` branches, plus `v*` tags — and after that every
+push restarts the workflow and cancels whatever was still in flight, because
+the workflow sets `concurrency: cancel-in-progress`. So a loop that pushes
+after each individual fix does not reliably buy a verdict per fix: a push that
+lands before the previous run finishes cancels it, and it leaves no settled
+head to review. Fix everything a round raised, verify locally per step 5, then
+push once. Several commits in one push is fine; step 6 asks for one commit per
+logical change, not one push.
 
 On a **draft** PR there is noise on top of that. When the diff touches service code the
 three heavy suites skip, and their gates fail that skip rather than let it report
@@ -651,12 +652,15 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 
 **First: is it red by design?** On a draft PR whose diff touches service code,
 the three heavy suites skip and their gates fail that skip, with a message
-saying the suite "has NOT run" and to mark the PR ready for review. That is not
-a test failure, and the diagnosis in steps 1-3 below does not apply to it — it
-clears by marking the PR ready once the change genuinely is ready, which runs
-the suites for real. Step 10's checklist still governs the merge, and step 4
-binds whatever made a check red. Steps 1-3 are about a suite that ran and
-failed.
+saying the suite "has NOT run" and to mark the PR ready for review. That is a
+statement about one check, not about the run: `python-lint` and `frontend-lint`
+carry no draft condition and run for real, so a genuine failure can sit beside
+the three by-design ones. Step 1 therefore always applies — read the output
+before concluding anything. What steps 2-3 do not apply to is that one
+by-design check: it clears by marking the PR ready once the change genuinely is
+ready, which runs the suites for real. Every other red check in the same run is
+diagnosed normally. Step 10's checklist still governs the merge, and step 4
+binds whatever made a check red.
 
 1. Read the CI failure output before doing anything else.
 2. If the failure is in your code: fix it locally, run the failing tests, commit,
