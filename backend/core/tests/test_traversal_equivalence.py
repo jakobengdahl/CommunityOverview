@@ -38,6 +38,8 @@ if REQUIRE:
 else:
     psycopg = pytest.importorskip("psycopg", reason="psycopg is an optional dependency")
 
+from psycopg_pool import PoolTimeout  # noqa: E402
+
 from backend.core import storage_search  # noqa: E402
 from backend.core.postgres_backend import (  # noqa: E402
     PostgresGraphPersistenceBackend,
@@ -752,9 +754,19 @@ class TestTheTraversalHoldsOneConnection:
                 id="bc", source="b", target="c", type=RelationshipType.RELATES_TO
             ),
         }
+        # Seeded by a SEPARATE backend, so the one under test meets the
+        # traversal as its very first call. Migrating from inside the held
+        # connection needs a second one and deadlocks against its own pool -
+        # measured at 30s to PoolTimeout - and loading here first would hide
+        # that, because the load migrates.
+        seeder = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            _load(seeder, nodes, edges)
+        finally:
+            seeder.close()
+
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
         try:
-            _load(backend, nodes, edges)
             # Several levels, so a per-level checkout would need a second
             # connection while the first is still held.
             got = backend.traverse("a", 3)
@@ -953,11 +965,31 @@ class TestTheRoutingItselfIsCovered:
             storage.flush()
             backend.close()
 
-    def test_a_store_that_raises_is_answered_by_the_walk(self, schema):
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(RuntimeError("the store is having a day"), id="runtime"),
+            pytest.param(
+                psycopg.OperationalError("connection dropped"), id="connection"
+            ),
+            pytest.param(
+                psycopg.errors.QueryCanceled("statement timeout"), id="timeout"
+            ),
+            pytest.param(PoolTimeout("no connection available"), id="pool"),
+        ],
+    )
+    def test_a_store_that_raises_is_answered_by_the_walk(self, schema, failure):
         """A store that cannot answer is not a failed request. Nothing made
         `traverse` fail before, so neither half of this was covered: letting
         the exception out, and swallowing it into an empty answer, both
         passed.
+
+        Parametrised over what a store actually raises, not over a stand-in.
+        With only `RuntimeError` here, narrowing the handler to `except
+        RuntimeError` passed the whole suite - and a dropped connection, a
+        statement timeout (which this file deliberately configures elsewhere)
+        or an exhausted pool would then leave the fallback and come out of the
+        API as a 500.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
@@ -982,7 +1014,7 @@ class TestTheRoutingItselfIsCovered:
             storage.flush()
 
             def _explode(*args, **kwargs):
-                raise RuntimeError("the store is having a day")
+                raise failure
 
             backend.traverse = _explode
             result = storage.get_related_nodes("a", depth=1)
