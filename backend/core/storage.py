@@ -210,6 +210,14 @@ class GraphStorage:
         # load() and save() wait on the queue while holding it, so a writer
         # that did would deadlock the process.
         self._resync_pending = False
+        # The most recent write of any kind - incremental or whole-graph.
+        # Writes go to a background executor, so `self.nodes` is ahead of the
+        # store between a mutation and its write landing. A traversal answered
+        # BY the store in that window would not see the caller's own write -
+        # the two engines answering different questions rather than
+        # disagreeing. This is what get_related_nodes checks before it uses
+        # the store, and it has to cover every route a write can take.
+        self._last_write: Optional["Future[None]"] = None
 
         # The VectorStore owns the vectors in memory; GraphStorage persists them
         # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
@@ -754,7 +762,12 @@ class GraphStorage:
             # Offload blocking I/O to background thread to avoid blocking event
             # loop. Returns the Future so callers that must wait (e.g. load())
             # can call .result().
-            return self._io_executor.submit(
+            # Recorded here as well as in _persist. A snapshot save is a write
+            # like any other as far as a reader is concerned, and _persist
+            # routes here for four documented cases - so watching only the
+            # incremental path left the guard open on exactly the writes that
+            # had already gone wrong once.
+            self._last_write = self._io_executor.submit(
                 self._do_save_to_disk,
                 data,
                 node_count,
@@ -762,6 +775,7 @@ class GraphStorage:
                 vectors,
                 vector_revision,
             )
+            return self._last_write
 
     def _snapshot_data(self) -> Dict[str, Any]:
         """The whole graph as a backend snapshot. Callers must hold _lock."""
@@ -1133,9 +1147,11 @@ class GraphStorage:
         if len(operations) > 1 and not caps.transactions:
             return self.save()
         vectors, vector_revision = self._take_vector_snapshot()
-        return self._io_executor.submit(
+        # Kept so a read can ask whether the store has caught up with us.
+        self._last_write = self._io_executor.submit(
             self._do_apply, tuple(operations), vectors, vector_revision
         )
+        return self._last_write
 
     def _do_apply(
         self,
@@ -1891,7 +1907,100 @@ class GraphStorage:
         depth: int = 1,
         include_archived: bool = False,
     ) -> Dict[str, Any]:
-        """Get nodes connected to the given node.  Delegates to storage_search."""
+        """Get nodes connected to the given node.
+
+        Two engines answer this, and which one does is not visible in the
+        result: `test_traversal_equivalence.py` holds the store's traversal to
+        the in-memory walk's answer, set for set, and neither may change
+        without the other (`dec-oc-traversal-recursive-cte`).
+
+        The store answers only when it is CURRENT. Writes go to a background
+        executor, so between a mutation and its write landing `self.nodes` is
+        ahead of the store; a traversal answered there would not see the
+        caller's own write. That is not the two engines disagreeing, it is them
+        being asked about different moments, and no equivalence test can cover
+        it. So a pending write sends the query to the walk, which reads the
+        live dictionaries - correct, and no slower than it was before any of
+        this existed.
+        """
+        if self._store_traversal_is_current():
+            try:
+                found = self._persistence_backend.traverse(  # type: ignore[union-attr]
+                    node_id,
+                    depth,
+                    relationship_types=[
+                        getattr(t, "value", t) for t in (relationship_types or [])
+                    ]
+                    or None,
+                    include_archived=include_archived,
+                )
+            except Exception as exc:
+                # A store that cannot answer is not a failed request. The walk
+                # is still here and still right; the store is the optimisation.
+                print(f"Warning: store traversal failed, walking instead: {exc}")
+            else:
+                # Membership was decided by the store, at the store's moment;
+                # the payloads are resolved here, at ours. Between the two the
+                # graph can change, and then there is no sound way to patch
+                # the store's answer into one: dropping a node that has since
+                # been archived leaves behind whatever was only reachable
+                # THROUGH it, which is a state neither engine ever held - the
+                # same objection that made returning the archived node wrong.
+                # Recomputing reachability here would be reimplementing the
+                # walk beside the walk.
+                #
+                # So this does not patch. It asks one question - did anything
+                # the store decided on stop being what it was - and when the
+                # answer is yes it falls through to the walk, which decides and
+                # resolves from one dictionary in one pass and is therefore
+                # self-consistent by construction. That is the fallback G3
+                # already relies on; this is one more reason to take it.
+                #
+                # Only disappearances count. A node ADDED since the store
+                # answered is absent from the result, but that is a read at an
+                # earlier instant rather than an inconsistent one, which is
+                # what any snapshot read gives you.
+                def _hidden(node: "Node", nid: str) -> bool:
+                    if include_archived or nid == node_id:
+                        return False
+                    return bool(getattr(node, "archived", False))
+
+                # Resolved in the SAME pass that checks, not a second one.
+                # This path takes no lock while every mutator holds one, so a
+                # delete landing between a `nid in self.nodes` and a
+                # `self.nodes[nid]` turns a traversal into a KeyError out of
+                # the API. One dict lookup per id, its result carried forward,
+                # makes the check and the use the same observation.
+                #
+                # Not copied from the walk - the walk has the same window.
+                # `storage_search.get_related_nodes` resolves with
+                # `if nid in nodes` and then indexes, which is the same
+                # check-then-use; that guard is there for the dangling-endpoint
+                # rule, not for a concurrent delete, and feeding it a dict that
+                # loses the key between the two raises KeyError exactly as this
+                # path used to. That is pre-existing and left alone here.
+                nodes = []
+                for nid in found["node_ids"]:
+                    node = self.nodes.get(nid)
+                    if node is None or _hidden(node, nid):
+                        nodes = None
+                        break
+                    nodes.append(node)
+                edges = None
+                if nodes is not None:
+                    edges = []
+                    for eid in found["edge_ids"]:
+                        edge = self.edges.get(eid)
+                        if edge is None or (
+                            not include_archived
+                            and bool(getattr(edge, "archived", False))
+                        ):
+                            edges = None
+                            break
+                        edges.append(edge)
+                if nodes is not None and edges is not None:
+                    return {"nodes": nodes, "edges": edges}
+
         return storage_search.get_related_nodes(
             self.nodes,
             self.edges,
@@ -1901,6 +2010,25 @@ class GraphStorage:
             depth,
             include_archived=include_archived,
         )
+
+    def _store_traversal_is_current(self) -> bool:
+        """Whether the store can be trusted to answer a traversal right now."""
+        if not self._backend_capabilities.store_traversal:
+            return False
+        write = self._last_write
+        if write is not None and not write.done():
+            return False
+        # Read AFTER done(), not before. _do_apply sets this flag and then
+        # raises, so the flag is set before the Future finishes. Reading it
+        # first admits: flag False here -> the worker sets it and finishes ->
+        # done() True -> the guard calls a store it has just been told is
+        # stale. In this order, done() being true means the flag write has
+        # already happened, so the window closes for free.
+        if self._resync_pending:
+            # The last write failed and the whole graph is owed to the store;
+            # what is there now is not what we hold.
+            return False
+        return True
 
     def find_similar_nodes(
         self,

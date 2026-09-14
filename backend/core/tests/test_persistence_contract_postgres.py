@@ -987,6 +987,485 @@ class TestPostgresBootsForALeastPrivilegeRole:
         assert backend.exists()
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
+    def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
+        self, lowpriv, backends, capsys
+    ):
+        """The operator provisioned the store exactly as the docs prescribe -
+        tables AND the two traversal indexes - and the role owns none of it.
+        `CREATE INDEX IF NOT EXISTS` checks ownership before existence, so
+        without a catalog check first this boots with two warnings saying the
+        traversal will scan, while it seeks. A warning that fires when nothing
+        is wrong teaches an operator to ignore warnings.
+        """
+        name, schema, password = lowpriv
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table, columns in (
+                ("graph_nodes", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                ("graph_edges", "id text PRIMARY KEY, doc jsonb NOT NULL"),
+                (
+                    "graph_metadata",
+                    "only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),"
+                    " doc jsonb NOT NULL",
+                ),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE TABLE {}.{} ({})").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.SQL(columns),
+                    )
+                )
+            for index, expression in (
+                ("graph_edges_source_idx", "((doc->>'source'))"),
+                ("graph_edges_target_idx", "((doc->>'target'))"),
+            ):
+                conn.execute(
+                    psycopg.sql.SQL("CREATE INDEX {} ON {}.graph_edges {}").format(
+                        psycopg.sql.Identifier(index),
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.SQL(expression),
+                    )
+                )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE"
+                    " ON ALL TABLES IN SCHEMA {} TO {}"
+                ).format(psycopg.sql.Identifier(schema), psycopg.sql.Identifier(name))
+            )
+
+        low_dsn = _dsn_as_role(name, password)
+        backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
+        backends.append(backend)
+        capsys.readouterr()
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        printed = capsys.readouterr().out
+        assert "scan instead of seek" not in printed, (
+            "warned about indexes the store already has: " + printed
+        )
+        # The other half of the same boot: ANALYZE does NOT raise for this
+        # role - PostgreSQL emits a warning and skips the table - so without
+        # the notice handler the save reports success while the statistics it
+        # exists to refresh were never touched. The docs promise the operator
+        # this line; nothing else asserts it.
+        # Matched on the backend's own prefix, not on the server's wording:
+        # PostgreSQL 16 says "permission denied to analyze", 15 and earlier say
+        # "only table or database owner can analyze it", and both are
+        # lc_messages-dependent. What this test is about is that the notice
+        # reaches the operator at all.
+        # With the colon: "Warning: ANALYZE after save:" is the notice-handler
+        # line, which is what this test is about. "could not ANALYZE after
+        # save;" is the exception line, and matching both would let a mutation
+        # that makes ANALYZE raise outright satisfy an assertion about the
+        # handler.
+        # Exactly once per table per save, and no handler left on the
+        # connection afterwards. A handler that is installed and not removed
+        # attaches to whatever runs on that pooled connection next: four saves
+        # leave four handlers, and an unrelated statement's notices then print
+        # four times, each labelled as coming from ANALYZE - which a
+        # substring assertion is perfectly happy with.
+        assert printed.count("Warning: ANALYZE after save:") == 2, (
+            "one line per table, once: " + printed
+        )
+        # A second save must cost the same two lines, not four. A handler
+        # installed and never removed stays on the pooled connection and
+        # attaches to whatever runs on it next, so they accumulate: four saves
+        # leave four handlers, and an unrelated statement's notices then print
+        # four times, each labelled as coming from ANALYZE. A substring
+        # assertion is perfectly happy with that; a count is not.
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        again = capsys.readouterr().out
+        assert again.count("Warning: ANALYZE after save:") == 2, (
+            "the notice handler from the first save is still attached: " + again
+        )
+        assert "Warning: ANALYZE after save:" in printed, (
+            "a role that cannot ANALYZE was told nothing about it: " + printed
+        )
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
+
+class TestPostgresIndexCreationLosesRacesQuietly:
+    """The index loop runs outside the migrating transaction, and the advisory
+    lock is transaction-scoped - so it holds no lock, and N instances booting
+    together all pass the catalog check and all issue the statement. Measured
+    with 8 concurrent boots against a 5 000-row table, the create raised 5
+    times; against 200 000 rows, 14 times and 14 false warnings saying the
+    traversal would scan, on a store whose index was there. The window is the
+    index build, so it widens with the table: it is the upgrade of a large
+    existing store that hits this.
+
+    Raced deterministically rather than by threads and hope - a race a fast
+    machine wins is a test that passes having exercised nothing. The create is
+    made to do what the losing instance sees: the index exists, and the
+    statement raises anyway.
+    """
+
+    def _boot_with_a_losing_create(self, schema, backends, capsys, really_create):
+        import psycopg as _psycopg
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        original = _psycopg.Connection.execute
+
+        def _lose(self, query, *args, **kwargs):
+            if "CREATE INDEX" in repr(query):
+                if really_create:
+                    # Whoever won the race already made it.
+                    with _psycopg.connect(DSN, autocommit=True) as winner:
+                        original(winner, query, *args, **kwargs)
+                raise _psycopg.errors.UniqueViolation(
+                    "duplicate key value violates unique constraint"
+                    ' "pg_class_relname_nsp_index"'
+                )
+            return original(self, query, *args, **kwargs)
+
+        _psycopg.Connection.execute = _lose
+        try:
+            capsys.readouterr()
+            backend._ensure_schema()
+        finally:
+            _psycopg.Connection.execute = original
+        return capsys.readouterr().out
+
+    def test_a_lost_race_is_not_reported(self, schema, backends, capsys):
+        printed = self._boot_with_a_losing_create(
+            schema, backends, capsys, really_create=True
+        )
+        assert "scan instead of seek" not in printed, (
+            "reported a failure on a store whose index is there: " + printed
+        )
+
+    def test_a_create_that_really_failed_is_still_reported(
+        self, schema, backends, capsys
+    ):
+        # The same index name exists in ANOTHER schema first. The re-check asks
+        # the catalog by name and schema; by name alone it finds the neighbour's
+        # and stays silent about this store's missing one, forever. Two schemas
+        # in one database is a supported shape here - `self.schema` exists for
+        # exactly that.
+        neighbour = schema + "_neighbour"
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(neighbour)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_edges"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(neighbour))
+            )
+            # BOTH names, and the assertion below names one of them. With
+            # only one planted here, the other index's warning satisfies a
+            # name-agnostic assertion while the planted one is silently
+            # skipped - which is how this test passed against a re-check whose
+            # schema predicate had been removed.
+            for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE INDEX {} ON {}.graph_edges ((doc->>'source'))"
+                    ).format(
+                        psycopg.sql.Identifier(index),
+                        psycopg.sql.Identifier(neighbour),
+                    )
+                )
+        try:
+            printed = self._boot_with_a_losing_create(
+                schema, backends, capsys, really_create=False
+            )
+            for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
+                assert index in printed and "scan instead of seek" in printed, (
+                    f"{index} is genuinely missing from this store and was not "
+                    f"reported: {printed}"
+                )
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(neighbour)
+                    )
+                )
+
+
+class TestPostgresIndexWorkIsDoneOnce:
+    """Two properties of the boot path that the answer cannot show.
+
+    The catalog pre-check's own purpose is not to be correct - the re-check
+    after a failure covers that - but to stop issuing DDL that will fail on
+    every boot of a store that already has its indexes. Deleting it leaves
+    every test green while a least-privilege instance sends two doomed
+    statements per start, forever.
+
+    And the ANALYZE after a save is outside the save's transaction so that it
+    cannot fail the save. That is the whole reason it is where it is, and
+    nothing exercised the path where it raises.
+    """
+
+    def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend._ensure_schema()
+
+        # Second boot, same store: the indexes are there now.
+        again = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(again)
+        # The module's own helper, which patches the CURSOR: `Connection.execute`
+        # delegates to one, so the cursor sees both, and a refactor that issued
+        # this DDL through `conn.cursor()` would leave a connection-level spy
+        # recording nothing and this assertion passing over two doomed
+        # statements.
+        issued = _statements_issued(again._ensure_schema)
+
+        creates = [q for q, _ in issued if "CREATE INDEX" in repr(q)]
+        assert not creates, (
+            "re-issued DDL for indexes that are already there; on a role that "
+            f"may not create them, that is a failure every boot: {creates}"
+        )
+
+    def test_a_catalog_it_cannot_read_is_reported_not_assumed_away(
+        self, schema, backends, capsys
+    ):
+        """`_index_state` answers "missing" when it cannot ask - a pool blip
+        during boot, a server that refuses a connection - so the caller
+        reports rather than hides. Answering "valid" there brings the store up
+        with neither index and nothing printed, which is the silent
+        degradation this whole path exists to prevent.
+        """
+        from psycopg_pool import ConnectionPool
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        real = ConnectionPool.connection
+        # After the migration's own checkout, so the tables still get made and
+        # only the index work meets the blip. Refusing every checkout would
+        # fail `_ensure_schema` before it ever reaches the index loop, and the
+        # test would assert nothing.
+        seen = {"n": 0}
+
+        def _blip(self, *args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise RuntimeError("pool exhausted")
+            return real(self, *args, **kwargs)
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        again = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(again)
+        capsys.readouterr()
+        ConnectionPool.connection = _blip
+        try:
+            again._ensure_schema()
+        except Exception:
+            pass
+        finally:
+            ConnectionPool.connection = real
+        printed = capsys.readouterr().out
+        assert "scan instead of seek" in printed, (
+            "a catalog that could not be read was taken as an answer: " + printed
+        )
+
+    def test_an_analyze_that_raises_does_not_fail_the_save(
+        self, schema, backends, capsys
+    ):
+        import psycopg as _psycopg
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend._ensure_schema()
+
+        original = _psycopg.Connection.execute
+
+        def _refuse_analyze(self, query, *args, **kwargs):
+            if "ANALYZE" in repr(query):
+                raise _psycopg.errors.InsufficientPrivilege("no ANALYZE for you")
+            return original(self, query, *args, **kwargs)
+
+        _psycopg.Connection.execute = _refuse_analyze
+        try:
+            backend.save_graph_data(snapshot([node_payload("a")]))
+        finally:
+            _psycopg.Connection.execute = original
+
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
+            "the save did not land"
+        )
+        assert "could not ANALYZE after save" in capsys.readouterr().out
+
+
+class TestPostgresReportsAnIndexItCannotUse:
+    """An index left invalid by a failed `CREATE INDEX CONCURRENTLY` is
+    present in the catalog, unusable by the planner, and matched by
+    `IF NOT EXISTS` - so a presence check by name alone accepts it, re-issuing
+    the statement is a no-op, and the store scans every edge at every level
+    with nothing printed. The docs tell an operator to use CONCURRENTLY on a
+    live store, which is exactly where a build can fail.
+    """
+
+    def test_an_invalid_index_is_reported_rather_than_taken_as_done(
+        self, schema, backends, capsys
+    ):
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "CREATE TABLE {}.graph_edges"
+                    " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "INSERT INTO {}.graph_edges VALUES"
+                    " ('a', '{{\"source\": \"x\"}}'),"
+                    " ('b', '{{\"source\": \"x\"}}')"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            # A concurrent build that cannot succeed: the values collide, so
+            # the unique index is left behind with indisvalid = false. That is
+            # the shape a failed CONCURRENTLY build leaves in any case.
+            try:
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE UNIQUE INDEX CONCURRENTLY graph_edges_source_idx"
+                        " ON {}.graph_edges ((doc->>'source'))"
+                    ).format(psycopg.sql.Identifier(schema))
+                )
+            except psycopg.errors.UniqueViolation:
+                pass
+            valid = conn.execute(
+                "SELECT i.indisvalid FROM pg_class c"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " JOIN pg_index i ON i.indexrelid = c.oid"
+                " WHERE n.nspname = %s AND c.relname = %s",
+                (schema, "graph_edges_source_idx"),
+            ).fetchone()
+        assert valid == (False,), (
+            f"the fixture did not leave an invalid index behind: {valid}"
+        )
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        capsys.readouterr()
+        backend._ensure_schema()
+        printed = capsys.readouterr().out
+        assert "graph_edges_source_idx" in printed and "not valid" in printed, (
+            "an index the planner cannot use was taken as done: " + printed
+        )
+        # And it must not name a cause. The same indisvalid = false is what a
+        # HEALTHY concurrent build reads while it is still running - verified
+        # against this server - and the docs tell an operator to use exactly
+        # that on a live store. "Your build failed, drop it" is how they abort
+        # their own build and take the lock they were avoiding.
+        assert "still running" in printed, (
+            "named a failed build as the cause when the catalog cannot tell "
+            "that from a healthy one still in progress: " + printed
+        )
+        # The whole command, quoted. The operator is meant to paste it, and
+        # the least-privilege fixture above parametrises over a schema that
+        # only survives quoted for exactly this class of bug: unquoted, the
+        # remedy fails with `schema "..." does not exist`.
+        assert (
+            f'REINDEX INDEX CONCURRENTLY "{schema}"."graph_edges_source_idx"' in printed
+        ), "the remedy is not a command the operator can run: " + printed
+        assert "REINDEX INDEX CONCURRENTLY" in printed, (
+            "an invalid index is repairable in place; DROP is not the remedy "
+            "and takes a stronger lock: " + printed
+        )
+        assert "scan instead of seek" in printed, (
+            "said the index was unusable without saying what it costs: " + printed
+        )
+        # And the boot carries on. Reporting must not stop the OTHER index
+        # being created - one invalid index would then keep the second from
+        # ever existing, on this boot and every later one.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            present = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = %s",
+                    (schema,),
+                ).fetchall()
+            }
+        assert "graph_edges_target_idx" in present, (
+            "an invalid source index stopped the target index being created: "
+            f"{sorted(present)}"
+        )
+
+
+class TestPostgresProvisionsWhatTheTraversalNeeds:
+    def test_the_traversal_indexes_and_statistics_are_actually_there(
+        self, schema, backends
+    ):
+        """Two mechanisms that exist only for speed, and speed is what a test
+        suite of small graphs cannot see: deleting either leaves every other
+        test green. Measured on 2000 nodes / 20 000 edges, the index takes the
+        level query from a sequential scan to a bitmap scan, and the ANALYZE
+        takes the planner's row estimate from a 21x overshoot to the truth.
+        Asserted as facts in the catalog rather than as timings, so this says
+        the same thing on a loaded runner.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            # Definitions, not names. An index of the right name on the wrong
+            # column, or on graph_nodes, or over `id`, satisfies a name check
+            # and puts the sequential scan straight back: measured on 20 000
+            # edges, a BitmapOr over both indexes at cost 138 becomes a Seq
+            # Scan at 901.
+            defined = {
+                row[0]: (row[1], row[2])
+                for row in conn.execute(
+                    "SELECT indexname, tablename, indexdef"
+                    " FROM pg_indexes WHERE schemaname = %s",
+                    (schema,),
+                ).fetchall()
+            }
+            for index, column in (
+                ("graph_edges_source_idx", "source"),
+                ("graph_edges_target_idx", "target"),
+            ):
+                assert index in defined, f"{index} is not there: {sorted(defined)}"
+                table, definition = defined[index]
+                assert table == "graph_edges", (
+                    f"{index} is on {table}, so the traversal's filter on "
+                    f"graph_edges cannot use it"
+                )
+                assert f"'{column}'" in definition, (
+                    f"{index} does not index doc->>'{column}', which is what "
+                    f"the traversal filters on: {definition}"
+                )
+            analysed = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    "SELECT relname, last_analyze IS NOT NULL"
+                    " FROM pg_stat_user_tables WHERE schemaname = %s",
+                    (schema,),
+                ).fetchall()
+            }
+        assert analysed.get("graph_nodes") and analysed.get("graph_edges"), (
+            "a whole-graph save left the planner's statistics describing the "
+            f"table it replaced: {analysed}"
+        )
+        # And they describe the table as SAVED, not as it was before. Running
+        # the ANALYZE first satisfies last_analyze while leaving reltuples at
+        # the pre-save count - 0 for a first save - which is exactly the stale
+        # statistics the block exists to prevent.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT c.relname, c.reltuples FROM pg_class c"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = %s AND c.relname = 'graph_nodes'",
+                (schema,),
+            ).fetchone()
+        assert rows is not None and rows[1] >= 1, (
+            "the statistics describe the table before the save rather than "
+            f"after it: reltuples = {rows}"
+        )
+
 
 class TestPostgresLoadIsOneMomentInTime:
     """A load taken while another instance saves must not tear.
@@ -1171,15 +1650,20 @@ class TestPostgresDeclaresWhatItImplements:
     assertion outside the contract can see it.
     """
 
-    def test_the_declaration_names_all_three_capabilities(self, schema, backends):
-        """Equality, not three flag reads: a capability added to the dataclass
-        and left undeclared here would pass every `is True` in the file."""
+    def test_the_declaration_names_every_capability(self, schema, backends):
+        """Equality, not a flag read each: a capability added to the dataclass
+        and left undeclared here would pass every `is True` in the file.
+
+        It did its job once already - `store_traversal` was added and this
+        assertion is what asked for it to be declared on purpose rather than
+        picked up by accident."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         assert backend.capabilities() == BackendCapabilities(
             incremental_writes=True,
             transactions=True,
             change_notification=True,
+            store_traversal=True,
         )
 
     def test_an_entity_write_can_be_a_backends_first_call(self, schema, backends):
@@ -2587,6 +3071,48 @@ class TestPostgresLoadIsolation:
             f"{after} != {baseline}"
         )
 
+    def test_the_traversal_runs_repeatable_read_and_leaves_nothing_behind(
+        self, schema, backends, monkeypatch
+    ):
+        """The same two halves as the load, and for the same reason: the
+        tearing test infers the level from an answer, which is true but weak.
+        It kills a drop to READ COMMITTED because that answer tears - but an
+        unnoticed change to SERIALIZABLE gives the right answer and the wrong
+        failure mode, and nothing would notice a level left behind on the
+        pooled connection either.
+        """
+        with psycopg.connect(DSN) as check:
+            baseline = check.execute("SHOW transaction_isolation").fetchone()[0]
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        seen = []
+        real_execute = psycopg.Connection.execute
+
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if "ISOLATION LEVEL" in str(query).upper() and not seen:
+                seen.append(
+                    real_execute(conn, "SHOW transaction_isolation").fetchone()[0]
+                )
+            return result
+
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        backend.traverse("a", 2)
+
+        assert seen == ["repeatable read"], (
+            f"the traversal did not run at REPEATABLE READ: {seen}"
+        )
+
+        with backend._pool.connection() as conn:
+            after = conn.execute("SHOW transaction_isolation").fetchone()[0]
+        assert after == baseline, (
+            f"the isolation level leaked onto the pooled connection: "
+            f"{after} != {baseline}"
+        )
+
 
 class TestPostgresLoadOnAVirginStore:
     def test_loading_before_anything_else_migrates_first(self, schema, backends):
@@ -2682,7 +3208,14 @@ class TestPostgresSaveWritesMetadataLast:
         # none. Narrowed when the announcement was added, rather than
         # relaxed: what the hooks depend on is that every row this save
         # writes has been written by the time the metadata upsert runs.
-        row_writes = [q for q in writes if _tables_named(q)]
+        # ANALYZE excluded on the same ground as the announcement, and not on
+        # a weaker one: it writes no graph row, and it runs after the
+        # transaction has committed rather than inside it. What the hooks
+        # depend on is unchanged - every row the save writes is written before
+        # the metadata upsert.
+        row_writes = [
+            q for q in writes if _tables_named(q) and "ANALYZE" not in q.upper()
+        ]
         assert row_writes, "the save wrote no graph table"
         assert "graph_metadata" in row_writes[-1] and "ON CONFLICT" in row_writes[-1], (
             "the metadata upsert is no longer the save's last write to a "

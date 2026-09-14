@@ -31,6 +31,13 @@ connection and refreshes what the announcement names. Without it an instance
 would serve what it last loaded until it restarted - correct, but stale, and
 a shared store that only one instance can read currently is not one.
 
+`store_traversal` is the fourth, and the one that reaches into reads rather
+than writes: the backend answers a bounded-depth neighbourhood query itself,
+a level at a time, instead of the application walking the copy of the
+topology it holds in memory. The in-memory walk stays the reference - the
+answers are held identical by a differential test - and answers whenever the
+store is not current or cannot be reached.
+
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. A whole-graph save carrying one fails
 entirely; an entity write fails only the write that carries it - one
@@ -344,7 +351,149 @@ class PostgresGraphPersistenceBackend:
                         "only_row boolean PRIMARY KEY DEFAULT true"
                         " CHECK (only_row), doc jsonb NOT NULL",
                     )
+            # Outside the migration transaction, on purpose, and one
+            # connection each. Every level of the traversal filters on
+            # doc->>'source' and doc->>'target', which no index covers by
+            # default. Measured at depth 3 on 20k nodes: 3.7 ms against
+            # 61 ms unindexed at 60k edges, and 89 ms against 258 ms at 300k.
+            #
+            # Best-effort, and deliberately not fatal: the same least-privilege
+            # role the guards above exist for may hold DML and no DDL, and a
+            # store that cannot take an index should still boot and still
+            # answer - slowly, which is a performance problem, where failing
+            # here is an outage. It has to be its own transaction for that to
+            # be true at all: a failed statement inside the migration's
+            # transaction aborts the whole thing, so catching the error there
+            # would have recovered nothing.
+            #
+            # The catalog is asked first, for the same reason `_create_missing`
+            # asks it: `CREATE INDEX IF NOT EXISTS` checks ownership BEFORE it
+            # checks existence, so the role provisioned exactly as
+            # docs/PERSISTENCE_BACKENDS.md prescribes - indexes and all - got
+            # "must be owner of table graph_edges" on every boot, and a warning
+            # saying its traversals would scan when they were seeking. A
+            # warning that fires when nothing is wrong is worse than none.
+            for name, expression in (
+                ("graph_edges_source_idx", "((doc->>'source'))"),
+                ("graph_edges_target_idx", "((doc->>'target'))"),
+            ):
+                try:
+                    with self._pool.connection() as conn:
+                        state = self._index_state(conn, name)
+                        if state == "valid":
+                            continue
+                        if state == "invalid":
+                            # indisvalid = false. The planner will not use it,
+                            # and `IF NOT EXISTS` matches on the name, so
+                            # re-issuing it here is a silent no-op: without
+                            # this branch the store scans every edge at every
+                            # level and says nothing.
+                            #
+                            # The cause is deliberately not named. A concurrent
+                            # build that failed looks exactly like one that is
+                            # still running - verified: indisvalid reads false
+                            # throughout a healthy CREATE INDEX CONCURRENTLY -
+                            # and the docs tell an operator to use that on a
+                            # live store. Telling them their own build had
+                            # failed is how they abort it and take an
+                            # ACCESS EXCLUSIVE lock they were avoiding.
+                            #
+                            # Reported rather than repaired because
+                            # REINDEX ... CONCURRENTLY cannot run inside a
+                            # transaction block and these connections are not
+                            # autocommit - not because the index must be
+                            # dropped. It need not: REINDEX repairs it in
+                            # place, and even removing it has a concurrent
+                            # form.
+                            # Quoted, because the operator is meant to paste
+                            # it. `self.schema` reaches an identifier position
+                            # nowhere else in this file without going through
+                            # sql.Identifier, and a mixed-case schema is a
+                            # supported shape the contract parametrises over:
+                            # unquoted, the remedy fails with `schema
+                            # "colow_demo" does not exist`.
+                            qualified = sql.Identifier(self.schema, name).as_string(
+                                conn
+                            )
+                            print(
+                                f"Warning: {name} exists but is not valid - a "
+                                f"concurrent build that failed, or one still "
+                                f"running. If no build is in progress, "
+                                f"REINDEX INDEX CONCURRENTLY {qualified} "
+                                f"repairs it; until it is valid the traversal "
+                                f"will scan instead of seek"
+                            )
+                            continue
+                        conn.execute(
+                            sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} {}").format(
+                                sql.Identifier(name),
+                                self._table("graph_edges"),
+                                sql.SQL(expression),
+                            )
+                        )
+                except Exception as exc:
+                    # Ask again before reporting. This loop runs outside the
+                    # migrating transaction, and the advisory lock is
+                    # transaction-scoped, so it was released before we got
+                    # here: N instances booting together all pass the check
+                    # above and all issue the statement, and the losers get a
+                    # duplicate-key error from the catalog insert. Measured:
+                    # 8 concurrent `CREATE INDEX IF NOT EXISTS` of one name,
+                    # 4 of them raised UniqueViolation and the index exists.
+                    # The window is the index build, so it widens with the
+                    # table - it is the upgrade of a large existing store
+                    # that hits this, not a toy one. The migration's own
+                    # docstring names the same mechanism for tables, where
+                    # the lock closes it.
+                    #
+                    # Nothing is lost when that happens: the index is there,
+                    # put there by whoever won. Reporting it would be the
+                    # defect this pre-check was added to fix - a warning that
+                    # fires when nothing is wrong - so the warning is for the
+                    # case where the index really is missing.
+                    if self._index_state(None, name) != "valid":
+                        print(
+                            f"Warning: could not create {name}; traversal will "
+                            f"scan instead of seek: {exc}"
+                        )
             self._migrated = True
+
+    _INDEX_STATE = (
+        "SELECT i.indisvalid FROM pg_class c"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " LEFT JOIN pg_index i ON i.indexrelid = c.oid"
+        " WHERE n.nspname = %s AND c.relname = %s"
+    )
+
+    def _index_state(self, conn, name: str) -> str:
+        """ "valid", "invalid" or "missing" for `name` in this schema.
+
+        Presence by name is not enough: an index left invalid by a failed
+        concurrent build is present, unusable by the planner, and matched by
+        `IF NOT EXISTS` - so treating it as there is how a store ends up
+        scanning silently.
+
+        `conn` may be None, which takes a fresh one from the pool. That is
+        what the failure path uses - not because the failed connection is
+        unusable (the pool's context manager rolls it back as the exception
+        propagates, before returning it), but because by then it has gone back
+        to the pool and another thread may hold it. Asking through the pool is
+        the only way to be sure what is being asked.
+        """
+        try:
+            if conn is not None:
+                row = conn.execute(self._INDEX_STATE, (self.schema, name)).fetchone()
+            else:
+                with self._pool.connection() as fresh:
+                    row = fresh.execute(
+                        self._INDEX_STATE, (self.schema, name)
+                    ).fetchone()
+        except Exception:
+            # Cannot tell. Say so, so the caller reports rather than hides.
+            return "missing"
+        if row is None:
+            return "missing"
+        return "valid" if row[0] else "invalid"
 
     # -- snapshot contract ---------------------------------------------------
 
@@ -353,7 +502,148 @@ class PostgresGraphPersistenceBackend:
             incremental_writes=True,
             transactions=True,
             change_notification=True,
+            store_traversal=True,
         )
+
+    # -- traversal contract --------------------------------------------------
+
+    # One level of the walk, not the whole traversal. The recursion this
+    # replaced was a single depth-limited `WITH RECURSIVE`, which is the
+    # obvious way to write it and cannot be made to stop early: its working
+    # table is keyed on (id, depth), so a level that reaches nothing new still
+    # emits rows at a depth never seen before, and PostgreSQL has no way to
+    # prune ids already reached - a recursive term may not reference its own
+    # accumulated result in a subquery. So it ran the caller's number of
+    # levels whatever the graph looked like. Measured on 500 nodes / 5000
+    # edges, where the answer is complete at depth 5 (0.06 s): depth 64 cost
+    # 1.05 s, depth 200 cost 3.3 s and depth 1000 cost 16.3 s, all returning
+    # the identical set. Clamping the depth to the graph's size does not fix
+    # that - the clamp only binds when the graph has FEWER edges than the
+    # requested depth, which is never the case on a store worth putting behind
+    # this - and `mcp_tools.get_related_nodes` takes a depth with no cap at
+    # all.
+    #
+    # Driving the levels from here converges instead: the loop stops the
+    # moment a level reaches nothing new, which is what the in-memory walk
+    # does and therefore what the equivalence contract already describes. It
+    # costs one round trip per level of the graph actually crossed, rather
+    # than one recursion step per level the caller asked for.
+    # No DISTINCT: the LATERAL emits one row per edge and `graph_nodes.id` is
+    # the primary key, so the LEFT JOIN matches at most once. There is nothing
+    # for it to remove, and asking for it buys a unique step per level.
+    _LEVEL = """
+    SELECT e.id AS edge_id, far.id AS far_id, (fn.id IS NOT NULL) AS is_node
+    FROM {edges} e
+    CROSS JOIN LATERAL (
+      SELECT CASE WHEN e.doc->>'source' = ANY(%(frontier)s)
+                  THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
+    ) far
+    LEFT JOIN {nodes} fn ON fn.id = far.id
+    WHERE (e.doc->>'source' = ANY(%(frontier)s)
+           OR e.doc->>'target' = ANY(%(frontier)s))
+      AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
+      AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
+      AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
+           OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
+    """
+
+    def traverse(
+        self,
+        anchor_id: str,
+        depth: int,
+        relationship_types: Optional[Sequence[str]] = None,
+        include_archived: bool = False,
+    ) -> Dict[str, List[str]]:
+        """Bounded-depth traversal in the store. See `TraversingBackend`.
+
+        A level at a time, from here, exactly as the in-memory walk does it:
+        the ids a level reaches become the next level's frontier, and the loop
+        ends when a level reaches nothing new. That is what bounds the cost by
+        the graph rather than by the caller's `depth` - see `_LEVEL` for what
+        the single-query version cost instead.
+
+        The edge set is everything incident to a node that was EXPANDED, which
+        is strictly smaller than everything incident to a node that was
+        reached: a node exactly `depth` away is reached but never expanded, so
+        an edge between two such nodes belongs to neither endpoint's expansion
+        and is not returned. Collecting each level's edges from the frontier
+        being expanded gives that for free; the single-query version needed a
+        second pass over the recursion to get it.
+
+        Ids that are not nodes are traversed THROUGH but not returned - the
+        dangling-endpoint rule - so a path can be longer than the graph has
+        nodes, and the frontier carries them while `node_ids` does not.
+        """
+        self._ensure_schema()
+        depth = max(0, depth)
+        # `.value`, never `str()`. RelationshipType is a str-Enum, and str()
+        # of one is "RelationshipType.RELATES_TO" while the stored document
+        # holds "RELATES_TO" - so a filter built with str() silently matches
+        # nothing and the traversal returns the anchor alone. The protocol asks
+        # for strings; this coerces an enum that arrives anyway, correctly.
+        types = [getattr(t, "value", t) for t in (relationship_types or [])]
+        query = sql.SQL(self._LEVEL).format(
+            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
+        )
+        with self._pool.connection() as conn, conn.transaction():
+            # One moment, like the load, and for the same reason. A traversal
+            # is N+1 statements on one connection, and PostgreSQL's default
+            # isolation takes its snapshot per STATEMENT: without this, level 2
+            # reads a graph level 1 never saw. Measured against a live server -
+            # a --ab--> b, with another connection committing `DELETE ab` and
+            # `INSERT bc` between the two levels - the store returned nodes
+            # a,b,c and edges ab,bc: the deleted edge AND the new one, an
+            # answer for neither the graph before the write nor the one after.
+            # The in-memory walk cannot produce that; it reads dictionaries it
+            # holds. On a shared store several writers is the case this backend
+            # exists for, so that interleaving is the normal case rather than a
+            # race to engineer - which is the argument load_graph_data already
+            # makes for itself, in this file. Stated rather than inherited,
+            # like the load and the save: leaving it to the environment was the
+            # asymmetry.
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            # The anchor has to exist, and an anchor that does not is not an
+            # empty traversal but no traversal: the in-memory walk returns
+            # nothing at all rather than a lone anchor.
+            present = conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
+                    self._table("graph_nodes")
+                ),
+                (anchor_id,),
+            ).fetchone()
+            if not present:
+                return {"node_ids": [], "edge_ids": []}
+
+            seen = {anchor_id}
+            node_ids = [anchor_id]
+            edge_ids: List[str] = []
+            edges_seen: set = set()
+            frontier = [anchor_id]
+            for _ in range(depth):
+                if not frontier:
+                    break
+                rows = conn.execute(
+                    query,
+                    {
+                        "frontier": frontier,
+                        "anchor": anchor_id,
+                        "archived_ok": bool(include_archived),
+                        "any_type": not types,
+                        "types": types,
+                    },
+                ).fetchall()
+                reached = []
+                for edge_id, far_id, is_node in rows:
+                    if edge_id not in edges_seen:
+                        edges_seen.add(edge_id)
+                        edge_ids.append(edge_id)
+                    if far_id not in seen:
+                        seen.add(far_id)
+                        reached.append(far_id)
+                        if is_node:
+                            node_ids.append(far_id)
+                frontier = reached
+        return {"node_ids": node_ids, "edge_ids": edge_ids}
 
     def exists(self) -> bool:
         self._ensure_schema()
@@ -481,6 +771,54 @@ class PostgresGraphPersistenceBackend:
                 # store against itself, which is the case unknown() exists
                 # for: the other instances reload.
                 self._announce(conn, None)
+
+        # A whole-graph save replaces every row and leaves the planner's
+        # statistics describing a table that no longer exists - an empty one,
+        # for a store being written for the first time. The traversal's
+        # expression indexes are then present and unused: measured on 300k
+        # edges, a depth-2 traversal took 185 ms planned against stale
+        # statistics and 2.2 ms once they were current, an 85x difference the
+        # indexes alone do not deliver. Autovacuum gets there on its own, but
+        # not before an instance that has just loaded starts serving.
+        # ~150 ms on that 300k table, against 10.4 s for the save it follows.
+        #
+        # Outside the transaction so it cannot fail the save. That is the whole
+        # reason: ANALYZE is perfectly legal inside a transaction block and its
+        # result is visible there - unlike VACUUM - so a comment claiming
+        # otherwise would be wrong.
+        #
+        # The notice handler is not decoration. A role with the DML grants
+        # docs/PERSISTENCE_BACKENDS.md tells an operator to hand out, and no
+        # ownership, does not get an error from ANALYZE: the server emits
+        # `WARNING: permission denied to analyze "graph_edges", skipping it`
+        # and reports success. Without this, the one deployment most likely to
+        # hit it is the one that would never be told - and it would keep the
+        # stale-statistics regression this exists to close. CREATE INDEX in the
+        # same situation DOES raise, which is why the two are handled
+        # differently rather than alike.
+        # Removed again in the `finally` below, not left on the connection.
+        # It goes back to the pool when this block exits, and a handler left
+        # behind attaches to whatever runs on it next: four saves leave four
+        # handlers, and an unrelated DROP's notices then print four times,
+        # each labelled as coming from ANALYZE.
+        def _report(diag: Any) -> None:
+            print(
+                f"Warning: ANALYZE after save: {diag.severity}: {diag.message_primary}"
+            )
+
+        try:
+            with self._pool.connection() as conn:
+                conn.add_notice_handler(_report)
+                try:
+                    for table in ("graph_nodes", "graph_edges"):
+                        conn.execute(sql.SQL("ANALYZE {}").format(self._table(table)))
+                finally:
+                    conn.remove_notice_handler(_report)
+        except Exception as exc:
+            print(
+                f"Warning: could not ANALYZE after save; the traversal's "
+                f"indexes may go unused: {exc}"
+            )
 
     def default_graph_name(self) -> str:
         return self._graph_name

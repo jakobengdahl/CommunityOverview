@@ -86,17 +86,24 @@ class BackendCapabilities:
         made behind its back (another instance sharing the same store). It
         implements the notification protocol, and GraphStorage subscribes to
         it and refreshes what the reported entities touch.
+    store_traversal: the backend can answer a bounded-depth traversal itself,
+        so the application does not need the topology in memory to do it. It
+        implements `traverse`. A backend that cannot say this is traversed
+        the way it always was, in process.
     """
 
     incremental_writes: bool = False
     transactions: bool = False
     change_notification: bool = False
+    store_traversal: bool = False
 
 
 SNAPSHOT_ONLY = BackendCapabilities()
 
 EntityKindName = Literal["node", "edge"]
 EntityActionName = Literal["upsert", "delete"]
+
+_TRAVERSAL_METHODS = ("traverse",)
 
 _NOTIFICATION_METHODS = (
     "start_change_notification",
@@ -316,6 +323,61 @@ class ExternalChangeRefused(RuntimeError):
 
 
 @runtime_checkable
+class TraversingBackend(Protocol):
+    """A backend that can walk the graph itself, bounded by depth.
+
+    Declared with ``store_traversal``. Without it the application walks its own
+    in-memory topology, which is only possible while the whole graph is
+    resident - the constraint this exists to remove.
+
+    The contract is exact, because there are now two implementations of it and
+    a difference between them is a difference in what the product returns. The
+    in-memory walk in `storage_search.get_related_nodes` is the reference; a
+    backend implementing this must agree with it on every graph, and
+    `test_traversal_equivalence.py` is what holds them to that.
+
+    Ids only, deliberately. What a traversal must not need is the payloads: the
+    caller resolves them, from memory while the graph is resident and from the
+    store when it is not. Returning documents here would move that decision
+    into every backend.
+
+    The rules, all of which the in-memory walk already follows and none of
+    which are obvious:
+
+    - The anchor is in the result even when it is archived, and even when no
+      edge reaches it. An anchor absent from the graph returns nothing at all.
+    - An edge is returned when ONE OF ITS ENDPOINTS WAS EXPANDED - reached at a
+      distance strictly less than `depth` - not merely when both endpoints are
+      in the result. Two nodes that are both exactly `depth` away are in the
+      node set, and the edge between them is not.
+    - An archived node is not traversed and not returned, and neither is the
+      edge that would have reached it. It cannot re-enter at a later hop. The
+      anchor is the exception.
+    - An edge whose far endpoint is not in the graph at all IS returned; the
+      missing id is not. A traversal continues through such an id, since the
+      edges that name it are still edges.
+    - `relationship_types` filters edges by type; an empty or absent list means
+      every type.
+    - `include_archived` lifts both archived rules at once, for nodes and for
+      edges.
+    """
+
+    def traverse(
+        self,
+        anchor_id: str,
+        depth: int,
+        relationship_types: Optional[Sequence[str]] = None,
+        include_archived: bool = False,
+    ) -> Dict[str, List[str]]:
+        """Return ``{"node_ids": [...], "edge_ids": [...]}`` for the traversal.
+
+        Order is not part of the contract: the in-memory walk collects into
+        sets, so the caller must not depend on it and the equivalence test
+        compares as sets.
+        """
+
+
+@runtime_checkable
 class ChangeNotifyingBackend(Protocol):
     """A backend that can report writes another writer made to the store.
 
@@ -372,7 +434,10 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
     at all; it is a snapshot-only backend and is treated as one. A backend
     that declares incremental writes without implementing the entity
     operations would fail on the first mutation, after the graph has already
-    changed in memory, so it is refused here instead.
+    changed in memory, so it is refused here instead. A backend that declares
+    store_traversal without `traverse` fails more quietly still - every
+    traversal warns and falls back, for the life of the process - which is why
+    that one is checked here too rather than left to the caller's except.
     """
     declare = getattr(backend, "capabilities", None)
     if declare is None:
@@ -399,6 +464,15 @@ def capabilities_of(backend: Any) -> BackendCapabilities:
         if missing:
             raise TypeError(
                 f"{type(backend).__name__} declares change_notification but does "
+                f"not implement: {', '.join(missing)}"
+            )
+    if caps.store_traversal:
+        missing = [
+            m for m in _TRAVERSAL_METHODS if not callable(getattr(backend, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"{type(backend).__name__} declares store_traversal but does "
                 f"not implement: {', '.join(missing)}"
             )
     return caps

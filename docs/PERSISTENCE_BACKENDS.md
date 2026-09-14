@@ -66,6 +66,7 @@ class BackendCapabilities:
     incremental_writes: bool = False
     transactions: bool = False
     change_notification: bool = False
+    store_traversal: bool = False
 ```
 
 | Flag | Means | Consequence in `GraphStorage` |
@@ -73,6 +74,7 @@ class BackendCapabilities:
 | `incremental_writes` | the entity operations are implemented | mutations arrive as entity operations, not snapshots |
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
 | `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes after its first load and refreshes what each reported entity touches; see *Reporting external changes* |
+| `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
 
@@ -81,7 +83,11 @@ The declaration is checked once, when `GraphStorage` is constructed
 implementing all six methods of the incremental contract is refused there
 with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
-the in-memory graph has already changed.
+the in-memory graph has already changed. `change_notification` and
+`store_traversal` are checked the same way, and for the same reason stated
+twice over: a missing `start_change_notification` would fail at first use, and
+a missing `traverse` would not fail at all — every traversal would warn and fall back
+to the walk, quietly, for the life of the process.
 
 ## The incremental contract
 
@@ -209,8 +215,9 @@ against the contract, with every hook implemented;
 `test_persistence_contract_memory.py` runs the reference backend both as
 declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares all
-three capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
-clauses skipping, then with the entity contract, then with notification. One
+four capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
+clauses skipping, then with the entity contract, then with notification, then
+with store traversal. One
 clause still skips for it — the backwards-compatibility one, because a store
 written by a previous release of this backend does not exist yet. Count it
 the way step 4 says to: a skipped clause is an unverified one whatever the
@@ -223,8 +230,9 @@ IncrementalGraphPersistenceBackend)` works, but `GraphStorage` never uses it:
 which contract drives you is decided by what you declare. The one type check
 it does make is for the file backend's sidecars (above). The contract does
 check it: a backend declaring `incremental_writes` must satisfy the
-`IncrementalGraphPersistenceBackend` protocol, and one declaring
-`change_notification` the `ChangeNotifyingBackend` protocol.
+`IncrementalGraphPersistenceBackend` protocol, one declaring
+`change_notification` the `ChangeNotifyingBackend` protocol, and one
+declaring `store_traversal` the `TraversingBackend` protocol.
 
 ## Reporting external changes
 
@@ -445,6 +453,73 @@ writing one store at the same time. Because it dispatches rather than
 delivers inline, the contract has a `settle_notifications` hook; any backend
 whose reports are not delivered before the write returns has to override it.
 
+## Answering a traversal from the store
+
+`get_related_nodes` walks the in-memory graph: it is a BFS over the NetworkX
+copy every instance holds. That copy is the reason the whole topology has to
+be resident, which is the ceiling a shared store exists to remove. A backend
+declaring `store_traversal` offers to answer the same question itself.
+
+```python
+class TraversingBackend(Protocol):
+    def traverse(
+        self,
+        anchor_id: str,
+        depth: int,
+        relationship_types: list[str] | None = None,
+        include_archived: bool = False,
+    ) -> dict: ...
+```
+
+It returns **ids only** — `{"node_ids": [...], "edge_ids": [...]}` — and
+deliberately: the payloads are already in memory, and shipping them back
+would make the store pay for what the caller already has.
+
+The answer has to match the walk's exactly, which means matching it on the
+cases nobody states out loud:
+
+- an edge between two nodes that are both exactly `depth` away is **not**
+  returned, because neither endpoint was ever expanded;
+- an edge whose far endpoint is absent from the graph **is** returned, and the
+  missing id is not — a traversal continues *through* such an id, so a path
+  can be longer than there are nodes;
+- an archived node blocks the path through it, and the edge that would have
+  reached it is dropped too;
+- an archived anchor is still returned;
+- an anchor that is not in the graph yields nothing at all, not a lone anchor.
+
+Order is not part of the contract. The walk collects into sets, so its order
+is an artefact.
+
+`GraphStorage` asks the store only while the store is **current** — every
+write it has issued has landed, whichever path that write took, and no resync
+is owed after a failed one. Writes are asynchronous, so between a mutation and
+its write landing the in-memory graph is ahead of the store, and a traversal
+answered there would not see the caller's own write.
+
+Membership is decided by the store and the payloads resolved from memory
+afterwards, so the graph can change in between. When anything the store
+decided on has since vanished — a node archived or deleted, an edge archived
+or deleted — the result is discarded and the walk answers instead. Patching
+the store's answer is not an option: dropping an archived node leaves behind
+whatever was reachable only through it, and recomputing that is the walk.
+
+The walk is also the fallback when the store raises. A store that cannot
+answer is not a failed request.
+
+The store walks a level at a time rather than answering in one
+depth-limited recursive query. Both return the same set; only the first
+stops when a level reaches nothing new. A recursive CTE cannot: its working
+table is keyed on (id, depth), and a recursive term may not consult its own
+accumulated result to prune ids already seen, so it runs every level the
+caller asked for. On 500 nodes and 5000 edges, complete at depth 5, asking
+for 1000 levels cost 16.3 s that way and 0.08 s this way - and
+`mcp_tools.get_related_nodes` accepts a depth with no cap.
+
+`backend/core/tests/test_traversal_equivalence.py` holds the two
+implementations to the same answer by fuzzing randomised graphs against the
+walk, rather than by two people reading two pieces of code.
+
 ## Current state
 
 `FileGraphPersistenceBackend` is the default, needs no configuration, and
@@ -486,7 +561,7 @@ which is the problem rather than the fix.
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Four things about it are worth knowing before
+should have an opinion about. Six things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same
@@ -554,7 +629,11 @@ writing a backend of your own against a shared server:
   further read on top of whichever of those two paths `_ensure_schema()`
   took — the single-row `SELECT` against `graph_metadata` — so a warm
   `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
-  that same `SELECT` plus everything above.
+  that same `SELECT` plus everything above. The traversal's two indexes are
+  not in those counts: they are created after the lock is released, one pooled
+  connection each, and each costs a `pg_class`/`pg_index` lookup plus a
+  `CREATE INDEX IF NOT EXISTS` only when the lookup says it is missing — see
+  the index bullet below for why they sit outside the transaction.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
@@ -563,6 +642,38 @@ writing a backend of your own against a shared server:
   then ends holding the union of two saves — a graph neither instance wrote —
   or the second save dies on a duplicate key for any id they share, which is
   what two instances of the *same* graph mostly have.
+- **Two expression indexes carry the traversal**, on `doc->>'source'` and
+  `doc->>'target'`. Nothing indexes those by default, so without them the
+  traversal scans every edge at every level. Measured at depth 3 on 20 000
+  nodes: 3.7 ms against 61 ms unindexed at 60 000 edges, and 89 ms against
+  258 ms at 300 000. Migration
+  creates them best-effort, each in its own connection *outside* the
+  migrating transaction — a failed statement inside that transaction aborts
+  the whole thing, so catching the error there would recover nothing — and a
+  failure is logged rather than raised, because a role with DML and no DDL
+  should still boot and still answer, slowly. That role is asked about the
+  catalog first: `CREATE INDEX IF NOT EXISTS` checks ownership before
+  existence, so a store provisioned exactly as below — indexes included —
+  would otherwise warn on every boot that its traversals scan, while they
+  seek. That check is on validity, not just presence: a `CREATE INDEX
+  CONCURRENTLY` that fails leaves the name behind with `indisvalid = false`,
+  which the planner will not use and `IF NOT EXISTS` will not replace, so
+  migration reports it rather than treating it as done. It reports without
+  naming a cause, because the catalog cannot: a build still in progress reads
+  `indisvalid = false` too, and telling an operator their own running build
+  had failed is how they abort it. The repair is `REINDEX INDEX CONCURRENTLY`,
+  which fixes it in place without blocking writes — not a `DROP`, which takes
+  a stronger lock than the one this bullet is about. Migration does neither:
+  `REINDEX … CONCURRENTLY` cannot run inside a transaction block, and these
+  connections are not autocommit.
+
+  `CREATE INDEX` without `CONCURRENTLY` holds a `ShareLock` on `graph_edges`
+  while it builds, so on an existing large store the first boot after this
+  upgrade blocks writes to that table for the duration and concurrent
+  instances queue behind it. Provisioning by hand does not avoid that lock —
+  the statements below take exactly the same one — but it lets the operator
+  choose when it is taken, and on a live store the statement to use is
+  `CREATE INDEX CONCURRENTLY`, outside a transaction, before the upgrade.
 
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
@@ -579,8 +690,14 @@ app role that owns nothing but DML on tables an operator provisioned — the
 ordinary least-privilege setup on managed PostgreSQL — dies at boot against a
 store it has every permission it actually needs on.
 
-To provision it that way, create these three tables and grant the app role
-`USAGE` on the schema plus `SELECT, INSERT, UPDATE, DELETE` on them. The
+To provision it that way, create these three tables and their two indexes,
+and grant the app role `USAGE` on the schema plus
+`SELECT, INSERT, UPDATE, DELETE` on the tables. The grants cover the app's
+reads and writes; they do not cover maintenance. A role that owns nothing
+cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
+error - the backend now prints the warning, but keeping the statistics
+current is the operator's or autovacuum's job on a store provisioned this
+way, and stale statistics leave the two indexes below unused. The
 primary key on `graph_metadata.only_row` is not decoration: the save upserts
 that row `ON CONFLICT (only_row)`, so a table without it boots cleanly and
 then fails on **every** save.
@@ -598,6 +715,17 @@ CREATE TABLE <schema>.graph_metadata (
   only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
   doc jsonb NOT NULL
 );
+
+-- The traversal needs these. Note the double parentheses: an expression
+-- index takes its own, and a single pair is a syntax error. As written, the
+-- two statements below take a ShareLock on graph_edges for the whole build
+-- and block writes until it finishes - fine on an empty table, an outage on
+-- a large one that is already serving. There, add CONCURRENTLY to each and
+-- run them outside a transaction, and check `indisvalid` afterwards: a
+-- concurrent build that fails leaves the index behind, unusable, and
+-- REINDEX INDEX CONCURRENTLY is what repairs it.
+CREATE INDEX graph_edges_source_idx ON <schema>.graph_edges ((doc->>'source'));
+CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
 ```
 
 **Two payload restrictions** are worth knowing before pointing an existing

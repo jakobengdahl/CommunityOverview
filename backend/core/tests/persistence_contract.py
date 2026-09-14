@@ -44,6 +44,7 @@ from backend.core.storage import GraphStorage
 from backend.core.storage_backends import (
     BackendCapabilities,
     ChangeNotifyingBackend,
+    TraversingBackend,
     EntityOperation,
     ExternalChange,
     IncrementalGraphPersistenceBackend,
@@ -311,6 +312,10 @@ class PersistenceBackendContract:
     def _incremental(backend) -> bool:
         return capabilities_of(backend).incremental_writes
 
+    @staticmethod
+    def _traversing(backend) -> bool:
+        return capabilities_of(backend).store_traversal
+
     def _require_incremental(self, backend) -> None:
         if not self._incremental(backend):
             pytest.skip("snapshot-only backend: the entity contract does not apply")
@@ -334,6 +339,19 @@ class PersistenceBackendContract:
         if not self._notifying(backend):
             pytest.skip("backend does not report external changes")
         assert isinstance(backend, ChangeNotifyingBackend)
+
+    def test_a_store_traversal_declaration_is_backed_by_the_protocol(self, factory):
+        backend = factory()
+        if not self._traversing(backend):
+            pytest.skip("backend does not answer traversals")
+        # A runtime_checkable Protocol with an empty body accepts everything,
+        # which would make the assertion below pass for a backend with no
+        # `traverse` at all. Asked as a negative because it is the same
+        # question on every Python: `__protocol_attrs__` is 3.12 and later.
+        assert not isinstance(object(), TraversingBackend), (
+            "TraversingBackend declares no members, so it checks nothing"
+        )
+        assert isinstance(backend, TraversingBackend)
 
     # -- the snapshot contract ------------------------------------------------
 
