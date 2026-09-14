@@ -1118,6 +1118,55 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
                 "and b was reachable only across that edge; got "
                 f"{sorted(n.id for n in result['nodes'])}"
             )
+            assert all(isinstance(e, Edge) for e in result["edges"]), (
+                "edges resolved out of the wrong dictionary"
+            )
+        finally:
+            storage.flush()
+            backend.close()
+
+    def test_the_edge_check_does_not_borrow_the_anchor_exemption(self, schema):
+        """The node rule exempts the anchor: an archived anchor is still
+        returned. Edges have no such rule - an archived edge is dropped
+        whatever it is called - but because ids are separate namespaces, an
+        edge can share the anchor's id, and an edge check written by analogy
+        with the node one would exempt it. Every other test here names its
+        edge `ab` against an anchor `a`, so none of them can tell.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    # The edge is called "a", like the anchor node.
+                    Edge(
+                        id="a",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            storage.edges["a"].archived = True
+
+            result = storage.get_related_nodes("a", depth=1)
+            assert {e.id for e in result["edges"]} == set(), (
+                "an archived edge was exempted for sharing the anchor's id: "
+                f"{[e.id for e in result['edges']]}"
+            )
+            assert {n.id for n in result["nodes"]} == {"a"}, (
+                f"got {sorted(n.id for n in result['nodes'])}"
+            )
+            assert all(isinstance(e, Edge) for e in result["edges"])
         finally:
             storage.flush()
             backend.close()

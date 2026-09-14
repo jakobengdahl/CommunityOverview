@@ -1347,6 +1347,24 @@ class TestPostgresReportsAnIndexItCannotUse:
             "an invalid index is repairable in place; DROP is not the remedy "
             "and takes a stronger lock: " + printed
         )
+        assert "scan instead of seek" in printed, (
+            "said the index was unusable without saying what it costs: " + printed
+        )
+        # And the boot carries on. Reporting must not stop the OTHER index
+        # being created - one invalid index would then keep the second from
+        # ever existing, on this boot and every later one.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            present = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = %s",
+                    (schema,),
+                ).fetchall()
+            }
+        assert "graph_edges_target_idx" in present, (
+            "an invalid source index stopped the target index being created: "
+            f"{sorted(present)}"
+        )
 
 
 class TestPostgresProvisionsWhatTheTraversalNeeds:
@@ -1366,16 +1384,33 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
         backend.save_graph_data(snapshot([node_payload("a")]))
 
         with psycopg.connect(DSN, autocommit=True) as conn:
-            indexes = {
-                row[0]
+            # Definitions, not names. An index of the right name on the wrong
+            # column, or on graph_nodes, or over `id`, satisfies a name check
+            # and puts the sequential scan straight back: measured on 20 000
+            # edges, a BitmapOr over both indexes at cost 138 becomes a Seq
+            # Scan at 901.
+            defined = {
+                row[0]: (row[1], row[2])
                 for row in conn.execute(
-                    "SELECT indexname FROM pg_indexes WHERE schemaname = %s",
+                    "SELECT indexname, tablename, indexdef"
+                    " FROM pg_indexes WHERE schemaname = %s",
                     (schema,),
                 ).fetchall()
             }
-            assert {"graph_edges_source_idx", "graph_edges_target_idx"} <= indexes, (
-                f"the traversal's indexes are not there: {sorted(indexes)}"
-            )
+            for index, column in (
+                ("graph_edges_source_idx", "source"),
+                ("graph_edges_target_idx", "target"),
+            ):
+                assert index in defined, f"{index} is not there: {sorted(defined)}"
+                table, definition = defined[index]
+                assert table == "graph_edges", (
+                    f"{index} is on {table}, so the traversal's filter on "
+                    f"graph_edges cannot use it"
+                )
+                assert f"'{column}'" in definition, (
+                    f"{index} does not index doc->>'{column}', which is what "
+                    f"the traversal filters on: {definition}"
+                )
             analysed = {
                 row[0]: row[1]
                 for row in conn.execute(
@@ -1387,6 +1422,21 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
         assert analysed.get("graph_nodes") and analysed.get("graph_edges"), (
             "a whole-graph save left the planner's statistics describing the "
             f"table it replaced: {analysed}"
+        )
+        # And they describe the table as SAVED, not as it was before. Running
+        # the ANALYZE first satisfies last_analyze while leaving reltuples at
+        # the pre-save count - 0 for a first save - which is exactly the stale
+        # statistics the block exists to prevent.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT c.relname, c.reltuples FROM pg_class c"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = %s AND c.relname = 'graph_nodes'",
+                (schema,),
+            ).fetchone()
+        assert rows is not None and rows[1] >= 1, (
+            "the statistics describe the table before the save rather than "
+            f"after it: reltuples = {rows}"
         )
 
 
