@@ -783,7 +783,13 @@ def _event_payload_cases():
     large = {f"field_{i}": BULK for i in range(12)}
     real_before = _node_with_bulk().to_dict()
     real_before.pop("embedding")
-    real_after = dict(real_before, description="new desc", summary="s2")
+    # A deep copy, not `dict(real_before, ...)`: a shallow copy would leave
+    # real_after's nested values (metadata, tags) as the very same objects as
+    # real_before's, so an in-place mutation of one would show up in both
+    # sides of the "before" comparison below and never surface as a diff.
+    real_after = copy.deepcopy(real_before)
+    real_after["description"] = "new desc"
+    real_after["summary"] = "s2"
     real_after["updated_at"] = "2026-09-05T00:00:00+00:00"
     return [
         pytest.param(
@@ -826,9 +832,11 @@ def test_building_a_record_does_not_alter_the_event_itself(before, after, patch)
 
     `append_event` builds the trimmed record while `dispatch(event)` hands the
     same Event to webhook subscribers and system listeners, so anything the
-    record builder does in place is visible to them. Two helpers can return the
-    caller's own dict rather than a copy, which is what makes an in-place strip
-    or an in-place narrowing easy to write and invisible from the record alone.
+    record builder does in place is visible to them. `_without_excluded` can
+    return the caller's own dict rather than a copy (when there is nothing to
+    strip), which is what makes an in-place strip easy to write and invisible
+    from the record alone; `_project` always returns a fresh dict, so only the
+    strip - not the narrowing - has that hatch.
 
     The payloads are parametrised to actually reach the projection: a patch that
     the embedding strip empties would skip `_project` entirely and assert
@@ -1006,7 +1014,13 @@ def test_a_page_parses_a_page_not_the_history(monkeypatch):
     """The cost guarantee, measured as work rather than as allocation. A
     generator that parses every record and discards it keeps peak memory flat,
     so the allocation test passes without the early stop that makes a query
-    proportional to the page."""
+    proportional to the page.
+
+    The lower bound matters as much as the upper one: a reader that stopped
+    parsing too early and padded or fabricated the rest of the page would
+    still satisfy "< 200 records parsed" while never having read the whole
+    page it returned.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         store = GraphHistoryStore(os.path.join(tmpdir, "graph.history.ndjson"))
         _fill(store, 4000)
@@ -1015,13 +1029,19 @@ def test_a_page_parses_a_page_not_the_history(monkeypatch):
         page = store.get_recent(limit=50)
 
         assert len(page) == 50
+        assert len(calls) >= 50, f"only parsed {len(calls)} records for a page of 50"
         assert len(calls) < 200, f"parsed {len(calls)} records to answer a page of 50"
 
 
 def test_entity_history_parses_no_more_than_it_has_to(monkeypatch):
     """The entity path had no cost bound at all. Its matches sit at the end of
     the file, so a reader that stops at the page parses about a page; one that
-    keeps going parses everything before them too."""
+    keeps going parses everything before them too.
+
+    The lower bound matters as much as the upper one: a reader that returned
+    fewer than the 10 requested matches (or fabricated some without parsing
+    them) would still satisfy "< 100 records parsed".
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         store = GraphHistoryStore(os.path.join(tmpdir, "graph.history.ndjson"))
         _fill(store, 3000, entity="other")
@@ -1032,6 +1052,7 @@ def test_entity_history_parses_no_more_than_it_has_to(monkeypatch):
         page = store.get_entity_history("wanted", limit=10)
 
         assert len(page) == 10
+        assert len(calls) >= 10, f"only parsed {len(calls)} records to find 10 matches"
         assert len(calls) < 100, f"parsed {len(calls)} records to find 10 matches"
 
 
@@ -1045,7 +1066,7 @@ def _recording_locks(monkeypatch):
     import backend.core.history_store as hs
 
     taken = []
-    real_lock, real_unlock = hs._lock_file, hs._unlock_file
+    real_lock = hs._lock_file
 
     def lock(f, exclusive):
         name = "<temp>" if isinstance(f.name, int) else os.path.basename(f.name)
@@ -1053,7 +1074,6 @@ def _recording_locks(monkeypatch):
         return real_lock(f, exclusive=exclusive)
 
     monkeypatch.setattr(hs, "_lock_file", lock)
-    monkeypatch.setattr(hs, "_unlock_file", real_unlock)
     return taken
 
 
@@ -1152,13 +1172,22 @@ def test_reads_take_shared_locks_and_the_rewrite_an_exclusive_one(monkeypatch):
 
 
 def test_the_rewrite_syncs_its_temp_file_before_renaming_it(monkeypatch):
-    """A rename can land while the temp file's contents have not, so a crash
-    between them leaves a short sidecar. The only portable proxy is the order
-    of the two calls."""
+    """A rename (or, on the platforms that need it, a replace) can land while
+    the temp file's contents have not, so a crash between them leaves a short
+    sidecar. The only portable proxy is the order of the two calls.
+
+    Both os.rename and os.replace are recorded here, not just os.rename: the
+    rewrite picks one or the other depending on platform (see
+    `_rewrite_streaming`), and a version of this test that watched only
+    os.rename would pass vacuously the moment the implementation used
+    os.replace to land the file instead - the call it was watching would
+    simply never happen, and an assertion phrased as "rename" happened would
+    tell you nothing about whether the real land-the-file call was synced.
+    """
     import backend.core.history_store as hs
 
     order = []
-    real_fsync, real_rename = hs.os.fsync, hs.os.rename
+    real_fsync, real_rename, real_replace = hs.os.fsync, hs.os.rename, hs.os.replace
 
     def fsync(fd):
         order.append("fsync")
@@ -1168,8 +1197,13 @@ def test_the_rewrite_syncs_its_temp_file_before_renaming_it(monkeypatch):
         order.append("rename")
         return real_rename(src, dst)
 
+    def replace(src, dst):
+        order.append("replace")
+        return real_replace(src, dst)
+
     monkeypatch.setattr(hs.os, "fsync", fsync)
     monkeypatch.setattr(hs.os, "rename", rename)
+    monkeypatch.setattr(hs.os, "replace", replace)
     with tempfile.TemporaryDirectory() as tmpdir:
         store = GraphHistoryStore(
             os.path.join(tmpdir, "graph.history.ndjson"),
@@ -1181,6 +1215,10 @@ def test_the_rewrite_syncs_its_temp_file_before_renaming_it(monkeypatch):
 
         store.compact()
 
-    assert "rename" in order, "no rewrite happened"
-    assert "fsync" in order, "the temp file was renamed without being synced"
-    assert order.index("fsync") < order.index("rename")
+    landed = [call for call in order if call in ("rename", "replace")]
+    assert len(landed) == 1, (
+        f"expected exactly one of os.rename/os.replace to land the temp "
+        f"file, got {order}"
+    )
+    assert "fsync" in order, "the temp file was landed without being synced"
+    assert order.index("fsync") < order.index(landed[0])
