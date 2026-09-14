@@ -165,12 +165,42 @@ class TestTheStoreAnswersWhatTheWalkWould:
         try:
             _load(backend, nodes, edges)
             for anchor in list(nodes)[:6]:
-                for depth in (0, 1, 2, 3):
+                # -1 because `mcp_tools.get_related_nodes` caps nothing and
+                # the walk's `range(depth)` makes any negative depth the anchor
+                # alone: the store has to clamp rather than take its absolute
+                # value, which is a live edit that changes no other answer.
+                for depth in (-1, 0, 1, 2, 3):
                     for types in (None, [RelationshipType.RELATES_TO], rel_types):
                         for archived in (False, True):
                             _compare(
                                 backend, nodes, edges, anchor, depth, types, archived
                             )
+        finally:
+            backend.close()
+
+    def test_an_edge_may_share_an_id_with_a_node(self, schema):
+        """Node ids and edge ids are separate namespaces - separate dicts in
+        memory, separate tables in the store - so they can collide, and the
+        fuzz cannot produce one because it names nodes n{i} and edges e{i}.
+        Tracking both in one set is a natural simplification and loses the
+        node: the edge is recorded first, and the node of the same id then
+        reads as already seen.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        nodes = {n: Node(id=n, type=NodeType.ACTOR, name=n) for n in ("a", "b")}
+        edges = {
+            "b": Edge(id="b", source="a", target="b", type=RelationshipType.RELATES_TO)
+        }
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            _load(backend, nodes, edges)
+            got = backend.traverse("a", 1)
+            assert set(got["node_ids"]) == {"a", "b"}, (
+                "the node was lost to an edge of the same id: "
+                f"{sorted(got['node_ids'])}"
+            )
+            assert set(got["edge_ids"]) == {"b"}
         finally:
             backend.close()
 
@@ -1130,6 +1160,60 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
+    def test_a_delete_between_the_check_and_the_lookup_does_not_raise(self, schema):
+        """The delete-based test above removes the node BEFORE the call, which
+        a check-then-use survives: the membership test already fails. What
+        that shape cannot reach is the window the comment is actually about -
+        a delete landing between the `in` and the `[]`, which this path is
+        exposed to because it takes no lock while every mutator holds one.
+        A dict whose membership test is true and whose lookup then misses is
+        that window, made deterministic.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+        from backend.core.storage import GraphStorage
+
+        class _VanishingOnLookup(dict):
+            """Says yes, then loses the key - exactly one id, exactly once."""
+
+            def __init__(self, *args, victim=None, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.victim = victim
+
+            def __contains__(self, key):
+                present = super().__contains__(key)
+                if key == self.victim:
+                    super().pop(key, None)
+                    self.victim = None
+                return present
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            storage.add_nodes(
+                [
+                    Node(id="a", type=NodeType.ACTOR, name="a"),
+                    Node(id="b", type=NodeType.ACTOR, name="b"),
+                ],
+                [
+                    Edge(
+                        id="ab",
+                        source="a",
+                        target="b",
+                        type=RelationshipType.RELATES_TO,
+                    )
+                ],
+            )
+            storage.flush()
+
+            storage.nodes = _VanishingOnLookup(storage.nodes, victim="b")
+            # Must not raise. The answer may come from either engine - what
+            # this pins is that a traversal does not turn into a KeyError out
+            # of the API.
+            result = storage.get_related_nodes("a", depth=1)
+            assert "a" in {n.id for n in result["nodes"]}
+        finally:
+            backend.close()
+
     def test_what_was_reachable_only_through_it_goes_too(self, schema):
         """Dropping the archived node on its own is not enough. Whatever was
         behind it was reachable only through it, and returning that leaves a
@@ -1230,6 +1314,20 @@ class TestADeclaredCapabilityMustBeImplemented:
         class _Liar:
             def capabilities(self):
                 return BackendCapabilities(store_traversal=True)
+
+        class _AlmostLiar:
+            """Worse than the one above, because `hasattr` is satisfied. A
+            declaration checked with `hasattr` instead of `callable` accepts
+            this and then warns-and-walks for the life of the process, which
+            is the failure the check exists to prevent."""
+
+            traverse = None
+
+            def capabilities(self):
+                return BackendCapabilities(store_traversal=True)
+
+        with pytest.raises(TypeError, match="store_traversal"):
+            capabilities_of(_AlmostLiar())
 
         with pytest.raises(TypeError, match="store_traversal"):
             capabilities_of(_Liar())

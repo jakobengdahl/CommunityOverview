@@ -457,9 +457,11 @@ class PostgresGraphPersistenceBackend:
         scanning silently.
 
         `conn` may be None, which takes a fresh one from the pool. That is
-        what the failure path needs: the connection whose transaction just
-        failed cannot be asked anything until it is reset, and it has already
-        gone back to the pool by then.
+        what the failure path uses - not because the failed connection is
+        unusable (the pool's context manager rolls it back as the exception
+        propagates, before returning it), but because by then it has gone back
+        to the pool and another thread may hold it. Asking through the pool is
+        the only way to be sure what is being asked.
         """
         try:
             if conn is not None:

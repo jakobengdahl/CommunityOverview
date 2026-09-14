@@ -1135,19 +1135,29 @@ class TestPostgresIndexCreationLosesRacesQuietly:
                     " (id text PRIMARY KEY, doc jsonb NOT NULL)"
                 ).format(psycopg.sql.Identifier(neighbour))
             )
-            conn.execute(
-                psycopg.sql.SQL(
-                    "CREATE INDEX graph_edges_source_idx ON {}.graph_edges"
-                    " ((doc->>'source'))"
-                ).format(psycopg.sql.Identifier(neighbour))
-            )
+            # BOTH names, and the assertion below names one of them. With
+            # only one planted here, the other index's warning satisfies a
+            # name-agnostic assertion while the planted one is silently
+            # skipped - which is how this test passed against a re-check whose
+            # schema predicate had been removed.
+            for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE INDEX {} ON {}.graph_edges ((doc->>'source'))"
+                    ).format(
+                        psycopg.sql.Identifier(index),
+                        psycopg.sql.Identifier(neighbour),
+                    )
+                )
         try:
             printed = self._boot_with_a_losing_create(
                 schema, backends, capsys, really_create=False
             )
-            assert "scan instead of seek" in printed, (
-                "an index that is genuinely missing was not reported: " + printed
-            )
+            for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
+                assert index in printed and "scan instead of seek" in printed, (
+                    f"{index} is genuinely missing from this store and was not "
+                    f"reported: {printed}"
+                )
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:
                 conn.execute(
@@ -1190,6 +1200,48 @@ class TestPostgresIndexWorkIsDoneOnce:
         assert not creates, (
             "re-issued DDL for indexes that are already there; on a role that "
             f"may not create them, that is a failure every boot: {creates}"
+        )
+
+    def test_a_catalog_it_cannot_read_is_reported_not_assumed_away(
+        self, schema, backends, capsys
+    ):
+        """`_index_state` answers "missing" when it cannot ask - a pool blip
+        during boot, a server that refuses a connection - so the caller
+        reports rather than hides. Answering "valid" there brings the store up
+        with neither index and nothing printed, which is the silent
+        degradation this whole path exists to prevent.
+        """
+        from psycopg_pool import ConnectionPool
+
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        real = ConnectionPool.connection
+        # After the migration's own checkout, so the tables still get made and
+        # only the index work meets the blip. Refusing every checkout would
+        # fail `_ensure_schema` before it ever reaches the index loop, and the
+        # test would assert nothing.
+        seen = {"n": 0}
+
+        def _blip(self, *args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise RuntimeError("pool exhausted")
+            return real(self, *args, **kwargs)
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+        again = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(again)
+        capsys.readouterr()
+        ConnectionPool.connection = _blip
+        try:
+            again._ensure_schema()
+        except Exception:
+            pass
+        finally:
+            ConnectionPool.connection = real
+        printed = capsys.readouterr().out
+        assert "scan instead of seek" in printed, (
+            "a catalog that could not be read was taken as an answer: " + printed
         )
 
     def test_an_analyze_that_raises_does_not_fail_the_save(
