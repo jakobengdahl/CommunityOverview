@@ -38,6 +38,7 @@ if REQUIRE:
 else:
     psycopg = pytest.importorskip("psycopg", reason="psycopg is an optional dependency")
 
+from psycopg.conninfo import make_conninfo  # noqa: E402
 from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core import storage_search  # noqa: E402
@@ -810,11 +811,13 @@ class TestTheTraversalTerminatesAndNotJustCorrectly:
             )
             for k in range(600)
         }
-        bounded = (
-            DSN
-            + ("&" if "?" in DSN else "?")
-            + "options=-c%20statement_timeout%3D10000"
-        )
+        # Built by psycopg, not by string concatenation. A DSN comes in two
+        # shapes - a URI, and the keyword/value form CI passes - and appending
+        # a query string works only on the first. Glued onto the second it
+        # lands inside the dbname value, and the connection then asks for a
+        # database called `communityoverview_test?options=...`, which is how
+        # this passed locally and could never have passed in CI.
+        bounded = make_conninfo(DSN, options="-c statement_timeout=10000")
         backend = PostgresGraphPersistenceBackend(bounded, schema=schema)
         try:
             _load(backend, nodes, edges)
