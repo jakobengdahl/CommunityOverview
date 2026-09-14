@@ -31,6 +31,13 @@ connection and refreshes what the announcement names. Without it an instance
 would serve what it last loaded until it restarted - correct, but stale, and
 a shared store that only one instance can read currently is not one.
 
+`store_traversal` is the fourth, and the one that reaches into reads rather
+than writes: the backend answers a bounded-depth neighbourhood query itself,
+a level at a time, instead of the application walking the copy of the
+topology it holds in memory. The in-memory walk stays the reference - the
+answers are held identical by a differential test - and answers whenever the
+store is not current or cannot be reached.
+
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. A whole-graph save carrying one fails
 entirely; an entity write fails only the write that carries it - one

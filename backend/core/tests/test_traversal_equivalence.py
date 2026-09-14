@@ -1402,7 +1402,7 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         ids as seen converges there and looks correct. Give it a dangling pair
         and the frontier oscillates between them forever - identical answer,
         one round trip per level the caller asked for. Measured on this graph
-        with that edit: 3 levels became 400 at depth 400.
+        with that edit: 4 levels became 400 at depth 400.
         """
         import psycopg
 
