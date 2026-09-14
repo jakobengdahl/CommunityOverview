@@ -307,6 +307,30 @@ The PR body follows `.github/pull_request_template.md`:
 - **Test plan** — which tests cover this, and how to verify manually.
 - **Screenshots affected** — see the Documentation section.
 
+**Push once per review round, not once per fix.** A feature-branch push runs no
+CI at all until the PR exists — `ci.yml`'s `push` trigger covers only the
+`main`, `preview` and `prod` branches, plus `v*` tags — and after that every
+push restarts the workflow and cancels whatever was still in flight, because
+the workflow sets `concurrency: cancel-in-progress`. So a loop that pushes
+after each individual fix does not reliably buy a verdict per fix: a push that
+lands before the previous run finishes cancels it. Fix everything a round
+raised, verify locally per step 5, then push once. Several commits in one push
+is fine; step 6 asks for one commit per logical change, not one push.
+
+On a **draft** PR there is noise on top of that. When the diff touches service
+code the three heavy suites skip, and their gates fail that skip rather than let
+it report green, so each push turns three required checks red and mails the
+repository owner. (A draft whose diff is only `docs/` or `*.md` reports green instead:
+`detect-changes` resolves `service_code=false` and the gates pass that as a
+path-skip.) A stream of such alarms is how a real failure gets missed.
+
+That red must not be "fixed" in the workflow. A gate that skipped quietly
+instead of failing would report GREEN to branch protection, because GitHub
+counts a skipped required check as a pass — the exact defect the gate and
+`backend/tests/test_ci_gate_semantics.py` exist to prevent. It is cleared the
+way the gate's own message says: by marking the PR ready, which runs the suites
+for real. See "What to Do When CI Is Red".
+
 ### 8. Review Loop
 
 **Write the guarantees first.** G1…Gn, one line each: what this change must
@@ -624,6 +648,18 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
 ---
 
 ## What to Do When CI Is Red
+
+**First: is it red by design?** On a draft PR whose diff touches service code,
+the three heavy suites skip and their gates fail that skip, with a message
+saying the suite "has NOT run" and to mark the PR ready for review. Those are
+statements about a check, not about the run: `frontend-lint` is unconditional
+and runs on every PR, draft or not, so a genuine failure can sit beside them.
+Step 1 therefore always applies — read the output before concluding anything.
+What steps 2-3 do not apply to is a check that is red by design: it clears by
+marking the PR ready once the change genuinely is ready, which runs the suites
+for real. Every red check that is not one of those is diagnosed normally.
+Step 10's checklist still governs the merge, and step 4 binds whatever made a
+check red.
 
 1. Read the CI failure output before doing anything else.
 2. If the failure is in your code: fix it locally, run the failing tests, commit,
