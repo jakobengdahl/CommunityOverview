@@ -376,20 +376,35 @@ class PostgresGraphPersistenceBackend:
                         if state == "valid":
                             continue
                         if state == "invalid":
-                            # A CREATE INDEX CONCURRENTLY that failed leaves
-                            # the name behind with indisvalid = false. The
-                            # planner will not use it, and `IF NOT EXISTS`
-                            # matches on the name, so re-issuing it here is a
-                            # silent no-op: without this branch the store
-                            # scans every edge at every level and says
-                            # nothing. Only the operator can fix it - the
-                            # index has to be dropped before it can be built
-                            # again - so this reports rather than repairs.
+                            # indisvalid = false. The planner will not use it,
+                            # and `IF NOT EXISTS` matches on the name, so
+                            # re-issuing it here is a silent no-op: without
+                            # this branch the store scans every edge at every
+                            # level and says nothing.
+                            #
+                            # The cause is deliberately not named. A concurrent
+                            # build that failed looks exactly like one that is
+                            # still running - verified: indisvalid reads false
+                            # throughout a healthy CREATE INDEX CONCURRENTLY -
+                            # and the docs tell an operator to use that on a
+                            # live store. Telling them their own build had
+                            # failed is how they abort it and take an
+                            # ACCESS EXCLUSIVE lock they were avoiding.
+                            #
+                            # Reported rather than repaired because
+                            # REINDEX ... CONCURRENTLY cannot run inside a
+                            # transaction block and these connections are not
+                            # autocommit - not because the index must be
+                            # dropped. It need not: REINDEX repairs it in
+                            # place, and even removing it has a concurrent
+                            # form.
                             print(
-                                f"Warning: {name} exists but is invalid (a "
-                                f"CREATE INDEX CONCURRENTLY that failed); DROP "
-                                f"it and build it again, or the traversal will "
-                                f"scan instead of seek"
+                                f"Warning: {name} exists but is not valid - a "
+                                f"concurrent build that failed, or one still "
+                                f"running. If no build is in progress, "
+                                f"REINDEX INDEX CONCURRENTLY {self.schema}."
+                                f"{name} repairs it; until it is valid the "
+                                f"traversal will scan instead of seek"
                             )
                             continue
                         conn.execute(

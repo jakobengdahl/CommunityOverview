@@ -654,8 +654,14 @@ writing a backend of your own against a shared server:
   seek. That check is on validity, not just presence: a `CREATE INDEX
   CONCURRENTLY` that fails leaves the name behind with `indisvalid = false`,
   which the planner will not use and `IF NOT EXISTS` will not replace, so
-  migration reports it rather than treating it as done — it has to be dropped
-  before it can be built again.
+  migration reports it rather than treating it as done. It reports without
+  naming a cause, because the catalog cannot: a build still in progress reads
+  `indisvalid = false` too, and telling an operator their own running build
+  had failed is how they abort it. The repair is `REINDEX INDEX CONCURRENTLY`,
+  which fixes it in place without blocking writes — not a `DROP`, which takes
+  a stronger lock than the one this bullet is about. Migration does neither:
+  `REINDEX … CONCURRENTLY` cannot run inside a transaction block, and these
+  connections are not autocommit.
 
   `CREATE INDEX` without `CONCURRENTLY` holds a `ShareLock` on `graph_edges`
   while it builds, so on an existing large store the first boot after this
@@ -707,11 +713,13 @@ CREATE TABLE <schema>.graph_metadata (
 );
 
 -- The traversal needs these. Note the double parentheses: an expression
--- index takes its own, and a single pair is a syntax error. On a table that
--- is already large and already serving, add CONCURRENTLY to each and run
--- them outside a transaction: these take a ShareLock for the whole build and
--- block writes until it finishes. Check `indisvalid` afterwards if you do -
--- a concurrent build that fails leaves the index behind, unusable.
+-- index takes its own, and a single pair is a syntax error. As written, the
+-- two statements below take a ShareLock on graph_edges for the whole build
+-- and block writes until it finishes - fine on an empty table, an outage on
+-- a large one that is already serving. There, add CONCURRENTLY to each and
+-- run them outside a transaction, and check `indisvalid` afterwards: a
+-- concurrent build that fails leaves the index behind, unusable, and
+-- REINDEX INDEX CONCURRENTLY is what repairs it.
 CREATE INDEX graph_edges_source_idx ON <schema>.graph_edges ((doc->>'source'));
 CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
 ```

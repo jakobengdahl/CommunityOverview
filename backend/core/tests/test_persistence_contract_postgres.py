@@ -1052,7 +1052,12 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # "only table or database owner can analyze it", and both are
         # lc_messages-dependent. What this test is about is that the notice
         # reaches the operator at all.
-        assert "ANALYZE after save" in printed, (
+        # With the colon: "Warning: ANALYZE after save:" is the notice-handler
+        # line, which is what this test is about. "could not ANALYZE after
+        # save;" is the exception line, and matching both would let a mutation
+        # that makes ANALYZE raise outright satisfy an assertion about the
+        # handler.
+        assert "Warning: ANALYZE after save:" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
@@ -1167,8 +1172,6 @@ class TestPostgresIndexWorkIsDoneOnce:
     """
 
     def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
-        import psycopg as _psycopg
-
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend._ensure_schema()
@@ -1176,20 +1179,14 @@ class TestPostgresIndexWorkIsDoneOnce:
         # Second boot, same store: the indexes are there now.
         again = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(again)
-        original = _psycopg.Connection.execute
-        issued = []
+        # The module's own helper, which patches the CURSOR: `Connection.execute`
+        # delegates to one, so the cursor sees both, and a refactor that issued
+        # this DDL through `conn.cursor()` would leave a connection-level spy
+        # recording nothing and this assertion passing over two doomed
+        # statements.
+        issued = _statements_issued(again._ensure_schema)
 
-        def _watching(self, query, *args, **kwargs):
-            issued.append(repr(query))
-            return original(self, query, *args, **kwargs)
-
-        _psycopg.Connection.execute = _watching
-        try:
-            again._ensure_schema()
-        finally:
-            _psycopg.Connection.execute = original
-
-        creates = [q for q in issued if "CREATE INDEX" in q]
+        creates = [q for q, _ in issued if "CREATE INDEX" in repr(q)]
         assert not creates, (
             "re-issued DDL for indexes that are already there; on a role that "
             f"may not create them, that is a failure every boot: {creates}"
@@ -1282,8 +1279,21 @@ class TestPostgresReportsAnIndexItCannotUse:
         capsys.readouterr()
         backend._ensure_schema()
         printed = capsys.readouterr().out
-        assert "graph_edges_source_idx exists but is invalid" in printed, (
+        assert "graph_edges_source_idx" in printed and "not valid" in printed, (
             "an index the planner cannot use was taken as done: " + printed
+        )
+        # And it must not name a cause. The same indisvalid = false is what a
+        # HEALTHY concurrent build reads while it is still running - verified
+        # against this server - and the docs tell an operator to use exactly
+        # that on a live store. "Your build failed, drop it" is how they abort
+        # their own build and take the lock they were avoiding.
+        assert "still running" in printed, (
+            "named a failed build as the cause when the catalog cannot tell "
+            "that from a healthy one still in progress: " + printed
+        )
+        assert "REINDEX INDEX CONCURRENTLY" in printed, (
+            "an invalid index is repairable in place; DROP is not the remedy "
+            "and takes a stronger lock: " + printed
         )
 
 
