@@ -85,8 +85,8 @@ with a `TypeError`
 naming the missing ones — better than failing on the first mutation, after
 the in-memory graph has already changed. `change_notification` and
 `store_traversal` are checked the same way, and for the same reason stated
-twice over: a missing `subscribe` would fail at first use, and a missing
-`traverse` would not fail at all — every traversal would warn and fall back
+twice over: a missing `start_change_notification` would fail at first use, and
+a missing `traverse` would not fail at all — every traversal would warn and fall back
 to the walk, quietly, for the life of the process.
 
 ## The incremental contract
@@ -629,7 +629,11 @@ writing a backend of your own against a shared server:
   further read on top of whichever of those two paths `_ensure_schema()`
   took — the single-row `SELECT` against `graph_metadata` — so a warm
   `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
-  that same `SELECT` plus everything above.
+  that same `SELECT` plus everything above. The traversal's two indexes are
+  not in those counts: they are created after the lock is released, one pooled
+  connection each, and each costs a `pg_class`/`pg_index` lookup plus a
+  `CREATE INDEX IF NOT EXISTS` only when the lookup says it is missing — see
+  the index bullet below for why they sit outside the transaction.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the

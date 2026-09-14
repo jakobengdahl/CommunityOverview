@@ -331,9 +331,9 @@ class TestTheStoreAnswersWhatTheWalkWould:
         self, schema
     ):
         """Every fixture here round-trips through `model_dump()`, so every
-        document carries `archived: false` and the four COALESCEs that handle
-        its absence are never exercised - a mutation round removed all four
-        with the suite green. The shape is real: `Node.from_dict` and
+        document carries `archived: false` and the two COALESCEs that handle
+        its absence are never exercised - a mutation round removed both with
+        the suite green. The shape is real: `Node.from_dict` and
         `Edge.from_dict` both `setdefault("archived", False)` for data that
         predates the flag, and the SQL is the one reader that does not go
         through them. Without the COALESCE, `NOT NULL` is NULL and every such
