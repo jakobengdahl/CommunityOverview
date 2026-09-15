@@ -1799,11 +1799,23 @@ class TestResyncFlagLockDiscipline:
 
 
 class TestSaveNowFlagHandling:
-    def test_save_now_keeps_the_flag_raised_until_it_actually_succeeds(self, tmp):
+    def test_save_now_keeps_the_flag_raised_until_it_actually_succeeds(
+        self, tmp, capsys
+    ):
         """_save_now is the last-resort synchronous write once the executor
         is gone. If its own write also fails, the flag it leaves must stay
         raised - not be treated as resolved for a write that never landed -
-        so a second shutdown attempt still retries it."""
+        so a second shutdown attempt still retries it.
+
+        The first shutdown_events() call below drives _save_now() into a
+        write that itself fails (the second `flaky_save` failure). This test
+        relies on _save_now's documented behavior of catching and printing
+        that failure rather than re-raising it (storage.py, _save_now) - that
+        is the only reason shutdown_events() returns normally here instead of
+        propagating the OSError. Assert that explicitly, so a regression to
+        re-raising fails on a named message instead of an unrelated
+        traceback out of shutdown_events().
+        """
         path = str(tmp / "g.json")
         storage = GraphStorage(json_path=path)
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
@@ -1829,7 +1841,17 @@ class TestSaveNowFlagHandling:
         backend.save_graph_data = flaky_save
         storage.update_node("a", {"name": "Renamed"})
 
-        storage.shutdown_events()
+        try:
+            storage.shutdown_events()
+        except Exception as exc:  # pragma: no cover - regression guard
+            pytest.fail(
+                "_save_now must catch and print its own failed write, not "
+                f"let it escape shutdown_events(): {exc!r}"
+            )
+        assert "graph write at shutdown failed" in capsys.readouterr().out, (
+            "_save_now's catch-and-print behavior did not fire as expected "
+            "- this test depends on it to reach the assertions below"
+        )
         assert storage._resync_pending, (
             "the first shutdown's own fallback write failed too; the flag "
             "must stay raised rather than being cleared for a write that "
