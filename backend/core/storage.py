@@ -1717,11 +1717,18 @@ class GraphStorage:
 
         # An edge cannot outlive an endpoint. The store may well have reported
         # the edge deletions too; deleting one twice is a no-op.
-        incident = [
-            edge.id
-            for edge in self.edges.values()
-            if edge.source == node_id or edge.target == node_id
-        ]
+        incident = []
+        if self.graph.has_node(node_id):
+            seen = set()
+            for _, _, k in self.graph.out_edges(node_id, keys=True):
+                if k not in seen:
+                    incident.append(k)
+                    seen.add(k)
+            for _, _, k in self.graph.in_edges(node_id, keys=True):
+                if k not in seen:
+                    incident.append(k)
+                    seen.add(k)
+
         for edge_id in incident:
             self._external_delete_edge(edge_id)
 
@@ -2560,13 +2567,21 @@ class GraphStorage:
 
                     # Find all edges connected to this node
                     edges_to_remove = []
-                    for edge_id, edge in self.edges.items():
-                        if edge.source == node_id or edge.target == node_id:
-                            edges_to_remove.append(edge_id)
-                            affected_edge_ids.append(edge_id)
-                            # Capture edge before state
-                            if edge_id not in edge_before_states:
-                                edge_before_states[edge_id] = edge.to_dict()
+                    if self.graph.has_node(node_id):
+                        seen = set()
+                        for _, _, k in self.graph.out_edges(node_id, keys=True):
+                            if k not in seen:
+                                edges_to_remove.append(k)
+                                seen.add(k)
+                        for _, _, k in self.graph.in_edges(node_id, keys=True):
+                            if k not in seen:
+                                edges_to_remove.append(k)
+                                seen.add(k)
+
+                    for edge_id in edges_to_remove:
+                        affected_edge_ids.append(edge_id)
+                        if edge_id not in edge_before_states:
+                            edge_before_states[edge_id] = self.edges[edge_id].to_dict()
 
                     # Remove edges
                     for edge_id in edges_to_remove:
