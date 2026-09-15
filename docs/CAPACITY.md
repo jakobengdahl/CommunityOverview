@@ -2,16 +2,18 @@
 
 What one instance holds, and what it costs to serve it.
 
-**Every figure in the two tables below, and the bullets under them, comes from
-`scripts/measure_capacity.py`.** Re-run it rather than quoting those numbers
-second-hand: one of them that the script cannot reproduce is stale, and that is
-the only way to tell.
+**The two tables below, and the marginal / intercept / floor figures under
+them, come from `scripts/measure_capacity.py`.** Re-run it rather than quoting
+those second-hand: one of them the script cannot reproduce is stale, and that
+is the only way to tell.
 
-The prose also cites figures the script does not produce — one-off
-measurements of imports, of the fixture, and of what a `del` returns, plus a
-latency the acceptance suite prints. Each says how it was obtained where it
-appears. They are evidence for an explanation, not part of the envelope, and
-re-running the script will not check them.
+Everything else here — attributions of memory to a particular import, the
+cost of a connection, what a `del` gives back, the visibility latency the
+acceptance suite prints — is a one-off measurement taken by hand on the
+hardware described below. Those are evidence for an explanation rather than
+part of the envelope, and re-running the script will not check them. Where
+one appears it says what was measured, so it can be re-taken; the method is a
+few lines of `/proc/self/statm` around the call in question.
 
 ```bash
 # exactly what produced the tables below - the 100,000 row is not a default
@@ -132,10 +134,18 @@ in the process floor; the `MultiDiGraph` it provides then grows per node and
 per edge, which is marginal rather than fixed.
 
 The ~11 MB by which the PostgreSQL process floor exceeds the file backend's is
-the psycopg import (measured). Its intercept is also higher — 17 MB against
-12 MB — and that difference is *not* the connection pool, which costs under
-0.1 MB; what accounts for it has not been measured, so it is left unexplained
-rather than guessed at.
+the psycopg import, which happens before the baseline.
+
+Its intercept is higher too — 17 MB against 12 MB — and that 5 MB **is** the
+connection pool, in the one state that shows it. Constructing the pool costs
+0.09 MB; opening its *first* connection costs a further 5.38 MB, and the
+second and third cost nothing measurable. That is the process's first libpq
+connection, paid once, and the pool opens it on the load path — after the
+baseline, so it lands in the intercept.
+
+The whole PostgreSQL intercept then adds up: numpy ~11 MB, `GraphStorage`
+~1.5 MB, first connection ~5.4 MB, against 17.8 MB measured at one node. The
+file backend's is the same minus the connection: ~12.6 MB.
 
 So there are three terms, not two:
 
@@ -152,7 +162,7 @@ Checked against the table, both backends at both large sizes:
 | PostgreSQL, 100,000 | 876 + 17 + 61 = **954 MB** | 953.7 |
 | PostgreSQL, 50,000 | 438 + 17 + 61 = **516 MB** | 516.8 |
 
-Dropping a fixed term throws the answer out by 12-17 MB (the graph's) or
+Dropping a fixed term throws the answer out by 12-17 MB (the intercept) or
 50-61 MB (the floor), and 62-78 MB for both — which at the top of that range
 is the difference between a container that fits and one the kernel kills.
 
@@ -218,9 +228,11 @@ extrapolate: these figures stop at 100,000 on purpose.
 
 ### Against the earlier measurement
 
-**These three "then" figures are the only ones here with no witness at all.**
-Other prose figures are one-off measurements that can be re-taken by the
-method stated beside them; these cannot. They come from a measurement recorded
+**These three "then" figures cannot be re-taken at all.** The other
+hand-measured figures here can be, by the method described above; these were
+produced by tooling that no longer exists. (The one other figure with no
+witness is the 45% of failed MCP calls quoted under criterion 2, which is a
+historical incident, not a measurement.) They come from a measurement recorded
 before the vector split and the traversal work, taken with tooling that no
 longer exists, and nothing in the repository pins them. Treat them as a
 recorded observation, not as a reproducible baseline — the point is the
