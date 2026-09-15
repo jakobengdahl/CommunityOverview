@@ -5652,9 +5652,32 @@ class TestTheLevelQueryIsNeverPrepared:
                 ).fetchall()
             ]
 
+        # The opt-out is ONE query, not the pool. Without this half, replacing
+        # `prepare=False` with a pool-wide `prepare_threshold=None` passes the
+        # whole of backend/core/tests - 1648 tests - while the property the
+        # change is about is destroyed. The anchor probe is the natural
+        # witness: `traverse` issues it on this same connection, inside the
+        # same call, so if it is missing the backend stopped preparing
+        # everything.
+        assert any("graph_nodes" in s and "WHERE id = $1" in s for s in prepared), (
+            "the backend stopped preparing its other statements, so the "
+            "opt-out is no longer one query but the whole pool: "
+            f"{prepared}"
+        )
+
         # CROSS JOIN LATERAL is the level query's fingerprint - no other
         # statement in this backend uses it - so this identifies it without
         # pinning the whole SQL text, which would break on any edit to it.
+        # The guard is what keeps that trade honest: rewriting _LEVEL to an
+        # equivalent derived-table form drops the phrase, and without this the
+        # filter below would match nothing and the test would pass forever
+        # while the query prepared again. `test_traversal_equivalence.py`
+        # guards its own fingerprint the same way, for the same reason.
+        assert "CROSS JOIN LATERAL" in PostgresGraphPersistenceBackend._LEVEL, (
+            "the level query no longer contains the fingerprint this test "
+            "filters on, so the assertion below matches nothing and passes "
+            "vacuously - update both together"
+        )
         offenders = [s for s in prepared if "CROSS JOIN LATERAL" in s]
         assert not offenders, (
             "the traversal's level query was prepared, so PostgreSQL will "
