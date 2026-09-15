@@ -353,15 +353,18 @@ def _marginal(subset: List[Dict[str, Any]]) -> str:
 
     A per-row `bytes / nodes` ratio is not the node cost. Measured here at
     2,000 nodes it reports 16.5 kB a node, against a marginal cost of about
-    10 kB that the slope recovers - the difference is the graph's own fixed
-    structures (the config, NetworkX, the empty indexes) divided by too few
-    nodes. The slope between two sizes cancels that fixed term; the intercept
-    it leaves is that fixed cost, which is worth naming rather than hiding.
+    10 kB that the slope recovers - the difference is a fixed term divided by
+    too few nodes. The slope between two sizes cancels it; the intercept it
+    leaves names it, which is worth doing rather than hiding.
 
-    Note what the intercept does NOT include: `rss_graph_mb` is measured from
-    a baseline taken after every import, so the interpreter and the import
-    graph are outside it. They are in `rss_total_mb` instead, which is why
-    that column is much larger than this intercept plus the nodes.
+    Be careful what you call that intercept. It is NOT the graph's own data
+    structures: at one node `rss_graph_mb` is already ~12.5 MB, and
+    pre-importing numpy before the baseline drops it to ~1.6 MB with total
+    process memory unchanged. Most of it is numpy, imported lazily on the
+    load path after the baseline - so the baseline is not "after every
+    import", and an empty graph does not cost 12 MB. NetworkX, by contrast,
+    is imported at module scope and is outside this figure entirely, in
+    `rss_total_mb`. See docs/CAPACITY.md, "How to read the memory figures".
     """
     if len(subset) < 2:
         return "  (needs at least two sizes to separate fixed from marginal cost)"

@@ -1364,6 +1364,43 @@ class TestSessionsDirIsolation:
             "storage"
         )
 
+    def test_the_server_derives_the_default_beside_the_graph(self, tmp_path):
+        """The other half of the same knob.
+
+        The test above pins that an explicit ``SESSIONS_DIR`` is honoured. This
+        one pins where the directory goes when it is NOT set — a server that
+        derived, say, ``graph_parent/"sess2"`` would still isolate two apps
+        from each other and would still honour an explicit override, so every
+        other test here would pass while the documented default was wrong.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "derived"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=None,
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == root / "sessions", (
+            "the server did not put the default session directory beside the "
+            "graph file, so docs/CAPACITY.md describes the wrong path for a "
+            "deployment that never sets SESSIONS_DIR"
+        )
+
     def test_apps_that_omit_sessions_dir_but_share_a_graph_parent_do_share_a_store(
         self, tmp_path
     ):

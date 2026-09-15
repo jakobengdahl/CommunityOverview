@@ -7,9 +7,15 @@ than quoting these numbers second-hand: a figure in this document that the
 script cannot reproduce is stale, and that is the only way to tell.
 
 ```bash
-python3 scripts/measure_capacity.py                       # file backend
-CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres
+# exactly what produced the tables below - the 100,000 row is not a default
+python3 scripts/measure_capacity.py --sizes 5000,20000,50000,100000
+CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py \
+    --sizes 5000,20000,50000,100000 --postgres
 ```
+
+Without `--sizes` the script measures 5,000 / 20,000 / 50,000 only, and the
+marginal figure it prints is the slope over that shorter span rather than the
+one quoted here.
 
 The two backends are reported separately and neither is a proxy for the
 other. Most installations run the file backend, and it is measured here as a
@@ -93,21 +99,34 @@ know none of that.
 There are **two** fixed costs, and conflating them is the easiest way to size a
 container wrongly.
 
-`graph MB` is measured against a baseline taken after every import, so its
-intercept — 12 MB and 17 MB above — is the *graph's* own fixed structures: the
-config and the empty indexes that `GraphStorage` allocates at construction.
-The interpreter and the import graph are outside it, in the process floor of
-~50 MB and ~61 MB.
+`graph MB` is the difference between two readings in the measuring process:
+one taken before `GraphStorage` is constructed, one after the graph is loaded.
 
-Two things that look like they belong in the intercept and do not. **NetworkX
-is not in it**: `import networkx` is module-scope in `backend/core/storage.py`
-and costs 24.1 MB — twice the whole intercept — so it is in the floor, and the
-`MultiDiGraph` it provides then grows per node and per edge, which makes that
-part *marginal* rather than fixed. **The connection pool is not in the floor**:
-the ~11 MB by which the PostgreSQL floor exceeds the file one is the psycopg
-import, while the pool is constructed after the baseline and costs 0.1 MB, so
-it lands in the intercept — which is why that intercept is 17 MB against the
-file backend's 12 MB.
+**Its intercept is not the graph's own data structures**, and it is worth
+saying so because the name invites that reading. Measured at a single node,
+`graph MB` is already 12.54 MB — the whole intercept is present before there
+is any graph to speak of. Pre-import `numpy` before the baseline and the same
+measurement gives 1.58 MB, with total process memory unchanged. So roughly
+11 MB of the file backend's 12 MB intercept is `numpy`, imported lazily on the
+load path *after* the baseline is taken, and only about 1.5 MB is what
+`GraphStorage` itself allocates.
+
+That is a measurement artefact, not a cost: those 11 MB are resident either
+way, and land in `process MB` regardless of which side of the baseline they
+fall on. The three-term model below reconciles with the tables for that
+reason. But do not read "12 MB" as the price of an empty graph — it is about
+1.5 MB.
+
+**NetworkX is in neither of those**: `import networkx` is module-scope in
+`backend/core/storage.py`, so its 24.1 MB is paid before the baseline and sits
+in the process floor; the `MultiDiGraph` it provides then grows per node and
+per edge, which is marginal rather than fixed.
+
+The ~11 MB by which the PostgreSQL process floor exceeds the file backend's is
+the psycopg import (measured). Its intercept is also higher — 17 MB against
+12 MB — and that difference is *not* the connection pool, which costs under
+0.1 MB; what accounts for it has not been measured, so it is left unexplained
+rather than guessed at.
 
 So there are three terms, not two:
 
@@ -124,15 +143,17 @@ Checked against the table, both backends at both large sizes:
 | PostgreSQL, 100,000 | 876 + 17 + 61 = **954 MB** | 953.7 |
 | PostgreSQL, 50,000 | 438 + 17 + 61 = **516 MB** | 516.8 |
 
-Dropping either fixed term throws the answer out by 50-80 MB, which is the
-difference between a container that fits and one the kernel kills.
+Dropping a fixed term throws the answer out by 12-17 MB (the graph's) or
+50-61 MB (the floor), and 62-78 MB for both — which at the top of that range
+is the difference between a container that fits and one the kernel kills.
 
 Take the **slope between two sizes**, not the ratio at one size. A per-size
 `bytes / nodes` ratio mixes both fixed costs into the per-node cost and makes
 small graphs look extravagant and large ones look cheap — at 2,000 nodes it
 reports 16.5 kB a node against a marginal cost of about 10 kB. The slope
-cancels the fixed term; the intercept names it. That is why the script insists
-on at least two sizes.
+cancels the fixed term; the intercept names it. That is why the script reports
+the slope only when it has at least two sizes to take it between, and says so
+instead when it does not.
 
 ## Sizing from this
 
@@ -147,10 +168,10 @@ the graph's own 12 MB (file) or 17 MB (PostgreSQL), and the process floor of
 | 100,000 nodes | ~1.02 GB | ~954 MB |
 
 A 1 GB container holds 50,000 nodes with room to serve requests. It does not
-comfortably hold 100,000: the file backend needs 1,023 MB there and PostgreSQL
-954 MB, so on a 1024 MiB limit one is already over and the other has 70 MB
-left for the interpreter's own peaks and every concurrent request. 100,000
-nodes wants 2 GB.
+comfortably hold 100,000: the file backend needs 1,022.8 MiB there and
+PostgreSQL 953.7 MiB, so against a 1024 MiB limit one is within about a
+megabyte of it and the other has 70 MiB left — for the interpreter's own
+peaks and every concurrent request. 100,000 nodes wants 2 GB.
 
 (The tables are MiB throughout, as `/proc` reports them. The figures above are
 compared against a 1024 MiB container for that reason.)

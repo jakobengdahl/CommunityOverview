@@ -1,4 +1,9 @@
-"""The four things that must hold before a deployment runs more than one instance.
+"""What must hold before a deployment runs more than one instance.
+
+Four criteria were stated when this work began; a fifth - that a file-backed
+installation stays single-instance - is listed with them below because it is
+the same question asked of the other backend, and a reader checking the list
+should not have to discover it elsewhere.
 
 This is the close-out of the multi-instance work, stated as tests rather than
 as an argument. A production deployment was pinned to exactly one instance
@@ -41,6 +46,7 @@ is the whole evidence - and it is not.
 """
 
 import os
+import threading
 import time
 import uuid
 
@@ -88,11 +94,12 @@ needs_server = pytest.mark.skipif(
 # not this constant - is what belongs in the capacity envelope.
 VISIBILITY_CEILING_S = 10.0
 
-# How long the background write worker is held up in the criterion-4 test, so
-# that the write cannot land inside the time it takes to open a second
-# connection. Long enough to beat a connect by a wide margin, short enough
-# that the test stays cheap.
-WORKER_DELAY_S = 0.3
+# How long the criterion-4 test holds the background write worker, so the
+# write cannot have landed by the time `flush()` is called. The test asserts
+# that precondition rather than trusting it, so a machine slow enough to
+# defeat this constant produces a clear failure telling you to raise it -
+# never a pass that proves nothing.
+WORKER_HOLD_S = 0.3
 
 
 @pytest.fixture
@@ -283,30 +290,59 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
         connection. So the node is there either way, and the test passes by
         winning a race rather than by exercising `flush()`.
 
-        Slowing the worker removes the race: the write cannot land inside the
-        connect, so only `flush()` waiting for it can put it in the store.
-        Verified both ways - with the delay, replacing `flush()`'s body with
-        `return` fails this test; without the delay, that same no-op passes
-        it.
+        Holding the worker removes that race - but a hold measured in seconds
+        only moves it, and in the wrong direction: on a runner slower than the
+        hold, the test would not go red, it would go quietly vacuous. So the
+        hold is paired with a check of the precondition it exists to create.
+        If the write has already landed by the time `flush()` is called, this
+        test cannot tell a working `flush()` from a no-op, and it now says so
+        and fails rather than passing for no reason.
+
+        The other half is `applied`, which records that the real write ran
+        before `flush()` returned. That is what makes a no-op `flush()` fail
+        deterministically instead of racing the reader's connect - and it
+        fails safe if the patch below is ever bypassed (a rename that stops
+        production routing through `_do_apply` leaves `applied` unset, so the
+        test goes red rather than silently testing nothing).
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
 
         real_apply = GraphStorage._do_apply
+        applied = threading.Event()
 
-        def slow_apply(self, *args, **kwargs):
-            time.sleep(WORKER_DELAY_S)
-            return real_apply(self, *args, **kwargs)
+        def held_apply(self, *args, **kwargs):
+            time.sleep(WORKER_HOLD_S)
+            result = real_apply(self, *args, **kwargs)
+            applied.set()
+            return result
 
-        monkeypatch.setattr(GraphStorage, "_do_apply", slow_apply)
+        monkeypatch.setattr(GraphStorage, "_do_apply", held_apply)
 
         first = instances()
         node_id = f"acked-{uuid.uuid4().hex[:8]}"
 
         first.add_nodes([_node(node_id, "Acknowledged")], [])
+
+        assert not applied.is_set(), (
+            "the write landed before flush() was even called, so this test "
+            "cannot distinguish a working flush() from a no-op - the worker "
+            "hold is too short for this machine. Raise WORKER_HOLD_S; do not "
+            "let this pass silently"
+        )
+
         first.flush()
 
-        # Timing-free half of the same property: whatever the worker is doing,
-        # flush() must not return while the write it acknowledged is pending.
+        assert applied.is_set(), (
+            "flush() returned before the write it acknowledged had run. "
+            "Either flush() does not wait, or production no longer routes "
+            "through _do_apply and the hold above did nothing"
+        )
+
+        # A second, independent statement of the same property: whatever the
+        # worker is doing, flush() must not return with the write still
+        # queued. Not redundant - setting `_last_write = None` satisfies this
+        # one while doing no work, and running the write satisfies the one
+        # above; only together do they pin flush().
         pending = first._last_write
         assert pending is None or pending.done(), (
             "flush() returned while the write it acknowledged was still "
@@ -330,11 +366,14 @@ class TestCriterion2SessionsAcrossInstances:
 
     The open core ships one session backend and it is file-backed
     (`session_store.py` says the SaaS layer swaps in a DB-backed one behind
-    the same seam). `server.py` resolves the directory as `sessions/` beside
-    the graph path, which `config.get_graph_path()` resolves against the
-    project root. So whether two instances share sessions is decided by
-    whether that path is on shared storage - a mounted bucket - and not by
-    which graph backend is configured.
+    the same seam). `server.py` takes the directory from
+    `AppConfig.resolve_sessions_dir()`: `SESSIONS_DIR` when set, otherwise
+    `sessions/` beside the graph path - and where that is depends on how
+    `get_graph_path()` resolves a relative `GRAPH_FILE`, which is the project
+    root only when the file is there, and the backend directory otherwise. So
+    whether two instances share sessions is decided by whether the resulting
+    path is on shared storage - a mounted bucket - and not by which graph
+    backend is configured.
 
     These two tests state both halves, because the failing half is the one
     that took a production deployment down, and nothing else in the repo
