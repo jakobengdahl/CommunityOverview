@@ -88,6 +88,12 @@ needs_server = pytest.mark.skipif(
 # not this constant - is what belongs in the capacity envelope.
 VISIBILITY_CEILING_S = 10.0
 
+# How long the background write worker is held up in the criterion-4 test, so
+# that the write cannot land inside the time it takes to open a second
+# connection. Long enough to beat a connect by a wide margin, short enough
+# that the test stays cheap.
+WORKER_DELAY_S = 0.3
+
 
 @pytest.fixture
 def schema():
@@ -137,15 +143,26 @@ def _wait_until_visible(
     measuring the sleep, not the system - or flake. Polling reports the
     latency itself, which is the number this criterion is about.
 
-    `started` is the moment the write was committed, and callers that want a
-    figure worth quoting must pass it. Defaulting to "now" measures only what
-    is left after the commit returns, which for a large enough write is
-    nothing: propagation finishes while `flush()` is still running and the
-    reported latency is 0 ms - not because the system is instant but because
-    the clock started after the thing it was timing.
+    `started` is the moment the write was ISSUED - not committed: the commit
+    happens on a background worker afterwards, so the figure includes the
+    writer's own local write as well as propagation. That makes it a
+    conservative upper bound rather than a pure cross-instance latency, and
+    on a fast run the local half can dominate it.
+
+    Callers that want a figure worth quoting must still pass it. Defaulting
+    to "now" measures only what is left after `flush()` returns, which for a
+    large enough write is nothing: propagation finishes while the flush is
+    still running and the reported latency is 0 ms - not because the system
+    is instant but because the clock started after the thing it was timing.
     """
+    # `started` is only for the figure that gets reported. The poll budget is
+    # its own, measured from here: sharing them meant a slow but entirely
+    # CORRECT local write could exhaust the deadline before the loop was
+    # reached, so the reader was never polled once and a visible node was
+    # reported as a cross-instance visibility failure - the wrong criterion
+    # and the wrong diagnosis.
     started = time.perf_counter() if started is None else started
-    deadline = started + timeout
+    deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
         if storage.nodes.get(node_id) is not None:
             return time.perf_counter() - started
@@ -175,11 +192,17 @@ class TestCriterion3ChangesBecomeVisible:
             [_node(node_id, "Beacon"), _node(other_id)],
             [Edge(id=edge_id, source=node_id, target=other_id)],
         )
-        committed = time.perf_counter()
+        issued = time.perf_counter()
         writer.flush()
 
         elapsed = _wait_until_visible(
-            reader, node_id, VISIBILITY_CEILING_S, started=committed
+            reader, node_id, VISIBILITY_CEILING_S, started=issued
+        )
+        assert elapsed <= VISIBILITY_CEILING_S, (
+            f"the node arrived, but {elapsed:.1f}s after the write was "
+            f"issued, past the {VISIBILITY_CEILING_S}s this criterion "
+            f"claims - without this the figure could drift to just under "
+            f"the poll budget and still be printed as though it passed"
         )
 
         assert reader.nodes[node_id].name == "Beacon", (
@@ -249,24 +272,46 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
         assert second.nodes[node_id].name == "Survivor"
 
     def test_a_flushed_write_is_in_the_store_before_the_instance_stops(
-        self, instances, schema
+        self, instances, schema, monkeypatch
     ):
         """The rollout case: the instance is killed, not stopped politely.
 
-        The test above shuts the writer down between the write and the read,
-        and `shutdown_events()` drains the executor, heals a failed write and
-        checkpoints on its own - so it passes even if `flush()` is a complete
-        no-op, which is not the claim its docstring makes. Here the store is
-        read through a fresh backend while the writer is still running, so
-        `flush()` is the only thing that can have put the node there.
+        Reading the store through a fresh backend, while the writer is still
+        running, is not by itself enough. `add_nodes` hands the write to a
+        single background worker and returns, and that worker finishes in
+        about a millisecond - less than it takes this test to open a second
+        connection. So the node is there either way, and the test passes by
+        winning a race rather than by exercising `flush()`.
+
+        Slowing the worker removes the race: the write cannot land inside the
+        connect, so only `flush()` waiting for it can put it in the store.
+        Verified both ways - with the delay, replacing `flush()`'s body with
+        `return` fails this test; without the delay, that same no-op passes
+        it.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        real_apply = GraphStorage._do_apply
+
+        def slow_apply(self, *args, **kwargs):
+            time.sleep(WORKER_DELAY_S)
+            return real_apply(self, *args, **kwargs)
+
+        monkeypatch.setattr(GraphStorage, "_do_apply", slow_apply)
 
         first = instances()
         node_id = f"acked-{uuid.uuid4().hex[:8]}"
 
         first.add_nodes([_node(node_id, "Acknowledged")], [])
         first.flush()
+
+        # Timing-free half of the same property: whatever the worker is doing,
+        # flush() must not return while the write it acknowledged is pending.
+        pending = first._last_write
+        assert pending is None or pending.done(), (
+            "flush() returned while the write it acknowledged was still "
+            "queued on the executor"
+        )
 
         reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
         try:

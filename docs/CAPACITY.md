@@ -295,10 +295,20 @@ document, and the test prints it on every run — so the figure above is a range
 across observed runs rather than a single sample, and re-running the suite is
 how to check it still holds.
 
-That number is timed from the moment the write is committed, not from the
-moment `flush()` returns. The difference is not pedantic: with a write large
-enough that propagation finishes while the commit is still running, timing
-from the return reports 0 ms — which reads as instant and actually means the
-clock started after the thing it was timing. Criterion 3 covers a node and an
-edge together, because "a change" is not "a node change" and an edge report
-dropped on its own would otherwise go unnoticed.
+That number is timed from the moment the write is **issued**, not from the
+moment `flush()` returns — and not from the commit either: the commit happens
+on a background worker afterwards, so the figure includes the writer's own
+local write as well as the propagation, and on a fast run the local half can
+dominate it. It is therefore a conservative upper bound on cross-instance
+visibility rather than a measurement of it alone.
+
+Timing from `flush()`'s return instead would be worse, not better: with a
+write large enough that propagation finishes while the flush is still
+running, it reports 0 ms — which reads as instant and actually means the clock
+started after the thing it was timing.
+
+Criterion 3 covers a node and an edge together, because "a change" is not "a
+node change" and an edge report dropped on its own would otherwise go
+unnoticed. It does not reach the *ordering* invariant between the two, because
+`add_nodes` emits nodes and edges as two separate announcements;
+`test_persistence_contract_postgres.py` holds that.

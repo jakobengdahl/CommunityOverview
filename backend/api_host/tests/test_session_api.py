@@ -1317,6 +1317,53 @@ class TestSessionsDirIsolation:
         )
         return TestClient(create_app(config))
 
+    def test_the_server_honours_an_explicit_sessions_dir(self, tmp_path):
+        """The knob a multi-instance deployment turns, pinned at the server.
+
+        Every other app in this class puts ``sessions_dir`` at
+        ``graph_parent/"sessions"`` — which is exactly what the derivation in
+        ``AppConfig.resolve_sessions_dir`` produces — so the two expressions
+        coincide and a server that resolved the config and then ignored it
+        would pass all of them. This one points the directory somewhere the
+        derivation cannot produce, which is the only way to tell them apart.
+
+        It matters beyond tidiness: sharing that directory is the whole
+        condition under which an MCP session survives being served by another
+        instance (see ``docs/CAPACITY.md`` and
+        ``backend/core/tests/test_multi_instance_acceptance.py``). A server
+        that ignored the override would silently give every instance its own
+        container-local session store.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "explicit"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        elsewhere = tmp_path / "somewhere-else" / "shared-sessions"
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=str(elsewhere),
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == elsewhere, (
+            "the server did not use the session directory it was configured "
+            "with, so SESSIONS_DIR does not reach the store and a "
+            "multi-instance deployment cannot point its instances at shared "
+            "storage"
+        )
+
     def test_apps_that_omit_sessions_dir_but_share_a_graph_parent_do_share_a_store(
         self, tmp_path
     ):
