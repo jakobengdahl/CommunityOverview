@@ -210,15 +210,23 @@ class ExternalChange:
         Three things about when it is called decide whether an implementation
         of it is correct:
 
-        - It is called on **the thread the report was delivered on**, further
-          down that call stack, because the application applies a report
-          inline. A backend that dispatches from a poller it needs to keep
-          polling has to hand the report to another thread itself.
+        - It is normally called on **the thread the report was delivered on**,
+          further down that call stack, because the application applies a
+          report inline. A backend that dispatches from a poller it needs to
+          keep polling has to hand the report to another thread itself.
+          The exception is a report that arrives before the application's
+          first load has returned: that one is held and replayed on the
+          thread that finished the load, with the dispatching thread long
+          gone. So `read_content` must not close over anything bound to the
+          thread it was created on - a thread-local, a session, a cursor.
+          Take a pooled or otherwise thread-agnostic connection.
         - The application's lock is held throughout, so it must not call back
           into the storage, and its LATENCY IS THAT INSTANCE'S WRITE STALL:
           every mutation waits for it. Bound the read - a pool with no
           timeout, or one long enough to wait out a hung server, stalls the
-          instance for exactly that long.
+          instance for exactly that long. For a replayed report it is the
+          BOOT that stalls instead: no mutation can be queued yet, and
+          construction is not finished until the replay is.
         - It is called at most once per report; a second ask returns what the
           first read.
         """

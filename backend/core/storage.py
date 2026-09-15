@@ -125,12 +125,21 @@ class _BootGate:
     application only once the load has returned. What arrives in between is
     held and replayed in arrival order.
 
-    Replaying late is sound rather than merely tolerable, because a report
-    carries identifiers and the content is read when the application asks:
-    the replay reads what the store holds at replay time, which is at least
-    as new as what the announcement described. The same property makes a
-    duplicate harmless - a write committed during the load is both in the
-    load and in the buffer, and applying it twice reads the same value twice.
+    Replaying late is sound for a report whose content is read on demand: it
+    carries identifiers, so the replay reads what the store holds at replay
+    time, which is at least as new as what the announcement described. The
+    same property makes a duplicate harmless - a write committed during the
+    load is both in the load and in the buffer, and applying it twice reads
+    the same value twice.
+
+    A report built with `ExternalChange.entities` carries content gathered
+    when it was DISPATCHED, and holding one lengthens the window its own
+    docstring warns about: the application arbitrates such an upsert against
+    its own by wall clock. The end state still converges - a stale node
+    upsert loses to `_is_newer`, and a delete or an edge upsert is saved by
+    arrival order, since a later write to the same entity is announced later
+    and so replayed later - but it converges by arbitration rather than by
+    reading the store, which is the weaker of the two routes.
     """
 
     def __init__(self, listener: Callable[["ExternalChange"], None]) -> None:
@@ -153,6 +162,17 @@ class _BootGate:
                     # place below - never because the writes stopped mattering.
                     self._held.clear()
                     self._overflowed = True
+                    # Said out loud, because the reload that replaces these
+                    # is best-effort: `_reload_from_store` swallows a failed
+                    # read and leaves memory as it was. An overflowed boot
+                    # that also met an unreadable store loses exactly what
+                    # this gate exists to keep, and nothing else would show
+                    # it. Every comparable degradation in this file warns.
+                    print(
+                        f"Warning: more than {_BOOT_BUFFER_LIMIT} external "
+                        "changes arrived while loading; dropping them for a "
+                        "whole-graph reload"
+                    )
                 return
         self._listener(change)
 
@@ -167,7 +187,6 @@ class _BootGate:
         while True:
             with self._lock:
                 if self._overflowed:
-                    self._overflowed = False
                     self._open = True
                     held: List["ExternalChange"] = []
                     overflowed = True
@@ -350,16 +369,23 @@ class GraphStorage:
 
         try:
             self.load()
+            if boot_gate is not None:
+                boot_gate.open()
         except BaseException:
-            # A listener left running behind a failed construction would hold
-            # its connection and report into a half-built object that nothing
-            # is going to finish or shut down.
+            # The replay is inside the guard, not after it. A raise out of
+            # `open()` leaves the rest of the buffer undelivered AND the gate
+            # shut, so every later report from the still-live backend thread
+            # would buffer into an object nobody will ever open - a worse leak
+            # than the one this guard was written for. It is also the one
+            # delivery the backend's own `except` around the listener does not
+            # cover, because the backend is no longer on the stack.
+            #
+            # Failing construction is the honest outcome: an instance that
+            # could not apply what it was told while loading would otherwise
+            # serve a graph with silent gaps in it.
             if boot_gate is not None:
                 self._persistence_backend.stop_change_notification()
             raise
-
-        if boot_gate is not None:
-            boot_gate.open()
 
     def _mark_writer_thread(self) -> None:
         self._writer_thread_id = threading.get_ident()

@@ -1246,11 +1246,15 @@ class PostgresGraphPersistenceBackend:
         # arbitrating with a wall clock that does not order the commits.
         #
         # "Later", not "elsewhere": the application applies the report inline,
-        # so the read still happens on THIS thread, further down this call
-        # stack, inside _deliver. What makes that safe is not which thread it
-        # is on but what the application has done by then - it has drained its
+        # so the read normally happens on THIS thread, further down this call
+        # stack, inside _deliver. A report that arrives before the
+        # application's first load has returned is the exception - it is held
+        # and replayed on the thread that finished the load, with this one
+        # long gone. Either way what makes it safe is not which thread it is
+        # on but what the application has done by then - it has drained its
         # write queue and holds the lock every mutation needs in order to be
-        # queued, so nothing of its own is competing for the pool.
+        # queued, so nothing of its own is competing for the pool - and
+        # _resolve takes a pooled connection, which does not care.
         #
         # A read that fails there is not this thread's to absorb, though: the
         # application turns it into a reload, which is what this used to do

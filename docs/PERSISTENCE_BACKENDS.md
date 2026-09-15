@@ -285,19 +285,27 @@ What the backend passes is an `ExternalChange`:
   below is what the alternative costs.
 
   Three things about *when* it is called decide whether an implementation is
-  correct, and none of them is "on some thread of the application's" —
-  `GraphStorage`'s write queue is the one thread a report may **not** arrive
-  on, and it applies a report inline rather than handing it anywhere:
+  correct. `GraphStorage`'s write queue is the one thread a report may **not**
+  arrive on, and it applies a report inline — with one exception, the boot
+  replay, which is called out in each bullet it changes:
 
   - It is called **on the thread the report was delivered on**, further down
     that call stack. A backend that dispatches from a poller it needs to keep
-    polling must hand the report to another thread itself.
+    polling must hand the report to another thread itself. **The exception is
+    a report held across the first load** (see *The boot window is closed*):
+    it is replayed on the thread that finished the load, and the dispatching
+    thread is gone by then. So `read_content` must not close over anything
+    bound to the thread that created it — a thread-local, a session, a cursor.
+    A pooled connection, which is what `_resolve` takes, is thread-agnostic
+    and survives the replay.
   - The application's lock is held for its whole duration, so it must not call
     back into the storage, and **its latency is that instance's write stall** —
     every mutation waits for it. Bound the read: a pool with no timeout, or one
     long enough to wait out a hung server, stalls the instance for exactly that
     long. Under `entities` the same read happened off-lock, so this is a real
-    trade for the correctness it buys.
+    trade for the correctness it buys. For a replayed report it is the **boot**
+    that stalls rather than a write: no mutation can be queued yet, and
+    construction does not finish until the replay does.
   - It is called **at most once per report**; a second ask returns the first
     ask's answer rather than a fresher read.
 

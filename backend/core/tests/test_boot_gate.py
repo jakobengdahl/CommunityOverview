@@ -254,6 +254,32 @@ class TestGraphStorageClosesTheWindow:
         finally:
             storage.shutdown_events()
 
+    def test_a_replay_that_raises_stops_notification(self, monkeypatch):
+        """The replay is inside the construction guard, not after it.
+
+        A raise out of `open()` leaves the rest of the buffer undelivered and
+        the gate shut, so every later report from the still-live backend
+        thread buffers into an object nobody will ever open. It is also the
+        one delivery the backend's own `except` around the listener does not
+        cover, because the backend is no longer on the stack. Failing
+        construction with the listener stopped is the honest outcome.
+        """
+        backend = _NotifyingDuringLoad()
+
+        def angry(self, change):
+            raise RuntimeError("replay failed")
+
+        monkeypatch.setattr(GraphStorage, "apply_external_change", angry)
+
+        with pytest.raises(RuntimeError, match="replay failed"):
+            GraphStorage(persistence_backend=backend)
+
+        assert backend.stopped, (
+            "the replay raised and construction failed with the listener "
+            "still running - a worse leak than the one the guard was "
+            "written for"
+        )
+
     def test_a_failed_load_stops_notification(self, monkeypatch):
         """Otherwise the listener outlives the object it reports into, holding
         its connection and refreshing something nothing will shut down."""
