@@ -392,12 +392,23 @@ class ChangeNotifyingBackend(Protocol):
         """Begin reporting external changes to ``listener``.
 
         The listener is called only with changes the store has already
-        applied - it never writes back. Called once, after the application's
-        first load, so no change can be reported against a model that does
-        not exist yet. It applies the report inline, so a report handed over
-        with `ExternalChange.entities_read_on_demand` has its content read on
-        this same thread, further down this call stack - see that constructor
-        for the three obligations that follow.
+        applied - it never writes back. Called once, BEFORE the application's
+        first load: a write committed between the load and the start of
+        listening would otherwise be announced to a channel nobody is
+        listening on, and no transport here replays. No change is reported
+        against a model that does not exist yet all the same - the
+        application holds what arrives until its load has returned and then
+        replays it, so from the listener's side the first call still comes
+        after the load. A backend need do nothing about this; it is named
+        here because it is why the call comes when it does.
+
+        It applies the report inline, so a report handed over with
+        `ExternalChange.entities_read_on_demand` has its content read on this
+        same thread, further down this call stack - see that constructor for
+        the three obligations that follow. A report held across the load is
+        the one exception: it is replayed on the thread that finished the
+        load, which is what makes the deferred read sound rather than which
+        thread it started on.
 
         Report from a thread of the backend's own - the thread a notification
         channel, a poller or a watcher runs on. One kind of thread is
