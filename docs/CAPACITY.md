@@ -84,17 +84,29 @@ budget and a rolling-update consideration, not a per-request cost.
 ## Interactive latency
 
 Search and depth-3 traversal from the largest hub both stay well inside a
-canvas's tolerance at 50,000 nodes: under 200 ms for search on both backends,
-173 ms (file) and 268 ms (PostgreSQL) for the traversal.
+canvas's tolerance at 50,000 nodes.
+
+Read the two traversal columns as two engines rather than as a race. Only the
+PostgreSQL backend declares `store_traversal`, so its figure is the SQL level
+query; the file backend's is the in-memory walk. That walk is also what a
+PostgreSQL deployment falls back to whenever a write is pending, so the file
+column doubles as the fallback cost on either backend — it is not a number
+only file-backed installations see.
 
 The PostgreSQL traversal figure is a *steady-state* number, deliberately. The
 measurement runs depth 1, depth 2 and then depth 3 with a warm-up, so the
 connection has issued roughly eighteen level queries before the reported
-median is taken — well past the point where psycopg begins preparing a
-statement. This matters because that threshold is exactly where a 17×
-regression hid until this measurement found it (see the note on the level
-query in `docs/PERSISTENCE_BACKENDS.md`). A traversal benchmark that stops
-before the fourth call would have reported ~250 ms and missed it.
+median is taken, and twenty-one before the first timed sample.
+
+On the code as it stands that count changes nothing: the level query passes
+`prepare=False` and psycopg never prepares it, at any execution count (see the
+note on the level query in `docs/PERSISTENCE_BACKENDS.md`). The count is there
+as a **regression guard**, not as a description of what happens today. It is
+past the point at which psycopg *would* start preparing if that opt-out were
+ever removed — and a prepared level query is exactly where a 17× cliff hid
+until this measurement found it. So a benchmark that stopped at the third call
+would report the same ~250 ms today and catch nothing tomorrow; this one would
+show the cliff.
 
 ## What this does not measure, and why
 
@@ -152,8 +164,9 @@ The session directory defaults to a `sessions/` directory beside the graph
 path, and `SESSIONS_DIR` overrides it. Whether the criterion holds is decided
 by whether *that* path is on shared storage — a mounted bucket or volume — and
 not by which graph backend is configured. Moving the graph to PostgreSQL does
-not move the sessions with it, which is precisely how the 2026 failure
-happened.
+not move the sessions with it, which is precisely how a multi-instance
+deployment came to fail 45% of its MCP calls — the module docstring in
+`backend/core/tests/test_multi_instance_acceptance.py` describes that failure.
 
 The 10 s ceiling in criterion 3 is an acceptance bound for a shared CI runner,
 not a latency anyone should quote. The measured number is what belongs in this

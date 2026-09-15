@@ -209,9 +209,7 @@ def create_app(
     # channel below is kept only to deliver MCP visualization pushes to the browser
     # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
     # from this store.
-    sessions_dir = config.sessions_dir or str(
-        config.get_graph_path().parent / "sessions"
-    )
+    sessions_dir = str(config.resolve_sessions_dir())
     session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
     session_manager = SessionManager(session_store)
     app.state.session_store = session_store

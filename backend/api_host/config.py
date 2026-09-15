@@ -159,6 +159,20 @@ class AppConfig:
                 graph_path = backend_dir / self.graph_file
         return graph_path
 
+    def resolve_sessions_dir(self) -> Path:
+        """Where shared-session files live.
+
+        `SESSIONS_DIR` when set, otherwise a `sessions` directory beside the
+        graph file. Defined here rather than inline at the call site because
+        it is the whole of the multi-instance session condition in
+        `docs/CAPACITY.md`: whether several instances share sessions is
+        decided by whether THIS path is on shared storage, and a rule stated
+        in a deployment document needs one definition that a test can reach.
+        """
+        if self.sessions_dir:
+            return Path(self.sessions_dir)
+        return self.get_graph_path().parent / "sessions"
+
     def get_embeddings_path(self) -> Optional[Path]:
         """Resolved path to the embedding sidecar, or None to derive it.
 

@@ -27,9 +27,11 @@ semantic number measured against the mock would be a number about the mock.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import random
+import shutil
 import statistics
 import subprocess
 import sys
@@ -56,6 +58,14 @@ WORDS = (
     "statistics register variable population dataset classification survey "
     "metadata quality indicator collection reference frame unit measure"
 ).split()
+
+# A token the common vocabulary cannot produce, planted on one node in
+# RARE_EVERY. Without it there is no selective search to measure: every word a
+# node carries is drawn from the 15 above, so a term picked out of a node's own
+# name matches most of the corpus and the "rare" column would measure the same
+# workload as the "all" one.
+RARE_TOKEN = "hapaxmarker"
+RARE_EVERY = 1_000
 
 
 def _rss_bytes() -> int:
@@ -85,7 +95,10 @@ def _build_graph(size: int, seed: int = 1) -> Dict[str, Any]:
                 "id": f"n{i}",
                 "type": "Actor",
                 "name": " ".join(rng.sample(WORDS, 4)),
-                "description": " ".join(rng.choices(WORDS, k=25)),
+                "description": (
+                    " ".join(rng.choices(WORDS, k=25))
+                    + (f" {RARE_TOKEN}" if i % RARE_EVERY == 0 else "")
+                ),
                 "tags": rng.sample(WORDS, 2),
             }
         )
@@ -173,6 +186,15 @@ def measure_one(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
         if backend_kind == "postgres":
             pg_backend = backend
 
+        # The fixture is the measurement's own scaffolding, not something a
+        # deployment holds: at 50,000 nodes it is ~70 MB of dicts. It has been
+        # written to the backend and is read back from there, so release it
+        # before the baseline - otherwise it sits inside `rss_total_mb` and
+        # that column overstates what a container has to hold by the size of
+        # the fixture.
+        del data
+        gc.collect()
+
         # --- cold start: a fresh process would do exactly this --------------
         baseline_rss = _rss_bytes()
         started = time.perf_counter()
@@ -186,7 +208,9 @@ def measure_one(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
         )
 
         # --- what a request costs -------------------------------------------
-        rare = data["nodes"][size // 2]["name"].split()[0]
+        # One matches a handful of nodes, the other most of them. Both are
+        # constants, not read off the fixture, which is gone by now.
+        rare = RARE_TOKEN
         common = WORDS[0]
         result = {
             "backend": backend_kind,
@@ -194,7 +218,6 @@ def measure_one(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
             "edges": edge_count,
             "rss_total_mb": round(loaded_rss / 1024 / 1024, 1),
             "rss_graph_mb": round((loaded_rss - baseline_rss) / 1024 / 1024, 1),
-            "bytes_per_node": round((loaded_rss - baseline_rss) / size),
             "cold_start_s": round(cold_start_ms / 1000, 2),
             "snapshot_s": round(snapshot_ms / 1000, 2),
             "search_rare_ms": round(
@@ -218,6 +241,7 @@ def measure_one(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
     finally:
         if pg_backend is not None:
             pg_backend.close()
+        shutil.rmtree(workdir, ignore_errors=True)
         if schema is not None:
             import psycopg
 
@@ -266,19 +290,25 @@ COLUMNS = (
 def _marginal(subset: List[Dict[str, Any]]) -> str:
     """The cost of one more node, separated from the cost of booting at all.
 
-    A per-row `bytes / nodes` ratio is not the node cost: at 2,000 nodes it
-    reported 16.5 kB a node against the ~1.9 kB a node actually costs, because
-    the fixed cost of an instance - the import graph, the config, NetworkX,
-    the empty indexes - was being divided by too few nodes. The slope between
-    two sizes cancels that fixed term; the intercept it leaves is the fixed
-    cost itself, which is worth naming rather than hiding.
+    A per-row `bytes / nodes` ratio is not the node cost. Measured here at
+    2,000 nodes it reports 16.5 kB a node, against a marginal cost of about
+    10 kB that the slope recovers - the difference is the graph's own fixed
+    structures (the config, NetworkX, the empty indexes) divided by too few
+    nodes. The slope between two sizes cancels that fixed term; the intercept
+    it leaves is that fixed cost, which is worth naming rather than hiding.
+
+    Note what the intercept does NOT include: `rss_graph_mb` is measured from
+    a baseline taken after every import, so the interpreter and the import
+    graph are outside it. They are in `rss_total_mb` instead, which is why
+    that column is much larger than this intercept plus the nodes.
     """
     if len(subset) < 2:
         return "  (needs at least two sizes to separate fixed from marginal cost)"
-    low, high = subset[0], subset[-1]
+    ordered = sorted(subset, key=lambda row: row["nodes"])
+    low, high = ordered[0], ordered[-1]
     span = high["nodes"] - low["nodes"]
     if span <= 0:
-        return "  (sizes do not differ)"
+        return "  (every measured size is the same, so there is no slope)"
     slope_mb = (high["rss_graph_mb"] - low["rss_graph_mb"]) / span
     intercept_mb = low["rss_graph_mb"] - slope_mb * low["nodes"]
     per_node = slope_mb * 1024 * 1024

@@ -30,7 +30,6 @@ somewhere this file names.
 import os
 import time
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -38,14 +37,22 @@ from backend.core.models import Node, NodeType
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.storage import GraphStorage
 
-psycopg = pytest.importorskip("psycopg")
+# Imported softly rather than with a module-level `importorskip`. The session
+# criterion below needs no database, and it is the one that encodes the
+# production failure this suite exists for - a module-level skip would make it
+# vanish on a clone without the optional PostgreSQL extra, with no signal that
+# the criterion went unchecked.
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - depends on which extras are installed
+    psycopg = None
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
 
 
 def _server_reachable() -> bool:
-    if not DSN:
+    if psycopg is None or not DSN:
         return False
     try:
         with psycopg.connect(DSN, connect_timeout=3):
@@ -56,7 +63,10 @@ def _server_reachable() -> bool:
 
 needs_server = pytest.mark.skipif(
     not _server_reachable() and not REQUIRE,
-    reason="set CO_TEST_POSTGRES_DSN to a reachable PostgreSQL server",
+    reason=(
+        "install the PostgreSQL extra and set CO_TEST_POSTGRES_DSN to a "
+        "reachable server"
+    ),
 )
 
 # What "within a stated bound" is allowed to mean. Generous on purpose: this
@@ -246,18 +256,38 @@ class TestCriterion2SessionsAcrossInstances:
             "needing shared storage is no longer the whole story"
         )
 
-    def test_the_default_directory_is_derived_from_the_graph_path(self):
+    def test_the_default_directory_is_derived_from_the_graph_path(self, monkeypatch):
         """Pins WHERE the directory comes from, because that is the whole
         condition. If this derivation changes, the deployment requirement
-        changes with it and the capacity document must be re-read."""
+        changes with it and the capacity document must be re-read.
+
+        Asserts against `AppConfig.resolve_sessions_dir`, which is what the
+        server calls. An earlier version of this test built the expected path
+        itself and then asserted that path's own shape - which holds for any
+        path by construction and could not fail.
+        """
         from backend.api_host.config import AppConfig
 
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
         config = AppConfig()
-        expected = config.get_graph_path().parent / "sessions"
 
-        assert config.sessions_dir is None or Path(config.sessions_dir), (
-            "SESSIONS_DIR is set in this environment, so the derivation this "
-            "test is about is not the one in force"
+        assert (
+            config.resolve_sessions_dir() == config.get_graph_path().parent / "sessions"
+        ), (
+            "the default session directory is no longer derived from the "
+            "graph path, so the deployment rule in docs/CAPACITY.md about "
+            "sharing that directory now points at the wrong place"
         )
-        assert expected.name == "sessions"
-        assert expected.parent == config.get_graph_path().parent
+
+    def test_sessions_dir_overrides_the_derivation(self, tmp_path, monkeypatch):
+        """The override half. This is the knob a multi-instance deployment
+        actually turns to satisfy criterion 2, so it has to work."""
+        from backend.api_host.config import AppConfig
+
+        elsewhere = tmp_path / "shared" / "sessions"
+        monkeypatch.setenv("SESSIONS_DIR", str(elsewhere))
+
+        assert AppConfig().resolve_sessions_dir() == elsewhere, (
+            "SESSIONS_DIR no longer overrides the derived path, so a "
+            "deployment cannot point its instances at shared storage"
+        )
