@@ -43,7 +43,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_SIZES = (5_000, 20_000, 50_000)
 
-# The Corp field profile: how many edges a real graph carries per node. Used
+# Taken from a real deployment's graph: how many edges a node carries. Used
 # so the envelope describes a graph of the shape deployments actually hold
 # rather than one chosen to make the numbers look good.
 EDGES_PER_NODE = 1.7

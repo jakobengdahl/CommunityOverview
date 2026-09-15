@@ -1,8 +1,8 @@
 """The four things that must hold before a deployment runs more than one instance.
 
 This is the close-out of the multi-instance work, stated as tests rather than
-as an argument. Corp production was pinned to exactly one instance on
-2026-09-01 because a second instance both answered 404 to MCP sessions it did
+as an argument. A production deployment was pinned to exactly one instance
+in 2026 because a second instance both answered 404 to MCP sessions it did
 not create and silently overwrote the first one's writes. Lifting that pin
 needs evidence, so each criterion below is either proved here or proved
 somewhere this file names.
@@ -209,7 +209,8 @@ class TestCriterion2SessionsAcrossInstances:
     which graph backend is configured.
 
     These two tests state both halves, because the failing half is the one
-    that took Corp down and nothing else in the repo says it out loud.
+    that took a production deployment down, and nothing else in the repo
+    says it out loud.
     """
 
     def test_two_instances_on_one_directory_share_a_session(self, tmp_path):
