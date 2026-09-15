@@ -103,6 +103,111 @@ def _apply_metadata_patch(
     return result
 
 
+# How many reports may be held while the first load runs before the buffer is
+# abandoned for a whole-graph reload. The reload is correct at any size, so
+# this trades a bounded amount of memory against the cost of reloading; a boot
+# that is overtaken by more writes than this was going to be expensive anyway.
+_BOOT_BUFFER_LIMIT = 1000
+
+
+class _BootGate:
+    """Holds reports that arrive before the first load has finished.
+
+    Listening starts BEFORE the load, because a write committed in the gap
+    between them is announced on a channel nobody is listening to and
+    LISTEN/NOTIFY does not replay it: narrow in time, unbounded in
+    consequence, since an entity written in that gap and never written again
+    is never reported and the instance serves a stale value for good.
+
+    Starting earlier would break the seam's promise that no change is reported
+    against a model that does not exist yet - so this keeps that promise on
+    the seam's behalf. The backend reports to the gate; the gate calls the
+    application only once the load has returned. What arrives in between is
+    held and replayed in arrival order.
+
+    Replaying late is sound for a report whose content is read on demand: it
+    carries identifiers, so the replay reads what the store holds at replay
+    time, which is at least as new as what the announcement described. The
+    same property makes a duplicate harmless - a write committed during the
+    load is both in the load and in the buffer, and applying it twice reads
+    the same value twice.
+
+    A report built with `ExternalChange.entities` carries content gathered
+    when it was DISPATCHED, and holding one lengthens the window its own
+    docstring warns about: the application arbitrates such an upsert against
+    its own by wall clock. The end state still converges - a stale node
+    upsert loses to `_is_newer`, and a delete or an edge upsert is saved by
+    arrival order, since a later write to the same entity is announced later
+    and so replayed later - but it converges by arbitration rather than by
+    reading the store, which is the weaker of the two routes.
+    """
+
+    def __init__(self, listener: Callable[["ExternalChange"], None]) -> None:
+        self._listener = listener
+        self._lock = threading.Lock()
+        self._held: List["ExternalChange"] = []
+        self._overflowed = False
+        self._open = False
+
+    def __call__(self, change: "ExternalChange") -> None:
+        with self._lock:
+            if not self._open:
+                if self._overflowed:
+                    return
+                self._held.append(change)
+                if len(self._held) > _BOOT_BUFFER_LIMIT:
+                    # One reload subsumes any number of held reports, so drop
+                    # them rather than grow without bound. Dropping the list
+                    # is safe only because `unknown()` is dispatched in its
+                    # place below - never because the writes stopped mattering.
+                    self._held.clear()
+                    self._overflowed = True
+                    # Said out loud, because the reload that replaces these
+                    # is best-effort: `_reload_from_store` swallows a failed
+                    # read and leaves memory as it was. An overflowed boot
+                    # that also met an unreadable store loses exactly what
+                    # this gate exists to keep, and nothing else would show
+                    # it. Every comparable degradation in this file warns.
+                    print(
+                        f"Warning: more than {_BOOT_BUFFER_LIMIT} external "
+                        "changes arrived while loading; dropping them for a "
+                        "whole-graph reload"
+                    )
+                return
+        self._listener(change)
+
+    def open(self) -> None:
+        """Replay what was held, then let reports through directly.
+
+        The flag is raised only once the buffer is empty, and the drain runs
+        outside the lock so a report arriving mid-drain is buffered rather
+        than overtaking the ones already held. Raising the flag first would
+        let it be delivered ahead of them and put the replay out of order.
+        """
+        while True:
+            with self._lock:
+                if self._overflowed:
+                    self._open = True
+                    held: List["ExternalChange"] = []
+                    overflowed = True
+                elif self._held:
+                    held = self._held
+                    self._held = []
+                    overflowed = False
+                else:
+                    self._open = True
+                    return
+            if overflowed:
+                # Everything held is subsumed by the reload this asks for,
+                # including anything that arrives from here on: the flag is
+                # already raised, so later reports go straight through and a
+                # reload does not need them.
+                self._listener(ExternalChange.unknown())
+                return
+            for change in held:
+                self._listener(change)
+
+
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -252,14 +357,35 @@ class GraphStorage:
         self._events_enabled = False
         self._system_listeners: List[Callable[["Event"], None]] = []
 
-        self.load()
-
-        # Only after the first load: a change reported against a model that
-        # does not exist yet has nothing to refresh.
+        # Listening starts BEFORE the load, and the gate keeps the seam's
+        # promise that nothing is reported against a model that does not exist
+        # yet: it holds what arrives until the load has returned. Starting
+        # after the load instead leaves a gap in which another instance's
+        # write is announced to nobody and never replayed - see _BootGate.
+        boot_gate: Optional[_BootGate] = None
         if self._backend_capabilities.change_notification:
-            self._persistence_backend.start_change_notification(
-                self.apply_external_change
-            )
+            boot_gate = _BootGate(self.apply_external_change)
+            self._persistence_backend.start_change_notification(boot_gate)
+
+        try:
+            self.load()
+            if boot_gate is not None:
+                boot_gate.open()
+        except BaseException:
+            # The replay is inside the guard, not after it. A raise out of
+            # `open()` leaves the rest of the buffer undelivered AND the gate
+            # shut, so every later report from the still-live backend thread
+            # would buffer into an object nobody will ever open - a worse leak
+            # than the one this guard was written for. It is also the one
+            # delivery the backend's own `except` around the listener does not
+            # cover, because the backend is no longer on the stack.
+            #
+            # Failing construction is the honest outcome: an instance that
+            # could not apply what it was told while loading would otherwise
+            # serve a graph with silent gaps in it.
+            if boot_gate is not None:
+                self._persistence_backend.stop_change_notification()
+            raise
 
     def _mark_writer_thread(self) -> None:
         self._writer_thread_id = threading.get_ident()

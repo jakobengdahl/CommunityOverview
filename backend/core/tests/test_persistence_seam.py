@@ -194,7 +194,8 @@ class _NotifyingBackend(_IncrementalBackend):
     """An incremental backend that also reports what someone else wrote.
 
     `on_subscribe` lets a test deliver a change at the moment the listener is
-    registered, which is how the wiring's ordering is pinned.
+    registered - which, since the gate closed the boot window, is BEFORE the
+    application has loaded. That makes it the shape a held report has.
     """
 
     def __init__(self, on_subscribe=None, incremental=True, **kwargs):
@@ -350,9 +351,16 @@ class TestChangeNotificationWiring:
             storage.shutdown_events()
         assert backend.unsubscribes == 0
 
-    def test_the_listener_is_subscribed_once_the_graph_is_loaded(self):
-        """A change reported against a model that does not exist yet would
-        refresh nothing, and the seeded graph would be gone."""
+    def test_a_change_reported_at_subscribe_time_survives_the_load(self):
+        """Subscription happens before the load, so this report is held.
+
+        The name used to say the listener was subscribed once the graph was
+        loaded, which was the ordering before the boot window was closed and
+        is now the opposite of what happens. What the test is actually good
+        for is the end-to-end property that replaced it: a change announced
+        at subscribe time is neither applied against the empty model nor
+        lost, and both the seeded node and the reported one are there
+        afterwards."""
         delivered = []
 
         def deliver(listener):

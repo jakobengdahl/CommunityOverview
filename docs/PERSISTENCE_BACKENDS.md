@@ -73,7 +73,7 @@ class BackendCapabilities:
 |---|---|---|
 | `incremental_writes` | the entity operations are implemented | mutations arrive as entity operations, not snapshots |
 | `transactions` | `apply_batch` lands all of its operations or none | a multi-entity mutation arrives as one batch; without it, as a snapshot |
-| `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes after its first load and refreshes what each reported entity touches; see *Reporting external changes* |
+| `change_notification` | the backend can report changes made by another instance | `GraphStorage` subscribes before its first load, holds what arrives until the load returns, then refreshes what each reported entity touches; see *Reporting external changes* |
 | `store_traversal` | `traverse` is implemented | `get_related_nodes` asks the store for the reachable ids instead of walking the in-memory graph — but only while the store is current; see *Answering a traversal from the store* |
 
 Everything defaults to `False`; `SNAPSHOT_ONLY` is that default.
@@ -253,9 +253,11 @@ def start_change_notification(self, listener) -> None: ...
 def stop_change_notification(self) -> None: ...
 ```
 
-`GraphStorage` subscribes once, after its first load — a change reported
-against a model that does not exist yet has nothing to refresh — and
-unsubscribes in `shutdown_events()`. The listener is called only with
+`GraphStorage` subscribes once, *before* its first load, and unsubscribes in
+`shutdown_events()`. It still never applies a change against a model that does
+not exist yet: reports arriving before the load has returned are held and
+replayed once it has (`_BootGate`), which closes the window a write could
+otherwise fall into. See *The boot window is closed* below. The listener is called only with
 changes the store has already applied, and from a thread of the backend's own
 — which thread, and why it matters, is *Which thread reports* below. The
 refresh never writes: not the change it was told about, and not the graph it
@@ -283,19 +285,27 @@ What the backend passes is an `ExternalChange`:
   below is what the alternative costs.
 
   Three things about *when* it is called decide whether an implementation is
-  correct, and none of them is "on some thread of the application's" —
-  `GraphStorage`'s write queue is the one thread a report may **not** arrive
-  on, and it applies a report inline rather than handing it anywhere:
+  correct. `GraphStorage`'s write queue is the one thread a report may **not**
+  arrive on, and it applies a report inline — with one exception, the boot
+  replay, which is called out in each bullet it changes:
 
   - It is called **on the thread the report was delivered on**, further down
     that call stack. A backend that dispatches from a poller it needs to keep
-    polling must hand the report to another thread itself.
+    polling must hand the report to another thread itself. **The exception is
+    a report held across the first load** (see *The boot window is closed*):
+    it is replayed on the thread that finished the load, and the dispatching
+    thread is gone by then. So `read_content` must not close over anything
+    bound to the thread that created it — a thread-local, a session, a cursor.
+    A pooled connection, which is what `_resolve` takes, is thread-agnostic
+    and survives the replay.
   - The application's lock is held for its whole duration, so it must not call
     back into the storage, and **its latency is that instance's write stall** —
     every mutation waits for it. Bound the read: a pool with no timeout, or one
     long enough to wait out a hung server, stalls the instance for exactly that
     long. Under `entities` the same read happened off-lock, so this is a real
-    trade for the correctness it buys.
+    trade for the correctness it buys. For a replayed report it is the **boot**
+    that stalls rather than a write: no mutation can be queued yet, and
+    construction does not finish until the replay does.
   - It is called **at most once per report**; a second ask returns the first
     ask's answer rather than a fresher read.
 
@@ -848,22 +858,32 @@ cross-instance write arrives. `stop_change_notification` joins the listening
 thread rather than merely signalling it, because a refresh already inside the
 listener is running against a model the caller is about to tear down.
 
-One window stays open, and it is the seam's rather than this backend's.
-`GraphStorage` loads and *then* starts notification — deliberately, so that
-no change is reported against a model that does not exist yet — so a write
-committed between the load and the `LISTEN` is announced to a connection that
-is not listening, and the server does not replay it.
+**The boot window is closed**, by the seam rather than by this backend.
+`GraphStorage` now starts notification *before* its first load and holds what
+arrives until the load returns, then replays it in arrival order — see
+`_BootGate` in `storage.py`. Loading first and listening second, as it did
+until then, left a write committed in between announced to a connection that
+was not listening; narrow in time and unbounded in consequence, because a
+reconnect reports `unknown()` precisely because its missed announcements are
+gone, while the first connect deliberately did not, so an entity written in
+the gap and never written again was never reported and that instance served
+the wrong value for as long as it ran.
 
-**That window is narrow in time and unbounded in consequence, and it is the
-one case with no recovery at all.** A reconnect reports `unknown()` precisely
-because the announcements it missed are gone; the first connect deliberately
-does not, because the caller has just loaded. So an entity written in the gap
-and never written again is never reported, and that instance serves the wrong
-value for as long as it runs. Later announcements do not help: each names only
-its own entities. Closing it means either an `unknown()` at start — one
-redundant whole-graph read per boot — or listening *before* the load, which is
-the reverse of what the seam specifies today and so is the seam's change to
-make, not this backend's.
+Replaying late is sound rather than merely tolerable: a report carries
+identifiers and `_resolve` reads the content when the application asks, so a
+replayed report reads what the store holds at replay time — at least as new
+as what the announcement described. The same property makes a duplicate
+harmless, which matters because a write committed during the load is both in
+the load and in the buffer. What the gate costs is a bounded buffer: past
+`_BOOT_BUFFER_LIMIT` held reports it drops them and reports `unknown()`
+instead, which one whole-graph read subsumes.
+
+The two alternatives, recorded because the choice is not obvious: an
+`unknown()` at start would be correct but imposes one redundant whole-graph
+read on every instance on every boot, and listening before the load *without*
+the gate would report against a model that does not exist yet, which is what
+the seam's original ordering existed to prevent. The gate keeps that promise
+while removing the gap.
 
 The floor on `psycopg` is 3.2 for `Connection.notifies(timeout=...)`, which
 is how the listening thread reads its channel while still noticing a stop.

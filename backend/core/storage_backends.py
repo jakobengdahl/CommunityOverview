@@ -210,15 +210,23 @@ class ExternalChange:
         Three things about when it is called decide whether an implementation
         of it is correct:
 
-        - It is called on **the thread the report was delivered on**, further
-          down that call stack, because the application applies a report
-          inline. A backend that dispatches from a poller it needs to keep
-          polling has to hand the report to another thread itself.
+        - It is normally called on **the thread the report was delivered on**,
+          further down that call stack, because the application applies a
+          report inline. A backend that dispatches from a poller it needs to
+          keep polling has to hand the report to another thread itself.
+          The exception is a report that arrives before the application's
+          first load has returned: that one is held and replayed on the
+          thread that finished the load, with the dispatching thread long
+          gone. So `read_content` must not close over anything bound to the
+          thread it was created on - a thread-local, a session, a cursor.
+          Take a pooled or otherwise thread-agnostic connection.
         - The application's lock is held throughout, so it must not call back
           into the storage, and its LATENCY IS THAT INSTANCE'S WRITE STALL:
           every mutation waits for it. Bound the read - a pool with no
           timeout, or one long enough to wait out a hung server, stalls the
-          instance for exactly that long.
+          instance for exactly that long. For a replayed report it is the
+          BOOT that stalls instead: no mutation can be queued yet, and
+          construction is not finished until the replay is.
         - It is called at most once per report; a second ask returns what the
           first read.
         """
@@ -392,12 +400,23 @@ class ChangeNotifyingBackend(Protocol):
         """Begin reporting external changes to ``listener``.
 
         The listener is called only with changes the store has already
-        applied - it never writes back. Called once, after the application's
-        first load, so no change can be reported against a model that does
-        not exist yet. It applies the report inline, so a report handed over
-        with `ExternalChange.entities_read_on_demand` has its content read on
-        this same thread, further down this call stack - see that constructor
-        for the three obligations that follow.
+        applied - it never writes back. Called once, BEFORE the application's
+        first load: a write committed between the load and the start of
+        listening would otherwise be announced to a channel nobody is
+        listening on, and no transport here replays. No change is reported
+        against a model that does not exist yet all the same - the
+        application holds what arrives until its load has returned and then
+        replays it, so from the listener's side the first call still comes
+        after the load. A backend need do nothing about this; it is named
+        here because it is why the call comes when it does.
+
+        It applies the report inline, so a report handed over with
+        `ExternalChange.entities_read_on_demand` has its content read on this
+        same thread, further down this call stack - see that constructor for
+        the three obligations that follow. A report held across the load is
+        the one exception: it is replayed on the thread that finished the
+        load, which is what makes the deferred read sound rather than which
+        thread it started on.
 
         Report from a thread of the backend's own - the thread a notification
         channel, a poller or a watcher runs on. One kind of thread is
