@@ -168,11 +168,18 @@ def seed_one(
     """Build the fixture and write it to the backend. Runs in its OWN process.
 
     Separate from the measuring process on purpose, and `del` is not a
-    substitute. The fixture is ~70 MB of dicts at 50,000 nodes, and freeing it
-    does NOT return that to the operating system: measured here, releasing it
-    and collecting gives back 2.8 MB of 70. Resident memory is the number this
-    whole envelope turns on, so the process that reports it must never have
-    held the fixture at all. This one builds it, writes it, and exits.
+    substitute - though not for the obvious reason. Releasing the fixture and
+    collecting leaves resident memory 72 MB above where it started, which
+    looks like Python refusing to return pages. It is not: drop the backend
+    object too and 69 of those 72 MB come back. `FileGraphPersistenceBackend`
+    keeps an in-memory mirror of the same node dicts, so the fixture was still
+    reachable.
+
+    Which is exactly why this is a process boundary rather than a `del`:
+    correctness would otherwise depend on which backend is under test and
+    what it happens to hold a reference to. Measured the other way, the file
+    backend at 50,000 nodes reported 617.7 MB of process memory against
+    548.6 MB measured here. Exiting needs to know none of that.
     """
     data = _build_graph(size)
     hub = data.pop("_hub")
@@ -223,6 +230,15 @@ def measure_one(
     assert len(storage.nodes) == size, (
         f"loaded {len(storage.nodes)} nodes, expected {size} - the "
         f"measurement would describe a graph nobody asked for"
+    )
+    # The edge count is reported from the seeding process and the traversal
+    # figures depend on those edges being here. Without this, a backend that
+    # dropped edges on the round trip would publish an edges column and a
+    # traversal number describing two different graphs, silently.
+    assert len(storage.edges) == edge_count, (
+        f"loaded {len(storage.edges)} edges, expected {edge_count} from the "
+        f"seeding process - the edges column and the traversal timings would "
+        f"describe different graphs"
     )
 
     # --- what a request costs -----------------------------------------------
@@ -309,8 +325,14 @@ def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
         if schema:
             import psycopg
 
-            with psycopg.connect(dsn, autocommit=True) as conn:
-                conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn:
+                    conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            except Exception as exc:  # noqa: BLE001 - see below
+                # A failure here must not replace the one that brought us to
+                # the finally block: a leaked schema is a tidiness problem,
+                # losing the reason the run stopped is not.
+                sys.stderr.write(f"warning: could not drop schema {schema}: {exc}\n")
 
 
 COLUMNS = (

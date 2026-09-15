@@ -41,13 +41,24 @@ second starts clean, loads the graph from that store and measures. So the
 process reporting resident memory never allocated the fixture — it holds the
 interpreter, the imports and the graph, which is what a deployment holds.
 
-Freeing the fixture instead of exiting does **not** work, and the difference is
-not small. Measured here: the fixture is ~70 MB at 50,000 nodes, and releasing
-it plus a full collection returns **2.8 MB of that 70** to the operating
-system. Python keeps the pages. Worse, the graph then loads into those retained
-pages, so `graph MB` — a difference of two readings — comes out *understated*
-as well. A single-process measurement gets both columns wrong, in opposite
-directions.
+Freeing the fixture instead of exiting does **not** work — though not for the
+reason it first appears, and the difference matters because the wrong reason
+is a false general fact about Python.
+
+Measured at 50,000 nodes: build the fixture (~70 MB), write it to the backend,
+then release it and collect. Resident memory stays **72 MB above** where it
+started. The tempting conclusion is that Python keeps the pages. It does not:
+drop the *backend* object as well and 69 of those 72 MB come straight back.
+The fixture was still reachable the whole time, because
+`FileGraphPersistenceBackend` keeps an in-memory mirror holding the same node
+dicts.
+
+That is a fragile thing to build a measurement on. Whether releasing the
+fixture is enough would depend on which backend is under test and whether it
+happens to retain a reference — and in practice it was not enough: measured
+this way the file backend at 50,000 nodes reported **617.7 MB** of process
+memory, against **548.6 MB** measured properly. Exiting the process needs to
+know none of that.
 
 ## File backend
 
@@ -84,9 +95,19 @@ container wrongly.
 
 `graph MB` is measured against a baseline taken after every import, so its
 intercept — 12 MB and 17 MB above — is the *graph's* own fixed structures: the
-config, NetworkX, the empty indexes. The interpreter and the import graph are
-outside it. They appear only in `process MB`, as the process floor of ~50 MB
-and ~61 MB.
+config and the empty indexes that `GraphStorage` allocates at construction.
+The interpreter and the import graph are outside it, in the process floor of
+~50 MB and ~61 MB.
+
+Two things that look like they belong in the intercept and do not. **NetworkX
+is not in it**: `import networkx` is module-scope in `backend/core/storage.py`
+and costs 24.1 MB — twice the whole intercept — so it is in the floor, and the
+`MultiDiGraph` it provides then grows per node and per edge, which makes that
+part *marginal* rather than fixed. **The connection pool is not in the floor**:
+the ~11 MB by which the PostgreSQL floor exceeds the file one is the psycopg
+import, while the pool is constructed after the baseline and costs 0.1 MB, so
+it lands in the intercept — which is why that intercept is 17 MB against the
+file backend's 12 MB.
 
 So there are three terms, not two:
 
@@ -115,7 +136,9 @@ on at least two sizes.
 
 ## Sizing from this
 
-About **10 MB of resident memory per 1,000 nodes**, plus the process floor.
+About **10 MB of resident memory per 1,000 nodes**, plus *both* fixed costs —
+the graph's own 12 MB (file) or 17 MB (PostgreSQL), and the process floor of
+~50 MB or ~61 MB. Dropping either is wrong by tens of megabytes.
 
 | graph | file backend | PostgreSQL |
 |---|---|---|
@@ -124,8 +147,13 @@ About **10 MB of resident memory per 1,000 nodes**, plus the process floor.
 | 100,000 nodes | ~1.02 GB | ~954 MB |
 
 A 1 GB container holds 50,000 nodes with room to serve requests. It does not
-comfortably hold 100,000 — both backends are at or over 1 GB there with
-nothing left for request handling, so 100,000 nodes wants 2 GB.
+comfortably hold 100,000: the file backend needs 1,023 MB there and PostgreSQL
+954 MB, so on a 1024 MiB limit one is already over and the other has 70 MB
+left for the interpreter's own peaks and every concurrent request. 100,000
+nodes wants 2 GB.
+
+(The tables are MiB throughout, as `/proc` reports them. The figures above are
+compared against a 1024 MiB container for that reason.)
 
 ## Where the ceiling is, and what gives first
 
@@ -138,11 +166,17 @@ depends on which budget is tighter in your deployment.
 default one, and paid on every rollout and every scale-up. It grows roughly
 linearly with the graph.
 
-**Exhaustive search** is the user-visible one. A term matching most of the
-corpus costs 341 ms (file) and 352 ms (PostgreSQL) at 100,000 nodes, against
-about 13 ms at 5,000 — linear in graph size, and already at the edge of what
-feels immediate. A selective search is not affected: the rare term stays at
-33 ms at the same size, because the cost is in the matches, not the corpus.
+**Search** is the user-visible one, and both kinds scale with the corpus. A
+term matching most of the corpus costs 341 ms (file) and 352 ms (PostgreSQL)
+at 100,000 nodes, against about 13 ms at 5,000 — already at the edge of what
+feels immediate.
+
+A selective search is cheaper by a constant factor, **not** independent of
+graph size: the rare term costs 1.6 ms at 5,000 and 33.3 ms at 100,000 — the
+same 20× the corpus grew by. `LexicalIndex.candidates` counts and scans one
+joined copy of the whole corpus before it visits any candidate node, so corpus
+size is what both searches pay for; the selective one merely does less work
+per match afterwards, about 10× less overall.
 
 So the practical ceiling for an interactive deployment on this hardware is
 around **100,000 nodes**, and what gives first is exhaustive search latency
@@ -151,9 +185,14 @@ extrapolate: these figures stop at 100,000 on purpose.
 
 ### Against the earlier measurement
 
-An earlier measurement of the file backend at 100,000 nodes, taken before the
-vector split and the traversal work, recorded 15.7 kB per node, 15.7 s cold
-start and 394 ms lexical search. The same three figures now:
+**These three "then" figures are the one second-hand quote in this document.**
+They come from a measurement recorded before the vector split and the
+traversal work, taken with tooling that no longer exists; this script cannot
+reproduce them and nothing in the repository pins them. Treat them as a
+recorded observation, not as a reproducible baseline — the point is the
+direction of travel, not the exact deltas.
+
+The same three figures, file backend at 100,000 nodes:
 
 | | then | now |
 |---|---|---|
@@ -175,8 +214,9 @@ only file-backed installations see.
 
 The PostgreSQL traversal figure is a *steady-state* number, deliberately. The
 measurement runs depth 1, depth 2 and then depth 3 with a warm-up, so the
-connection has issued roughly eighteen level queries before the reported
-median is taken, and twenty-one before the first timed sample.
+connection has issued eighteen level queries before the depth-3 block starts,
+twenty-one before the first timed sample, and thirty by the time the reported
+median is taken.
 
 On the code as it stands that count changes nothing: the level query passes
 `prepare=False` and psycopg never prepares it, at any execution count (see the
@@ -212,7 +252,7 @@ are stated as tests rather than as an argument, in
 |---|---|---|
 | 1 | Concurrent writes from two instances lose no updates | holds — proved in `test_multi_instance_postgres.py` |
 | 2 | An MCP session survives being served by a different instance | holds **conditionally** — see below |
-| 3 | A change written by one instance becomes visible to the others within a stated bound | holds — **12-21 ms measured** across runs, against a 10 s acceptance ceiling |
+| 3 | A change written by one instance becomes visible to the others within a stated bound | holds — **tens of milliseconds**: 7-36 ms across twelve runs, against a 10 s acceptance ceiling |
 | 4 | Restart does not lose acknowledged writes | holds |
 
 ### What this means for file-backed installations
