@@ -1373,19 +1373,37 @@ class TestSessionsDirIsolation:
         project root when the file exists there OR the path contains
         ``data/`` — the second is how the documented
         ``data/active/graph.json`` lands on a first boot, with no file
-        present. Every other test in this repo passes an absolute path, so
-        that branch is otherwise dead to the suite while
-        ``docs/CAPACITY.md`` turns its multi-instance session condition on it.
+        present.
+
+        The branch is not unreached — ``test_multi_instance_acceptance.py``
+        constructs a bare ``AppConfig()``, whose default ``GRAPH_FILE`` is the
+        relative ``"graph.json"`` — but until this test nothing pinned its
+        OUTCOME, while ``docs/CAPACITY.md`` turns its multi-instance session
+        condition on it.
 
         Note what the expected value is built from: the project root
-        directly, NOT ``get_graph_path()``. Using the production method on
-        both sides is how the sibling test below cannot catch a change here —
-        both sides move together.
+        directly, NOT ``get_graph_path()``. That matters, and
+        ``test_multi_instance_acceptance.py::
+        test_the_default_directory_is_derived_from_the_graph_path`` shows why:
+        it asserts ``resolve_sessions_dir() == get_graph_path().parent /
+        "sessions"``, the production method on both sides, so a change to the
+        resolution moves both sides together and the test cannot notice.
         """
         from backend.api_host.config import AppConfig
 
         monkeypatch.delenv("SESSIONS_DIR", raising=False)
         project_root = Path(__file__).resolve().parents[3]
+
+        # The `data/` clause is only distinguishable from `candidate.exists()`
+        # while this file is absent - and it is gitignored, so it IS absent in
+        # a clean checkout but present on any tree where the app has been run
+        # locally with the default GRAPH_FILE. Without this the test would
+        # quietly stop discriminating there rather than fail.
+        assert not (project_root / "data" / "active" / "graph.json").exists(), (
+            "this tree has a real data/active/graph.json, so the exists() "
+            "branch would carry this assertion and the data/ clause it is "
+            "written for would go untested"
+        )
 
         resolved = AppConfig(graph_file="data/active/graph.json").resolve_sessions_dir()
 
