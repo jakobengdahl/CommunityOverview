@@ -7,13 +7,19 @@ them, come from `scripts/measure_capacity.py`.** Re-run it rather than quoting
 those second-hand: one of them the script cannot reproduce is stale, and that
 is the only way to tell.
 
-Everything else here — attributions of memory to a particular import, the
-cost of a connection, what a `del` gives back, the visibility latency the
-acceptance suite prints — is a one-off measurement taken by hand on the
-hardware described below. Those are evidence for an explanation rather than
-part of the envelope, and re-running the script will not check them. Where
-one appears it says what was measured, so it can be re-taken; the method is a
-few lines of `/proc/self/statm` around the call in question.
+Everything else here is evidence for an explanation rather than part of the
+envelope, and re-running the script will not check it. There are two kinds.
+
+Most are **one-off memory measurements taken by hand** on the hardware
+described below — attributing memory to a particular import, the cost of a
+connection, what a `del` gives back. Each says what was measured, so each can
+be re-taken: the method is a few lines of `/proc/self/statm` around the call
+in question.
+
+The exception is the **visibility latency** under criterion 3. That is not
+hand-taken and not memory: the acceptance suite prints it on every run, and
+the figure quoted is a range across runs. Re-running that suite is how to
+check it.
 
 ```bash
 # exactly what produced the tables below - the 100,000 row is not a default
@@ -102,8 +108,9 @@ know none of that.
 - **marginal: 9,180 B per node** — one node and its 1.7 edges
 - **intercept: 17 MB** — same caveat
 - **process floor: ~61 MB** (61.1 / 61.1 / 61.2 / 61.0) — higher than the file
-  backend's by the psycopg import (measured 11.2 MB). Not by the connection
-  pool, which is built after the baseline and costs under 0.1 MB
+  backend's by the psycopg import (measured 11.2 MB). The connection pool is
+  not in the floor at all, because it is built after the baseline; its cost
+  lands in the intercept above — see "How to read the memory figures"
 
 ## How to read the memory figures
 
@@ -228,9 +235,10 @@ extrapolate: these figures stop at 100,000 on purpose.
 
 ### Against the earlier measurement
 
-**These three "then" figures cannot be re-taken at all.** The other
-hand-measured figures here can be, by the method described above; these were
-produced by tooling that no longer exists. (The one other figure with no
+**These three "then" figures cannot be re-taken at all.** The hand-measured
+memory figures here can be, by the method described at the top, and the
+visibility latency by re-running the acceptance suite; these were produced by
+tooling that no longer exists. (The one other figure with no
 witness is the 45% of failed MCP calls quoted under criterion 2, which is a
 historical incident, not a measurement.) They come from a measurement recorded
 before the vector split and the traversal work, taken with tooling that no
