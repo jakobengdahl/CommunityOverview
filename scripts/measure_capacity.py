@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""Measure what one instance holds, and what it costs to serve it.
+
+This is the maintained form of the capacity envelope: re-run it rather than
+quoting a number somebody measured once. A figure in `docs/CAPACITY.md` that
+this script cannot reproduce is stale, and the document says so.
+
+Each (backend, size) pair is measured in a FRESH SUBPROCESS. That is not
+tidiness: resident memory is the number the envelope turns on, and a process
+that has already built one graph carries its allocator's free lists, the
+import graph of whatever ran before, and any cache a previous size warmed.
+Measuring two sizes in one process makes the second look cheaper than it is.
+The worker prints one JSON line; the driver aggregates.
+
+Usage:
+
+    python3 scripts/measure_capacity.py                         # file backend
+    python3 scripts/measure_capacity.py --sizes 5000,20000
+    CO_TEST_POSTGRES_DSN=... python3 scripts/measure_capacity.py --postgres
+
+What it does NOT measure, and why: semantic search. The base install carries
+no ML stack by deliberate policy (`requirements-ml.txt` is separate), so
+`VectorStore` falls back to its mock path here exactly as it does in CI. A
+semantic number measured against the mock would be a number about the mock.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+DEFAULT_SIZES = (5_000, 20_000, 50_000)
+
+# Taken from a real deployment's graph: how many edges a node carries. Used
+# so the envelope describes a graph of the shape deployments actually hold
+# rather than one chosen to make the numbers look good.
+EDGES_PER_NODE = 1.7
+
+# Roughly the payload a real node carries - a few-word name and a couple of
+# sentences of description. Node cost is dominated by the payload, not by the
+# topology, so a fixture with empty descriptions would understate memory by
+# the thing that actually fills it.
+WORDS = (
+    "statistics register variable population dataset classification survey "
+    "metadata quality indicator collection reference frame unit measure"
+).split()
+
+# A token the common vocabulary cannot produce, planted on one node in
+# RARE_EVERY. Without it there is no selective search to measure: every word a
+# node carries is drawn from the 15 above, so a term picked out of a node's own
+# name matches most of the corpus and the "rare" column would measure the same
+# workload as the "all" one.
+RARE_TOKEN = "hapaxmarker"
+RARE_EVERY = 1_000
+
+
+def _rss_bytes() -> int:
+    """Resident set size, read from the kernel rather than from the allocator.
+
+    `sys.getsizeof` and friends measure what Python thinks it holds;
+    deployments are killed on what the kernel thinks the process holds.
+    """
+    with open("/proc/self/statm") as handle:
+        pages = int(handle.read().split()[1])
+    return pages * os.sysconf("SC_PAGE_SIZE")
+
+
+def _build_graph(size: int, seed: int = 1) -> Dict[str, Any]:
+    """A graph of `size` nodes with preferential attachment.
+
+    Preferential attachment rather than uniform random wiring, because it is
+    what real graphs look like: a few hubs and a long tail. Traversal cost
+    from a hub is the worst case an interactive canvas actually meets, and
+    uniform wiring has no hubs to find it with.
+    """
+    rng = random.Random(seed)
+    nodes = []
+    for i in range(size):
+        nodes.append(
+            {
+                "id": f"n{i}",
+                "type": "Actor",
+                "name": " ".join(rng.sample(WORDS, 4)),
+                "description": (
+                    " ".join(rng.choices(WORDS, k=25))
+                    + (f" {RARE_TOKEN}" if i % RARE_EVERY == 0 else "")
+                ),
+                "tags": rng.sample(WORDS, 2),
+            }
+        )
+
+    edges = []
+    degree = [1] * size
+    targets: List[int] = list(range(min(size, 10)))
+    for i in range(1, int(size * EDGES_PER_NODE)):
+        source = i % size
+        target = rng.choice(targets)
+        if source == target:
+            continue
+        edges.append(
+            {
+                "id": f"e{len(edges)}",
+                "source": f"n{source}",
+                "target": f"n{target}",
+                "type": "RELATES_TO",
+            }
+        )
+        degree[target] += 1
+        targets.append(target)
+        targets.append(source)
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "metadata": {"version": "1.0", "graph_name": "capacity"},
+        # The most connected node, so the traversal worst case is measurable
+        # rather than guessed at.
+        "_hub": f"n{max(range(size), key=lambda i: degree[i])}",
+    }
+
+
+def _time(fn, repeats: int = 5) -> float:
+    """Median milliseconds over `repeats`, discarding the first run.
+
+    The first call pays for whatever the path lazily builds; the median of the
+    rest is what a request meets. Reporting the mean would let one stall
+    dominate, and reporting the minimum would describe a machine at rest.
+    """
+    fn()
+    samples = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - started) * 1000)
+    return statistics.median(samples)
+
+
+def _backend_factory(backend_kind: str, workdir: str, schema: str, dsn: str | None):
+    """The same backend, constructible from either phase's process."""
+    if backend_kind == "file":
+        from backend.core.storage_backends import FileGraphPersistenceBackend
+
+        path = Path(workdir) / "graph.json"
+        return lambda: FileGraphPersistenceBackend(path)
+
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+    return lambda: PostgresGraphPersistenceBackend(dsn, schema=schema)
+
+
+def seed_one(
+    backend_kind: str, size: int, dsn: str | None, workdir: str, schema: str
+) -> Dict[str, Any]:
+    """Build the fixture and write it to the backend. Runs in its OWN process.
+
+    Separate from the measuring process on purpose, and `del` is not a
+    substitute - though not for the obvious reason. Releasing the fixture and
+    collecting leaves resident memory 72 MB above where it started, which
+    looks like Python refusing to return pages. It is not: drop the backend
+    object too and 69 of those 72 MB come back. `FileGraphPersistenceBackend`
+    keeps an in-memory mirror of the same node dicts, so the fixture was still
+    reachable.
+
+    Which is exactly why this is a process boundary rather than a `del`:
+    correctness would otherwise depend on which backend is under test and
+    what it happens to hold a reference to. Measured the other way, the file
+    backend at 50,000 nodes reported 617.7 MB of process memory against
+    548.6 MB measured here. Exiting needs to know none of that.
+    """
+    data = _build_graph(size)
+    hub = data.pop("_hub")
+    edge_count = len(data["edges"])
+
+    backend = _backend_factory(backend_kind, workdir, schema, dsn)()
+    started = time.perf_counter()
+    backend.save_graph_data(data)
+    snapshot_ms = (time.perf_counter() - started) * 1000
+    close = getattr(backend, "close", None)
+    if close is not None:
+        close()
+
+    return {
+        "hub": hub,
+        "edges": edge_count,
+        "snapshot_s": round(snapshot_ms / 1000, 2),
+    }
+
+
+def measure_one(
+    backend_kind: str,
+    size: int,
+    dsn: str | None,
+    workdir: str,
+    schema: str,
+    hub: str,
+    edge_count: int,
+) -> Dict[str, Any]:
+    """Measure an already-seeded store. Runs in its own, fixture-free process.
+
+    What this process holds is what a deployment holds: the interpreter, the
+    imports, and the graph. `rss_total_mb` is therefore a number a container
+    can be sized on, which is only true because the seeding happened
+    elsewhere.
+    """
+    from backend.core.storage import GraphStorage
+
+    make_backend = _backend_factory(backend_kind, workdir, schema, dsn)
+
+    # --- cold start: a fresh process would do exactly this ------------------
+    baseline_rss = _rss_bytes()
+    started = time.perf_counter()
+    storage = GraphStorage(persistence_backend=make_backend())
+    cold_start_ms = (time.perf_counter() - started) * 1000
+    loaded_rss = _rss_bytes()
+
+    assert len(storage.nodes) == size, (
+        f"loaded {len(storage.nodes)} nodes, expected {size} - the "
+        f"measurement would describe a graph nobody asked for"
+    )
+    # The edge count is reported from the seeding process and the traversal
+    # figures depend on those edges being here. Without this, a backend that
+    # dropped edges on the round trip would publish an edges column and a
+    # traversal number describing two different graphs, silently.
+    assert len(storage.edges) == edge_count, (
+        f"loaded {len(storage.edges)} edges, expected {edge_count} from the "
+        f"seeding process - the edges column and the traversal timings would "
+        f"describe different graphs"
+    )
+
+    # --- what a request costs -----------------------------------------------
+    # One matches a handful of nodes, the other most of them. Both are
+    # constants, so neither needs the fixture this process deliberately lacks.
+    rare = RARE_TOKEN
+    common = WORDS[0]
+    result = {
+        "backend": backend_kind,
+        "nodes": size,
+        "edges": edge_count,
+        "rss_total_mb": round(loaded_rss / 1024 / 1024, 1),
+        "rss_graph_mb": round((loaded_rss - baseline_rss) / 1024 / 1024, 1),
+        "cold_start_s": round(cold_start_ms / 1000, 2),
+        "search_rare_ms": round(_time(lambda: storage.search_nodes(rare, limit=20)), 1),
+        "search_common_ms": round(
+            _time(lambda: storage.search_nodes(common, limit=20)), 1
+        ),
+        "traverse_d1_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=1)), 1
+        ),
+        "traverse_d2_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=2)), 1
+        ),
+        "traverse_d3_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=3), repeats=3), 1
+        ),
+    }
+    storage.shutdown_events()
+    return result
+
+
+def _spawn(phase: str, payload: Dict[str, Any], dsn: str | None) -> Dict[str, Any]:
+    """Run one phase in a fresh interpreter and read its JSON line back."""
+    argv = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        phase,
+        json.dumps(payload),
+    ]
+    env = dict(os.environ)
+    if dsn:
+        env["CO_TEST_POSTGRES_DSN"] = dsn
+    completed = subprocess.run(argv, capture_output=True, text=True, env=env)
+    if completed.returncode != 0:
+        sys.stderr.write(completed.stderr)
+        raise SystemExit(
+            f"{phase} failed for {payload['backend']} at {payload['size']:,} "
+            "nodes; a partial envelope is worse than none, so this stops here"
+        )
+    for line in completed.stdout.splitlines():
+        if line.startswith("{"):
+            return json.loads(line)
+    raise SystemExit(f"{phase} produced no result for {payload['backend']}")
+
+
+def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]:
+    """One (backend, size) pair, as two processes and a cleanup.
+
+    The seeding process builds the fixture and exits; the measuring process
+    starts clean and never allocates it. Both are children of this one, which
+    owns the working directory and the schema so that either child failing
+    still leaves nothing behind.
+    """
+    workdir = tempfile.mkdtemp(prefix="capacity-")
+    schema = f"cap_{uuid.uuid4().hex[:12]}" if backend_kind != "file" else ""
+    payload = {
+        "backend": backend_kind,
+        "size": size,
+        "workdir": workdir,
+        "schema": schema,
+    }
+    try:
+        seeded = _spawn("--seed", payload, dsn)
+        measured = _spawn(
+            "--measure",
+            {**payload, "hub": seeded["hub"], "edges": seeded["edges"]},
+            dsn,
+        )
+        measured["snapshot_s"] = seeded["snapshot_s"]
+        return measured
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+        if schema:
+            import psycopg
+
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn:
+                    conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            except Exception as exc:  # noqa: BLE001 - see below
+                # A failure here must not replace the one that brought us to
+                # the finally block: a leaked schema is a tidiness problem,
+                # losing the reason the run stopped is not.
+                sys.stderr.write(f"warning: could not drop schema {schema}: {exc}\n")
+
+
+COLUMNS = (
+    ("nodes", "nodes", "{:,}"),
+    ("edges", "edges", "{:,}"),
+    ("rss_total_mb", "process MB", "{}"),
+    ("rss_graph_mb", "graph MB", "{}"),
+    ("cold_start_s", "cold start s", "{}"),
+    ("snapshot_s", "snapshot s", "{}"),
+    ("search_rare_ms", "search rare ms", "{}"),
+    ("search_common_ms", "search all ms", "{}"),
+    ("traverse_d3_ms", "hub depth 3 ms", "{}"),
+)
+
+
+def _marginal(subset: List[Dict[str, Any]]) -> str:
+    """The cost of one more node, separated from the cost of booting at all.
+
+    A per-row `bytes / nodes` ratio is not the node cost. Measured here at
+    2,000 nodes it reports 16.5 kB a node, against a marginal cost of about
+    10 kB that the slope recovers - the difference is a fixed term divided by
+    too few nodes. The slope between two sizes cancels it; the intercept it
+    leaves names it, which is worth doing rather than hiding.
+
+    Be careful what you call that intercept. It is NOT the graph's own data
+    structures: at one node `rss_graph_mb` is already ~12.5 MB, and
+    pre-importing numpy before the baseline drops it to ~1.6 MB with total
+    process memory unchanged. Most of it is numpy, imported lazily on the
+    load path after the baseline - so the baseline is not "after every
+    import", and an empty graph does not cost 12 MB. NetworkX, by contrast,
+    is imported at module scope and is outside this figure entirely, in
+    `rss_total_mb`. See docs/CAPACITY.md, "How to read the memory figures".
+    """
+    if len(subset) < 2:
+        return "  (needs at least two sizes to separate fixed from marginal cost)"
+    ordered = sorted(subset, key=lambda row: row["nodes"])
+    low, high = ordered[0], ordered[-1]
+    span = high["nodes"] - low["nodes"]
+    if span <= 0:
+        return "  (every measured size is the same, so there is no slope)"
+    slope_mb = (high["rss_graph_mb"] - low["rss_graph_mb"]) / span
+    intercept_mb = low["rss_graph_mb"] - slope_mb * low["nodes"]
+    per_node = slope_mb * 1024 * 1024
+    return (
+        f"  marginal: {per_node:,.0f} B per node "
+        f"(at {EDGES_PER_NODE} edges a node, so node + its edges), "
+        f"measured as the slope from {low['nodes']:,} to {high['nodes']:,}\n"
+        f"  fixed:    {intercept_mb:,.0f} MB before the first node - "
+        f"the intercept that slope leaves"
+    )
+
+
+def _print_table(rows: List[Dict[str, Any]]) -> None:
+    for backend_kind in ("file", "postgres"):
+        subset = [r for r in rows if r["backend"] == backend_kind]
+        if not subset:
+            continue
+        print(f"\n## {backend_kind} backend\n")
+        headers = [label for _, label, _ in COLUMNS]
+        widths = [len(h) for h in headers]
+        table = []
+        for row in subset:
+            cells = [fmt.format(row[key]) for key, _, fmt in COLUMNS]
+            widths = [max(w, len(c)) for w, c in zip(widths, cells)]
+            table.append(cells)
+        print(" | ".join(h.rjust(w) for h, w in zip(headers, widths)))
+        print("-+-".join("-" * w for w in widths))
+        for cells in table:
+            print(" | ".join(c.rjust(w) for c, w in zip(cells, widths)))
+        print()
+        print(_marginal(subset))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES))
+    parser.add_argument(
+        "--postgres",
+        action="store_true",
+        help="also measure the PostgreSQL backend (needs CO_TEST_POSTGRES_DSN)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit raw JSON rows")
+    # The two phases are internal: the driver re-invokes this file with one of
+    # them and a JSON payload. Kept out of --help because running a phase by
+    # hand against a directory the driver did not create measures nothing.
+    parser.add_argument("--seed", metavar="JSON", help=argparse.SUPPRESS)
+    parser.add_argument("--measure", metavar="JSON", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    dsn_env = os.environ.get("CO_TEST_POSTGRES_DSN")
+    if args.seed:
+        job = json.loads(args.seed)
+        print(
+            json.dumps(
+                seed_one(
+                    job["backend"], job["size"], dsn_env, job["workdir"], job["schema"]
+                )
+            )
+        )
+        return 0
+    if args.measure:
+        job = json.loads(args.measure)
+        print(
+            json.dumps(
+                measure_one(
+                    job["backend"],
+                    job["size"],
+                    dsn_env,
+                    job["workdir"],
+                    job["schema"],
+                    job["hub"],
+                    job["edges"],
+                )
+            )
+        )
+        return 0
+
+    sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    backends = ["file"]
+    dsn = os.environ.get("CO_TEST_POSTGRES_DSN")
+    if args.postgres:
+        if not dsn:
+            parser.error("--postgres needs CO_TEST_POSTGRES_DSN")
+        backends.append("postgres")
+
+    rows = []
+    for backend_kind in backends:
+        for size in sizes:
+            print(f"measuring {backend_kind} at {size:,} nodes ...", file=sys.stderr)
+            rows.append(_run_worker(backend_kind, size, dsn))
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        _print_table(rows)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1317,6 +1317,155 @@ class TestSessionsDirIsolation:
         )
         return TestClient(create_app(config))
 
+    def test_the_server_honours_an_explicit_sessions_dir(self, tmp_path):
+        """The knob a multi-instance deployment turns, pinned at the server.
+
+        Every other app in this class puts ``sessions_dir`` at
+        ``graph_parent/"sessions"`` — which is exactly what the derivation in
+        ``AppConfig.resolve_sessions_dir`` produces — so the two expressions
+        coincide and a server that resolved the config and then ignored it
+        would pass all of them. This one points the directory somewhere the
+        derivation cannot produce, which is the only way to tell them apart.
+
+        It matters beyond tidiness: sharing that directory is the whole
+        condition under which an MCP session survives being served by another
+        instance (see ``docs/CAPACITY.md`` and
+        ``backend/core/tests/test_multi_instance_acceptance.py``). A server
+        that ignored the override would silently give every instance its own
+        container-local session store.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "explicit"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        elsewhere = tmp_path / "somewhere-else" / "shared-sessions"
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=str(elsewhere),
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == elsewhere, (
+            "the server did not use the session directory it was configured "
+            "with, so SESSIONS_DIR does not reach the store and a "
+            "multi-instance deployment cannot point its instances at shared "
+            "storage"
+        )
+
+    def test_a_relative_data_graph_path_resolves_against_the_project_root(
+        self, monkeypatch
+    ):
+        """The branch the deployment rule names, which nothing else pins.
+
+        `get_graph_path()` resolves a relative ``GRAPH_FILE`` against the
+        project root when the file exists there OR the path contains
+        ``data/`` — the second is how the documented
+        ``data/active/graph.json`` lands on a first boot, with no file
+        present.
+
+        The branch is not unreached — ``test_multi_instance_acceptance.py``
+        constructs a bare ``AppConfig()``, whose default ``GRAPH_FILE`` is the
+        relative ``"graph.json"`` — but until this test nothing pinned its
+        OUTCOME, while ``docs/CAPACITY.md`` turns its multi-instance session
+        condition on it.
+
+        Note what the expected value is built from: the project root
+        directly, NOT ``get_graph_path()``. That matters, and
+        ``test_multi_instance_acceptance.py::
+        test_the_default_directory_is_derived_from_the_graph_path`` shows why:
+        it asserts ``resolve_sessions_dir() == get_graph_path().parent /
+        "sessions"``, the production method on both sides, so a change to the
+        resolution moves both sides together and the test cannot notice.
+        """
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        project_root = Path(__file__).resolve().parents[3]
+
+        # The `data/` clause is only distinguishable from `candidate.exists()`
+        # while this file is absent - and it is gitignored, so it IS absent in
+        # a clean checkout but present on any tree where the app has been run
+        # locally with the default GRAPH_FILE. Without this the test would
+        # quietly stop discriminating there rather than fail.
+        assert not (project_root / "data" / "active" / "graph.json").exists(), (
+            "this tree has a real data/active/graph.json, so the exists() "
+            "branch would carry this assertion and the data/ clause it is "
+            "written for would go untested"
+        )
+
+        resolved = AppConfig(graph_file="data/active/graph.json").resolve_sessions_dir()
+
+        assert resolved == project_root / "data" / "active" / "sessions", (
+            "a relative data/ graph path no longer resolves against the "
+            "project root, so the sessions directory moves with it and a "
+            "deployment's shared volume is no longer where the graph is"
+        )
+
+    def test_a_relative_non_data_graph_path_resolves_against_the_backend_dir(
+        self, monkeypatch
+    ):
+        """The other branch of the same rule, pinned the same way."""
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        backend_dir = Path(__file__).resolve().parents[2]
+
+        resolved = AppConfig(graph_file="nowhere/graph.json").resolve_sessions_dir()
+
+        assert resolved == backend_dir / "nowhere" / "sessions", (
+            "a relative non-data graph path no longer falls back to the "
+            "backend directory"
+        )
+
+    def test_the_server_derives_the_default_beside_the_graph(self, tmp_path):
+        """The other half of the same knob.
+
+        The test above pins that an explicit ``SESSIONS_DIR`` is honoured. This
+        one pins where the directory goes when it is NOT set — a server that
+        derived, say, ``graph_parent/"sess2"`` would still isolate two apps
+        from each other and would still honour an explicit override, so every
+        other test here would pass while the documented default was wrong.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "derived"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=None,
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == root / "sessions", (
+            "the server did not put the default session directory beside the "
+            "graph file, so docs/CAPACITY.md describes the wrong path for a "
+            "deployment that never sets SESSIONS_DIR"
+        )
+
     def test_apps_that_omit_sessions_dir_but_share_a_graph_parent_do_share_a_store(
         self, tmp_path
     ):
