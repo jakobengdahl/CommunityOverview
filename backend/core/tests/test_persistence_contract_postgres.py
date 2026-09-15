@@ -5589,3 +5589,131 @@ class TestPostgresStopHoldsWithABatchAlreadyRead:
             "a notification the loop had already read was delivered after "
             f"stop returned: {delivered}"
         )
+
+
+class TestTheLevelQueryIsNeverPrepared:
+    """The traversal's level query must plan against the frontier it was given.
+
+    Its selectivity depends entirely on a parameter: `= ANY(%(frontier)s)` is
+    one id on the first level and thousands by the third. PostgreSQL switches
+    a PREPARED statement to a generic plan after a few executions, and a
+    generic plan cannot see how large that array is - so it plans for the
+    small case and then meets the large one.
+
+    Measured at 50,000 nodes, depth 3 from the most connected node, the same
+    call repeated: 329, 209, 201, 4358, 4365, 4437, 4402, 4285 ms. The cliff
+    is between the third call and the fourth and never recovers, because the
+    plan is cached for the life of the connection. Roughly 17x, on the read
+    path an interactive canvas uses.
+
+    Asserting the LATENCY would be flaky and would need a large fixture. This
+    asserts the server-side fact that causes it instead: no prepared statement
+    for the level query exists, however many traversals have run.
+    """
+
+    def _pinned_backend(self, schema, backends):
+        # One connection, so every traversal below reuses it and the prepare
+        # threshold is reached on the connection this test then inspects.
+        # pg_prepared_statements is per-session: a pool free to hand out a
+        # different connection would let the test look at the wrong one.
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        return backend
+
+    def test_no_prepared_statement_for_the_level_query_survives_many_traversals(
+        self, schema, backends
+    ):
+        backend = self._pinned_backend(schema, backends)
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    {"id": "a", "type": "Actor", "name": "A"},
+                    {"id": "b", "type": "Actor", "name": "B"},
+                    {"id": "c", "type": "Actor", "name": "C"},
+                ],
+                "edges": [
+                    {"id": "ab", "source": "a", "target": "b", "type": "RELATES_TO"},
+                    {"id": "bc", "source": "b", "target": "c", "type": "RELATES_TO"},
+                ],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+
+        # Well past psycopg's prepare threshold: each depth-2 traversal issues
+        # one level execution per level, so this is ~40 executions.
+        for _ in range(20):
+            backend.traverse("a", 2)
+
+        with backend._pool.connection() as conn:
+            prepared = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT statement FROM pg_prepared_statements"
+                ).fetchall()
+            ]
+
+        # The opt-out is ONE query, not the pool. Without this half, replacing
+        # `prepare=False` with a pool-wide `prepare_threshold=None` passes the
+        # whole of backend/core/tests - 1648 tests - while the property the
+        # change is about is destroyed. The anchor probe is the natural
+        # witness: `traverse` issues it on this same connection, inside the
+        # same call, so if it is missing the backend stopped preparing
+        # everything.
+        assert any("graph_nodes" in s and "WHERE id = $1" in s for s in prepared), (
+            "the backend stopped preparing its other statements, so the "
+            "opt-out is no longer one query but the whole pool: "
+            f"{prepared}"
+        )
+
+        # CROSS JOIN LATERAL is the level query's fingerprint - no other
+        # statement in this backend uses it - so this identifies it without
+        # pinning the whole SQL text, which would break on any edit to it.
+        # The guard is what keeps that trade honest: rewriting _LEVEL to an
+        # equivalent derived-table form drops the phrase, and without this the
+        # filter below would match nothing and the test would pass forever
+        # while the query prepared again. `test_traversal_equivalence.py`
+        # guards its own fingerprint the same way, for the same reason.
+        assert "CROSS JOIN LATERAL" in PostgresGraphPersistenceBackend._LEVEL, (
+            "the level query no longer contains the fingerprint this test "
+            "filters on, so the assertion below matches nothing and passes "
+            "vacuously - update both together"
+        )
+        offenders = [s for s in prepared if "CROSS JOIN LATERAL" in s]
+        assert not offenders, (
+            "the traversal's level query was prepared, so PostgreSQL will "
+            "plan it generically once the plan cache warms and it will stop "
+            "seeing how large the frontier is: "
+            f"{offenders}"
+        )
+
+    def test_the_traversal_still_answers_correctly_without_preparation(
+        self, schema, backends
+    ):
+        """The opt-out must not be bought with a wrong answer: the same walk,
+        repeated past the threshold, keeps returning the same thing."""
+        backend = self._pinned_backend(schema, backends)
+        backend.save_graph_data(
+            {
+                "nodes": [
+                    {"id": "a", "type": "Actor", "name": "A"},
+                    {"id": "b", "type": "Actor", "name": "B"},
+                    {"id": "c", "type": "Actor", "name": "C"},
+                ],
+                "edges": [
+                    {"id": "ab", "source": "a", "target": "b", "type": "RELATES_TO"},
+                    {"id": "bc", "source": "b", "target": "c", "type": "RELATES_TO"},
+                ],
+                "metadata": {"version": "1.0", "graph_name": "g"},
+            }
+        )
+
+        answers = set()
+        for _ in range(20):
+            found = backend.traverse("a", 2)
+            answers.add(
+                (tuple(sorted(found["node_ids"])), tuple(sorted(found["edge_ids"])))
+            )
+
+        assert answers == {(("a", "b", "c"), ("ab", "bc"))}, (
+            f"the traversal's answer changed across repeated calls: {answers}"
+        )

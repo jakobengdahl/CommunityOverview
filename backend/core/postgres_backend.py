@@ -631,6 +631,18 @@ class PostgresGraphPersistenceBackend:
                         "any_type": not types,
                         "types": types,
                     },
+                    # Never prepared, and this is the one query in this backend
+                    # that must not be. Its selectivity is the frontier's size:
+                    # one id on the first level, thousands by the third. psycopg
+                    # prepares a statement after a few executions and PostgreSQL
+                    # then plans a prepared statement GENERICALLY - without the
+                    # array in hand - so it plans for the small case and meets
+                    # the large one. Measured at 50k nodes, depth 3 from the
+                    # biggest hub: 329, 209, 201, then 4358 ms and never fast
+                    # again, because the plan is cached for the connection's
+                    # life. A traversal issues one of these per level, so a
+                    # handful of requests is enough to fall off that cliff.
+                    prepare=False,
                 ).fetchall()
                 reached = []
                 for edge_id, far_id, is_node in rows:

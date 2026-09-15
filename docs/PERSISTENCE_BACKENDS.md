@@ -685,6 +685,29 @@ writing a backend of your own against a shared server:
   choose when it is taken, and on a live store the statement to use is
   `CREATE INDEX CONCURRENTLY`, outside a transaction, before the upgrade.
 
+- **The level query is never prepared**, and it is the only statement here
+  that opts out. Its selectivity *is* a parameter: `= ANY(%(frontier)s)` holds
+  one id on the first level and thousands by the third. psycopg prepares a
+  statement after a few executions, and PostgreSQL may then plan a prepared
+  statement generically — without the array in hand — so it plans for the
+  small frontier and then meets the large one. Measured at 50 000 nodes,
+  depth 3 from the most connected node, the same call repeated: 329, 209,
+  201, then **4 358 ms and never fast again**, because the plan is cached for
+  the connection's life. A traversal issues one level execution per level, so
+  a handful of requests is enough. The plans differ in kind rather than
+  degree: with a 2 000-id frontier, a custom plan takes a hash left join over
+  a sequential scan (45 ms) and a generic one a nested loop (830 ms).
+
+  Nothing else here needs it, and that was measured rather than assumed.
+  `_resolve`'s `WHERE id = ANY(%s)` looks the same but is not: equality
+  against the primary key's unique btree gives the identical plan either way
+  — bitmap index scan into a bitmap heap scan, 51 ms against 55 ms for 20 000
+  ids — because the plan does not turn on the array's estimated length. The
+  level query is different because it filters on *expressions*
+  (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
+  the frontier's size decides the join strategy. Every other statement is
+  single-row key access or a parameterless read.
+
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
 written as existing, and `GraphStorage` would load an empty graph instead of
