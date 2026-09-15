@@ -268,6 +268,21 @@ class GraphStorage:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
 
+    def _save_destination(self) -> str:
+        """Describe where a save actually lands, for the log line.
+
+        Only the file-backed backend owns a concrete path — `self.json_path`
+        is a synthetic default for every other backend (see its assignment
+        in `__init__`), so naming it there would claim a save landed in
+        graph.json when it went to PostgreSQL, or nowhere on disk at all.
+        """
+        if isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return str(self.json_path)
+        return (
+            f"the {type(self._persistence_backend).__name__} backend "
+            f"(graph '{self._default_graph_name()}')"
+        )
+
     def _init_embedding_sidecar(
         self, embeddings_path: Optional[str]
     ) -> Optional[FileEmbeddingSidecar]:
@@ -1088,7 +1103,8 @@ class GraphStorage:
         try:
             self._persistence_backend.save_graph_data(data)
             print(
-                f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
+                f"Saved {node_count} nodes and {edge_count} edges to "
+                f"{self._save_destination()}"
             )
         except ExternalChangeRefused:
             # Same reason as in _do_apply, and it has to be said in both write

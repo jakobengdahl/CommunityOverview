@@ -1123,6 +1123,45 @@ class TestGraphStoragePersistence:
         assert {"persist-backend-1", "persist-backend-2"}.issubset(persisted_ids)
         assert backend.data["metadata"]["graph_name"] == "in-memory-graph"
 
+    def test_save_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+        """The save log line named graph.json even through a backend that
+        never wrote a file at all (e.g. PostgreSQL) — see
+        smallfix-oc-storage-logs-graph-json-for-every-backend. A backend with
+        no `json_path` of its own must be described by its own identity, not
+        by the file backend's default path."""
+        backend = InMemoryPersistenceBackend(
+            initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
+        )
+        storage = GraphStorage(persistence_backend=backend)
+        capsys.readouterr()  # discard the initial load's own log line
+
+        storage.add_nodes(
+            [Node(id="non-file-node", type=NodeType.ACTOR, name="Non-file Node")], []
+        )
+        storage.flush()
+
+        out = capsys.readouterr().out
+        assert "graph.json" not in out
+        assert "Saved 1 nodes and 0 edges" in out
+        assert "in-memory-graph" in out
+
+    def test_save_through_file_backend_still_names_its_path(self, temp_storage, capsys):
+        """The fix for the non-file case must not regress the common one:
+        the file backend's own whole-graph save still names the real
+        json_path. (The file backend is incremental, so add_nodes takes the
+        journal path rather than this one — call save() directly to reach
+        the same _do_save_to_disk log line the non-file test exercises.)"""
+        temp_storage.add_nodes(
+            [Node(id="file-backed-node", type=NodeType.ACTOR, name="File Node")], []
+        )
+        temp_storage.flush()
+        capsys.readouterr()  # discard everything up to here
+
+        temp_storage.save().result()
+
+        out = capsys.readouterr().out
+        assert f"Saved 1 nodes and 0 edges to {temp_storage.json_path}" in out
+
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""
         # Add data
