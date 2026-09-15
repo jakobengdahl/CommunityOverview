@@ -2,9 +2,16 @@
 
 What one instance holds, and what it costs to serve it.
 
-Every figure here comes from `scripts/measure_capacity.py`. Re-run it rather
-than quoting these numbers second-hand: a figure in this document that the
-script cannot reproduce is stale, and that is the only way to tell.
+**Every figure in the two tables below, and the bullets under them, comes from
+`scripts/measure_capacity.py`.** Re-run it rather than quoting those numbers
+second-hand: one of them that the script cannot reproduce is stale, and that is
+the only way to tell.
+
+The prose also cites figures the script does not produce — one-off
+measurements of imports, of the fixture, and of what a `del` returns, plus a
+latency the acceptance suite prints. Each says how it was obtained where it
+appears. They are evidence for an explanation, not part of the envelope, and
+re-running the script will not check them.
 
 ```bash
 # exactly what produced the tables below - the 100,000 row is not a default
@@ -76,7 +83,8 @@ know none of that.
 | 100,000 | 169,997 | 1022.8 | 972.7 | 12.76 | 1.97 | 33.3 | 341.5 | 186.0 |
 
 - **marginal: 10,069 B per node** — one node and its 1.7 edges
-- **graph's own fixed cost: 12 MB** — the intercept the slope leaves
+- **intercept: 12 MB** — what the slope leaves, and NOT the price of an
+  empty graph; see "How to read the memory figures" below
 - **process floor: ~50 MB** — `process MB` minus `graph MB`, flat across all
   four sizes (50.0 / 50.0 / 50.1 / 50.1)
 
@@ -90,9 +98,10 @@ know none of that.
 | 100,000 | 169,997 | 953.7 | 892.7 | 9.40 | 8.80 | 33.3 | 352.2 | 338.4 |
 
 - **marginal: 9,180 B per node** — one node and its 1.7 edges
-- **graph's own fixed cost: 17 MB**
+- **intercept: 17 MB** — same caveat
 - **process floor: ~61 MB** (61.1 / 61.1 / 61.2 / 61.0) — higher than the file
-  backend's by psycopg and its connection pool
+  backend's by the psycopg import (measured 11.2 MB). Not by the connection
+  pool, which is built after the baseline and costs under 0.1 MB
 
 ## How to read the memory figures
 
@@ -131,7 +140,7 @@ rather than guessed at.
 So there are three terms, not two:
 
 ```
-resident ≈ nodes × marginal  +  graph's fixed cost  +  process floor
+resident ≈ nodes × marginal  +  intercept  +  process floor
 ```
 
 Checked against the table, both backends at both large sizes:
@@ -148,18 +157,21 @@ Dropping a fixed term throws the answer out by 12-17 MB (the graph's) or
 is the difference between a container that fits and one the kernel kills.
 
 Take the **slope between two sizes**, not the ratio at one size. A per-size
-`bytes / nodes` ratio mixes both fixed costs into the per-node cost and makes
-small graphs look extravagant and large ones look cheap — at 2,000 nodes it
-reports 16.5 kB a node against a marginal cost of about 10 kB. The slope
+`graph MB / nodes` ratio folds the intercept into the per-node cost and makes
+small graphs look extravagant — at 2,000 nodes it reports 16.5 kB a node
+against a marginal cost of about 10 kB. (It folds in the intercept only; the
+process floor is not in `graph MB` at all. `process MB / nodes` at the same
+size reports 41.9 kB, which is what mixing in both would look like.) The slope
 cancels the fixed term; the intercept names it. That is why the script reports
 the slope only when it has at least two sizes to take it between, and says so
 instead when it does not.
 
 ## Sizing from this
 
-About **10 MB of resident memory per 1,000 nodes**, plus *both* fixed costs —
-the graph's own 12 MB (file) or 17 MB (PostgreSQL), and the process floor of
-~50 MB or ~61 MB. Dropping either is wrong by tens of megabytes.
+About **10 MB of resident memory per 1,000 nodes**, plus *both* fixed terms —
+the 12 MB (file) or 17 MB (PostgreSQL) intercept, and the process floor of
+~50 MB or ~61 MB. Dropping the floor is wrong by 50-61 MB, dropping the
+intercept by 12-17 MB, dropping both by 62-78 MB.
 
 | graph | file backend | PostgreSQL |
 |---|---|---|
@@ -206,10 +218,11 @@ extrapolate: these figures stop at 100,000 on purpose.
 
 ### Against the earlier measurement
 
-**These three "then" figures are the one second-hand quote in this document.**
-They come from a measurement recorded before the vector split and the
-traversal work, taken with tooling that no longer exists; this script cannot
-reproduce them and nothing in the repository pins them. Treat them as a
+**These three "then" figures are the only ones here with no witness at all.**
+Other prose figures are one-off measurements that can be re-taken by the
+method stated beside them; these cannot. They come from a measurement recorded
+before the vector split and the traversal work, taken with tooling that no
+longer exists, and nothing in the repository pins them. Treat them as a
 recorded observation, not as a reproducible baseline — the point is the
 direction of travel, not the exact deltas.
 

@@ -369,8 +369,10 @@ class TestCriterion2SessionsAcrossInstances:
     the same seam). `server.py` takes the directory from
     `AppConfig.resolve_sessions_dir()`: `SESSIONS_DIR` when set, otherwise
     `sessions/` beside the graph path - and where that is depends on how
-    `get_graph_path()` resolves a relative `GRAPH_FILE`, which is the project
-    root only when the file is there, and the backend directory otherwise. So
+    `get_graph_path()` resolves a relative `GRAPH_FILE`: against the project
+    root if that file exists there OR the path contains `data/` (so the
+    documented `data/active/graph.json` resolves there on a first boot, with
+    no file present), and against the backend directory otherwise. So
     whether two instances share sessions is decided by whether the resulting
     path is on shared storage - a mounted bucket - and not by which graph
     backend is configured.
