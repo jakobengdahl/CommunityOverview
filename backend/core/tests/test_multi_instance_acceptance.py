@@ -31,14 +31,18 @@ somewhere this file names.
    here: `test_boot_gate.py` holds it, and `test_persistence_contract_file.py`
    holds the other half of criterion 5 below.
 
-4. Restart does not lose acknowledged writes. Proved here.
+4. Restart does not lose acknowledged writes. Proved here for a write that
+   succeeds. The half where a write FAILS and `flush()` has to heal it is
+   proved in `test_file_backend_journal.py` - dropping the heal from
+   `flush()` loses an acknowledged write and passes everything in this file.
 
 5. A file-backed installation stays single-instance. Not proved here either:
    `test_persistence_contract_file.py` asserts that the file backend declares
    no change notification and that a storage on it never starts any.
 
 What a green run here therefore does NOT establish: criterion 1, the boot
-gate, the file backend's capabilities, or that the server wires the session
+gate, the file backend's capabilities, criterion 4's failed-write half
+(`test_file_backend_journal.py`), or that the server wires the session
 directory it resolves (`backend/api_host/tests/test_session_api.py` covers
 that last one). Each is held somewhere named above. This matters because the
 "four criteria" framing invites the opposite reading - that a green run here
@@ -259,10 +263,20 @@ class TestCriterion3ChangesBecomeVisible:
 @needs_server
 class TestCriterion4RestartKeepsAcknowledgedWrites:
     def test_a_flushed_write_survives_shutdown_and_a_fresh_instance(self, instances):
-        """`flush()` is the acknowledgement: it returns once the write has
-        landed in the store, so anything it covered must outlive the process
-        that made it. A rollout replaces instances one at a time, and a write
-        acknowledged just before an instance goes away has no second chance."""
+        """A write must outlive the instance that made it.
+
+        Scope, stated because the obvious reading is wrong: this does NOT
+        pin that `flush()` is the acknowledgement. It passes with `flush()`
+        stubbed out to `return` - there is no worker hold here, so the
+        background write commits in about a millisecond, and
+        `shutdown_events()` would re-issue the graph anyway. What it proves
+        is that an entity write lands and survives a fresh instance. The
+        acknowledgement half is the sibling test below, which holds the
+        worker so `flush()` is the only thing that can have got the write
+        there.
+
+        A rollout replaces instances one at a time, and a write acknowledged
+        just before an instance goes away has no second chance."""
         first = instances()
         node_id = f"durable-{uuid.uuid4().hex[:8]}"
 
@@ -325,9 +339,13 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
 
         assert not applied.is_set(), (
             "the write landed before flush() was even called, so this test "
-            "cannot distinguish a working flush() from a no-op - the worker "
-            "hold is too short for this machine. Raise WORKER_HOLD_S; do not "
-            "let this pass silently"
+            "cannot distinguish a working flush() from a no-op. Either "
+            "add_nodes() no longer defers the write to the executor - in "
+            "which case this test needs rethinking, not retuning - or the "
+            "worker hold is too short for this machine, in which case raise "
+            "WORKER_HOLD_S. Check which before reaching for the constant; "
+            "the gap being measured is normally microseconds against a "
+            "300 ms budget, so a slow runner is the less likely of the two"
         )
 
         first.flush()
