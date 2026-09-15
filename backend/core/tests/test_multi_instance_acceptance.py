@@ -42,7 +42,10 @@ somewhere this file names.
 
 What a green run here therefore does NOT establish: criterion 1, the boot
 gate, the file backend's capabilities, criterion 4's failed-write half
-(`test_file_backend_journal.py`), or that the server wires the session
+(`test_file_backend_journal.py`), the announcement's ordering, its
+unreadable-payload fallback and its per-schema channel (all three in
+`test_persistence_contract_postgres.py` - they survive this file AND every
+other module named here), or that the server wires the session
 directory it resolves (`backend/api_host/tests/test_session_api.py` covers
 that last one). Each is held somewhere named above. This matters because the
 "four criteria" framing invites the opposite reading - that a green run here

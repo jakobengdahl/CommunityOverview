@@ -1364,6 +1364,53 @@ class TestSessionsDirIsolation:
             "storage"
         )
 
+    def test_a_relative_data_graph_path_resolves_against_the_project_root(
+        self, monkeypatch
+    ):
+        """The branch the deployment rule names, which nothing else pins.
+
+        `get_graph_path()` resolves a relative ``GRAPH_FILE`` against the
+        project root when the file exists there OR the path contains
+        ``data/`` — the second is how the documented
+        ``data/active/graph.json`` lands on a first boot, with no file
+        present. Every other test in this repo passes an absolute path, so
+        that branch is otherwise dead to the suite while
+        ``docs/CAPACITY.md`` turns its multi-instance session condition on it.
+
+        Note what the expected value is built from: the project root
+        directly, NOT ``get_graph_path()``. Using the production method on
+        both sides is how the sibling test below cannot catch a change here —
+        both sides move together.
+        """
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        project_root = Path(__file__).resolve().parents[3]
+
+        resolved = AppConfig(graph_file="data/active/graph.json").resolve_sessions_dir()
+
+        assert resolved == project_root / "data" / "active" / "sessions", (
+            "a relative data/ graph path no longer resolves against the "
+            "project root, so the sessions directory moves with it and a "
+            "deployment's shared volume is no longer where the graph is"
+        )
+
+    def test_a_relative_non_data_graph_path_resolves_against_the_backend_dir(
+        self, monkeypatch
+    ):
+        """The other branch of the same rule, pinned the same way."""
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        backend_dir = Path(__file__).resolve().parents[2]
+
+        resolved = AppConfig(graph_file="nowhere/graph.json").resolve_sessions_dir()
+
+        assert resolved == backend_dir / "nowhere" / "sessions", (
+            "a relative non-data graph path no longer falls back to the "
+            "backend directory"
+        )
+
     def test_the_server_derives_the_default_beside_the_graph(self, tmp_path):
         """The other half of the same knob.
 
