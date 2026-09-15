@@ -31,65 +31,145 @@ cost is dominated by payload rather than by topology. Traversals start from
 the single most connected node — the worst case an interactive canvas actually
 meets, and the one uniform wiring has no hubs to find.
 
+## How a measurement is taken
+
+Each `(backend, size)` pair costs **two** processes, and the split is what
+makes the memory figures mean anything.
+
+The first process builds the fixture, writes it to the backend and exits. The
+second starts clean, loads the graph from that store and measures. So the
+process reporting resident memory never allocated the fixture — it holds the
+interpreter, the imports and the graph, which is what a deployment holds.
+
+Freeing the fixture instead of exiting does **not** work, and the difference is
+not small. Measured here: the fixture is ~70 MB at 50,000 nodes, and releasing
+it plus a full collection returns **2.8 MB of that 70** to the operating
+system. Python keeps the pages. Worse, the graph then loads into those retained
+pages, so `graph MB` — a difference of two readings — comes out *understated*
+as well. A single-process measurement gets both columns wrong, in opposite
+directions.
+
 ## File backend
 
 | nodes | edges | process MB | graph MB | cold start s | snapshot s | search rare ms | search all ms | hub depth 3 ms |
 |---|---|---|---|---|---|---|---|---|
-| 5,000 | 8,497 | 117.4 | 60.1 | 0.33 | 0.11 | 13.5 | 13.0 | 18.7 |
-| 20,000 | 33,999 | 282.7 | 202.9 | 1.63 | 0.43 | 68.1 | 65.6 | 40.7 |
-| 50,000 | 84,998 | 618.9 | 494.2 | 5.47 | 0.99 | 186.0 | 186.4 | 173.4 |
+| 5,000 | 8,497 | 110.5 | 60.5 | 0.35 | 0.10 | 1.6 | 13.3 | 20.7 |
+| 20,000 | 33,999 | 254.8 | 204.8 | 2.49 | 0.40 | 6.7 | 69.1 | 35.3 |
+| 50,000 | 84,998 | 548.6 | 498.5 | 6.03 | 1.00 | 16.3 | 154.8 | 146.3 |
+| 100,000 | 169,997 | 1022.8 | 972.7 | 12.76 | 1.97 | 33.3 | 341.5 | 186.0 |
 
-- **marginal: 10,115 B per node** — one node and its 1.7 edges
-- **fixed: 12 MB** before the first node
+- **marginal: 10,069 B per node** — one node and its 1.7 edges
+- **graph's own fixed cost: 12 MB** — the intercept the slope leaves
+- **process floor: ~50 MB** — `process MB` minus `graph MB`, flat across all
+  four sizes (50.0 / 50.0 / 50.1 / 50.1)
 
 ## PostgreSQL backend
 
 | nodes | edges | process MB | graph MB | cold start s | snapshot s | search rare ms | search all ms | hub depth 3 ms |
 |---|---|---|---|---|---|---|---|---|
-| 5,000 | 8,497 | 129.0 | 53.5 | 0.52 | 0.48 | 17.1 | 16.3 | 47.0 |
-| 20,000 | 33,999 | 279.1 | 181.3 | 1.93 | 1.88 | 71.3 | 67.0 | 74.5 |
-| 50,000 | 84,998 | 586.2 | 447.4 | 7.08 | 3.92 | 175.7 | 178.2 | 268.3 |
+| 5,000 | 8,497 | 122.1 | 61.0 | 0.45 | 0.51 | 1.7 | 13.2 | 44.9 |
+| 20,000 | 33,999 | 251.9 | 190.8 | 1.71 | 1.87 | 6.6 | 60.4 | 73.1 |
+| 50,000 | 84,998 | 516.8 | 455.6 | 4.62 | 3.85 | 17.1 | 166.9 | 293.9 |
+| 100,000 | 169,997 | 953.7 | 892.7 | 9.40 | 8.80 | 33.3 | 352.2 | 338.4 |
 
-- **marginal: 9,179 B per node** — one node and its 1.7 edges
-- **fixed: 10 MB** before the first node
+- **marginal: 9,180 B per node** — one node and its 1.7 edges
+- **graph's own fixed cost: 17 MB**
+- **process floor: ~61 MB** (61.1 / 61.1 / 61.2 / 61.0) — higher than the file
+  backend's by psycopg and its connection pool
 
 ## How to read the memory figures
 
+There are **two** fixed costs, and conflating them is the easiest way to size a
+container wrongly.
+
+`graph MB` is measured against a baseline taken after every import, so its
+intercept — 12 MB and 17 MB above — is the *graph's* own fixed structures: the
+config, NetworkX, the empty indexes. The interpreter and the import graph are
+outside it. They appear only in `process MB`, as the process floor of ~50 MB
+and ~61 MB.
+
+So there are three terms, not two:
+
+```
+resident ≈ nodes × marginal  +  graph's fixed cost  +  process floor
+```
+
+Checked against the table, both backends at both large sizes:
+
+| | model | measured |
+|---|---|---|
+| file, 100,000 | 960 + 12 + 50 = **1,022 MB** | 1,022.8 |
+| file, 50,000 | 480 + 12 + 50 = **542 MB** | 548.6 |
+| PostgreSQL, 100,000 | 876 + 17 + 61 = **954 MB** | 953.7 |
+| PostgreSQL, 50,000 | 438 + 17 + 61 = **516 MB** | 516.8 |
+
+Dropping either fixed term throws the answer out by 50-80 MB, which is the
+difference between a container that fits and one the kernel kills.
+
 Take the **slope between two sizes**, not the ratio at one size. A per-size
-`bytes / nodes` ratio mixes the fixed cost of the process into the per-node
-cost and makes small graphs look extravagant and large ones look cheap; the
-slope cancels the fixed term, and its intercept is what names that fixed cost.
-The script reports both, and this is why it measures at least two sizes.
-
-Each `(backend, size)` pair is measured in a **fresh subprocess**. That is not
-tidiness. Resident memory is the number the envelope turns on, and a process
-that has already built one graph carries its allocator's free lists and
-whatever a previous size warmed — measuring two sizes in one process makes the
-second look cheaper than it is.
-
-`process MB` is resident memory for the whole process and is the number to
-size a container on. `graph MB` is the graph's own share of it.
+`bytes / nodes` ratio mixes both fixed costs into the per-node cost and makes
+small graphs look extravagant and large ones look cheap — at 2,000 nodes it
+reports 16.5 kB a node against a marginal cost of about 10 kB. The slope
+cancels the fixed term; the intercept names it. That is why the script insists
+on at least two sizes.
 
 ## Sizing from this
 
-At roughly 10 KB per node in both backends, a graph is about **10 MB of
-resident memory per 1,000 nodes**, plus 10–12 MB for the process itself.
-50,000 nodes needs on the order of 600 MB resident; a 1 GB container holds
-that with room to serve requests, and a 512 MB container does not.
+About **10 MB of resident memory per 1,000 nodes**, plus the process floor.
 
-Cold start is the figure that constrains deployment rather than serving:
-5–7 seconds at 50,000 nodes, on both backends. That is a readiness-probe
-budget and a rolling-update consideration, not a per-request cost.
+| graph | file backend | PostgreSQL |
+|---|---|---|
+| 20,000 nodes | ~255 MB | ~252 MB |
+| 50,000 nodes | ~549 MB | ~517 MB |
+| 100,000 nodes | ~1.02 GB | ~954 MB |
+
+A 1 GB container holds 50,000 nodes with room to serve requests. It does not
+comfortably hold 100,000 — both backends are at or over 1 GB there with
+nothing left for request handling, so 100,000 nodes wants 2 GB.
+
+## Where the ceiling is, and what gives first
+
+Memory is not what breaks. It is linear, predictable from the slope, and
+cheap to buy. Two other things degrade with size, and which one bites first
+depends on which budget is tighter in your deployment.
+
+**Cold start** is the operational constraint. At 100,000 nodes it is 12.8 s
+(file) and 9.4 s (PostgreSQL) — inside a generous readiness probe, past a
+default one, and paid on every rollout and every scale-up. It grows roughly
+linearly with the graph.
+
+**Exhaustive search** is the user-visible one. A term matching most of the
+corpus costs 341 ms (file) and 352 ms (PostgreSQL) at 100,000 nodes, against
+about 13 ms at 5,000 — linear in graph size, and already at the edge of what
+feels immediate. A selective search is not affected: the rare term stays at
+33 ms at the same size, because the cost is in the matches, not the corpus.
+
+So the practical ceiling for an interactive deployment on this hardware is
+around **100,000 nodes**, and what gives first is exhaustive search latency
+followed by cold start — not memory. Beyond that, measure rather than
+extrapolate: these figures stop at 100,000 on purpose.
+
+### Against the earlier measurement
+
+An earlier measurement of the file backend at 100,000 nodes, taken before the
+vector split and the traversal work, recorded 15.7 kB per node, 15.7 s cold
+start and 394 ms lexical search. The same three figures now:
+
+| | then | now |
+|---|---|---|
+| bytes per node | 15.7 kB | 10.1 kB |
+| cold start at 100,000 | 15.7 s | 12.8 s |
+| lexical search at 100,000 | 394 ms | 341 ms |
+
+Memory per node is down by about a third; the two latencies are modestly
+better. Nothing regressed.
 
 ## Interactive latency
 
-Search and depth-3 traversal from the largest hub both stay well inside a
-canvas's tolerance at 50,000 nodes.
-
-Read the two traversal columns as two engines rather than as a race. Only the
-PostgreSQL backend declares `store_traversal`, so its figure is the SQL level
-query; the file backend's is the in-memory walk. That walk is also what a
-PostgreSQL deployment falls back to whenever a write is pending, so the file
+Read the two `hub depth 3` columns as two engines rather than as a race. Only
+the PostgreSQL backend declares `store_traversal`, so its figure is the SQL
+level query; the file backend's is the in-memory walk. That walk is also what
+a PostgreSQL deployment falls back to whenever a write is pending, so the file
 column doubles as the fallback cost on either backend — it is not a number
 only file-backed installations see.
 
@@ -105,7 +185,7 @@ as a **regression guard**, not as a description of what happens today. It is
 past the point at which psycopg *would* start preparing if that opt-out were
 ever removed — and a prepared level query is exactly where a 17× cliff hid
 until this measurement found it. So a benchmark that stopped at the third call
-would report the same ~250 ms today and catch nothing tomorrow; this one would
+would report the same figure today and catch nothing tomorrow; this one would
 show the cliff.
 
 ## What this does not measure, and why
@@ -115,10 +195,9 @@ show the cliff.
 path here exactly as it does in CI. A semantic number measured against the
 mock would be a number about the mock, not about search.
 
-**Sizes above 50,000 nodes.** The three measured sizes establish a slope that
-extrapolates honestly for memory, but cold start is super-linear and search is
-linear in graph size, so a 200,000-node deployment should be measured rather
-than extrapolated.
+**Sizes above 100,000 nodes.** Memory extrapolates honestly from the slope,
+but cold start and search are both linear and already near their budgets at
+100,000, so a larger deployment should be measured rather than assumed.
 
 **Concurrency.** Every figure is single-request. What multiple concurrent
 readers cost is a separate question this script does not answer.
@@ -133,7 +212,7 @@ are stated as tests rather than as an argument, in
 |---|---|---|
 | 1 | Concurrent writes from two instances lose no updates | holds — proved in `test_multi_instance_postgres.py` |
 | 2 | An MCP session survives being served by a different instance | holds **conditionally** — see below |
-| 3 | A change written by one instance becomes visible to the others within a stated bound | holds — **10-13 ms measured** across runs, against a 10 s acceptance ceiling |
+| 3 | A change written by one instance becomes visible to the others within a stated bound | holds — **12-21 ms measured** across runs, against a 10 s acceptance ceiling |
 | 4 | Restart does not lose acknowledged writes | holds |
 
 ### What this means for file-backed installations
@@ -161,15 +240,25 @@ a shared session directory will serve 404 to MCP sessions it did not itself
 create.
 
 The session directory defaults to a `sessions/` directory beside the graph
-path, and `SESSIONS_DIR` overrides it. Whether the criterion holds is decided
-by whether *that* path is on shared storage — a mounted bucket or volume — and
-not by which graph backend is configured. Moving the graph to PostgreSQL does
-not move the sessions with it, which is precisely how a multi-instance
-deployment came to fail 45% of its MCP calls — the module docstring in
-`backend/core/tests/test_multi_instance_acceptance.py` describes that failure.
+path, and `SESSIONS_DIR` overrides it — `AppConfig.resolve_sessions_dir()` is
+the one definition, and the server calls it. Whether the criterion holds is
+decided by whether *that* path is on shared storage — a mounted bucket or
+volume — and not by which graph backend is configured. Moving the graph to
+PostgreSQL does not move the sessions with it, which is precisely how a
+multi-instance deployment came to fail 45% of its MCP calls; the module
+docstring in `backend/core/tests/test_multi_instance_acceptance.py` describes
+that failure.
 
 The 10 s ceiling in criterion 3 is an acceptance bound for a shared CI runner,
 not a latency anyone should quote. The measured number is what belongs in this
 document, and the test prints it on every run — so the figure above is a range
 across observed runs rather than a single sample, and re-running the suite is
 how to check it still holds.
+
+That number is timed from the moment the write is committed, not from the
+moment `flush()` returns. The difference is not pedantic: with a write large
+enough that propagation finishes while the commit is still running, timing
+from the return reports 0 ms — which reads as instant and actually means the
+clock started after the thing it was timing. Criterion 3 covers a node and an
+edge together, because "a change" is not "a node change" and an edge report
+dropped on its own would otherwise go unnoticed.

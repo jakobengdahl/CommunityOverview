@@ -27,7 +27,6 @@ semantic number measured against the mock would be a number about the mock.
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import os
 import random
@@ -37,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -149,114 +149,119 @@ def _time(fn, repeats: int = 5) -> float:
     return statistics.median(samples)
 
 
-def measure_one(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]:
-    """Measure one (backend, size) pair. Runs in its own process."""
-    from backend.core.storage import GraphStorage
-    from backend.core.storage_backends import FileGraphPersistenceBackend
+def _backend_factory(backend_kind: str, workdir: str, schema: str, dsn: str | None):
+    """The same backend, constructible from either phase's process."""
+    if backend_kind == "file":
+        from backend.core.storage_backends import FileGraphPersistenceBackend
 
+        path = Path(workdir) / "graph.json"
+        return lambda: FileGraphPersistenceBackend(path)
+
+    from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+    return lambda: PostgresGraphPersistenceBackend(dsn, schema=schema)
+
+
+def seed_one(
+    backend_kind: str, size: int, dsn: str | None, workdir: str, schema: str
+) -> Dict[str, Any]:
+    """Build the fixture and write it to the backend. Runs in its OWN process.
+
+    Separate from the measuring process on purpose, and `del` is not a
+    substitute. The fixture is ~70 MB of dicts at 50,000 nodes, and freeing it
+    does NOT return that to the operating system: measured here, releasing it
+    and collecting gives back 2.8 MB of 70. Resident memory is the number this
+    whole envelope turns on, so the process that reports it must never have
+    held the fixture at all. This one builds it, writes it, and exits.
+    """
     data = _build_graph(size)
     hub = data.pop("_hub")
     edge_count = len(data["edges"])
 
-    workdir = tempfile.mkdtemp(prefix="capacity-")
-    schema = None
-    pg_backend = None
+    backend = _backend_factory(backend_kind, workdir, schema, dsn)()
+    started = time.perf_counter()
+    backend.save_graph_data(data)
+    snapshot_ms = (time.perf_counter() - started) * 1000
+    close = getattr(backend, "close", None)
+    if close is not None:
+        close()
 
-    if backend_kind == "file":
-        path = Path(workdir) / "graph.json"
-        make_backend = lambda: FileGraphPersistenceBackend(path)  # noqa: E731
-    else:
-        import uuid
-
-        import psycopg
-
-        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
-
-        schema = f"cap_{uuid.uuid4().hex[:12]}"
-        make_backend = lambda: PostgresGraphPersistenceBackend(  # noqa: E731
-            dsn, schema=schema
-        )
-
-    try:
-        # --- write the fixture, and time the snapshot while doing it --------
-        backend = make_backend()
-        started = time.perf_counter()
-        backend.save_graph_data(data)
-        snapshot_ms = (time.perf_counter() - started) * 1000
-        if backend_kind == "postgres":
-            pg_backend = backend
-
-        # The fixture is the measurement's own scaffolding, not something a
-        # deployment holds: at 50,000 nodes it is ~70 MB of dicts. It has been
-        # written to the backend and is read back from there, so release it
-        # before the baseline - otherwise it sits inside `rss_total_mb` and
-        # that column overstates what a container has to hold by the size of
-        # the fixture.
-        del data
-        gc.collect()
-
-        # --- cold start: a fresh process would do exactly this --------------
-        baseline_rss = _rss_bytes()
-        started = time.perf_counter()
-        storage = GraphStorage(persistence_backend=make_backend())
-        cold_start_ms = (time.perf_counter() - started) * 1000
-        loaded_rss = _rss_bytes()
-
-        assert len(storage.nodes) == size, (
-            f"loaded {len(storage.nodes)} nodes, expected {size} - the "
-            f"measurement would describe a graph nobody asked for"
-        )
-
-        # --- what a request costs -------------------------------------------
-        # One matches a handful of nodes, the other most of them. Both are
-        # constants, not read off the fixture, which is gone by now.
-        rare = RARE_TOKEN
-        common = WORDS[0]
-        result = {
-            "backend": backend_kind,
-            "nodes": size,
-            "edges": edge_count,
-            "rss_total_mb": round(loaded_rss / 1024 / 1024, 1),
-            "rss_graph_mb": round((loaded_rss - baseline_rss) / 1024 / 1024, 1),
-            "cold_start_s": round(cold_start_ms / 1000, 2),
-            "snapshot_s": round(snapshot_ms / 1000, 2),
-            "search_rare_ms": round(
-                _time(lambda: storage.search_nodes(rare, limit=20)), 1
-            ),
-            "search_common_ms": round(
-                _time(lambda: storage.search_nodes(common, limit=20)), 1
-            ),
-            "traverse_d1_ms": round(
-                _time(lambda: storage.get_related_nodes(hub, depth=1)), 1
-            ),
-            "traverse_d2_ms": round(
-                _time(lambda: storage.get_related_nodes(hub, depth=2)), 1
-            ),
-            "traverse_d3_ms": round(
-                _time(lambda: storage.get_related_nodes(hub, depth=3), repeats=3), 1
-            ),
-        }
-        storage.shutdown_events()
-        return result
-    finally:
-        if pg_backend is not None:
-            pg_backend.close()
-        shutil.rmtree(workdir, ignore_errors=True)
-        if schema is not None:
-            import psycopg
-
-            with psycopg.connect(dsn, autocommit=True) as conn:
-                conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    return {
+        "hub": hub,
+        "edges": edge_count,
+        "snapshot_s": round(snapshot_ms / 1000, 2),
+    }
 
 
-def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]:
-    """Spawn a fresh interpreter for one measurement and read its JSON line."""
+def measure_one(
+    backend_kind: str,
+    size: int,
+    dsn: str | None,
+    workdir: str,
+    schema: str,
+    hub: str,
+    edge_count: int,
+) -> Dict[str, Any]:
+    """Measure an already-seeded store. Runs in its own, fixture-free process.
+
+    What this process holds is what a deployment holds: the interpreter, the
+    imports, and the graph. `rss_total_mb` is therefore a number a container
+    can be sized on, which is only true because the seeding happened
+    elsewhere.
+    """
+    from backend.core.storage import GraphStorage
+
+    make_backend = _backend_factory(backend_kind, workdir, schema, dsn)
+
+    # --- cold start: a fresh process would do exactly this ------------------
+    baseline_rss = _rss_bytes()
+    started = time.perf_counter()
+    storage = GraphStorage(persistence_backend=make_backend())
+    cold_start_ms = (time.perf_counter() - started) * 1000
+    loaded_rss = _rss_bytes()
+
+    assert len(storage.nodes) == size, (
+        f"loaded {len(storage.nodes)} nodes, expected {size} - the "
+        f"measurement would describe a graph nobody asked for"
+    )
+
+    # --- what a request costs -----------------------------------------------
+    # One matches a handful of nodes, the other most of them. Both are
+    # constants, so neither needs the fixture this process deliberately lacks.
+    rare = RARE_TOKEN
+    common = WORDS[0]
+    result = {
+        "backend": backend_kind,
+        "nodes": size,
+        "edges": edge_count,
+        "rss_total_mb": round(loaded_rss / 1024 / 1024, 1),
+        "rss_graph_mb": round((loaded_rss - baseline_rss) / 1024 / 1024, 1),
+        "cold_start_s": round(cold_start_ms / 1000, 2),
+        "search_rare_ms": round(_time(lambda: storage.search_nodes(rare, limit=20)), 1),
+        "search_common_ms": round(
+            _time(lambda: storage.search_nodes(common, limit=20)), 1
+        ),
+        "traverse_d1_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=1)), 1
+        ),
+        "traverse_d2_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=2)), 1
+        ),
+        "traverse_d3_ms": round(
+            _time(lambda: storage.get_related_nodes(hub, depth=3), repeats=3), 1
+        ),
+    }
+    storage.shutdown_events()
+    return result
+
+
+def _spawn(phase: str, payload: Dict[str, Any], dsn: str | None) -> Dict[str, Any]:
+    """Run one phase in a fresh interpreter and read its JSON line back."""
     argv = [
         sys.executable,
         str(Path(__file__).resolve()),
-        "--worker",
-        backend_kind,
-        str(size),
+        phase,
+        json.dumps(payload),
     ]
     env = dict(os.environ)
     if dsn:
@@ -265,13 +270,47 @@ def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]
     if completed.returncode != 0:
         sys.stderr.write(completed.stderr)
         raise SystemExit(
-            f"measurement failed for {backend_kind} at {size} nodes; "
-            "a partial envelope is worse than none, so this stops here"
+            f"{phase} failed for {payload['backend']} at {payload['size']:,} "
+            "nodes; a partial envelope is worse than none, so this stops here"
         )
     for line in completed.stdout.splitlines():
         if line.startswith("{"):
             return json.loads(line)
-    raise SystemExit(f"worker produced no result for {backend_kind} at {size}")
+    raise SystemExit(f"{phase} produced no result for {payload['backend']}")
+
+
+def _run_worker(backend_kind: str, size: int, dsn: str | None) -> Dict[str, Any]:
+    """One (backend, size) pair, as two processes and a cleanup.
+
+    The seeding process builds the fixture and exits; the measuring process
+    starts clean and never allocates it. Both are children of this one, which
+    owns the working directory and the schema so that either child failing
+    still leaves nothing behind.
+    """
+    workdir = tempfile.mkdtemp(prefix="capacity-")
+    schema = f"cap_{uuid.uuid4().hex[:12]}" if backend_kind != "file" else ""
+    payload = {
+        "backend": backend_kind,
+        "size": size,
+        "workdir": workdir,
+        "schema": schema,
+    }
+    try:
+        seeded = _spawn("--seed", payload, dsn)
+        measured = _spawn(
+            "--measure",
+            {**payload, "hub": seeded["hub"], "edges": seeded["edges"]},
+            dsn,
+        )
+        measured["snapshot_s"] = seeded["snapshot_s"]
+        return measured
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+        if schema:
+            import psycopg
+
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
 COLUMNS = (
@@ -351,14 +390,37 @@ def main() -> int:
         help="also measure the PostgreSQL backend (needs CO_TEST_POSTGRES_DSN)",
     )
     parser.add_argument("--json", action="store_true", help="emit raw JSON rows")
-    parser.add_argument("--worker", nargs=2, metavar=("BACKEND", "SIZE"))
+    # The two phases are internal: the driver re-invokes this file with one of
+    # them and a JSON payload. Kept out of --help because running a phase by
+    # hand against a directory the driver did not create measures nothing.
+    parser.add_argument("--seed", metavar="JSON", help=argparse.SUPPRESS)
+    parser.add_argument("--measure", metavar="JSON", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if args.worker:
-        backend_kind, size = args.worker[0], int(args.worker[1])
+    dsn_env = os.environ.get("CO_TEST_POSTGRES_DSN")
+    if args.seed:
+        job = json.loads(args.seed)
         print(
             json.dumps(
-                measure_one(backend_kind, size, os.environ.get("CO_TEST_POSTGRES_DSN"))
+                seed_one(
+                    job["backend"], job["size"], dsn_env, job["workdir"], job["schema"]
+                )
+            )
+        )
+        return 0
+    if args.measure:
+        job = json.loads(args.measure)
+        print(
+            json.dumps(
+                measure_one(
+                    job["backend"],
+                    job["size"],
+                    dsn_env,
+                    job["workdir"],
+                    job["schema"],
+                    job["hub"],
+                    job["edges"],
+                )
             )
         )
         return 0

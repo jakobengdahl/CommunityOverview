@@ -22,9 +22,22 @@ somewhere this file names.
    stated bound. Proved here, with the bound measured rather than asserted
    loosely - and only meaningful since the boot window was closed, because an
    entity written during another instance's startup used to be reported to
-   nobody and no bound covered it.
+   nobody and no bound covered it. The boot gate itself is NOT exercised
+   here: `test_boot_gate.py` holds it, and `test_persistence_contract_file.py`
+   holds the other half of criterion 5 below.
 
 4. Restart does not lose acknowledged writes. Proved here.
+
+5. A file-backed installation stays single-instance. Not proved here either:
+   `test_persistence_contract_file.py` asserts that the file backend declares
+   no change notification and that a storage on it never starts any.
+
+What a green run here therefore does NOT establish: criterion 1, the boot
+gate, the file backend's capabilities, or that the server wires the session
+directory it resolves (`backend/api_host/tests/test_session_api.py` covers
+that last one). Each is held somewhere named above. This matters because the
+"four criteria" framing invites the opposite reading - that a green run here
+is the whole evidence - and it is not.
 """
 
 import os
@@ -33,7 +46,7 @@ import uuid
 
 import pytest
 
-from backend.core.models import Node, NodeType
+from backend.core.models import Edge, Node, NodeType
 from backend.core.session_store import FileSessionPersistenceBackend, SessionStore
 from backend.core.storage import GraphStorage
 
@@ -115,14 +128,23 @@ def _node(node_id: str, name: str | None = None) -> Node:
     return Node(id=node_id, type=NodeType.ACTOR, name=name or node_id)
 
 
-def _wait_until_visible(storage, node_id: str, timeout: float) -> float:
+def _wait_until_visible(
+    storage, node_id: str, timeout: float, started: float | None = None
+) -> float:
     """Seconds until `node_id` appears, or fail. Polls rather than sleeps once.
 
     A fixed sleep would either pass by being longer than the real latency -
     measuring the sleep, not the system - or flake. Polling reports the
     latency itself, which is the number this criterion is about.
+
+    `started` is the moment the write was committed, and callers that want a
+    figure worth quoting must pass it. Defaulting to "now" measures only what
+    is left after the commit returns, which for a large enough write is
+    nothing: propagation finishes while `flush()` is still running and the
+    reported latency is 0 ms - not because the system is instant but because
+    the clock started after the thing it was timing.
     """
-    started = time.perf_counter()
+    started = time.perf_counter() if started is None else started
     deadline = started + timeout
     while time.perf_counter() < deadline:
         if storage.nodes.get(node_id) is not None:
@@ -144,15 +166,35 @@ class TestCriterion3ChangesBecomeVisible:
         reader = instances()
         node_id = f"visible-{uuid.uuid4().hex[:8]}"
 
-        writer.add_nodes([_node(node_id, "Beacon")], [])
+        # A node AND an edge. Criterion 3 says "a change", not "a node
+        # change": with only a node here, the edge half of the report could be
+        # dropped entirely and this suite would stay silent.
+        other_id = f"{node_id}-peer"
+        edge_id = f"edge-{uuid.uuid4().hex[:8]}"
+        writer.add_nodes(
+            [_node(node_id, "Beacon"), _node(other_id)],
+            [Edge(id=edge_id, source=node_id, target=other_id)],
+        )
+        committed = time.perf_counter()
         writer.flush()
 
-        elapsed = _wait_until_visible(reader, node_id, VISIBILITY_CEILING_S)
+        elapsed = _wait_until_visible(
+            reader, node_id, VISIBILITY_CEILING_S, started=committed
+        )
 
         assert reader.nodes[node_id].name == "Beacon", (
             "the node arrived but not its content, so the report named an "
             "entity without carrying what the store holds"
         )
+
+        deadline = time.perf_counter() + VISIBILITY_CEILING_S
+        while reader.edges.get(edge_id) is None:
+            assert time.perf_counter() < deadline, (
+                f"the node became visible but {edge_id} did not, so an "
+                f"edge write is announced to nobody and no bound covers it - "
+                f"criterion 3 would hold for nodes only"
+            )
+            time.sleep(0.01)
         with capsys.disabled():
             print(f"\n  measured visibility latency: {elapsed * 1000:.0f} ms")
 
@@ -205,6 +247,37 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
             "that made it - a rollout would lose it"
         )
         assert second.nodes[node_id].name == "Survivor"
+
+    def test_a_flushed_write_is_in_the_store_before_the_instance_stops(
+        self, instances, schema
+    ):
+        """The rollout case: the instance is killed, not stopped politely.
+
+        The test above shuts the writer down between the write and the read,
+        and `shutdown_events()` drains the executor, heals a failed write and
+        checkpoints on its own - so it passes even if `flush()` is a complete
+        no-op, which is not the claim its docstring makes. Here the store is
+        read through a fresh backend while the writer is still running, so
+        `flush()` is the only thing that can have put the node there.
+        """
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        first = instances()
+        node_id = f"acked-{uuid.uuid4().hex[:8]}"
+
+        first.add_nodes([_node(node_id, "Acknowledged")], [])
+        first.flush()
+
+        reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            stored = reader.load_graph_data()
+        finally:
+            reader.close()
+
+        assert any(n["id"] == node_id for n in stored["nodes"]), (
+            "flush() returned but the write was not in the store, so an "
+            "instance killed mid-rollout loses a write it acknowledged"
+        )
 
 
 class TestCriterion2SessionsAcrossInstances:
@@ -281,7 +354,14 @@ class TestCriterion2SessionsAcrossInstances:
 
     def test_sessions_dir_overrides_the_derivation(self, tmp_path, monkeypatch):
         """The override half. This is the knob a multi-instance deployment
-        actually turns to satisfy criterion 2, so it has to work."""
+        actually turns to satisfy criterion 2, so it has to work.
+
+        Both this and the test above stop at `AppConfig`. That the SERVER
+        uses what it resolves is a separate property, held by
+        `backend/api_host/tests/test_session_api.py::TestSessionsDirIsolation`
+        - a server that resolved the path correctly and then ignored it would
+        pass everything in this file.
+        """
         from backend.api_host.config import AppConfig
 
         elsewhere = tmp_path / "shared" / "sessions"
