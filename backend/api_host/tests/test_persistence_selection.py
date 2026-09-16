@@ -32,10 +32,14 @@ from backend.core.storage_backends import BackendCapabilities
 
 
 # Mirrors the guard every other PostgreSQL-touching module in this repo uses
-# (see backend/core/tests/test_traversal_equivalence.py). Only the tests that
-# reach the real backend module carry it; the rest need no driver, and a
-# module-level skip would make them vanish silently on a clone without the
-# optional extra.
+# (see backend/core/tests/test_traversal_equivalence.py). It goes on every
+# test that reaches the real backend module -- which includes the ones that
+# only monkeypatch it: pytest's string-form setattr IMPORTS the target module,
+# and postgres_backend imports psycopg at module scope, so those tests need
+# the driver too even though they never open a connection. Verified rather
+# than assumed. The tests that build an AppConfig and call the factory for a
+# file or refused backend genuinely do not, and a module-level skip would make
+# those vanish silently on a clone without the optional extra.
 _REQUIRE_POSTGRES = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
 _HAS_PSYCOPG = importlib.util.find_spec("psycopg") is not None
 
@@ -101,7 +105,6 @@ class TestBackendSelection:
         with pytest.raises(PersistenceConfigurationError) as exc:
             build_persistence_backend(config)
         assert "postgresql" in str(exc.value)
-        assert "postgres" in str(exc.value)
 
     def test_postgres_without_a_dsn_is_refused_at_boot(self):
         config = AppConfig(graph_file="graph.json", graph_backend="postgres")
@@ -133,6 +136,7 @@ class TestBackendSelection:
             build_persistence_backend(config)
         assert "requirements-postgres.txt" in str(exc.value)
 
+    @requires_backend_module
     def test_postgres_settings_reach_the_backend(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
@@ -141,17 +145,66 @@ class TestBackendSelection:
         config = AppConfig(
             graph_file="graph.json",
             graph_backend="postgres",
-            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_dsn="postgresql://u:pw@db.example:5432/one",
             graph_postgres_schema="corp",
             graph_postgres_pool_size=3,
         )
         backend = build_persistence_backend(config)
 
         assert isinstance(backend, StubBackend)
-        assert backend.conninfo == "postgresql:///example"
+        # Against the config, not a literal this file repeats: a backend built
+        # with a hardcoded DSN equal to the shared fixture would satisfy a
+        # literal comparison while discarding what the deployment configured.
+        assert backend.conninfo == config.graph_postgres_dsn
         assert backend.kwargs["schema"] == "corp"
         assert backend.kwargs["pool_size"] == 3
 
+    @requires_backend_module
+    def test_a_second_distinct_dsn_also_reaches_the_backend(self, monkeypatch):
+        """One hardcoded constant cannot satisfy two different DSNs."""
+        monkeypatch.setattr(
+            "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
+            StubBackend,
+        )
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql://other@elsewhere:6543/two",
+        )
+        backend = build_persistence_backend(config)
+        assert backend.conninfo == "postgresql://other@elsewhere:6543/two"
+
+    @requires_backend_module
+    def test_a_padded_dsn_is_stripped_before_it_reaches_libpq(self, monkeypatch):
+        """Detecting the whitespace without removing it is worse than not looking.
+
+        libpq parses a string as a URI only when it STARTS with
+        `postgresql://`. One leading space demotes it to keyword/value
+        parsing, and the resulting error quotes the whole connection string
+        back — password included — into the process log, which the comment on
+        `AppConfig.graph_postgres_dsn` promises never happens. Verified: the
+        padded DSN raises `missing "=" after "postgresql://u:pw@..."` while
+        the same DSN unpadded reports only a refused connection.
+        """
+        from psycopg.conninfo import conninfo_to_dict
+
+        monkeypatch.setattr(
+            "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
+            StubBackend,
+        )
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="  postgresql://u:pw@db.example/graph\n",
+        )
+        backend = build_persistence_backend(config)
+
+        assert backend.conninfo == "postgresql://u:pw@db.example/graph"
+        # The property that matters is not the equality above but that libpq
+        # accepts it as a URI at all.
+        assert conninfo_to_dict(backend.conninfo)["password"] == "pw"
+
+    @requires_backend_module
     def test_pool_size_unset_leaves_the_backend_default(self, monkeypatch):
         """Unset means "whatever the backend chose", not a number repeated here."""
         monkeypatch.setattr(
@@ -175,6 +228,7 @@ class TestTheServerUsesWhatWasSelected:
     test above.
     """
 
+    @requires_backend_module
     def test_a_selected_backend_is_the_one_the_graph_runs_on(
         self, monkeypatch, tmp_path
     ):
@@ -269,6 +323,17 @@ class TestTheEnvironmentIsTheInterface:
 
     def test_pool_size_unset_is_none_not_a_number_repeated_here(self, monkeypatch):
         monkeypatch.delenv("GRAPH_POSTGRES_POOL_SIZE", raising=False)
+        assert AppConfig().graph_postgres_pool_size is None
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_an_empty_pool_size_reads_as_unset(self, monkeypatch, blank):
+        """`GRAPH_POSTGRES_POOL_SIZE=` is templated out, not set to nothing.
+
+        The case `GRAPH_BACKEND` already handles above. Without it, int("")
+        raises a bare ValueError inside a dataclass default_factory, naming
+        no variable the operator can act on.
+        """
+        monkeypatch.setenv("GRAPH_POSTGRES_POOL_SIZE", blank)
         assert AppConfig().graph_postgres_pool_size is None
 
 

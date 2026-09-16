@@ -581,11 +581,12 @@ construction site to drift from that one.
 | `GRAPH_BACKEND` | `file` | `file` or `postgres` |
 | `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required for `postgres` |
 | `GRAPH_POSTGRES_SCHEMA` | `public` | One database can hold several graphs, one per schema |
-| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Connections this instance may hold |
+| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Connections this instance may hold; at least 1 |
 
-Three ways to get it wrong fail at boot rather than later, in
+Four ways to get it wrong fail at boot rather than later, in
 `backend/api_host/persistence.py`: an unrecognised `GRAPH_BACKEND`, `postgres`
-with no DSN, and `postgres` without the psycopg extra installed. The first
+with no DSN (unset, empty or whitespace), `postgres` without the psycopg extra
+installed, and a `GRAPH_POSTGRES_POOL_SIZE` below 1. The first
 matters most — a value of `postgresql` falling back to `file` would boot
 happily and look correct until a second instance started writing the same
 graph.

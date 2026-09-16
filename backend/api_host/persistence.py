@@ -50,9 +50,15 @@ def build_persistence_backend(config: AppConfig):
             f"Supported: {', '.join(SUPPORTED_BACKENDS)}."
         )
 
-    # Falsiness rather than `is None`: an unset secret rendered into the
-    # environment arrives as "", and an empty DSN is no DSN.
-    if not config.graph_postgres_dsn or not config.graph_postgres_dsn.strip():
+    # Normalised once, then used. Detecting the whitespace without removing
+    # it is worse than not looking: libpq treats a string as a URI only when
+    # it STARTS with postgresql://, so one leading space demotes it to
+    # keyword/value parsing, and the resulting error quotes the whole
+    # connection string back - password included - into the process log.
+    # An unset secret rendered into the environment also arrives as "", and
+    # an empty DSN is no DSN.
+    dsn = (config.graph_postgres_dsn or "").strip()
+    if not dsn:
         raise PersistenceConfigurationError(
             "GRAPH_BACKEND=postgres needs GRAPH_POSTGRES_DSN, which is unset "
             "or empty. It is the libpq connection string for the graph store."
@@ -81,4 +87,4 @@ def build_persistence_backend(config: AppConfig):
             )
         kwargs["pool_size"] = pool_size
 
-    return PostgresGraphPersistenceBackend(config.graph_postgres_dsn, **kwargs)
+    return PostgresGraphPersistenceBackend(dsn, **kwargs)

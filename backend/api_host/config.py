@@ -89,8 +89,8 @@ class AppConfig:
     # costs", has the budget an operator has to fit this under.
     graph_postgres_pool_size: Optional[int] = field(
         default_factory=lambda: (
-            int(os.environ["GRAPH_POSTGRES_POOL_SIZE"])
-            if os.getenv("GRAPH_POSTGRES_POOL_SIZE")
+            int(_v)
+            if (_v := os.getenv("GRAPH_POSTGRES_POOL_SIZE", "").strip())
             else None
         )
     )
