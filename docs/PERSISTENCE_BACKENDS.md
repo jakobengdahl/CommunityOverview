@@ -595,8 +595,13 @@ file-backed in the directory `SESSIONS_DIR` names, or one derived from the
 graph path when it is unset. Two instances sharing a database but not that
 directory share a graph and not their sessions — see
 [CAPACITY.md](CAPACITY.md) for what that condition costs in practice.
-Connection budget belongs there too: each instance takes its pool plus one
-dedicated `LISTEN` connection, against a stock ceiling of 100 with 3 reserved.
+
+`GRAPH_POSTGRES_POOL_SIZE` is the one setting here with a ceiling to fit
+under rather than a value to pick freely. *Sizing it: what an instance costs*,
+below, has the arithmetic and the table; it is not repeated here, so there is
+one copy to keep true.
+
+### Inside the PostgreSQL backend
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables

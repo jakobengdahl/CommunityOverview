@@ -14,6 +14,11 @@ were. `AppConfig.resolve_sessions_dir` and its tests in `test_session_api.py`
 hold that half.
 """
 
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -24,6 +29,22 @@ from backend.api_host.persistence import (
     build_persistence_backend,
 )
 from backend.core.storage_backends import BackendCapabilities
+
+
+# Mirrors the guard every other PostgreSQL-touching module in this repo uses
+# (see backend/core/tests/test_traversal_equivalence.py). Only the tests that
+# reach the real backend module carry it; the rest need no driver, and a
+# module-level skip would make them vanish silently on a clone without the
+# optional extra.
+_REQUIRE_POSTGRES = os.environ.get("CO_REQUIRE_POSTGRES") == "1"
+_HAS_PSYCOPG = importlib.util.find_spec("psycopg") is not None
+
+requires_backend_module = pytest.mark.skipif(
+    not _HAS_PSYCOPG and not _REQUIRE_POSTGRES,
+    reason="psycopg is an optional dependency; CO_REQUIRE_POSTGRES=1 makes a skip here a failure",
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class StubBackend:
@@ -193,4 +214,186 @@ class TestTheServerUsesWhatWasSelected:
         assert isinstance(
             app.state.graph_storage._persistence_backend,
             FileGraphPersistenceBackend,
+        )
+
+
+class TestTheEnvironmentIsTheInterface:
+    """The variable names are the deployment contract, so they get pinned.
+
+    Every test above builds `AppConfig(...)` by keyword, which leaves the
+    `default_factory` half — the only half a deployment exercises — unread.
+    Renaming any of these four variables would make the field permanently
+    unreachable from a container while the suite stayed green and this PR's
+    own documentation went quietly false.
+    """
+
+    def test_graph_backend_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("GRAPH_BACKEND", "postgres")
+        assert AppConfig().graph_backend == "postgres"
+
+    def test_graph_backend_is_normalised(self, monkeypatch):
+        """A Secret Manager value or a YAML block scalar brings whitespace."""
+        monkeypatch.setenv("GRAPH_BACKEND", "  Postgres \n")
+        assert AppConfig().graph_backend == "postgres"
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\n"])
+    def test_an_empty_graph_backend_means_unset_not_unrecognised(
+        self, monkeypatch, blank
+    ):
+        """`GRAPH_BACKEND=` is how a variable is templated out, not a typo.
+
+        It reads as "unset" to whoever wrote the manifest, so it must select
+        the file default rather than refuse to boot. Sibling fields in the
+        same dataclass already read an empty value this way.
+        """
+        monkeypatch.setenv("GRAPH_BACKEND", blank)
+        config = AppConfig()
+        assert config.graph_backend == "file"
+        assert build_persistence_backend(config) is None
+
+    def test_dsn_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///from-env")
+        assert AppConfig().graph_postgres_dsn == "postgresql:///from-env"
+
+    def test_schema_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "corp")
+        assert AppConfig().graph_postgres_schema == "corp"
+
+    def test_schema_defaults_to_public(self, monkeypatch):
+        monkeypatch.delenv("GRAPH_POSTGRES_SCHEMA", raising=False)
+        assert AppConfig().graph_postgres_schema == "public"
+
+    def test_pool_size_is_read_as_an_integer(self, monkeypatch):
+        monkeypatch.setenv("GRAPH_POSTGRES_POOL_SIZE", "6")
+        assert AppConfig().graph_postgres_pool_size == 6
+
+    def test_pool_size_unset_is_none_not_a_number_repeated_here(self, monkeypatch):
+        monkeypatch.delenv("GRAPH_POSTGRES_POOL_SIZE", raising=False)
+        assert AppConfig().graph_postgres_pool_size is None
+
+
+class TestRefusals:
+    """Each misconfiguration names the variable the operator can change."""
+
+    @pytest.mark.parametrize(
+        "name", ["postgresql", "sqlite", "none", "Postgres!", "file2"]
+    )
+    def test_every_unknown_name_is_refused(self, name):
+        """Pinned by a set, not by the single string that first motivated it."""
+        config = AppConfig(graph_file="graph.json", graph_backend=name)
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert name in str(exc.value)
+
+    @pytest.mark.parametrize("dsn", ["", "   "])
+    def test_an_empty_dsn_is_no_dsn(self, dsn):
+        """An unset secret rendered into the environment arrives as ""."""
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn=dsn,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_POSTGRES_DSN" in str(exc.value)
+
+    @pytest.mark.parametrize("size", [0, -1])
+    def test_an_unusable_pool_size_names_its_own_variable(self, size):
+        """Not the backend's `pool_size must be at least 1`, which names
+        an argument the operator never set."""
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_pool_size=size,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_POSTGRES_POOL_SIZE" in str(exc.value)
+
+
+class TestTheServerPropagatesAConfigurationError:
+    """ "At boot" only means something at the layer that boots.
+
+    `build_persistence_backend` raising is not the guarantee; `create_app`
+    refusing to return is. A `try/except` around the call in server.py would
+    restore the silent file fallback and every other test here would pass.
+    """
+
+    def _config(self, tmp_path, **overrides):
+        from backend.api_host import AppConfig as Cfg
+
+        return Cfg(
+            graph_file=str(tmp_path / "graph.json"),
+            sessions_dir=str(tmp_path / "sessions"),
+            web_static_path=str(tmp_path / "web"),
+            widget_static_path=str(tmp_path / "widget"),
+            **overrides,
+        )
+
+    def test_an_unknown_backend_stops_the_server_starting(self, tmp_path):
+        from backend.api_host import create_app
+
+        with pytest.raises(PersistenceConfigurationError):
+            create_app(self._config(tmp_path, graph_backend="postgresql"))
+
+    def test_postgres_without_a_dsn_stops_the_server_starting(self, tmp_path):
+        from backend.api_host import create_app
+
+        with pytest.raises(PersistenceConfigurationError):
+            create_app(self._config(tmp_path, graph_backend="postgres"))
+
+
+class TestPsycopgStaysOffTheAlwaysImportedPath:
+    """G6, which three separate passages of prose assert and nothing checked.
+
+    CI cannot catch a hoisted import by failing to install psycopg, because
+    backend/requirements-dev.txt pulls the postgres extra in — so the driver
+    is always importable wherever pytest runs. A subprocess asking
+    `sys.modules` is the only thing that can tell.
+    """
+
+    def test_importing_the_api_host_does_not_import_the_postgres_backend(self):
+        probe = (
+            "import backend.api_host, sys; "
+            "leaked = [m for m in ('backend.core.postgres_backend', 'psycopg') "
+            "if m in sys.modules]; "
+            "print(','.join(leaked))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        leaked = result.stdout.strip()
+        assert leaked == "", (
+            f"importing backend.api_host pulled in {leaked}; psycopg is an "
+            "optional dependency and must stay off the always-imported path"
+        )
+
+
+class TestTheFactoryMatchesTheRealBackend:
+    """The stub absorbs any keyword, so it cannot catch signature drift.
+
+    Renaming `schema` on PostgresGraphPersistenceBackend would leave every
+    stub-based test green while production raised TypeError at boot. This
+    binds the factory's keywords against the real signature.
+    """
+
+    @requires_backend_module
+    def test_the_factory_keywords_bind_to_the_real_constructor(self):
+        import inspect
+
+        from backend.core.postgres_backend import PostgresGraphPersistenceBackend
+
+        signature = inspect.signature(PostgresGraphPersistenceBackend.__init__)
+        # Raises TypeError if the factory's keywords stop matching.
+        signature.bind(
+            None,
+            "postgresql:///example",
+            schema="corp",
+            pool_size=3,
         )

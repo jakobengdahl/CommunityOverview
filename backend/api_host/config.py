@@ -65,8 +65,13 @@ class AppConfig:
     # deployment that meant to move to PostgreSQL and typed the name wrong
     # would otherwise boot happily on the file backend and look correct until
     # the second instance started.
+    #
+    # Empty is not unrecognised, though: `GRAPH_BACKEND=` is how a variable is
+    # templated out of a compose file or a `gcloud run deploy --set-env-vars`,
+    # and it means "unset" to whoever wrote it. `or` rather than a getenv
+    # default, the same way HISTORY_MAX_EVENTS above reads an empty value.
     graph_backend: str = field(
-        default_factory=lambda: os.getenv("GRAPH_BACKEND", "file").strip().lower()
+        default_factory=lambda: os.getenv("GRAPH_BACKEND", "").strip().lower() or "file"
     )
     # libpq connection string for graph_backend="postgres". Carries a password
     # in most deployments, so it comes from the environment (Secret Manager on
@@ -80,8 +85,8 @@ class AppConfig:
     )
     # Connections this instance may hold, on top of the one LISTEN connection
     # the backend keeps for change notification. Unset uses the backend's own
-    # default. docs/CAPACITY.md has the budget: stock PostgreSQL allows 100
-    # with 3 reserved, so N instances must fit (pool_size + 1) * N under that.
+    # default. docs/PERSISTENCE_BACKENDS.md, "Sizing it: what an instance
+    # costs", has the budget an operator has to fit this under.
     graph_postgres_pool_size: Optional[int] = field(
         default_factory=lambda: (
             int(os.environ["GRAPH_POSTGRES_POOL_SIZE"])

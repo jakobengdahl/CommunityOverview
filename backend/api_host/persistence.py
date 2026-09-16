@@ -50,10 +50,12 @@ def build_persistence_backend(config: AppConfig):
             f"Supported: {', '.join(SUPPORTED_BACKENDS)}."
         )
 
-    if not config.graph_postgres_dsn:
+    # Falsiness rather than `is None`: an unset secret rendered into the
+    # environment arrives as "", and an empty DSN is no DSN.
+    if not config.graph_postgres_dsn or not config.graph_postgres_dsn.strip():
         raise PersistenceConfigurationError(
-            "GRAPH_BACKEND=postgres needs GRAPH_POSTGRES_DSN, which is unset. "
-            "It is the libpq connection string for the graph store."
+            "GRAPH_BACKEND=postgres needs GRAPH_POSTGRES_DSN, which is unset "
+            "or empty. It is the libpq connection string for the graph store."
         )
 
     try:
@@ -66,7 +68,17 @@ def build_persistence_backend(config: AppConfig):
         ) from exc
 
     kwargs = {"schema": config.graph_postgres_schema}
-    if config.graph_postgres_pool_size is not None:
-        kwargs["pool_size"] = config.graph_postgres_pool_size
+    pool_size = config.graph_postgres_pool_size
+    if pool_size is not None:
+        # The backend rejects this too, but its ValueError names `pool_size`,
+        # which is not what an operator set. Refuse here so the message names
+        # the variable they can actually change.
+        if pool_size < 1:
+            raise PersistenceConfigurationError(
+                f"GRAPH_POSTGRES_POOL_SIZE={pool_size} is not usable; it is "
+                "the number of connections this instance may hold, so it must "
+                "be at least 1."
+            )
+        kwargs["pool_size"] = pool_size
 
     return PostgresGraphPersistenceBackend(config.graph_postgres_dsn, **kwargs)
