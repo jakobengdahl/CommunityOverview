@@ -126,8 +126,8 @@ mutation is one appended line in `graph.journal.ndjson` beside `graph.json`,
 folded back into it at a checkpoint (every 100 mutations, on flush, at
 shutdown), and one graph file is not a store two instances can share. The
 optional `PostgresGraphPersistenceBackend` declares all four, reporting over
-the server's own LISTEN/NOTIFY and traversing a level at a time; nothing
-selects it yet. See
+the server's own LISTEN/NOTIFY and traversing a level at a time; select it
+with `GRAPH_BACKEND=postgres` (see the environment table below). See
 `docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against
 — executable as `backend/core/tests/persistence_contract.py`, which every
 backend's tests subclass — and `docs/DATA_MANAGEMENT.md` for the journal's
@@ -198,8 +198,12 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
 | `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar; a relative value resolves against the graph file's directory |
-| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` removes the count cap (age trimming, if configured, still applies) |
-| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days; unset keeps them regardless of age |
+| `GRAPH_BACKEND` | `file` | Which backend holds the graph: `file` or `postgres`. An unrecognised value fails at boot rather than falling back |
+| `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required when `GRAPH_BACKEND=postgres` |
+| `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
+| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |

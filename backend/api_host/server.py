@@ -59,6 +59,7 @@ from .diagnostics import build_startup_diagnostics, emit_startup_diagnostics_log
 from .logging_config import configure_root_logging
 from .middleware import add_auth_middleware, add_cors_middleware, compute_auth_active
 from .mcp_mount import build_mcp_instructions, mount_mcp
+from .persistence import build_persistence_backend
 from .session_stream import register_session_stream
 from .tool_routes import register_tool_routes
 from .system_routes import register_system_routes
@@ -111,6 +112,7 @@ def create_app(
             embeddings_path=str(embeddings_path) if embeddings_path else None,
             history_max_events=config.history_max_events,
             history_max_age_days=config.history_max_age_days,
+            persistence_backend=build_persistence_backend(config),
         )
 
     def _on_federated_node_event(operation, before_node, after_node):

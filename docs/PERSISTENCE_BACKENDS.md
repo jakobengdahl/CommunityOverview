@@ -556,8 +556,8 @@ either in the app.
 
 `PostgresGraphPersistenceBackend` (`backend/core/postgres_backend.py`) is the
 second backend, and it is **optional**: nothing in the always-imported path
-touches it, `psycopg` lives in `backend/requirements-postgres.txt` rather than
-the base requirements, and the app selects it nowhere yet. It exists for the
+touches it and `psycopg` lives in `backend/requirements-postgres.txt` rather
+than the base requirements. It exists for the
 one deployment the file backend cannot serve — several instances sharing one
 graph — because a file is rewritten whole by whichever instance saved last,
 and on a FUSE-mounted object store its locking gives no protection at all.
@@ -568,6 +568,52 @@ by the connection string, not ten copies of a store. That is also why an
 embedded database is not an alternative, however good its write path —
 SQLite and DuckDB would give each instance its own writer on a shared file,
 which is the problem rather than the fix.
+
+### Selecting a backend
+
+`GRAPH_BACKEND` picks one. It defaults to `file`, so a deployment that sets
+nothing runs exactly what it ran before this setting existed — `GraphStorage`
+builds its own `FileGraphPersistenceBackend`, and there is no second
+construction site to drift from that one.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRAPH_BACKEND` | `file` | `file` or `postgres` |
+| `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required for `postgres` |
+| `GRAPH_POSTGRES_SCHEMA` | `public` | One database can hold several graphs, one per schema |
+| `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Connections this instance may hold; at least 1 |
+
+Four ways to get it wrong fail at boot rather than later, in
+`backend/api_host/persistence.py`: an unrecognised `GRAPH_BACKEND`, `postgres`
+with no DSN (unset, empty or whitespace), `postgres` without the psycopg extra
+installed, and a `GRAPH_POSTGRES_POOL_SIZE` below 1. The first
+matters most — a value of `postgresql` falling back to `file` would boot
+happily and look correct until a second instance started writing the same
+graph.
+
+**Selecting `postgres` moves the graph and the node vectors, leaves one thing
+where it is, and stops one more.** The vectors travel inline, as an
+`embedding` key on each node,
+rather than in the binary sidecar the file backend keeps beside `graph.json`.
+
+Sessions do not move. They stay file-backed in the directory `SESSIONS_DIR`
+names, or one derived from the graph path when it is unset, so two instances
+sharing a database but not that directory share a graph and not their
+sessions — see [CAPACITY.md](CAPACITY.md) for what that condition costs in
+practice.
+
+Mutation history stops. `GraphStorage` builds its history sidecar only for a
+file-backed store, so under `postgres` the `/api/history` endpoints return
+nothing and `HISTORY_MAX_EVENTS` and `HISTORY_MAX_AGE_DAYS` become inert. That
+is stated under *Vectors and history* above and is repeated here because this
+is the section an operator reads before flipping the switch.
+
+`GRAPH_POSTGRES_POOL_SIZE` is the one setting here with a ceiling to fit
+under rather than a value to pick freely. *Sizing it: what an instance costs*,
+below, has the arithmetic and the table; it is not repeated here, so there is
+one copy to keep true.
+
+### Inside the PostgreSQL backend
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
