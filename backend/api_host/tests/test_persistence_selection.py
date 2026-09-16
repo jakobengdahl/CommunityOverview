@@ -156,8 +156,8 @@ class TestBackendSelection:
         # with a hardcoded DSN equal to the shared fixture would satisfy a
         # literal comparison while discarding what the deployment configured.
         assert backend.conninfo == config.graph_postgres_dsn
-        assert backend.kwargs["schema"] == "corp"
-        assert backend.kwargs["pool_size"] == 3
+        assert backend.kwargs["schema"] == config.graph_postgres_schema
+        assert backend.kwargs["pool_size"] == config.graph_postgres_pool_size
 
     @requires_backend_module
     def test_a_second_distinct_dsn_also_reaches_the_backend(self, monkeypatch):
@@ -204,6 +204,33 @@ class TestBackendSelection:
         # The property that matters is not the equality above but that libpq
         # accepts it as a URI at all.
         assert conninfo_to_dict(backend.conninfo)["password"] == "pw"
+
+    @requires_backend_module
+    @pytest.mark.parametrize(("schema", "pool_size"), [("corp", 1), ("tenant_b", 7)])
+    def test_a_second_schema_and_pool_size_reach_the_backend_too(
+        self, monkeypatch, schema, pool_size
+    ):
+        """No single hardcoded constant can satisfy both cases.
+
+        `pool_size=1` also pins the refusal boundary from the accepting side:
+        the guard refuses below 1 and its message says "at least 1", so a
+        `<= 1` would contradict the text while every refusing test still
+        passed.
+        """
+        monkeypatch.setattr(
+            "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
+            StubBackend,
+        )
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_schema=schema,
+            graph_postgres_pool_size=pool_size,
+        )
+        backend = build_persistence_backend(config)
+        assert backend.kwargs["schema"] == schema
+        assert backend.kwargs["pool_size"] == pool_size
 
     @requires_backend_module
     def test_pool_size_unset_leaves_the_backend_default(self, monkeypatch):
@@ -402,6 +429,64 @@ class TestRefusals:
         message = str(exc.value)
         assert "GRAPH_POSTGRES_POOL_SIZE" in message
         assert str(size) in message, "the message should echo what was set"
+
+
+class TestRefusalOrder:
+    """Which misconfiguration is reported when more than one is present.
+
+    Both of these were unobservable to the suite: the round-3 relocation of
+    the pool-size guard above the psycopg import, and the order of the DSN
+    and pool-size guards relative to each other. A source comment claiming a
+    property is not the same as a test holding it — this branch has now been
+    caught out by that three times.
+    """
+
+    def _refuse_the_backend_import(self, monkeypatch):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if name == "backend.core.postgres_backend":
+                raise ImportError("No module named 'psycopg'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", refuse)
+
+    def test_a_bad_pool_size_is_diagnosable_without_the_driver(self, monkeypatch):
+        """The whole point of checking the pool size before the import.
+
+        With the guard back below it, the operator is told to install psycopg
+        when what is actually wrong is a number they set.
+        """
+        self._refuse_the_backend_import(monkeypatch)
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_pool_size=0,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        message = str(exc.value)
+        assert "GRAPH_POSTGRES_POOL_SIZE" in message
+        assert "requirements-postgres.txt" not in message
+
+    def test_a_missing_dsn_outranks_a_bad_pool_size(self):
+        """With both wrong, the more fundamental one is named.
+
+        A pool size cannot be acted on by an operator who has no connection
+        string yet, so the DSN is the useful thing to report first.
+        """
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="",
+            graph_postgres_pool_size=0,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_POSTGRES_DSN" in str(exc.value)
 
 
 class TestTheServerPropagatesAConfigurationError:

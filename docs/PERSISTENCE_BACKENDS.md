@@ -591,8 +591,9 @@ matters most — a value of `postgresql` falling back to `file` would boot
 happily and look correct until a second instance started writing the same
 graph.
 
-**Selecting `postgres` moves the graph and the node vectors, and stops two
-other things.** The vectors travel inline, as an `embedding` key on each node,
+**Selecting `postgres` moves the graph and the node vectors, leaves one thing
+where it is, and stops one more.** The vectors travel inline, as an
+`embedding` key on each node,
 rather than in the binary sidecar the file backend keeps beside `graph.json`.
 
 Sessions do not move. They stay file-backed in the directory `SESSIONS_DIR`
