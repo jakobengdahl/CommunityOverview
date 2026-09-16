@@ -103,6 +103,36 @@ The `GraphStorage` layer implements thread-safety and multi-process safety mecha
 - **File System**: Uses `fcntl` (Unix) or `msvcrt` (Windows) for file locking.
 - **Atomic Writes**: Uses temp-file-and-rename strategy to prevent corruption.
 
+Where the graph is stored is behind `backend/core/storage_backends.py`. Every
+backend implements the snapshot contract (load / save the whole graph); one
+that declares `incremental_writes` in its capabilities gets a single-entity
+mutation as that entity's operation (`upsert_node`, `delete_edge`, …) and, if
+it also declares `transactions`, a multi-entity one as an atomic
+`apply_batch` — otherwise a multi-entity mutation is still a whole-graph
+write. A third capability, `change_notification`, is the backend saying its
+store can have another writer: it reports what changed and `GraphStorage`
+refreshes the affected entities — the node and edge dictionaries, the
+NetworkX graph, the searchable-text cache and the vector index — without a
+restart, emitting the ordinary events with `event_origin: external-change`.
+A fourth, `store_traversal`, is the backend saying it can answer a
+neighbourhood traversal itself: `get_related_nodes` asks the store instead of
+walking the in-memory graph. The store is used only while it is current —
+every write landed, no resync owed — and the in-memory walk remains the
+reference and the fallback, so the graph is still loaded into memory today;
+what this moves is which copy answers a traversal, which is the step a
+later change needs before the resident copy can go.
+The default file backend declares the first two and not the last two: a
+mutation is one appended line in `graph.journal.ndjson` beside `graph.json`,
+folded back into it at a checkpoint (every 100 mutations, on flush, at
+shutdown), and one graph file is not a store two instances can share. The
+optional `PostgresGraphPersistenceBackend` declares all four, reporting over
+the server's own LISTEN/NOTIFY and traversing a level at a time; nothing
+selects it yet. See
+`docs/PERSISTENCE_BACKENDS.md` for the contract a backend implements against
+— executable as `backend/core/tests/persistence_contract.py`, which every
+backend's tests subclass — and `docs/DATA_MANAGEMENT.md` for the journal's
+operational meaning.
+
 See `docs/DEPLOYMENT_AND_CONCURRENCY_ANALYSIS.md` for a deep dive.
 
 ## Prerequisites
@@ -167,6 +197,9 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to graph data file |
+| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar; a relative value resolves against the graph file's directory |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` removes the count cap (age trimming, if configured, still applies) |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days; unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |

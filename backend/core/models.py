@@ -187,7 +187,9 @@ class Node(BaseModel):
     archived: bool = Field(
         default=False
     )  # Lifecycle flag: archived nodes are hidden from search/traversal by default
-    embedding: Optional[List[float]] = None  # For future vector search
+    # Vectors live in the embedding sidecar, not here; this field only
+    # carries them in from a graph written before that split.
+    embedding: Optional[List[float]] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

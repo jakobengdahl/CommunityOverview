@@ -20,3 +20,4 @@ ADRs carry only the technical decision.
 | [0001](0001-local-durable-execution-store.md) | Default local durable execution store | Accepted |
 | [0002](0002-env-backed-secret-provider.md) | Environment-backed default secret provider | Accepted |
 | [0003](0003-webxr-immersive-graph-client-spike.md) | WebXR immersive graph client (Quest) — spike | Proposed |
+| [0004](0004-webxr-spike-findings-and-phase-2-recommendation.md) | WebXR spike findings and Phase 2 recommendation | Accepted |

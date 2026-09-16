@@ -26,7 +26,11 @@ Agent nodes (type: `Agent`) define AI agents that react to graph events. An Agen
 ### Event Context
 
 Every mutation can include context for tracking and loop prevention:
-- `event_origin`: Source of the mutation (e.g., "web-ui", "mcp", "agent:my-agent")
+- `event_origin`: Source of the mutation (e.g., "web-ui", "mcp", "agent:my-agent").
+  `external-change` marks a mutation another instance made, replayed into this
+  one by a backend that reports external writes — see
+  `docs/PERSISTENCE_BACKENDS.md`. An agent that reacts by writing should treat
+  it as somebody else's work, or the change bounces between instances.
 - `event_session_id`: Unique session identifier
 - `event_correlation_id`: For chaining related events
 
@@ -363,7 +367,27 @@ the nodes already on the canvas.
   lost on restart. (AgentRun *history* is recorded durably — see above — but the
   delivery queue itself is not yet wired to the durable store.)
 - **No guaranteed delivery**: Failed events are dropped after retries
-- **Single process**: Works within one process only
+- **Per-instance delivery**: the queue is per process, and so is delivery.
+  `PostgresGraphPersistenceBackend` declares `change_notification`, so a
+  second instance is refreshed by another instance's write and emits these
+  events too, stamped with the `external-change` origin. That origin is a
+  label, not a brake: the only thing that acts on it is a subscription's own
+  `ignore_origins`, so both consequences below are opt-out rather than
+  handled.
+  - A webhook subscription is delivered **once per instance** for a change
+    reported as named entities — once by the writer, and once by each instance
+    told about it. With ten instances that is ten deliveries, not two.
+  - A change the backend could not describe is the exception: a whole-graph
+    save, or a batch too large to fit the announcement, arrives as
+    `unknown()`, and `apply_external_change` answers that with a reload, which
+    emits nothing. Those are delivered once, by the writer alone.
+  - An agent that answers a change by writing **can** bounce it between
+    instances, exactly as the `event_origin` note above warns. Listing
+    `external-change` in the agent subscription's `ignore_origins` is what
+    stops it.
+
+  Delivering exactly once across instances, and making the origin act by
+  default rather than by configuration, are both separate work.
 - **Simple filtering**: No complex query expressions
 
 ## Future Enhancements

@@ -19,7 +19,7 @@ Event System:
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
 from datetime import datetime, timezone
 import networkx as nx
 from pathlib import Path
@@ -36,14 +36,26 @@ from .models import (
     DeleteEdgesResult,
     _parse_datetime,
 )
-from .storage_backends import FileGraphPersistenceBackend, GraphPersistenceBackend
-from .vector_store import VectorStore
+from .embedding_sidecar import EmbeddingSidecarError, FileEmbeddingSidecar
+from .storage_backends import (
+    EntityOperation,
+    ExternalChange,
+    ExternalChangeRefused,
+    FileGraphPersistenceBackend,
+    GraphPersistenceBackend,
+    capabilities_of,
+)
+from .vector_store import VectorStore, dominant_dimension, matching_dimension
 from . import storage_search
 from . import storage_history
 from . import storage_events
 
 # Event system imports
 from .events.models import EventType, EntityKind, EventContext
+
+# The origin stamped on events that report a change another writer made, so a
+# subscriber reacting by writing can tell them from its own instance's work.
+EXTERNAL_CHANGE_ORIGIN = "external-change"
 
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
@@ -91,6 +103,111 @@ def _apply_metadata_patch(
     return result
 
 
+# How many reports may be held while the first load runs before the buffer is
+# abandoned for a whole-graph reload. The reload is correct at any size, so
+# this trades a bounded amount of memory against the cost of reloading; a boot
+# that is overtaken by more writes than this was going to be expensive anyway.
+_BOOT_BUFFER_LIMIT = 1000
+
+
+class _BootGate:
+    """Holds reports that arrive before the first load has finished.
+
+    Listening starts BEFORE the load, because a write committed in the gap
+    between them is announced on a channel nobody is listening to and
+    LISTEN/NOTIFY does not replay it: narrow in time, unbounded in
+    consequence, since an entity written in that gap and never written again
+    is never reported and the instance serves a stale value for good.
+
+    Starting earlier would break the seam's promise that no change is reported
+    against a model that does not exist yet - so this keeps that promise on
+    the seam's behalf. The backend reports to the gate; the gate calls the
+    application only once the load has returned. What arrives in between is
+    held and replayed in arrival order.
+
+    Replaying late is sound for a report whose content is read on demand: it
+    carries identifiers, so the replay reads what the store holds at replay
+    time, which is at least as new as what the announcement described. The
+    same property makes a duplicate harmless - a write committed during the
+    load is both in the load and in the buffer, and applying it twice reads
+    the same value twice.
+
+    A report built with `ExternalChange.entities` carries content gathered
+    when it was DISPATCHED, and holding one lengthens the window its own
+    docstring warns about: the application arbitrates such an upsert against
+    its own by wall clock. The end state still converges - a stale node
+    upsert loses to `_is_newer`, and a delete or an edge upsert is saved by
+    arrival order, since a later write to the same entity is announced later
+    and so replayed later - but it converges by arbitration rather than by
+    reading the store, which is the weaker of the two routes.
+    """
+
+    def __init__(self, listener: Callable[["ExternalChange"], None]) -> None:
+        self._listener = listener
+        self._lock = threading.Lock()
+        self._held: List["ExternalChange"] = []
+        self._overflowed = False
+        self._open = False
+
+    def __call__(self, change: "ExternalChange") -> None:
+        with self._lock:
+            if not self._open:
+                if self._overflowed:
+                    return
+                self._held.append(change)
+                if len(self._held) > _BOOT_BUFFER_LIMIT:
+                    # One reload subsumes any number of held reports, so drop
+                    # them rather than grow without bound. Dropping the list
+                    # is safe only because `unknown()` is dispatched in its
+                    # place below - never because the writes stopped mattering.
+                    self._held.clear()
+                    self._overflowed = True
+                    # Said out loud, because the reload that replaces these
+                    # is best-effort: `_reload_from_store` swallows a failed
+                    # read and leaves memory as it was. An overflowed boot
+                    # that also met an unreadable store loses exactly what
+                    # this gate exists to keep, and nothing else would show
+                    # it. Every comparable degradation in this file warns.
+                    print(
+                        f"Warning: more than {_BOOT_BUFFER_LIMIT} external "
+                        "changes arrived while loading; dropping them for a "
+                        "whole-graph reload"
+                    )
+                return
+        self._listener(change)
+
+    def open(self) -> None:
+        """Replay what was held, then let reports through directly.
+
+        The flag is raised only once the buffer is empty, and the drain runs
+        outside the lock so a report arriving mid-drain is buffered rather
+        than overtaking the ones already held. Raising the flag first would
+        let it be delivered ahead of them and put the replay out of order.
+        """
+        while True:
+            with self._lock:
+                if self._overflowed:
+                    self._open = True
+                    held: List["ExternalChange"] = []
+                    overflowed = True
+                elif self._held:
+                    held = self._held
+                    self._held = []
+                    overflowed = False
+                else:
+                    self._open = True
+                    return
+            if overflowed:
+                # Everything held is subsumed by the reload this asks for,
+                # including anything that arrives from here on: the flag is
+                # already raised, so later reports go straight through and a
+                # reload does not need them.
+                self._listener(ExternalChange.unknown())
+                return
+            for change in held:
+                self._listener(change)
+
+
 class GraphStorage:
     """
     Manages graph storage with NetworkX + JSON persistence.
@@ -116,8 +233,10 @@ class GraphStorage:
         Args:
             json_path: Path to the JSON file for graph persistence when using the
                 default file-backed persistence backend.
-            embeddings_path: Path to the embeddings pickle file (Legacy/Deprecated).
-                           New implementation stores embeddings in graph.json directly.
+            embeddings_path: Path to the binary embedding sidecar holding the
+                node vectors. Defaults to "<graph stem>.embeddings.bin" next to
+                the graph file. Only honoured by the file-backed backend; other
+                backends keep vectors inline in the node payload.
             persistence_backend: Optional persistence backend adapter. Defaults to
                 the file-backed JSON backend to preserve standalone behavior.
             history_max_events: Optional cap on retained history records. When set
@@ -133,9 +252,39 @@ class GraphStorage:
         self._persistence_backend = persistence_backend or FileGraphPersistenceBackend(
             json_path
         )
+        # Read once: what the backend can take decides the shape of every
+        # write (see _persist), and a backend that declares more than it
+        # implements is refused here rather than on the first mutation.
+        self._backend_capabilities = capabilities_of(self._persistence_backend)
         self.json_path = getattr(
             self._persistence_backend, "json_path", Path(json_path)
         )
+
+        # Node vectors live in their own binary file rather than in the node
+        # payload, so a mutation that changes no vector rewrites none of them.
+        # Only the file-backed backend owns a concrete path to put it next to;
+        # for any other backend vectors stay inline in the serialized node, as
+        # they were before the split, so no backend silently loses them.
+        self._embedding_sidecar = self._init_embedding_sidecar(embeddings_path)
+        self._persisted_vector_revision: Optional[int] = None
+        # Raw vectors read out of graph.json that no sidecar write has covered
+        # yet, keyed by node id. While an id is in here graph.json is its ONLY
+        # durable copy, so the payload keeps carrying it. A vector this process
+        # generated was never durable in graph.json, so it never enters this
+        # map and is dropped from the first save - which is what keeps the file
+        # small immediately.
+        #
+        # One map rather than "ids the index took" plus "values it refused":
+        # those were mutually exclusive branches, so a vector that moved from
+        # the first group to the second - evicted when a model width change
+        # reset the index - belonged to neither and was deleted from graph.json
+        # with nothing written in its place.
+        self._inline_fallback: Dict[str, Any] = {}
+        # Set when a save has already captured a revision for writing but the
+        # background write has not landed yet. Without it a second save in the
+        # same operation — add_nodes saves once for the nodes and again for the
+        # edges — snapshots and rewrites the identical matrix.
+        self._snapshotted_vector_revision: Optional[int] = None
 
         # Durable append-only mutation history sidecar. Only enabled for the
         # file-backed standalone backend, which owns a concrete json_path next
@@ -152,10 +301,31 @@ class GraphStorage:
 
         # Executor for background I/O operations (saving to disk)
         # Using max_workers=1 to ensure sequential writes
-        self._io_executor = ThreadPoolExecutor(max_workers=1)
+        # Identified so a change reported on it - which would be a report
+        # from inside the write it is running - is refused rather than left
+        # to wait on the queue this thread *is*.
+        self._writer_thread_id: Optional[int] = None
+        self._io_executor = ThreadPoolExecutor(
+            max_workers=1, initializer=self._mark_writer_thread
+        )
+        # Set when an entity write or a whole-graph write failed: the
+        # backend's image then lacks what memory has. Consumed on the
+        # caller's thread - by the next write, flush() or shutdown - which
+        # re-issues the whole graph. The writer never takes _lock itself:
+        # load() and save() wait on the queue while holding it, so a writer
+        # that did would deadlock the process.
+        self._resync_pending = False
+        # The most recent write of any kind - incremental or whole-graph.
+        # Writes go to a background executor, so `self.nodes` is ahead of the
+        # store between a mutation and its write landing. A traversal answered
+        # BY the store in that window would not see the caller's own write -
+        # the two engines answering different questions rather than
+        # disagreeing. This is what get_related_nodes checks before it uses
+        # the store, and it has to cover every route a write can take.
+        self._last_write: Optional["Future[None]"] = None
 
-        # We initialize VectorStore without a storage path as it now holds state in memory
-        # and relies on GraphStorage for persistence via graph.json
+        # The VectorStore owns the vectors in memory; GraphStorage persists them
+        # through the embedding sidecar (see _load_embeddings / _serialize_nodes).
         self.vector_store = VectorStore()
         self.vector_store.preload_model()  # Start loading embedding model in background
 
@@ -166,7 +336,11 @@ class GraphStorage:
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
         # Cache for searchable text to speed up search_nodes
-        self._searchable_text_cache: Dict[str, str] = {}
+        # Keyed by node id; the value is everything matching and ranking read
+        # off that node, lowered once. It was the flat searchable string alone
+        # until the scorer's per-query re-lowering showed up as a third of a
+        # large query's cost.
+        self._searchable_text_cache = storage_search.LexicalIndex()
 
         # Cache: node_type_key -> "typeName label1 label2 ..." (lowercased)
         self._type_searchable_text: Dict[str, str] = {}
@@ -183,11 +357,108 @@ class GraphStorage:
         self._events_enabled = False
         self._system_listeners: List[Callable[["Event"], None]] = []
 
-        self.load()
+        # Listening starts BEFORE the load, and the gate keeps the seam's
+        # promise that nothing is reported against a model that does not exist
+        # yet: it holds what arrives until the load has returned. Starting
+        # after the load instead leaves a gap in which another instance's
+        # write is announced to nobody and never replayed - see _BootGate.
+        boot_gate: Optional[_BootGate] = None
+        if self._backend_capabilities.change_notification:
+            boot_gate = _BootGate(self.apply_external_change)
+            self._persistence_backend.start_change_notification(boot_gate)
+
+        try:
+            self.load()
+            if boot_gate is not None:
+                boot_gate.open()
+        except BaseException:
+            # The replay is inside the guard, not after it. A raise out of
+            # `open()` leaves the rest of the buffer undelivered AND the gate
+            # shut, so every later report from the still-live backend thread
+            # would buffer into an object nobody will ever open - a worse leak
+            # than the one this guard was written for. It is also the one
+            # delivery the backend's own `except` around the listener does not
+            # cover, because the backend is no longer on the stack.
+            #
+            # Failing construction is the honest outcome: an instance that
+            # could not apply what it was told while loading would otherwise
+            # serve a graph with silent gaps in it.
+            if boot_gate is not None:
+                self._persistence_backend.stop_change_notification()
+            raise
+
+    def _mark_writer_thread(self) -> None:
+        self._writer_thread_id = threading.get_ident()
 
     def _default_graph_name(self) -> str:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
+
+    def _save_destination(self) -> str:
+        """Describe where a save actually lands, for the log line.
+
+        Only the file-backed backend owns a concrete path — `self.json_path`
+        is a synthetic default for every other backend (see its assignment
+        in `__init__`), so naming it there would claim a save landed in
+        graph.json when it went to PostgreSQL, or nowhere on disk at all.
+        """
+        if isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return str(self.json_path)
+        return (
+            f"the {type(self._persistence_backend).__name__} backend "
+            f"(graph '{self._default_graph_name()}')"
+        )
+
+    def _init_embedding_sidecar(
+        self, embeddings_path: Optional[str]
+    ) -> Optional[FileEmbeddingSidecar]:
+        """Create the vector sidecar for file-backed standalone mode."""
+        if not isinstance(self._persistence_backend, FileGraphPersistenceBackend):
+            return None
+        derived = self.json_path.with_name(self.json_path.stem + ".embeddings.bin")
+        if not embeddings_path:
+            return FileEmbeddingSidecar(derived, owns_path=True)
+
+        path = Path(embeddings_path)
+        # The graph file is the one collision the refusal in save() cannot
+        # catch, because the sidecar is written first and the graph write then
+        # lands on top of it — and on the bootstrap path, where the graph file
+        # is momentarily absent, the sidecar write finds nothing to refuse.
+        # The migration script rejects the same shape outright for the same
+        # reason: the second write silently destroys the first.
+        if path.resolve() == self.json_path.resolve():
+            print(
+                f"Warning: EMBEDDINGS_FILE names the graph file itself "
+                f"({path}); using {derived} instead"
+            )
+            return FileEmbeddingSidecar(derived, owns_path=True)
+        # Ownership is a property of the NAME, not of whether anyone passed one.
+        # start-dev.sh exports EMBEDDINGS_FILE on every run, set to exactly this
+        # derived path, and .env.example documents the same pairing - so asking
+        # "was a value supplied" put the app's own file in the mode meant for an
+        # operator's, and the self-heal never fired where it actually matters.
+        # Comparing resolved paths also covers a relative value and a symlink
+        # that land on the same file.
+        return FileEmbeddingSidecar(path, owns_path=path.resolve() == derived.resolve())
+
+    @property
+    def vectors_persisted(self) -> bool:
+        """Whether the vector index as it stands has been written to disk.
+
+        A sidecar write failure is deliberately not fatal to a graph save, so
+        callers that report success to an operator — or act on it, like the
+        pickle migration renaming its source — must ask rather than assume.
+        """
+        if self._embedding_sidecar is None:
+            return True
+        return self._persisted_vector_revision == self.vector_store.revision
+
+    @property
+    def embeddings_path(self) -> Optional[Path]:
+        """Where node vectors are persisted, or None for a backend with no sidecar."""
+        if self._embedding_sidecar is None:
+            return None
+        return self._embedding_sidecar.path
 
     def _init_history_store(self) -> Optional["GraphHistoryStore"]:
         """Create the append-only history sidecar for file-backed standalone mode."""
@@ -219,8 +490,14 @@ class GraphStorage:
             # Config not available; type matching will use type name only
             pass
 
-    def _build_searchable_text(self, node: "Node") -> str:
-        return storage_search.build_searchable_text(node, self._type_searchable_text)
+    def _build_match_fields(self, node: "Node") -> storage_search.MatchFields:
+        """Prepare everything search matches and ranks a node on, lowered once.
+
+        Renamed from `_build_searchable_text`, which returned only the flat
+        string: keeping that name while widening what it returns is the quiet
+        kind of break - a reader would go on believing the cache holds a str.
+        """
+        return storage_search.build_match_fields(node, self._type_searchable_text)
 
     def add_system_listener(self, listener: Callable[["Event"], None]) -> None:
         """
@@ -291,6 +568,13 @@ class GraphStorage:
 
     def shutdown_events(self) -> None:
         """Shutdown the event system and I/O executor gracefully."""
+        # First, so nothing arrives to refresh a model that is being torn down.
+        if self._backend_capabilities.change_notification:
+            try:
+                self._persistence_backend.stop_change_notification()
+            except Exception as exc:
+                print(f"Warning: stopping change notification failed: {exc}")
+
         if self._delivery_worker:
             self._delivery_worker.stop(wait=True)
             self._delivery_worker = None
@@ -298,8 +582,49 @@ class GraphStorage:
         self._event_dispatcher = None
         self._events_enabled = False
 
-        # Shut down I/O executor and wait for pending saves
+        # Let every queued write land, heal a failed one, fold deferred
+        # writes into the snapshot, then shut down the I/O executor and wait
+        # for everything queued before it.
+        checkpoint = None
+        try:
+            self._io_executor.submit(lambda: None).result()
+            self._heal_if_needed()
+            if self._backend_capabilities.incremental_writes:
+                checkpoint = self._io_executor.submit(
+                    self._persistence_backend.checkpoint
+                )
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
         self._io_executor.shutdown(wait=True)
+        # A write that failed after the heal above ran - or the heal itself,
+        # which re-raises the flag - has nowhere to queue a retry; write the
+        # graph on this thread instead, or it is lost.
+        if self._resync_pending:
+            self._save_now()
+        # Data is safe either way - the journal still holds the difference and
+        # is replayed on the next start - but an operator reading "clean
+        # shutdown means graph.json is complete" must be told when it is not.
+        if checkpoint is not None and checkpoint.exception() is not None:
+            print(
+                f"Warning: graph checkpoint at shutdown failed: {checkpoint.exception()}"
+            )
+
+    def _save_now(self) -> None:
+        """A whole-graph write on the calling thread, for after the executor
+        is gone. Reports rather than raises: this runs from a shutdown hook."""
+        with self._lock:
+            vectors, vector_revision = self._take_vector_snapshot()
+            data = self._snapshot_data()
+            node_count, edge_count = len(self.nodes), len(self.edges)
+            self._resync_pending = False
+        try:
+            self._do_save_to_disk(
+                data, node_count, edge_count, vectors, vector_revision
+            )
+        except Exception as exc:
+            # _do_save_to_disk has re-raised the flag; it stays raised, which
+            # is the honest state - the journal still holds what it can.
+            print(f"Warning: graph write at shutdown failed: {exc}")
 
     def _emit_event(
         self,
@@ -372,17 +697,48 @@ class GraphStorage:
             self._history_store, edge_id, limit, offset
         )
 
-    def load(self) -> None:
+    def load(self, *, bootstrap_if_missing: bool = True) -> None:
         """
         Load graph from the configured persistence backend.
 
         Thread-safe: Uses lock for in-memory updates.
+
+        `bootstrap_if_missing` is what makes a first start work: a store that
+        does not exist yet is created from whatever is in memory. A refresh
+        passes False, because there the store belongs to somebody else - it
+        may be missing only for a moment, mid-restore, and writing this
+        instance's graph over it is the one thing a refresh must never do.
         """
         with self._lock:
             if not self._persistence_backend.exists():
+                if not bootstrap_if_missing:
+                    print(
+                        f"Warning: cannot refresh from {self.json_path}: it is "
+                        f"not there. Serving the graph in memory unchanged."
+                    )
+                    return
                 print(
                     f"No graph file found at {self.json_path}, creating new empty graph"
                 )
+                # An empty index has nothing to contribute, and marking it
+                # persisted is what keeps this bootstrap write from putting an
+                # EMPTY sidecar over a real one — a graph file that is merely
+                # missing for now (wrong GRAPH_FILE, a restore in progress) must
+                # not destroy the only copy of the vectors.
+                #
+                # A populated index is the opposite case. load() is also the body
+                # of reload(), which re-saves the in-memory graph; if the sidecar
+                # has gone too, those vectors are now the only copy anywhere and
+                # this save is the one chance to write them. The revision alone
+                # cannot tell: it still matches the last successful write, of a
+                # file that no longer exists. Both markers have to go — the
+                # snapshot one records that this revision was already handed to
+                # a save, and on its own it keeps needs_write false forever.
+                if self.vector_store.embeddings:
+                    self._persisted_vector_revision = None
+                    self._snapshotted_vector_revision = None
+                else:
+                    self._persisted_vector_revision = self.vector_store.revision
                 # Wait for the initial file write to complete so callers can
                 # immediately open the file (e.g. creating a second storage instance).
                 self.save().result()
@@ -393,7 +749,7 @@ class GraphStorage:
 
                 metadata = data.get("metadata") if isinstance(data, dict) else None
                 if isinstance(metadata, dict):
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": metadata.get("version", "1.0"),
                         "graph_name": metadata.get("graph_name")
                         or self._default_graph_name(),
@@ -404,40 +760,74 @@ class GraphStorage:
                         },
                     }
                 else:
-                    self.graph_metadata = {
+                    graph_metadata = {
                         "version": "1.0",
                         "graph_name": self._default_graph_name(),
                     }
 
-                # Clear existing data
-                self.nodes.clear()
-                self.edges.clear()
-                self.graph.clear()
+                # Everything is parsed beside the live model and swapped in
+                # only once all of it parsed. Clearing first and refilling
+                # would mean an entity this build cannot read leaves the graph
+                # truncated - and a refresh, which cannot raise at its caller,
+                # would report that as merely being behind the store.
+                nodes: Dict[str, Node] = {}
+                edges: Dict[str, Edge] = {}
+                searchable: Dict[str, storage_search.MatchFields] = {}
 
-                # Clear searchable text cache
-                self._searchable_text_cache.clear()
-
-                # Load nodes
                 for node_data in data.get("nodes", []):
                     node = Node.from_dict(node_data)
-                    self.nodes[node.id] = node
-                    self.graph.add_node(node.id, data=node)
+                    nodes[node.id] = node
+                    searchable[node.id] = self._build_match_fields(node)
 
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
-                        node
-                    )
-
-                # Load edges
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
-                    self.edges[edge.id] = edge
+                    edges[edge.id] = edge
+
+                # Past here nothing can fail: the containers are replaced in
+                # place, so anything holding a reference to one still sees the
+                # graph this instance serves.
+                self.graph_metadata = graph_metadata
+                # Order matters three ways here, and two of them fight.
+                #
+                # The index must never be MISSING an id `nodes` holds, or the
+                # search's candidate path silently drops that node. And it must
+                # iterate in step with `nodes`, or the `-index` tie-break puts
+                # equal-scoring results in a different order than the walk
+                # does - with a limit, a different set of results entirely.
+                #
+                # Unioning the new records in and pruning afterwards keeps the
+                # first and breaks the second: `dict.update` leaves an existing
+                # key in its existing slot, so every id that survives a reload
+                # keeps its OLD position while `nodes` is rebuilt in the
+                # store's order.
+                #
+                # Emptying the index first keeps both. While it is empty it is
+                # shorter than `nodes`, which is exactly what the size test in
+                # `search_nodes` declines on, so the walk answers for that
+                # window and reads the live dict. Then it refills in
+                # `searchable` order - the same order `nodes` was just built
+                # in. At no point are the two the same size with different ids.
+                #
+                # The refill only lands in that order because the walk does not
+                # write records back (see `search_nodes`). A walk in this window
+                # would otherwise insert the ids that passed its filters, in its
+                # own order, and `update` would leave them there.
+                self._searchable_text_cache.clear()
+                self.nodes.clear()
+                self.nodes.update(nodes)
+                self.edges.clear()
+                self.edges.update(edges)
+                self._searchable_text_cache.update(searchable)
+
+                self.graph.clear()
+                for node in nodes.values():
+                    self.graph.add_node(node.id, data=node)
+                for edge in edges.values():
                     self.graph.add_edge(
                         edge.source, edge.target, key=edge.id, data=edge
                     )
 
-                # Rebuild vector store index from loaded nodes
-                self.vector_store.rebuild_index(list(self.nodes.values()))
+                self._load_embeddings()
 
                 print(
                     f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
@@ -459,29 +849,369 @@ class GraphStorage:
         Thread-safe: Uses lock for reading in-memory data.
         """
         with self._lock:
-            data = {
-                "nodes": [node.to_dict() for node in self.nodes.values()],
-                "edges": [edge.to_dict() for edge in self.edges.values()],
-                "metadata": {
-                    **(self.graph_metadata or {}),
-                    "version": (self.graph_metadata or {}).get("version", "1.0"),
-                    "graph_name": (self.graph_metadata or {}).get(
-                        "graph_name", self._default_graph_name()
-                    ),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                },
-            }
+            vectors, vector_revision = self._take_vector_snapshot()
+            if vectors is not None:
+                # Migration is the one case where what the node payload may
+                # contain depends on whether the sidecar write has landed:
+                # those ids keep their inline copy until it has, because
+                # graph.json is still their only durable home. Landing it
+                # here — before serialising, rather than on the background
+                # thread afterwards — is what lets THIS save drop them.
+                #
+                # Deferring it costs a whole extra save, which a long-lived app
+                # eventually makes but a one-shot caller never does: both
+                # maintenance scripts save once and exit, so they reported a
+                # successful migration while leaving every vector in graph.json
+                # and the file the size it always was.
+                #
+                # Only ids this write actually covers count. A vector the
+                # index refused, or a deleted node's, can never appear in a
+                # later matrix, so gating on the map being non-empty would
+                # route EVERY subsequent save down this path and turn a
+                # one-time migration into permanent blocking I/O on the
+                # caller's thread.
+                if self._inline_fallback.keys() & vectors.keys():
+                    # Ordered through the same single-worker queue as every
+                    # other write, so a save already in flight cannot land on
+                    # top of this one — waiting on the result is what keeps it
+                    # before _serialize_nodes. Safe to wait while holding the
+                    # lock: the queued work never takes it.
+                    self._io_executor.submit(
+                        self._persist_vectors, vectors, vector_revision
+                    ).result()
+                    # Either outcome ends this save's sidecar attempt, so the
+                    # background write must not repeat it. A failure has already
+                    # cleared the snapshot marker, and that is what leaves the
+                    # retry open for the next save.
+                    vectors = None
+
+            data = self._snapshot_data()
             node_count = len(self.nodes)
             edge_count = len(self.edges)
+            # Cleared under the lock, with the capture: a write issued after
+            # this point is issued after the clear, so its failure cannot be
+            # erased by a snapshot that does not contain it.
+            self._resync_pending = False
 
-        # Offload blocking I/O to background thread to avoid blocking event loop.
-        # Returns the Future so callers that must wait (e.g. load()) can call .result().
-        return self._io_executor.submit(
-            self._do_save_to_disk, data, node_count, edge_count
+            # Submitted under the same lock as the capture, like every entity
+            # write in _persist: the single-worker queue then lands snapshots
+            # in capture order. Submitted after the release, two callers
+            # could queue in the opposite order of their captures and the
+            # older image would land last. The submit is cheap and the queued
+            # work never takes the lock.
+            #
+            # Offload blocking I/O to background thread to avoid blocking event
+            # loop. Returns the Future so callers that must wait (e.g. load())
+            # can call .result().
+            # Recorded here as well as in _persist. A snapshot save is a write
+            # like any other as far as a reader is concerned, and _persist
+            # routes here for four documented cases - so watching only the
+            # incremental path left the guard open on exactly the writes that
+            # had already gone wrong once.
+            self._last_write = self._io_executor.submit(
+                self._do_save_to_disk,
+                data,
+                node_count,
+                edge_count,
+                vectors,
+                vector_revision,
+            )
+            return self._last_write
+
+    def _snapshot_data(self) -> Dict[str, Any]:
+        """The whole graph as a backend snapshot. Callers must hold _lock."""
+        return {
+            "nodes": self._serialize_nodes(),
+            "edges": [edge.to_dict() for edge in self.edges.values()],
+            "metadata": {
+                **(self.graph_metadata or {}),
+                "version": (self.graph_metadata or {}).get("version", "1.0"),
+                "graph_name": (self.graph_metadata or {}).get(
+                    "graph_name", self._default_graph_name()
+                ),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+
+    def _take_vector_snapshot(self) -> Tuple[Optional[Dict[str, Any]], int]:
+        """The vectors the write being issued must carry to the sidecar, if any.
+
+        Callers must hold _lock. Only when they have actually moved since the
+        last successful sidecar write, and are not already in flight: an
+        ordinary metadata edit changes no vector and must not rewrite the
+        matrix. Returns (vectors or None, the revision they are).
+        """
+        vector_revision = self.vector_store.revision
+        needs_write = (
+            self._embedding_sidecar is not None
+            and vector_revision != self._persisted_vector_revision
+            and vector_revision != self._snapshotted_vector_revision
         )
+        if not needs_write:
+            return None, vector_revision
+        # No filtering here: VectorStore keeps the index uniform, so what it
+        # exports is always a matrix the sidecar accepts. An extra vote at
+        # this boundary would only re-decide the dimension, and it decided it
+        # by raw count — which favours whichever vectors are the more
+        # numerous, i.e. the stale ones.
+        vectors = self.vector_store.export_vectors()
+        self._snapshotted_vector_revision = vector_revision
+        return vectors, vector_revision
+
+    def _migration_pending(self) -> bool:
+        """Whether graph.json is still the only durable home of some vector.
+
+        Callers must hold _lock. True while a vector read out of a pre-split
+        graph file is in the index but not yet in the sidecar. Ids whose
+        vector the index refused are in the fallback map too, and stay there;
+        they are not a pending migration, or every write would be one.
+        """
+        if self._embedding_sidecar is None or not self._inline_fallback:
+            return False
+        # Gated on the sidecar actually needing a write, exactly as save() is.
+        # Once a sidecar write lands it pops the ids it carried from the
+        # fallback map, so after that the intersection below is empty on its
+        # own; the gate matters in the window BEFORE it lands - a write
+        # already queued behind this one, its vectors snapshotted but not yet
+        # written - where the map still holds those ids and, without the
+        # gate, every mutation issued meanwhile would be a whole-graph write.
+        revision = self.vector_store.revision
+        if revision in (
+            self._persisted_vector_revision,
+            self._snapshotted_vector_revision,
+        ):
+            return False
+        return bool(self._inline_fallback.keys() & self.vector_store.embeddings.keys())
+
+    def _serialize_node(self, node: "Node") -> Dict[str, Any]:
+        """Serialize one node for persistence, routing its vector to the sidecar.
+
+        Callers must hold _lock. This is the node's shape in a snapshot and in
+        an upsert alike, so an incremental backend stores for a node exactly
+        what a snapshot would have held for it. Backends without a sidecar keep
+        the vector in the node payload, exactly as every backend did before the
+        split, so a custom backend does not silently stop persisting them.
+        """
+        payload = node.to_dict()
+        if self._embedding_sidecar is None:
+            payload["embedding"] = self._vector_for_payload(node.id)
+            return payload
+
+        # Dropping the vector is what makes graph.json small, and it is safe
+        # for every vector this process generated. It is NOT safe for one
+        # read out of a pre-split graph.json before the sidecar has it:
+        # there graph.json is the only durable copy, and the sidecar write
+        # is allowed to fail without failing the graph write, so removing it
+        # would destroy the vector with nothing written in its place.
+        vector = (
+            self._vector_for_payload(node.id)
+            if node.id in self._inline_fallback
+            else None
+        )
+        if vector is None:
+            payload.pop("embedding", None)
+        else:
+            payload["embedding"] = vector
+        return payload
+
+    def _serialize_nodes(self) -> List[Dict[str, Any]]:
+        """Serialize every node for a snapshot. Callers must hold _lock."""
+        return [self._serialize_node(node) for node in self.nodes.values()]
+
+    def _vector_for_payload(self, node_id: str) -> Optional[List[float]]:
+        """The vector to write into a node's payload, or None.
+
+        The live index vector whenever there is one — it is what the node means
+        now — and otherwise the raw copy the node was loaded with. The index
+        refusing a vector for its width, or evicting it when the model width
+        changes, does not make the file it came from any less its only home.
+        """
+        vector = self.vector_store.get_vector_list(node_id)
+        if vector is not None:
+            return vector
+        raw = self._inline_fallback.get(node_id)
+        if raw is None:
+            return None
+        return raw.tolist() if hasattr(raw, "tolist") else list(raw)
+
+    def _adopt_supplied_vectors(self, nodes) -> None:
+        """Move vectors carried on node objects into the vector index.
+
+        The serialized payload no longer carries `embedding`, so a vector that
+        arrived on a node object is persisted nowhere unless it is adopted
+        here. What happens next is the caller's: `add_nodes` generates over
+        the whole batch afterwards, so generation wins there, while a refresh
+        generates only where the store supplied nothing.
+        """
+        self._adopt_vectors(self._take_inline_vectors(nodes))
+
+    def _adopt_vectors(
+        self, supplied: Dict[str, Any], anchor: Optional[int] = None
+    ) -> None:
+        """Move vectors already taken off their nodes into the index.
+
+        Separate from _adopt_supplied_vectors because the refresh takes a
+        vector off its node when the operation is applied - so the event it
+        emits does not carry it - and adopts it only when the batch ends.
+
+        `anchor` is the width to judge the supplied vectors against, for a
+        caller that has already emptied the index of what would otherwise
+        have set it.
+        """
+        if not supplied:
+            return
+        # The index already in memory anchors the dimension; a caller passing
+        # vectors of some other width must never evict the vectors that are
+        # already correct.
+        existing = self.vector_store.export_vectors()
+        dimension = (
+            anchor or dominant_dimension(existing) or dominant_dimension(supplied)
+        )
+        accepted = matching_dimension(supplied, dimension)
+        if len(accepted) != len(supplied):
+            print(
+                f"Warning: ignored {len(supplied) - len(accepted)} supplied "
+                f"embedding(s) whose dimension is not {dimension}"
+            )
+        if accepted:
+            self.vector_store.load_vectors({**existing, **accepted})
+
+    def _take_inline_vectors(self, nodes) -> Dict[str, Any]:
+        """Move any vector carried on a node object into a plain dict.
+
+        A vector reaches a node object two ways: a graph file written before the
+        split, and a caller passing `embedding` to add_nodes. Both have to end
+        up in the vector store, because the serialized payload no longer carries
+        the field — otherwise the value is written nowhere at all.
+        """
+        taken = {}
+        for node in nodes:
+            if node.embedding is None:
+                continue
+            # A zero-length vector is not a usable vector, and carrying one
+            # through would make the whole sidecar read back empty (dim 0).
+            if len(node.embedding) > 0:
+                taken[node.id] = node.embedding
+            node.embedding = None
+        return taken
+
+    def _load_embeddings(self) -> None:
+        """Populate the vector index after nodes have been loaded.
+
+        The sidecar is authoritative. A graph written before the split still
+        carries vectors on its nodes; those are adopted for any node the sidecar
+        does not cover and the sidecar is marked for rewrite, which is what
+        migrates them on the next save. Vectors are never left on the node
+        objects — that inline copy is what made a node cost 51 kB resident.
+        """
+        inline = self._take_inline_vectors(self.nodes.values())
+
+        if self._embedding_sidecar is None:
+            accepted = matching_dimension(inline, dominant_dimension(inline))
+            self.vector_store.load_vectors(accepted)
+            # Same reason as the sidecar path below: a vector the index refuses
+            # for its width is still the node's only durable copy, and here
+            # there is no sidecar it could ever move to. Without this the next
+            # ordinary save writes None over it, silently — the drop happens in
+            # matching_dimension, so not even load_vectors' warning fires.
+            self._inline_fallback = {
+                node_id: vector
+                for node_id, vector in inline.items()
+                if node_id not in accepted
+            }
+            self._persisted_vector_revision = self.vector_store.revision
+            return
+
+        stored = {}
+        if self._embedding_sidecar.exists():
+            try:
+                stored = self._embedding_sidecar.load()
+            except EmbeddingSidecarError as exc:
+                # Vectors are derived data: a damaged sidecar costs semantic
+                # search until they are regenerated, never a failed load.
+                print(f"Warning: ignoring unreadable embedding sidecar: {exc}")
+
+        migrated = {
+            node_id: vector
+            for node_id, vector in inline.items()
+            if node_id not in stored
+        }
+        merged = {**stored, **migrated}
+        orphaned = [node_id for node_id in merged if node_id not in self.nodes]
+        for node_id in orphaned:
+            del merged[node_id]
+
+        # The two sources can disagree on dimension — a sidecar written by one
+        # embedding model merged with inline vectors from another. Stacking
+        # those raises in numpy and would take the whole load down, so drop the
+        # odd ones out. The sidecar decides which dimension that is whenever it
+        # has one: it is the authoritative source, and a graph file full of
+        # stale inline vectors must not outvote it.
+        #
+        # Only the entries that SURVIVED pruning get that vote. A sidecar
+        # sharing no live node id with the graph contributes nothing to merged,
+        # and letting it still dictate the width would drop every inline vector
+        # for disagreeing with a file whose contents are all orphans — taking
+        # the graph.json copy with it and then writing an empty sidecar over
+        # the old one. That is the shape of restoring a graph.json from another
+        # dataset, or from before a model change, onto an existing sidecar.
+        live_stored = {
+            node_id: vector
+            for node_id, vector in stored.items()
+            if node_id in self.nodes
+        }
+        dimension = dominant_dimension(live_stored) or dominant_dimension(migrated)
+        vectors = matching_dimension(merged, dimension)
+        dropped = len(merged) - len(vectors)
+        if dropped:
+            print(
+                f"Warning: dropped {dropped} embedding(s) whose dimension did not "
+                f"match the rest; they will be regenerated on next update"
+            )
+
+        self.vector_store.load_vectors(vectors)
+        # Every vector that came out of graph.json, whether or not the index
+        # took it. One the index refused for its width will never be carried by
+        # a sidecar write at all, since it is not in the index to be written;
+        # one the index took can still be evicted later by a model change. Both
+        # keep graph.json as their only durable copy, so both are held.
+        self._inline_fallback = dict(migrated)
+        if migrated or orphaned or dropped:
+            # Leave the persisted revision behind the live one so the next save
+            # writes the migrated or pruned matrix out.
+            self._persisted_vector_revision = None
+        else:
+            self._persisted_vector_revision = self.vector_store.revision
+
+        print(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
+
+    def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
+        """Write the vector matrix to the sidecar. Returns whether it landed.
+
+        A failure is deliberately not fatal to the graph save, so it leaves the
+        persisted revision behind and clears the snapshot marker — otherwise the
+        retry it opens would be skipped by the next save as "already in flight".
+        """
+        try:
+            self._embedding_sidecar.save(vectors)
+        except Exception as e:
+            self._snapshotted_vector_revision = None
+            print(f"Warning: could not save embedding sidecar: {e}")
+            return False
+        self._persisted_vector_revision = vector_revision
+        # The sidecar is now these vectors' durable home, so graph.json stops
+        # having to carry them. This is what ends the migration.
+        for node_id in vectors:
+            self._inline_fallback.pop(node_id, None)
+        return True
 
     def _do_save_to_disk(
-        self, data: Dict[str, Any], node_count: int, edge_count: int
+        self,
+        data: Dict[str, Any],
+        node_count: int,
+        edge_count: int,
+        vectors: Optional[Dict[str, Any]] = None,
+        vector_revision: Optional[int] = None,
     ) -> None:
         """
         Internal method: delegate serialized graph data to the persistence backend.
@@ -491,27 +1221,166 @@ class GraphStorage:
         them in the returned Future. Callers that call .result() (e.g. load())
         will then receive the exception rather than a silent no-op.
         """
+        if vectors is not None:
+            # Written first: an orphaned vector is harmless, a node whose vector
+            # never landed is a silent gap in semantic search.
+            self._persist_vectors(vectors, vector_revision)
+
         try:
             self._persistence_backend.save_graph_data(data)
             print(
-                f"Saved {node_count} nodes and {edge_count} edges to {self.json_path}"
+                f"Saved {node_count} nodes and {edge_count} edges to "
+                f"{self._save_destination()}"
             )
+        except ExternalChangeRefused:
+            # Same reason as in _do_apply, and it has to be said in both write
+            # paths or the one without it undoes the other: this is a backend
+            # reporting on a thread it may not report on, told so out of a
+            # listener it called itself. Flagging a resync would answer that
+            # by re-issuing the whole graph over a store another writer is
+            # committing to.
+            raise
         except Exception as e:
             print(f"Error saving graph to disk: {e}")
+            # The backend's image may now lack what memory has, exactly as
+            # after a failed entity write: the next write is the whole graph
+            # again, until one lands. Before the entity path existed every
+            # write was, so this is the same "next successful write carries
+            # everything" as before.
+            self._resync_pending = True
+            raise
+
+    def _persist(self, operations: List[EntityOperation]) -> "Future[None]":
+        """Persist a mutation, as entity operations where the backend takes them.
+
+        Callers must hold _lock and pass the operations that describe exactly
+        what they changed. After a failed entity write - or a failed
+        whole-graph write - the next write here is the whole graph, whatever
+        its own shape would have been, so the backend's image catches up
+        with memory (see _do_apply and _do_save_to_disk). Otherwise which
+        shape reaches the backend is decided by its declared capabilities:
+
+        - no incremental support: the whole graph, exactly as before the
+          entity contract existed;
+        - one operation: that operation;
+        - several operations and transactions: one atomic batch;
+        - several operations and no transactions: the whole graph, since the
+          snapshot write is atomic and a loop of single operations is not.
+
+        The vector sidecar, where there is one, travels with either shape:
+        the write carries whatever vectors moved since the last sidecar
+        write, and lands them first. The one exception is a pending
+        migration - vectors read out of a pre-split graph.json that the
+        sidecar does not hold yet - which only the snapshot path knows how to
+        complete, so a write during one is a snapshot.
+
+        Same single-worker executor as save(), so entity writes and snapshots
+        land in the order they were issued and flush() drains both.
+        """
+        caps = self._backend_capabilities
+        if (
+            not caps.incremental_writes
+            or self._resync_pending
+            or self._migration_pending()
+        ):
+            return self.save()
+        if not operations:
+            return self._io_executor.submit(lambda: None)
+        if len(operations) > 1 and not caps.transactions:
+            return self.save()
+        vectors, vector_revision = self._take_vector_snapshot()
+        # Kept so a read can ask whether the store has caught up with us.
+        self._last_write = self._io_executor.submit(
+            self._do_apply, tuple(operations), vectors, vector_revision
+        )
+        return self._last_write
+
+    def _do_apply(
+        self,
+        operations: Tuple[EntityOperation, ...],
+        vectors: Optional[Dict[str, Any]] = None,
+        vector_revision: Optional[int] = None,
+    ) -> None:
+        """Hand entity operations to the backend, on the executor thread.
+
+        A single operation goes to its own method; more than one go to
+        apply_batch, which the backend has declared atomic. Exceptions are
+        re-raised, as in _do_save_to_disk, so the Future carries them.
+        """
+        if vectors is not None:
+            # Written first, as in _do_save_to_disk: an orphaned vector is
+            # harmless, a node whose vector never landed is a silent gap.
+            self._persist_vectors(vectors, vector_revision)
+
+        backend = self._persistence_backend
+        try:
+            if len(operations) > 1:
+                backend.apply_batch(operations)
+                return
+            op = operations[0]
+            if op.kind == "node" and op.action == "upsert":
+                backend.upsert_node(op.payload)
+            elif op.kind == "node":
+                backend.delete_node(op.entity_id)
+            elif op.action == "upsert":
+                backend.upsert_edge(op.payload)
+            else:
+                backend.delete_edge(op.entity_id)
+        except ExternalChangeRefused:
+            # Not a write failure: the backend broke the reporting rule and
+            # got told so, on its own call stack, out of a listener it called
+            # itself. Flagging a resync here would answer that with a
+            # whole-graph write over a store that by definition has another
+            # writer. The Future still carries it, so the mutation is not
+            # reported as having landed.
+            raise
+        except Exception as e:
+            print(f"Error applying {len(operations)} entity operation(s): {e}")
+            # The mutation is in memory and nowhere else now, and the backend's
+            # own image lacks it - a later checkpoint would write that image
+            # and truncate the journal, and the mutation would be gone at the
+            # next start. Flag it; the caller's thread re-issues the whole
+            # graph, the way every failed write was healed before the entity
+            # path existed. Nothing else happens here, so the Future carries
+            # this exception and this thread never touches _lock.
+            self._resync_pending = True
             raise
 
     def flush(self) -> None:
         """
-        Wait for any pending background save operations to complete.
+        Wait for any pending background write to complete, and have the
+        backend fold whatever it has deferred into its canonical snapshot.
 
-        Useful in tests and in code that reloads from disk immediately
-        after mutating the graph.
+        Useful in tests and in code that reads the graph file directly, or
+        reloads from disk, immediately after mutating the graph.
 
-        Correctness relies on max_workers=1 (FIFO task ordering). The no-op
-        submitted here will only run after all previously submitted saves.
+        Correctness relies on max_workers=1 (FIFO task ordering): the
+        checkpoint and the no-op sentinel run only after every previously
+        submitted write. A checkpoint that fails surfaces here.
         """
+        # Drain first, so a failed entity write already queued has had its
+        # say; then heal it, so the checkpoint folds a complete image. A heal
+        # that fails surfaces here, like a failed checkpoint.
+        self._io_executor.submit(lambda: None).result()
+        heal = self._heal_if_needed()
+        if heal is not None:
+            heal.result()
+        if self._backend_capabilities.incremental_writes:
+            self._io_executor.submit(self._persistence_backend.checkpoint).result()
         # Submit a no-op sentinel and block until it runs — drains the queue.
         self._io_executor.submit(lambda: None).result()
+
+    def _heal_if_needed(self) -> "Optional[Future[None]]":
+        """Re-issue the whole graph after a failed entity write or a failed
+        whole-graph write, if one failed.
+
+        Runs on the caller's thread. save() clears the flag; the write it
+        queues carries every mutation in memory, including the failed one.
+        """
+        with self._lock:
+            if not self._resync_pending:
+                return None
+            return self.save()
 
     def get_graph_name(self) -> str:
         """Return configured graph name from graph metadata."""
@@ -519,6 +1388,542 @@ class GraphStorage:
         if isinstance(name, str) and name.strip():
             return name.strip()
         return self._default_graph_name()
+
+    def apply_external_change(self, change: "ExternalChange") -> None:
+        """Bring the in-memory model in step with a write someone else made.
+
+        A backend that declares `change_notification` calls this, from a
+        thread of its own, when the store changed behind this instance's
+        back. Which threads count as its own is the backend's obligation and
+        is stated on ChangeNotifyingBackend; only one violation of it is
+        visible from here, and that one is refused below.
+        Nothing here is persisted: the change is already in the store, and
+        writing it back would fight the writer that made it.
+
+        Every derived structure a read path serves has to move with it, not
+        just the node dictionary: the NetworkX graph, the searchable-text
+        cache behind lexical search, and the vector index behind semantic
+        search. A stale entry in any of them is worse than a missing one,
+        because a miss is refilled on demand and a stale hit is served.
+
+        Events are emitted so subscriptions, agents and the history see the
+        change, marked with a distinct origin so an agent that reacts by
+        writing cannot bounce it between instances forever. A change the
+        backend could not describe is a reload, and a reload emits nothing:
+        a backend that wants subscribers to see individual changes has to
+        report them as operations.
+        """
+        if threading.get_ident() == self._writer_thread_id:
+            # This thread is the write queue. A refresh may have to wait for
+            # that queue, and waiting here would be waiting for ourselves;
+            # not waiting would reload over the write we are inside. Handing
+            # it to another thread was tried and is worse: two such refreshes
+            # race each other, and one can outlive the shutdown that was
+            # supposed to have stopped them. So it is a contract violation,
+            # and said plainly - every real transport reports from a thread
+            # of its own.
+            raise ExternalChangeRefused(
+                "a change was reported from the thread the application issued "
+                "a write on; report changes from the backend's own thread"
+            )
+
+        with self._lock:
+            if not self._settle_before_refresh():
+                return
+            # Read AFTER the settle, never before. A backend that gathers the
+            # content when it dispatches gathers it without this instance's
+            # queued writes in it, and the only defence left is the wall clock
+            # below - which does not order the commits, and which leaves the
+            # two instances apart for good when it disagrees with them. Asking
+            # here instead means the answer is the store's, with our own work
+            # already landed in it.
+            authoritative = change.content_read_on_demand()
+            if authoritative:
+                try:
+                    change = change.with_content()
+                except Exception as exc:
+                    print(
+                        f"Warning: could not read the content of an external "
+                        f"change ({exc}); reloading the graph instead"
+                    )
+                    self._reload_from_store()
+                    return
+            if change.operations is None:
+                self._reload_from_store()
+                return
+            # Every change to the vector index rebuilds its matrix whole,
+            # so doing that once per reported node is linear in the index per
+            # operation and quadratic over a batch. Collect what the batch
+            # touches and settle the index once, at the end - the shape
+            # add_nodes already has. A dict gives last-operation-wins per id,
+            # which is what the store applied.
+            touched: Dict[str, Tuple[Optional[Node], Any]] = {}
+            failure: Optional[Exception] = None
+            try:
+                for op in change.operations:
+                    # Anything this build does not recognise is a resync, not
+                    # a delete: reading an unknown action as one would drop
+                    # the entity and tell every subscriber it was deleted.
+                    if op.action not in ("upsert", "delete"):
+                        raise ValueError(f"unknown entity action {op.action!r}")
+                    if op.kind == "node":
+                        if op.action == "upsert":
+                            self._external_upsert_node(op, touched, authoritative)
+                        else:
+                            self._external_delete_node(op.entity_id, touched)
+                    elif op.kind == "edge":
+                        if op.action == "upsert":
+                            self._external_upsert_edge(op)
+                        else:
+                            self._external_delete_edge(op.entity_id)
+                    else:
+                        raise ValueError(f"unknown entity kind {op.kind!r}")
+            except Exception as exc:
+                failure = exc
+
+            # Whatever did apply, settled before any reload. A reload that
+            # lands supersedes this, but _reload_from_store deliberately does
+            # not land in two cases - a store reporting it is not there, and a
+            # read that fails - and then the applied prefix stays in memory.
+            # Its vectors have to match it, or a renamed node goes on matching
+            # the description it no longer has.
+            try:
+                self._settle_vector_index(touched)
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+
+            if failure is not None:
+                # A payload this build cannot read - two instances mid-upgrade,
+                # say - would otherwise leave the batch half applied and throw
+                # into whatever backend thread called us, where the writing
+                # instance would read it as its own write having failed.
+                # Resync instead, and keep it to ourselves.
+                print(
+                    f"Warning: could not apply an external change ({failure}); "
+                    f"reloading the graph instead"
+                )
+                self._reload_from_store()
+
+    def _settle_vector_index(
+        self, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
+        """Bring the vector index in step with one batch, in one pass.
+
+        `touched` maps an entity id to the node the batch left there and the
+        vector the store carried for it - (None, None) where the batch left
+        nothing. Doing this per entity instead would rebuild the index matrix
+        once per operation, and the rebuild is linear in the index, so a batch
+        would cost the square of it.
+
+        No writer interleaves: every mutation path takes _lock and the whole
+        batch holds it. Readers are another matter, and this is the cost of
+        settling once - get_node, semantic_search_nodes and find_similar_nodes
+        take no lock at all - nor does any other query path that reads the
+        node dictionary and the index together - before this change as after,
+        so a concurrent reader can see a node the batch updated while its
+        vector is still the one the batch found, until the settle lands.
+        save() is the exception that matters, and it does hold _lock across
+        both, so a half-settled batch is never what gets written. Settling per entity
+        narrowed that window to one entity rather than closing it. A system
+        listener runs inside the window too, on this thread, and sees its own
+        entity half applied that way: node updated, vector not.
+
+        Callers must hold _lock.
+        """
+        if not touched:
+            return
+
+        # Read before the eviction destroys it, and remember whether any id
+        # this batch upserts actually held a vector - that is what makes the
+        # old width authoritative rather than a ghost. A batch that empties
+        # the index by *replacing* everything must still be judged against
+        # the width it replaced; one that empties it by *deleting* everything
+        # must not, or a supplied vector is refused for disagreeing with
+        # vectors that no longer exist.
+        upserted = [
+            (node, vector) for node, vector in touched.values() if node is not None
+        ]
+        before = self.vector_store.dimension
+        replacing = any(
+            self.vector_store.has_embedding(node.id) for node, _ in upserted
+        )
+
+        # Whatever these ids had described the text they used to have.
+        self.vector_store.remove_nodes_embeddings(list(touched))
+        if not upserted:
+            return
+
+        supplied = {node.id: vector for node, vector in upserted if vector is not None}
+        anchor = self.vector_store.dimension
+        if anchor is None and replacing:
+            anchor = before
+        if anchor is None and supplied:
+            # Nothing local anchors the width, so this batch establishes it.
+            # A majority vote is the wrong tie-breaker: it would adopt the
+            # commonest width and refuse the rest. Judging every supplied
+            # vector against the first is what the per-operation path did,
+            # one node at a time.
+            anchor = len(next(iter(supplied.values())))
+        self._adopt_vectors(supplied, anchor)
+
+        def generate(nodes) -> bool:
+            try:
+                self.vector_store.update_nodes_embeddings(nodes)
+                return True
+            except Exception as embed_error:
+                print(f"Warning: Could not update embeddings: {embed_error}")
+                return False
+
+        missing = [
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if not missing or not generate(missing):
+            return
+
+        # Generating at a width the batch did not adopt reads as a model
+        # change, and the index is emptied of everything just adopted. Those
+        # ids were not in `missing`, so nothing above brings them back. One
+        # more pass does, and it cannot recur: this one generates at the width
+        # the index now holds.
+        stranded = [
+            node for node, _ in upserted if not self.vector_store.has_embedding(node.id)
+        ]
+        if stranded:
+            generate(stranded)
+
+    def _settle_before_refresh(self) -> bool:
+        """Wait for this instance's own writes; say whether to refresh at all.
+
+        A mutation is in memory before it is in the store, so a refresh that
+        overtook one still queued would leave memory holding the store's
+        value while our write goes on to land in it. Nothing would ever put
+        that right: an instance is not told about its own writes, so the
+        disagreement would outlive every later report. Both halves of a
+        refresh wait, the reload and the named operations alike.
+
+        Holding _lock is what makes the drain enough: every mutation path
+        submits under it, so nothing new can be queued while we wait, and
+        queued work never takes _lock. Waiting is safe only because the
+        report arrives on a thread that is not running a write - see
+        ChangeNotifyingBackend, which is where that obligation is stated.
+
+        The flag is read after the drain, not before. A write already queued
+        raises it while we are waiting, so a check made first would pass on a
+        value that stopped being true before the refresh used it.
+
+        Callers must hold _lock.
+        """
+        try:
+            self._io_executor.submit(lambda: None).result()
+        except RuntimeError:
+            pass  # already shut down: nothing can be queued, nothing is pending
+
+        if not self._resync_pending:
+            return True
+
+        # An entity write failed, so a mutation is in memory and nowhere
+        # else. Refreshing over it drops it. Writing it first is worse: the
+        # only write that carries it is the whole graph, and re-issuing this
+        # instance's whole image over a store that by definition has another
+        # writer destroys what that writer just committed - including the
+        # change being reported. So neither: stay put and say so. The next
+        # write, flush or shutdown heals the flag, and the next report brings
+        # this instance forward.
+        print(
+            "Warning: not refreshing the graph: a local write failed and "
+            "is still only in memory. This instance stays behind the "
+            "store until that write has been re-issued."
+        )
+        return False
+
+    def _reload_from_store(self) -> None:
+        """Re-read the whole graph. Callers must hold _lock, and must have
+        settled this instance's own writes first (_settle_before_refresh).
+
+        Nothing here writes. A refresh that wrote would re-assert this
+        instance's image over a store whose whole point is that someone else
+        is writing it too, which is why a failed local write stops the
+        refresh instead of being healed into it.
+
+        Bootstrapping is off: a store reporting that it is not there is not
+        an invitation to write this instance's graph over it. A store that
+        cannot be read at all is reported and left; nothing is raised, because
+        the only thread to raise into is the backend's.
+        """
+        try:
+            self.load(bootstrap_if_missing=False)
+        except Exception as exc:
+            # The store can be unreadable for a moment - being replaced as we
+            # read it, a network read failing. Throwing here would put that in
+            # the caller's lap, and the caller is the backend's thread, where
+            # the instance that made the write would read it as its own write
+            # having failed. What is in memory is behind, not wrong: whatever
+            # a half-applied batch already applied is real store state.
+            print(
+                f"Warning: could not reload the graph ({exc}); the graph in "
+                f"memory is unchanged and behind the store until the next "
+                f"change is reported"
+            )
+
+    @staticmethod
+    def _is_newer(held, reported) -> bool:
+        """Is the version we hold later than the one being reported?
+
+        Wall-clock last-writer-wins: the instances share no other ordering,
+        so their clocks have to be roughly in step for this to mean anything.
+        A pair that cannot be compared - one naive and one aware, which a
+        backend handing over datetime objects of its own could produce - is
+        not an answer, and the report is applied. Equal stamps defer to the
+        report too: a tie is unresolvable, and taking the store's side is
+        what converges the two instances. (A payload with no stamp at all
+        never reaches here as a gap: the model fills one in at parse time,
+        stamped now - so it is normally the newer one and applies, but it
+        loses to a held stamp dated in the future, which is what a
+        clock-skewed peer produces.)
+        """
+        try:
+            return bool(held > reported)
+        except TypeError:
+            return False
+
+    @staticmethod
+    def _entity_type_name(entity) -> str:
+        value = getattr(entity, "type", None)
+        return value.value if hasattr(value, "value") else str(value)
+
+    def _already_held(self, existing: Node, reported: Node) -> bool:
+        """Is the store's answer the value this instance already holds?
+
+        The vector is compared where it lives rather than where it is written:
+        an embedding is moved off the node and into the index as soon as it is
+        adopted, so a node held in memory carries none while the store's copy
+        of the same node carries one. Comparing the two dictionaries whole
+        would therefore call every vectored node changed.
+        """
+        held = existing.to_dict()
+        answer = reported.to_dict()
+        held.pop("embedding", None)
+        vector = answer.pop("embedding", None)
+        if held != answer:
+            return False
+        # Both directions: an answer carrying no embedding for a node the
+        # index has a vector for is a change too - the store dropped it - and
+        # reading that as "nothing to do" would leave semantic search matching
+        # a description the store no longer keeps.
+        return self.vector_store.get_vector_list(reported.id) == vector
+
+    def _external_upsert_node(
+        self,
+        op: EntityOperation,
+        touched: "Dict[str, Tuple[Optional[Node], Any]]",
+        authoritative: bool = False,
+    ) -> None:
+        """Callers must hold _lock, and settle `touched` when the batch ends.
+
+        `authoritative` says the payload was read from the store AFTER this
+        instance settled its own writes, so it already contains them. There is
+        then nothing of ours for the clock below to protect, and consulting it
+        would be worse than useless - it is what keeps the two instances apart.
+        """
+        # from_dict rewrites its argument in place - timestamps parsed,
+        # defaults filled in - and the argument here belongs to the backend,
+        # which may still be holding the record it reported. Read it, do not
+        # take it. The top level is all from_dict touches.
+        node = Node.from_dict(dict(op.payload))
+        existing = self.nodes.get(node.id)
+        if (
+            authoritative
+            and existing is not None
+            and self._already_held(existing, node)
+        ):
+            # Reading after the settle means the answer is often this
+            # instance's own write, and there is nothing in that to apply. Not
+            # a no-op if it were. The event would tell every subscriber a node
+            # changed when nothing about it did; and the settle would go to
+            # work on a description that did not change - rebuilding the index
+            # twice for a node that has a vector, once to evict it and once to
+            # put the same one back from the payload, and for a node that has
+            # none, asking the model for one, which is the whole cost on an
+            # install with no model to ask.
+            return
+        if (
+            not authoritative
+            and existing is not None
+            and self._is_newer(existing.updated_at, node.updated_at)
+        ):
+            # Both instances wrote this node, and this report was gathered
+            # before we settled - so it may predate our own write, which we
+            # are never told about. Applying it would leave us serving a value
+            # the store does not hold, with nothing left to report that would
+            # put it right. Last writer wins, by the only ordering two
+            # instances that cannot re-read their store share.
+            #
+            # It is a poor ordering, and it is why a backend that CAN re-read
+            # should report `entities_read_on_demand` and never reach this:
+            # the clock does not order the commits, so when the write that
+            # committed last carries the earlier stamp this keeps the two
+            # instances apart permanently rather than resolving anything.
+            print(
+                f"Warning: ignoring an external change to node {node.id}: this "
+                f"instance holds a newer version of it"
+            )
+            return
+        before = existing.to_dict() if existing is not None else None
+
+        # The vector describes the text this node used to have, and keeping
+        # it would let semantic search go on matching a description that is
+        # gone. The index is settled for the whole batch at the end; the
+        # graph file's own inline copy is dropped here, since that costs a
+        # dict pop rather than a matrix rebuild.
+        # Taken here, not at the settle: _emit_event below builds `after`
+        # from the node, and every other mutation path has already moved the
+        # vector into the index by then. Leaving it on would put a raw
+        # embedding into every webhook and agent payload - the one thing the
+        # history store strips by name, on the one path that has no such
+        # filter.
+        touched[node.id] = (node, self._take_inline_vectors([node]).get(node.id))
+        self._inline_fallback.pop(node.id, None)
+
+        # Index BEFORE `nodes`, here and everywhere that adds; removals are the
+        # mirror image, `nodes` first and the index after. Together those keep
+        # the index a superset of `nodes` through every incremental write,
+        # which is what lets the search's candidate path - which can only offer
+        # ids it holds records for, and takes no lock - be trusted. `load`
+        # replaces everything at once and is the one path that steps outside
+        # it, deliberately and visibly: it empties the index first, so the size
+        # test declines for the whole swap. See the comment there.
+        #
+        # One half-done write on its own would be caught anyway: `nodes` first
+        # would leave the index SHORTER, and the size test in `search_nodes`
+        # sends the query to the walk. What the ordering is really for is two
+        # writes in flight at once, where the sizes cancel out and that test
+        # cannot tell the two dicts apart.
+        #
+        # The two halves are not equally urgent, and it is worth being exact
+        # about which. Reverse the ADD and a node that has reached `nodes` -
+        # one a reader is owed - is missing from the index, and the candidate
+        # path returns [] for it. Measured. Reverse the REMOVAL and the node
+        # that goes missing is the one whose delete is already in flight,
+        # which a search racing that delete could fail to see anyway; no
+        # reader is owed it.
+        #
+        # The removal half is still written this way, because what it keeps is
+        # the invariant rather than any single query: index a superset of
+        # `nodes` for every incremental write, which is what the size test is a
+        # backstop FOR. An invariant that holds except where somebody has
+        # argued the exception away is one nobody can reason about later -
+        # which is why `load`'s exception is not argued away but arranged to
+        # fail the size test outright.
+        self._searchable_text_cache[node.id] = self._build_match_fields(node)
+        self.nodes[node.id] = node
+        # add_node on an existing id replaces the attributes, which is what
+        # repoints `data` at the new object; every read path that walks the
+        # graph would otherwise still hand out the old one.
+        self.graph.add_node(node.id, data=node)
+
+        self._emit_event(
+            event_type=EventType.NODE_UPDATE if before else EventType.NODE_CREATE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node.id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=node.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_node(
+        self, node_id: str, touched: "Dict[str, Tuple[Optional[Node], Any]]"
+    ) -> None:
+        """Callers must hold _lock."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        before = node.to_dict()
+
+        # An edge cannot outlive an endpoint. The store may well have reported
+        # the edge deletions too; deleting one twice is a no-op.
+        incident = [
+            edge.id
+            for edge in self.edges.values()
+            if edge.source == node_id or edge.target == node_id
+        ]
+        for edge_id in incident:
+            self._external_delete_edge(edge_id)
+
+        if self.graph.has_node(node_id):
+            self.graph.remove_node(node_id)
+        del self.nodes[node_id]
+        self._searchable_text_cache.pop(node_id, None)
+        # Settled with the rest of the batch; see _settle_vector_index. The
+        # inline copy goes now - a dict pop, not a matrix rebuild - or an id
+        # created again later would inherit the departed node's vector.
+        touched[node_id] = (None, None)
+        self._inline_fallback.pop(node_id, None)
+
+        self._emit_event(
+            event_type=EventType.NODE_DELETE,
+            entity_kind=EntityKind.NODE,
+            entity_id=node_id,
+            entity_type=self._entity_type_name(node),
+            before=before,
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_upsert_edge(self, op: EntityOperation) -> None:
+        """Callers must hold _lock."""
+        edge = Edge.from_dict(dict(op.payload))  # the backend's dict; see above
+        if edge.source not in self.nodes or edge.target not in self.nodes:
+            # add_edge would invent the missing endpoint as a node with no
+            # data, which every read path walking the graph would then trip
+            # over. Report it and leave the edge out of both structures.
+            absent = edge.source if edge.source not in self.nodes else edge.target
+            print(
+                f"Warning: ignoring external edge {edge.id}: "
+                f"endpoint {absent} is not present"
+            )
+            return
+
+        existing = self.edges.get(edge.id)
+        before = existing.to_dict() if existing is not None else None
+        if existing is not None and self.graph.has_edge(
+            existing.source, existing.target, key=existing.id
+        ):
+            # An endpoint may have moved; the old graph edge is keyed on where
+            # it used to point and would otherwise stay.
+            self.graph.remove_edge(existing.source, existing.target, key=existing.id)
+
+        self.edges[edge.id] = edge
+        self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+        self._emit_event(
+            event_type=EventType.EDGE_UPDATE if before else EventType.EDGE_CREATE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge.id,
+            entity_type=self._entity_type_name(edge),
+            before=before,
+            after=edge.to_dict(),
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
+
+    def _external_delete_edge(self, edge_id: str) -> None:
+        """Callers must hold _lock."""
+        edge = self.edges.pop(edge_id, None)
+        if edge is None:
+            return
+        if self.graph.has_edge(edge.source, edge.target, key=edge_id):
+            self.graph.remove_edge(edge.source, edge.target, key=edge_id)
+
+        self._emit_event(
+            event_type=EventType.EDGE_DELETE,
+            entity_kind=EntityKind.EDGE,
+            entity_id=edge_id,
+            entity_type=self._entity_type_name(edge),
+            before=edge.to_dict(),
+            after=None,
+            context=EventContext(event_origin=EXTERNAL_CHANGE_ORIGIN),
+        )
 
     def reload(self) -> None:
         """
@@ -644,7 +2049,100 @@ class GraphStorage:
         depth: int = 1,
         include_archived: bool = False,
     ) -> Dict[str, Any]:
-        """Get nodes connected to the given node.  Delegates to storage_search."""
+        """Get nodes connected to the given node.
+
+        Two engines answer this, and which one does is not visible in the
+        result: `test_traversal_equivalence.py` holds the store's traversal to
+        the in-memory walk's answer, set for set, and neither may change
+        without the other (`dec-oc-traversal-recursive-cte`).
+
+        The store answers only when it is CURRENT. Writes go to a background
+        executor, so between a mutation and its write landing `self.nodes` is
+        ahead of the store; a traversal answered there would not see the
+        caller's own write. That is not the two engines disagreeing, it is them
+        being asked about different moments, and no equivalence test can cover
+        it. So a pending write sends the query to the walk, which reads the
+        live dictionaries - correct, and no slower than it was before any of
+        this existed.
+        """
+        if self._store_traversal_is_current():
+            try:
+                found = self._persistence_backend.traverse(  # type: ignore[union-attr]
+                    node_id,
+                    depth,
+                    relationship_types=[
+                        getattr(t, "value", t) for t in (relationship_types or [])
+                    ]
+                    or None,
+                    include_archived=include_archived,
+                )
+            except Exception as exc:
+                # A store that cannot answer is not a failed request. The walk
+                # is still here and still right; the store is the optimisation.
+                print(f"Warning: store traversal failed, walking instead: {exc}")
+            else:
+                # Membership was decided by the store, at the store's moment;
+                # the payloads are resolved here, at ours. Between the two the
+                # graph can change, and then there is no sound way to patch
+                # the store's answer into one: dropping a node that has since
+                # been archived leaves behind whatever was only reachable
+                # THROUGH it, which is a state neither engine ever held - the
+                # same objection that made returning the archived node wrong.
+                # Recomputing reachability here would be reimplementing the
+                # walk beside the walk.
+                #
+                # So this does not patch. It asks one question - did anything
+                # the store decided on stop being what it was - and when the
+                # answer is yes it falls through to the walk, which decides and
+                # resolves from one dictionary in one pass and is therefore
+                # self-consistent by construction. That is the fallback G3
+                # already relies on; this is one more reason to take it.
+                #
+                # Only disappearances count. A node ADDED since the store
+                # answered is absent from the result, but that is a read at an
+                # earlier instant rather than an inconsistent one, which is
+                # what any snapshot read gives you.
+                def _hidden(node: "Node", nid: str) -> bool:
+                    if include_archived or nid == node_id:
+                        return False
+                    return bool(getattr(node, "archived", False))
+
+                # Resolved in the SAME pass that checks, not a second one.
+                # This path takes no lock while every mutator holds one, so a
+                # delete landing between a `nid in self.nodes` and a
+                # `self.nodes[nid]` turns a traversal into a KeyError out of
+                # the API. One dict lookup per id, its result carried forward,
+                # makes the check and the use the same observation.
+                #
+                # Not copied from the walk - the walk has the same window.
+                # `storage_search.get_related_nodes` resolves with
+                # `if nid in nodes` and then indexes, which is the same
+                # check-then-use; that guard is there for the dangling-endpoint
+                # rule, not for a concurrent delete, and feeding it a dict that
+                # loses the key between the two raises KeyError exactly as this
+                # path used to. That is pre-existing and left alone here.
+                nodes = []
+                for nid in found["node_ids"]:
+                    node = self.nodes.get(nid)
+                    if node is None or _hidden(node, nid):
+                        nodes = None
+                        break
+                    nodes.append(node)
+                edges = None
+                if nodes is not None:
+                    edges = []
+                    for eid in found["edge_ids"]:
+                        edge = self.edges.get(eid)
+                        if edge is None or (
+                            not include_archived
+                            and bool(getattr(edge, "archived", False))
+                        ):
+                            edges = None
+                            break
+                        edges.append(edge)
+                if nodes is not None and edges is not None:
+                    return {"nodes": nodes, "edges": edges}
+
         return storage_search.get_related_nodes(
             self.nodes,
             self.edges,
@@ -654,6 +2152,25 @@ class GraphStorage:
             depth,
             include_archived=include_archived,
         )
+
+    def _store_traversal_is_current(self) -> bool:
+        """Whether the store can be trusted to answer a traversal right now."""
+        if not self._backend_capabilities.store_traversal:
+            return False
+        write = self._last_write
+        if write is not None and not write.done():
+            return False
+        # Read AFTER done(), not before. _do_apply sets this flag and then
+        # raises, so the flag is set before the Future finishes. Reading it
+        # first admits: flag False here -> the worker sets it and finishes ->
+        # done() True -> the guard calls a store it has just been told is
+        # stale. In this order, done() being true means the flag write has
+        # already happened, so the window closes for free.
+        if self._resync_pending:
+            # The last write failed and the whole graph is owed to the store;
+            # what is there now is not what we hold.
+            return False
+        return True
 
     def find_similar_nodes(
         self,
@@ -699,12 +2216,39 @@ class GraphStorage:
         with self._lock:
             added_node_ids = []
             added_edge_ids = []
+            # What has landed in memory but not yet reached the store. A
+            # failure part-way - a rejected id, an unresolvable endpoint, a
+            # raise - returns a failure result while leaving what was added in
+            # place, as it always has; every failure exit first persists
+            # exactly that, so the store never falls behind the memory image.
+            unpersisted_nodes: List[Node] = []
+            unpersisted_edges: List[Edge] = []
+
+            def persist_landed() -> None:
+                if not (unpersisted_nodes or unpersisted_edges):
+                    return
+                try:
+                    self._persist(
+                        [
+                            EntityOperation.upsert_node(self._serialize_node(node))
+                            for node in unpersisted_nodes
+                        ]
+                        + [
+                            EntityOperation.upsert_edge(edge.to_dict())
+                            for edge in unpersisted_edges
+                        ]
+                    )
+                except Exception as persist_error:
+                    # The failure being handled may be the persist itself
+                    # (executor shut down); the caller still gets its result.
+                    print(f"Warning: could not persist what was added: {persist_error}")
 
             try:
                 # Add nodes
                 nodes_to_embed = []
                 for node in nodes:
                     if node.id in self.nodes:
+                        persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
                             added_edge_ids=[],
@@ -712,15 +2256,21 @@ class GraphStorage:
                             message=f"Node with ID {node.id} already exists",
                         )
 
+                    # Index before `nodes` - see _external_upsert_node for why.
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
                     self.nodes[node.id] = node
                     self.graph.add_node(node.id, data=node)
                     added_node_ids.append(node.id)
                     nodes_to_embed.append(node)
+                    unpersisted_nodes.append(node)
 
-                    # Precompute searchable text
-                    self._searchable_text_cache[node.id] = self._build_searchable_text(
-                        node
-                    )
+                # A caller may pass `embedding` on the node itself. The
+                # serialized payload no longer carries that field, so adopt it
+                # into the vector store or it is persisted nowhere. Generation
+                # below still wins when the ML stack is available, as before.
+                self._adopt_supplied_vectors(nodes_to_embed)
 
                 # Generate embeddings for new nodes (non-blocking)
                 if nodes_to_embed:
@@ -730,8 +2280,15 @@ class GraphStorage:
                         # Embedding generation is optional - log but don't fail
                         print(f"Warning: Could not generate embeddings: {embed_error}")
 
-                # Save again to persist embeddings generated above
-                self.save()
+                # Persisted before the edges so that, as before, a rejected
+                # edge leaves the nodes it was meant to join in place.
+                self._persist(
+                    [
+                        EntityOperation.upsert_node(self._serialize_node(node))
+                        for node in nodes_to_embed
+                    ]
+                )
+                unpersisted_nodes.clear()
 
                 # Create name-to-ID mapping for newly added nodes and existing nodes
                 name_to_id = {}
@@ -767,6 +2324,7 @@ class GraphStorage:
                     edge.target = target_id
 
                     if edge.id in self.edges:
+                        persist_landed()
                         return AddNodesResult(
                             added_node_ids=[],
                             added_edge_ids=[],
@@ -781,9 +2339,15 @@ class GraphStorage:
                         edge.source, edge.target, key=edge.id, data=edge
                     )
                     added_edge_ids.append(edge.id)
+                    unpersisted_edges.append(edge)
 
-                # Save to JSON
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.upsert_edge(self.edges[edge_id].to_dict())
+                        for edge_id in added_edge_ids
+                    ]
+                )
+                unpersisted_edges.clear()
 
                 # Emit events for added nodes
                 for node_id in added_node_ids:
@@ -831,6 +2395,7 @@ class GraphStorage:
                 )
 
             except Exception as e:
+                persist_landed()
                 return AddNodesResult(
                     added_node_ids=[],
                     added_edge_ids=[],
@@ -983,7 +2548,7 @@ class GraphStorage:
             self.graph.nodes[node_id]["data"] = node
 
             # Update searchable text cache
-            self._searchable_text_cache[node.id] = self._build_searchable_text(node)
+            self._searchable_text_cache[node.id] = self._build_match_fields(node)
 
             # Update embedding if text fields or tags changed (non-blocking)
             if any(
@@ -995,8 +2560,7 @@ class GraphStorage:
                 except Exception as embed_error:
                     print(f"Warning: Could not update embedding: {embed_error}")
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_node(self._serialize_node(node))])
 
             # Emit update event
             node_type = (
@@ -1032,7 +2596,7 @@ class GraphStorage:
         """
         with self._lock:
             found: List[Node] = []
-            changed = False
+            changed: List[Node] = []
             for node_id in node_ids:
                 node = self.nodes.get(node_id)
                 if node is None:
@@ -1045,7 +2609,7 @@ class GraphStorage:
                 node.archived = archived
                 node.updated_at = datetime.now(timezone.utc)
                 self.graph.nodes[node_id]["data"] = node
-                changed = True
+                changed.append(node)
 
                 node_type = (
                     node.type.value if hasattr(node.type, "value") else str(node.type)
@@ -1061,7 +2625,12 @@ class GraphStorage:
                 )
 
             if changed:
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.upsert_node(self._serialize_node(node))
+                        for node in changed
+                    ]
+                )
 
             return found
 
@@ -1139,9 +2708,23 @@ class GraphStorage:
 
                 # Remove embeddings
                 self.vector_store.remove_nodes_embeddings(deleted_node_ids)
+                # And the graph.json fallback copies, or an id created again
+                # later would inherit the departed node's vector.
+                for node_id in deleted_node_ids:
+                    self._inline_fallback.pop(node_id, None)
 
-                # Save
-                self.save()
+                # Edges first, for the same reason the events below go out in
+                # that order: an edge must never outlive an endpoint in the store.
+                self._persist(
+                    [
+                        EntityOperation.delete_edge(edge_id)
+                        for edge_id in edge_before_states
+                    ]
+                    + [
+                        EntityOperation.delete_node(node_id)
+                        for node_id in deleted_node_ids
+                    ]
+                )
 
                 # Emit delete events for edges (before nodes, to maintain referential integrity info)
                 for edge_id, before_state in edge_before_states.items():
@@ -1242,19 +2825,27 @@ class GraphStorage:
     def get_edges_between_nodes(self, node_ids: List[str]) -> List[Edge]:
         """Get all edges where both source and target are in the given node IDs"""
         node_id_set = set(node_ids)
-        return [
-            edge
-            for edge in self.edges.values()
-            if edge.source in node_id_set and edge.target in node_id_set
-        ]
+        valid_nodes = [nid for nid in node_id_set if nid in self.graph]
+        subgraph = self.graph.subgraph(valid_nodes)
+        return [data["data"] for _, _, data in subgraph.edges(data=True)]
 
     def get_edges_for_node(self, node_id: str) -> List[Edge]:
         """Get all edges connected to a specific node"""
-        return [
-            edge
-            for edge in self.edges.values()
-            if edge.source == node_id or edge.target == node_id
-        ]
+        if node_id not in self.graph:
+            return []
+
+        collected_edges = {}
+        # Outgoing edges
+        for _, _, _, edge_data in self.graph.out_edges(node_id, keys=True, data=True):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
+
+        # Incoming edges
+        for _, _, _, edge_data in self.graph.in_edges(node_id, keys=True, data=True):
+            edge = edge_data["data"]
+            collected_edges[edge.id] = edge
+
+        return list(collected_edges.values())
 
     def update_edge(
         self,
@@ -1294,8 +2885,7 @@ class GraphStorage:
             for key in allowed_fields:
                 setattr(edge, key, getattr(validated_edge, key))
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
 
             # Emit update event
             edge_type = (
@@ -1330,7 +2920,7 @@ class GraphStorage:
         """
         with self._lock:
             found: List[Edge] = []
-            changed = False
+            changed: List[Edge] = []
             for edge_id in edge_ids:
                 edge = self.edges.get(edge_id)
                 if edge is None:
@@ -1341,7 +2931,7 @@ class GraphStorage:
 
                 before_state = edge.to_dict()
                 edge.archived = archived
-                changed = True
+                changed.append(edge)
 
                 edge_type = (
                     edge.type.value if hasattr(edge.type, "value") else str(edge.type)
@@ -1357,7 +2947,9 @@ class GraphStorage:
                 )
 
             if changed:
-                self.save()
+                self._persist(
+                    [EntityOperation.upsert_edge(edge.to_dict()) for edge in changed]
+                )
 
             return found
 
@@ -1397,8 +2989,7 @@ class GraphStorage:
             # Remove from edges dict
             del self.edges[edge_id]
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.delete_edge(edge_id)])
 
             # Emit delete event
             self._emit_event(
@@ -1439,7 +3030,12 @@ class GraphStorage:
                     del self.edges[edge_id]
                     deleted_edge_ids.append(edge_id)
 
-                self.save()
+                self._persist(
+                    [
+                        EntityOperation.delete_edge(edge_id)
+                        for edge_id in deleted_edge_ids
+                    ]
+                )
 
                 for edge_id in deleted_edge_ids:
                     before_state = edge_before_states[edge_id]
@@ -1508,8 +3104,7 @@ class GraphStorage:
             self.edges[edge.id] = edge
             self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
 
-            # Save
-            self.save()
+            self._persist([EntityOperation.upsert_edge(edge.to_dict())])
 
             # Emit create event
             edge_type = (

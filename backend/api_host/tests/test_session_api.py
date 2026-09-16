@@ -9,6 +9,7 @@ contract of the request/response endpoints.
 
 import base64
 import io
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -52,9 +53,6 @@ class TestSessionCrud:
         materialise it rather than 404, or the name is lost once it later saves
         with a null server name."""
         sid = "9999-9997"
-        test_app.delete(
-            f"/api/sessions/{sid}"
-        )  # clean slate (shared temp dir across test runs)
         resp = test_app.patch(f"/api/sessions/{sid}", json={"name": "renamed"})
         assert resp.status_code == 200
         assert resp.json()["name"] == "renamed"
@@ -72,6 +70,28 @@ class TestSessionCrud:
 
     def test_invalid_id_returns_400(self, test_app: TestClient):
         assert test_app.get("/api/sessions/not-valid").status_code == 400
+
+
+class TestSessionStreamAuthBypass:
+    def test_shared_session_stream_bypass_is_anchored_to_api_prefix(
+        self, temp_graph_file, temp_static_dirs, tmp_path
+    ):
+        from backend.api_host import AppConfig, create_app
+
+        web_path, widget_path = temp_static_dirs
+        config = AppConfig(
+            graph_file=temp_graph_file,
+            web_static_path=web_path,
+            widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
+            auth_enabled=True,
+            auth_password="password",
+        )
+        client = TestClient(create_app(config))
+
+        response = client.get("/admin/api/sessions/1234-5678/stream")
+
+        assert response.status_code == 401
 
 
 class TestSessionLookupRateLimit:
@@ -99,7 +119,7 @@ class TestSessionLookupRateLimit:
         assert resp.status_code == 429
 
     def test_rate_limit_keys_on_real_client_behind_proxy(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """With a trusted proxy, each real client gets its own budget and a
         client cannot spoof X-Forwarded-For to mint a fresh one."""
@@ -111,6 +131,7 @@ class TestSessionLookupRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -185,7 +206,7 @@ class TestLegacyStreamRateLimit:
         assert resp.status_code == 200
 
     def test_legacy_stream_rate_limit_keys_on_real_client_behind_proxy(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """Per-IP budget applies; clients cannot spoof X-Forwarded-For."""
         import os
@@ -198,6 +219,7 @@ class TestLegacyStreamRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -1066,7 +1088,7 @@ class TestImageIngestRateLimit:
     proxy every request would key on the proxy's own address instead."""
 
     @staticmethod
-    def _app_behind_proxy(temp_graph_file, temp_static_dirs, capacity: float):
+    def _app_behind_proxy(temp_graph_file, temp_static_dirs, tmp_path, capacity: float):
         from backend.api_host import create_app, AppConfig
         from backend.core.session_manager import _TokenBucket
 
@@ -1075,6 +1097,7 @@ class TestImageIngestRateLimit:
             graph_file=temp_graph_file,
             web_static_path=web_path,
             widget_static_path=widget_path,
+            sessions_dir=str(tmp_path / "sessions"),
             auth_enabled=False,
             trusted_proxy_hops=1,
         )
@@ -1096,9 +1119,11 @@ class TestImageIngestRateLimit:
         )
 
     def test_one_source_exhausting_its_budget_does_not_lock_out_another(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1").status_code == 200
@@ -1107,14 +1132,16 @@ class TestImageIngestRateLimit:
         assert self._upload(client, sid, "2.2.2.2").status_code == 200
 
     def test_budget_tracks_the_source_and_ignores_the_caller_supplied_client_id(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """Both halves together pin which of the two the key actually is: a new
         ``client_id`` on a spent source buys nothing, and the same ``client_id``
         on a fresh source is unaffected. The handler does not forward the
         browser's ``client_id`` into the throttle at all today, so this is the
         guard against a rewiring that starts to."""
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1", client_id="b1").status_code == 200
@@ -1122,16 +1149,18 @@ class TestImageIngestRateLimit:
         assert self._upload(client, sid, "2.2.2.2", client_id="b1").status_code == 200
 
     def test_spoofed_forwarded_for_entry_does_not_mint_a_fresh_budget(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         sid = client.post("/api/sessions", json={}).json()["id"]
 
         assert self._upload(client, sid, "1.1.1.1").status_code == 200
         assert self._upload(client, sid, "9.9.9.9, 1.1.1.1").status_code == 429
 
     def test_ops_traffic_cannot_drain_a_source_image_budget(
-        self, temp_graph_file, temp_static_dirs
+        self, temp_graph_file, temp_static_dirs, tmp_path
     ):
         """The image budget is keyed on a source address while the op bucket is
         keyed on self-declared client ids. They must not share a keyspace, or a
@@ -1139,7 +1168,9 @@ class TestImageIngestRateLimit:
         that victim's image budget through ``/ops``."""
         from backend.core.session_manager import _TokenBucket
 
-        client = self._app_behind_proxy(temp_graph_file, temp_static_dirs, capacity=1)
+        client = self._app_behind_proxy(
+            temp_graph_file, temp_static_dirs, tmp_path, capacity=1
+        )
         client.app.state.session_manager._bucket = _TokenBucket(1.0, 0.0)
         sid = client.post("/api/sessions", json={}).json()["id"]
 
@@ -1249,3 +1280,257 @@ class TestImageIngestBodyCap:
             headers={"content-type": "application/json"},
         )
         assert resp.status_code == 422
+
+
+class TestSessionsDirIsolation:
+    """Regression for the shared session store: ``app_config`` previously left
+    ``sessions_dir`` unset, so it fell back to a "sessions" directory next to
+    the ``NamedTemporaryFile`` graph path — bare ``/tmp`` — which every test
+    app in the process resolved to identically. Sessions leaked across test
+    files and runs, could push ``max_sessions``, and could flip a test that
+    asserts a fixed session id is absent."""
+
+    def test_app_config_puts_sessions_dir_under_this_tests_own_tmp_path(
+        self, app_config, tmp_path
+    ):
+        assert Path(app_config.sessions_dir).is_relative_to(tmp_path)
+
+    def _make_app(self, tmp_path: Path, name: str) -> TestClient:
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / name
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=str(root / "sessions"),
+            auth_enabled=False,
+        )
+        return TestClient(create_app(config))
+
+    def test_the_server_honours_an_explicit_sessions_dir(self, tmp_path):
+        """The knob a multi-instance deployment turns, pinned at the server.
+
+        Every other app in this class puts ``sessions_dir`` at
+        ``graph_parent/"sessions"`` — which is exactly what the derivation in
+        ``AppConfig.resolve_sessions_dir`` produces — so the two expressions
+        coincide and a server that resolved the config and then ignored it
+        would pass all of them. This one points the directory somewhere the
+        derivation cannot produce, which is the only way to tell them apart.
+
+        It matters beyond tidiness: sharing that directory is the whole
+        condition under which an MCP session survives being served by another
+        instance (see ``docs/CAPACITY.md`` and
+        ``backend/core/tests/test_multi_instance_acceptance.py``). A server
+        that ignored the override would silently give every instance its own
+        container-local session store.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "explicit"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        elsewhere = tmp_path / "somewhere-else" / "shared-sessions"
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=str(elsewhere),
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == elsewhere, (
+            "the server did not use the session directory it was configured "
+            "with, so SESSIONS_DIR does not reach the store and a "
+            "multi-instance deployment cannot point its instances at shared "
+            "storage"
+        )
+
+    def test_a_relative_data_graph_path_resolves_against_the_project_root(
+        self, monkeypatch
+    ):
+        """The branch the deployment rule names, which nothing else pins.
+
+        `get_graph_path()` resolves a relative ``GRAPH_FILE`` against the
+        project root when the file exists there OR the path contains
+        ``data/`` — the second is how the documented
+        ``data/active/graph.json`` lands on a first boot, with no file
+        present.
+
+        The branch is not unreached — ``test_multi_instance_acceptance.py``
+        constructs a bare ``AppConfig()``, whose default ``GRAPH_FILE`` is the
+        relative ``"graph.json"`` — but until this test nothing pinned its
+        OUTCOME, while ``docs/CAPACITY.md`` turns its multi-instance session
+        condition on it.
+
+        Note what the expected value is built from: the project root
+        directly, NOT ``get_graph_path()``. That matters, and
+        ``test_multi_instance_acceptance.py::
+        test_the_default_directory_is_derived_from_the_graph_path`` shows why:
+        it asserts ``resolve_sessions_dir() == get_graph_path().parent /
+        "sessions"``, the production method on both sides, so a change to the
+        resolution moves both sides together and the test cannot notice.
+        """
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        project_root = Path(__file__).resolve().parents[3]
+
+        # The `data/` clause is only distinguishable from `candidate.exists()`
+        # while this file is absent - and it is gitignored, so it IS absent in
+        # a clean checkout but present on any tree where the app has been run
+        # locally with the default GRAPH_FILE. Without this the test would
+        # quietly stop discriminating there rather than fail.
+        assert not (project_root / "data" / "active" / "graph.json").exists(), (
+            "this tree has a real data/active/graph.json, so the exists() "
+            "branch would carry this assertion and the data/ clause it is "
+            "written for would go untested"
+        )
+
+        resolved = AppConfig(graph_file="data/active/graph.json").resolve_sessions_dir()
+
+        assert resolved == project_root / "data" / "active" / "sessions", (
+            "a relative data/ graph path no longer resolves against the "
+            "project root, so the sessions directory moves with it and a "
+            "deployment's shared volume is no longer where the graph is"
+        )
+
+    def test_a_relative_non_data_graph_path_resolves_against_the_backend_dir(
+        self, monkeypatch
+    ):
+        """The other branch of the same rule, pinned the same way."""
+        from backend.api_host.config import AppConfig
+
+        monkeypatch.delenv("SESSIONS_DIR", raising=False)
+        backend_dir = Path(__file__).resolve().parents[2]
+
+        resolved = AppConfig(graph_file="nowhere/graph.json").resolve_sessions_dir()
+
+        assert resolved == backend_dir / "nowhere" / "sessions", (
+            "a relative non-data graph path no longer falls back to the "
+            "backend directory"
+        )
+
+    def test_the_server_derives_the_default_beside_the_graph(self, tmp_path):
+        """The other half of the same knob.
+
+        The test above pins that an explicit ``SESSIONS_DIR`` is honoured. This
+        one pins where the directory goes when it is NOT set — a server that
+        derived, say, ``graph_parent/"sess2"`` would still isolate two apps
+        from each other and would still honour an explicit override, so every
+        other test here would pass while the documented default was wrong.
+        """
+        from backend.api_host import create_app, AppConfig
+
+        root = tmp_path / "derived"
+        web_dir = root / "web"
+        widget_dir = root / "widget"
+        web_dir.mkdir(parents=True)
+        widget_dir.mkdir(parents=True)
+        (web_dir / "index.html").write_text("<html></html>")
+        (widget_dir / "index.html").write_text("<html></html>")
+        graph_file = root / "graph.json"
+        graph_file.write_text('{"nodes": [], "edges": []}')
+
+        config = AppConfig(
+            graph_file=str(graph_file),
+            web_static_path=str(web_dir),
+            widget_static_path=str(widget_dir),
+            sessions_dir=None,
+            auth_enabled=False,
+        )
+
+        app = create_app(config)
+
+        assert app.state.session_store._backend.directory == root / "sessions", (
+            "the server did not put the default session directory beside the "
+            "graph file, so docs/CAPACITY.md describes the wrong path for a "
+            "deployment that never sets SESSIONS_DIR"
+        )
+
+    def test_apps_that_omit_sessions_dir_but_share_a_graph_parent_do_share_a_store(
+        self, tmp_path
+    ):
+        """Reproduces the actual pre-fix mechanism: AppConfig.sessions_dir left
+        unset falls back to ``graph_path.parent / "sessions"`` (server.py), and
+        tempfile.NamedTemporaryFile() places every graph file directly under the
+        bare system temp dir by default — so two apps that both omit
+        sessions_dir end up pointed at the identical on-disk session store."""
+        from backend.api_host import create_app, AppConfig
+
+        shared_graph_parent = tmp_path / "shared-graph-parent"
+        shared_graph_parent.mkdir()
+
+        def make_app_without_sessions_dir(name: str) -> TestClient:
+            root = tmp_path / name
+            web_dir = root / "web"
+            widget_dir = root / "widget"
+            web_dir.mkdir(parents=True)
+            widget_dir.mkdir(parents=True)
+            (web_dir / "index.html").write_text("<html></html>")
+            (widget_dir / "index.html").write_text("<html></html>")
+            graph_file = shared_graph_parent / f"{name}-graph.json"
+            graph_file.write_text('{"nodes": [], "edges": []}')
+            config = AppConfig(
+                graph_file=str(graph_file),
+                web_static_path=str(web_dir),
+                widget_static_path=str(widget_dir),
+                auth_enabled=False,
+            )
+            return TestClient(create_app(config))
+
+        app_a = make_app_without_sessions_dir("app-a")
+        app_b = make_app_without_sessions_dir("app-b")
+
+        assert (
+            app_a.app.state.session_store._backend.directory
+            == app_b.app.state.session_store._backend.directory
+        )
+
+        sid = "1234-9999"
+        app_a.app.state.session_manager.get_or_create(sid)
+        assert app_b.get(f"/api/sessions/{sid}").status_code == 200
+
+    def test_two_independently_configured_apps_do_not_share_a_session_store(
+        self, tmp_path
+    ):
+        """This is the fixed state: every fixture/test app in this suite now
+        passes an explicit, per-app sessions_dir (see app_config and
+        test_app_empty_graph in conftest.py), so the leak mechanism the
+        previous test reproduces cannot occur in the actual test suite."""
+        app_a = self._make_app(tmp_path, "app-a")
+        app_b = self._make_app(tmp_path, "app-b")
+
+        sid = "1234-5678"
+        app_a.app.state.session_manager.get_or_create(sid)
+        resp = app_a.post(
+            f"/api/sessions/{sid}/ops",
+            json={
+                "client_id": "c1",
+                "ops": [{"op": "nodes_added", "node_ids": ["node-x"]}],
+            },
+        )
+        assert resp.status_code == 200
+
+        assert app_a.get(f"/api/sessions/{sid}").status_code == 200
+        # A session materialised in app A's store must stay invisible to a
+        # second, independently configured app using the same id.
+        assert app_b.get(f"/api/sessions/{sid}").status_code == 404

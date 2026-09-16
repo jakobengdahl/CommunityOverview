@@ -105,7 +105,13 @@ def create_app(
     # Initialize graph storage if not provided
     if graph_storage is None:
         graph_path = config.get_graph_path()
-        graph_storage = GraphStorage(str(graph_path))
+        embeddings_path = config.get_embeddings_path()
+        graph_storage = GraphStorage(
+            str(graph_path),
+            embeddings_path=str(embeddings_path) if embeddings_path else None,
+            history_max_events=config.history_max_events,
+            history_max_age_days=config.history_max_age_days,
+        )
 
     def _on_federated_node_event(operation, before_node, after_node):
         graph_storage.emit_federated_node_event(
@@ -203,9 +209,7 @@ def create_app(
     # channel below is kept only to deliver MCP visualization pushes to the browser
     # (design §3.8) — the browser no longer uploads canvas state, MCP tools read it
     # from this store.
-    sessions_dir = config.sessions_dir or str(
-        config.get_graph_path().parent / "sessions"
-    )
+    sessions_dir = str(config.resolve_sessions_dir())
     session_store = SessionStore(FileSessionPersistenceBackend(sessions_dir))
     session_manager = SessionManager(session_store)
     app.state.session_store = session_store
