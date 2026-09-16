@@ -61,9 +61,15 @@ function SettingsDialog({ stats, onExportGraph, onClose }) {
 
   return (
     <div className="settings-dialog-overlay" onClick={onClose}>
-      <div className="settings-dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="settings-dialog-header">
-          <h3>{t('settings.title')}</h3>
+          <h3 id="settings-dialog-title">{t('settings.title')}</h3>
           <button
             className="settings-dialog-close"
             onClick={onClose}

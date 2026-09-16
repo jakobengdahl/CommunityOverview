@@ -4,9 +4,19 @@
 # First install core requirements
 -r requirements.txt
 
+# The optional PostgreSQL backend, so its contract tests can run. The
+# tests skip themselves when no server is reachable, so installing this
+# does not oblige anyone to run one.
+-r requirements-postgres.txt
+
 # Testing
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+# A test that deadlocks - a re-entrant lock taken twice, a background thread
+# waited on under the lock it needs - would otherwise stall the CI job until
+# the runner kills it, with no red test to name. The per-test ceiling is set
+# in pyproject.toml, well above anything the suite legitimately takes.
+pytest-timeout>=2.1.0
 
 # Linting and formatting (replaces black; config in root pyproject.toml).
 # Pinned to the 0.15 line so `ruff format` output matches the CI pin

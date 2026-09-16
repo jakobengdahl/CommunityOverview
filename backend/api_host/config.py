@@ -19,8 +19,34 @@ class AppConfig:
     graph_file: str = field(
         default_factory=lambda: os.getenv("GRAPH_FILE", "graph.json")
     )
+    # Binary sidecar holding the node embedding vectors. Unset means "next to
+    # the graph file", which is what a standalone deployment wants.
     embeddings_file: Optional[str] = field(
         default_factory=lambda: os.getenv("EMBEDDINGS_FILE")
+    )
+
+    # Mutation-history retention. The GraphHistoryStore library default is
+    # unbounded, deliberately — an audit trail is not something a library should
+    # silently truncate. The application picks the open-core policy here.
+    #
+    # HISTORY_MAX_EVENTS bounds the sidecar so it cannot grow without limit; 0
+    # removes the count cap, which keeps every record unless HISTORY_MAX_AGE_DAYS
+    # is also set. The default is generous so a typical deployment is not trimmed
+    # on upgrade, but it is a cap rather than a promise: a sidecar already holding
+    # more than this loses the excess on the first compaction.
+    #
+    # HISTORY_MAX_AGE_DAYS is opt-in and unset by default. "Delete records older
+    # than X" is a retention policy an operator has to choose, not one to
+    # inherit from a default.
+    history_max_events: int = field(
+        default_factory=lambda: int(os.getenv("HISTORY_MAX_EVENTS") or "100000")
+    )
+    history_max_age_days: Optional[float] = field(
+        default_factory=lambda: (
+            float(os.environ["HISTORY_MAX_AGE_DAYS"])
+            if os.getenv("HISTORY_MAX_AGE_DAYS")
+            else None
+        )
     )
 
     # Shared-session store directory (one JSON file per session). Defaults to a
@@ -132,3 +158,30 @@ class AppConfig:
                 backend_dir = Path(__file__).parent.parent
                 graph_path = backend_dir / self.graph_file
         return graph_path
+
+    def resolve_sessions_dir(self) -> Path:
+        """Where shared-session files live.
+
+        `SESSIONS_DIR` when set, otherwise a `sessions` directory beside the
+        graph file. Defined here rather than inline at the call site because
+        it is the whole of the multi-instance session condition in
+        `docs/CAPACITY.md`: whether several instances share sessions is
+        decided by whether THIS path is on shared storage, and a rule stated
+        in a deployment document needs one definition that a test can reach.
+        """
+        if self.sessions_dir:
+            return Path(self.sessions_dir)
+        return self.get_graph_path().parent / "sessions"
+
+    def get_embeddings_path(self) -> Optional[Path]:
+        """Resolved path to the embedding sidecar, or None to derive it.
+
+        A relative EMBEDDINGS_FILE is resolved against the graph file's
+        directory, so the pair stays together on a mounted data volume.
+        """
+        if not self.embeddings_file:
+            return None
+        path = Path(self.embeddings_file)
+        if path.is_absolute():
+            return path
+        return self.get_graph_path().parent / path

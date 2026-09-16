@@ -17,8 +17,6 @@ Covers:
 - Invalid session ID rejection
 """
 
-import asyncio
-
 import pytest
 
 from fastapi.testclient import TestClient
@@ -29,16 +27,8 @@ def _open_browser(test_app: TestClient, session_id: str) -> None:
 
     In production the browser opens ``GET /sessions/{id}/stream`` on load, which
     calls ``registry.get_or_create``. Tests can't easily hold an SSE stream open,
-    so we materialise the registry entry directly. The file-backed store lives in
-    a shared temp dir, so first clear any session a previous run left on disk to
-    keep the id a clean slate.
-
-    ``delete_session`` is async (R10: it takes the same per-session lock as
-    ``apply_ops`` to avoid a delete/in-flight-batch race) but this helper is
-    called from plain sync test functions, so it is run to completion via a
-    throwaway event loop rather than awaited.
+    so we materialise the registry entry directly.
     """
-    asyncio.run(test_app.app.state.session_manager.delete_session(session_id))
     test_app.app.state.session_registry.get_or_create(session_id)
 
 
@@ -48,25 +38,14 @@ def headless_session(test_app: TestClient):
 
     Deliberately leaves the push registry untouched — these tests are about a
     session that exists server-side and has never had a client.
-
-    Each call mints a fresh random id in the file-backed store, which is shared
-    across test files and runs and counts toward ``max_sessions``, so the
-    fixture deletes what it created rather than leaving a session per run
-    behind.
     """
-    created = []
 
     def _create() -> str:
         result = test_app.app.state.tools_map["create_visualization_session"]()
         assert result["success"] is True
-        session_id = result["session"]["session_id"]
-        created.append(session_id)
-        return session_id
+        return result["session"]["session_id"]
 
-    yield _create
-
-    for session_id in created:
-        asyncio.run(test_app.app.state.session_manager.delete_session(session_id))
+    return _create
 
 
 def _add_nodes(test_app: TestClient, session_id: str, node_ids) -> None:
@@ -86,9 +65,6 @@ class TestConnectToVisualizationSession:
     """MCP tool: connect_to_visualization_session"""
 
     def test_returns_not_connected_for_unknown_session(self, test_app: TestClient):
-        # Absence assertion against the shared, cross-run store — clear any
-        # leftover first (see _open_browser).
-        asyncio.run(test_app.app.state.session_manager.delete_session("9999-9999"))
         response = test_app.post(
             "/execute_tool",
             json={
@@ -358,10 +334,6 @@ class TestHeadlessSessionAddressability:
     ):
         """The relaxed gate must not turn any well-formed id into a hit."""
         unknown = "1010-2020-3030-4040"
-        # The file-backed store is shared across test files and runs, and this
-        # test asserts the *absence* of a session — so clear any leftover first
-        # (same hazard _open_browser documents).
-        asyncio.run(test_app.app.state.session_manager.delete_session(unknown))
 
         connect = test_app.post(
             "/execute_tool",
@@ -394,7 +366,6 @@ class TestClearVisualization:
         """An id that names no session is not-found, per contract §8 — not
         "exists but unwatched"."""
         clear = test_app.app.state.tools_map["clear_visualization"]
-        asyncio.run(test_app.app.state.session_manager.delete_session("0000-1111"))
 
         data = clear(visualization_session_id="0000-1111")
 

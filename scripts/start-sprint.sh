@@ -130,6 +130,10 @@ if [ ! -f "$ACTIVE_DATA" ]; then
     else
         echo '{"nodes":[],"edges":[],"metadata":{"version":"1.0"}}' > "$ACTIVE_DATA"
     fi
+    # A journal left behind by a previous graph would be replayed onto this
+    # seed at startup (docs/DATA_MANAGEMENT.md, Graph Journal). Only here,
+    # after a replacement is in place - never on an ordinary start.
+    rm -f "${ACTIVE_DATA%.*}.journal.ndjson"
 fi
 
 export GRAPH_FILE="$ACTIVE_DATA"

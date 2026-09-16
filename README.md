@@ -115,6 +115,7 @@ See [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) for a full user-facing walkthroug
     default.json                  # Default example dataset
   /active                         # Active data used at runtime (git-ignored)
     graph.json                    # Currently active graph file
+    graph.journal.ndjson          # Mutations not yet folded into graph.json
 /frontend                         # Frontend applications
   /web                            # React web application
     /src/components               # UI components (ChatPanel, etc.)

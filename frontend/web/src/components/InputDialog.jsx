@@ -45,9 +45,16 @@ function InputDialog({
 
   return (
     <div className="input-dialog-overlay" onClick={onCancel}>
-      <div className="input-dialog" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
+      <div
+        className="input-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="input-dialog-title"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
+      >
         <div className="input-dialog-header">
-          <h3>{title}</h3>
+          <h3 id="input-dialog-title">{title}</h3>
         </div>
 
         <div className="input-dialog-content">

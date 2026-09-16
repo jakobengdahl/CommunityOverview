@@ -9,7 +9,10 @@ data/
   examples/          # Example graph data files (tracked in git)
     default.json     # Default example dataset
   active/            # Active graph data used by the running app (git-ignored)
-    graph.json       # Currently active graph file
+    graph.json              # Currently active graph file
+    graph.journal.ndjson    # Mutations not yet folded into graph.json (see below)
+    graph.embeddings.bin    # Embedding vectors for that graph (see below)
+    graph.history.ndjson    # Mutation history sidecar
 ```
 
 ## How It Works
@@ -156,11 +159,201 @@ All domain node types support an optional **subtypes** field for sub-classificat
 
 Domain types can be freely modified, added, or removed in the schema configuration file. System types are integral to application functionality and should not be removed. See [PROFILES.md](./PROFILES.md) for how to create custom profiles with different node types.
 
+## Embedding Sidecar
+
+Semantic search needs a vector per node. Those vectors are **not** part of the
+graph file — they live in a separate binary file next to it, by default
+`<graph stem>.embeddings.bin` (so `data/active/graph.embeddings.bin` for the
+default layout), overridable with `EMBEDDINGS_FILE`.
+
+They are kept out of `graph.json` because a 384-dimension vector costs about
+1.5 kB as float32 and roughly 7.5x that as JSON text. Written into the graph
+file, they dominated it, and every graph mutation rewrote all of them even when
+none had changed. The sidecar is rewritten only when a vector actually changes.
+
+What this means in practice:
+
+- **Backup.** Back up the sidecar alongside `graph.json`. It is the only copy
+  of the vectors.
+- **Restore.** A restore without the sidecar still works: the graph loads, and
+  semantic search returns nothing until the vectors are regenerated. A sidecar
+  that cannot be read is ignored with a warning for the same reason — the graph
+  never fails to load because of it. Regenerate with
+  `python scripts/generate_embeddings.py`, which needs the optional ML extras
+  (`pip install -r backend/requirements-ml.txt`). That script and
+  `scripts/migrate_embeddings.py` both honour `EMBEDDINGS_FILE`, and take
+  `--embeddings-file` to override it, so they act on the same sidecar the
+  running app reads.
+- **Migration.** A `graph.json` written before the split still carries its
+  vectors inline. Those are read on load and moved into the sidecar on the next
+  save; nothing needs to be run by hand.
+- **Portability.** Vectors are derived from node text, so a graph file moved
+  without its sidecar is complete data — only the search index is missing.
+- **Replacing the graph.** A sidecar belongs to the graph it was built from.
+  Swapping in a different dataset while leaving the old sidecar in place would
+  give any node id present in both the *old* dataset's vector, and nothing
+  regenerates a vector for a node that is only loaded. `start-dev.sh` deletes
+  the sidecar whenever it puts a different graph in place — `--data`, or seeding
+  a missing `graph.json` from a profile or example — and follows
+  `EMBEDDINGS_FILE` when doing so. It deletes the graph journal at the same
+  points (see *Graph Journal* below). Do the same when replacing a graph file
+  by hand.
+
+## Graph Journal
+
+`graph.json` is the graph, and it is still written whole and atomically (a temp
+file, then a rename). What changed is *when*. A mutation no longer rewrites it:
+it is appended as one JSON line to `graph.journal.ndjson` beside it, with an
+`fsync`, so a one-word edit to a large graph costs one small append rather than
+a serialisation of every node. The journal is folded back into `graph.json` — a
+**checkpoint** — every 100 mutations, whenever the app flushes, and at shutdown.
+On startup the app reads `graph.json` and replays whatever the journal holds.
+
+What this means in practice:
+
+- **Durability.** Nothing the backend has written is lost on a crash. (What
+  a crash can lose is a write still queued behind the app's single writer
+  thread — the same window the whole-file write always had.) A crash
+  mid-append leaves an incomplete last line, which is detected, dropped
+  whole and cut off the file at the next start — a
+  multi-entity mutation is one line, so it lands entirely or not at all. A
+  crash mid-checkpoint leaves the previous `graph.json` intact (the rename is
+  atomic) and the journal still complete; replaying it onto a snapshot that
+  already contains its records is harmless.
+- **`graph.json` on its own is the graph as of the last checkpoint.** After a
+  clean shutdown the journal is empty and `graph.json` is complete; a
+  checkpoint that fails at shutdown is reported in the log, and the journal
+  then still holds the difference. While the
+  app is running, or after a crash, the journal holds the difference. **Back up
+  the journal alongside `graph.json`**, or checkpoint first; a copy of
+  `graph.json` taken while the journal is non-empty is behind by up to 100
+  mutations.
+- **Replacing the graph.** A journal belongs to the graph it was written
+  against. Replayed onto a different dataset it would resurrect nodes of the
+  old one and overwrite same-id nodes of the new one with stale payloads. So
+  `graph.json` carries a `journal_id` in its metadata — minted the first time
+  the app writes the file — and every journal line names the id it extends.
+  The id is kept for the file's lifetime, with one exception: if the
+  checkpoint that mints it writes the snapshot but is interrupted before it
+  empties the journal, that id sits in `graph.json` beside a journal that
+  still predates it — refused at load like any other mismatch, described
+  below — and the next successful append mints and writes a replacement,
+  superseding it once the journal is emptied too. No journal line ever names
+  the superseded id, so nothing already acknowledged is lost, but it is not
+  the id the file ends up keeping. A journal whose lines name a different id,
+  or none where the file has one, or one where the file has none, is **refused at
+  startup** with a message naming both ids; the graph is not loaded, and
+  nothing is deleted. If you replaced
+  `graph.json` on purpose, delete the journal (its mutations belong to the old
+  graph); if not, put back the `graph.json` it belongs to. One more shape
+  reads the same way: a journal whose lines carry *no* id beside a stamped
+  file, where nobody replaced anything, is the write that stamped the file
+  (a checkpoint, which folds those lines in first, or a whole-graph save,
+  which supersedes them) interrupted before it emptied the journal — either
+  way deleting the journal loses nothing; the message says so. `start-dev.sh`
+  still deletes the journal whenever it puts a different graph in place, for
+  the same reasons and at the same points as the embedding sidecar, and doing
+  the same when replacing `graph.json` by hand saves a refused start.
+  A `graph.json` from before the stamp loads as before: with a journal from
+  before the stamp it replays, and the file is stamped at the next
+  checkpoint — which happens before the first new mutation is journaled.
+  The id identifies the file's *lineage*, not a point in time: a copy of
+  `graph.json` taken after the file was stamped, restored beside a newer
+  journal of the same lineage, replays that journal — the crash-recovery
+  shape, and correct only if the copy is older than the journal. A copy
+  taken *before* the stamp (a pre-upgrade backup) has no id, so a stamped
+  journal beside it is refused: put the stamped `graph.json` back, or accept
+  losing the journal. The backup guidance above stands.
+- **Damage.** An incomplete or unreadable *last* line is the crash shape and
+  is skipped with a warning. An unreadable line anywhere else is not, and the
+  records after it may depend on it, so the app refuses to load and names the
+  line rather than silently losing mutations; `graph.json` still holds the
+  graph as of the last checkpoint.
+- **Object-store mounts.** On a FUSE-mounted bucket an append re-uploads the
+  file, so the journal's cost there is proportional to its size — which the
+  checkpoint cadence keeps small.
+
+## Mutation History
+
+Every graph mutation is appended to a history sidecar next to the graph file
+(`graph.history.ndjson` for the default layout). It is an audit trail: append-only,
+newest records last, one self-contained JSON record per line.
+
+**Retention.** The sidecar is capped at `HISTORY_MAX_EVENTS` records (default
+100000). When the cap is exceeded, a compaction pass rewrites the file keeping the
+newest N, atomically. `HISTORY_MAX_AGE_DAYS` additionally drops records older than
+a given age; it is unset by default, because "delete records older than X" is a
+retention policy an operator should choose rather than inherit. Setting
+`HISTORY_MAX_EVENTS=0` removes the count cap; trimming then stops altogether
+unless `HISTORY_MAX_AGE_DAYS` is also set, in which case age-based trimming
+still runs. **To keep every record you must set `HISTORY_MAX_EVENTS=0`
+explicitly and leave `HISTORY_MAX_AGE_DAYS` unset** — leaving both unset
+applies the default cap, it does not disable trimming.
+
+The default is deliberately generous, so that upgrading a typical deployment does
+not trim anything. It is a cap, not a promise: a sidecar that already holds more
+than `HISTORY_MAX_EVENTS` records loses the excess on the first compaction after
+the upgrade. Set `HISTORY_MAX_EVENTS=0` before upgrading if that matters. Note
+also that the resulting file size depends on the record size, so the cap bounds
+the record count rather than the bytes directly.
+
+**When trimming runs.** A compaction pass reads and rewrites the whole sidecar
+while holding the store lock, so it is throttled rather than run on every append:
+once per tenth of the records the previous pass left on disk. Deriving it from
+the file rather than from the cap keeps the work per mutation roughly constant at
+any size — on the order of twenty records read per append, since a pass makes two
+forward passes plus the rewrite — including under age-based retention, where
+there is no count cap to derive it from. The cost is a bounded overshoot — between passes the sidecar holds what
+retention keeps plus at most one interval, about 110%.
+
+One consequence worth knowing if you rely on `HISTORY_MAX_AGE_DAYS`: passes are
+counted in mutations, never in time. A record past the cutoff survives until the
+next pass — up to a tenth of the history's worth of appends — so on a quiet
+instance aged-out records stay on disk indefinitely. Age retention bounds records
+in mutations, not in wall-clock time; it is not a deletion deadline.
+
+**Reads.** History queries return a page at a time and read the file backwards, so
+answering one costs memory proportional to the page rather than to the file. That
+matters on a small container: the previous implementation parsed every record to
+return the newest 50.
+
+**What a record holds.** A **node** update record keeps the `patch` — the fields
+that actually changed — plus, in `before` and `after`, those same fields and the
+entity's display name. That is exactly what the history views read: the name to
+title the entry, and each patched field's before-value to render a
+`before → after` diff. Fields the mutation left alone are not repeated into the
+record, so a one-word edit to a large node costs a small record rather than two
+copies of the node.
+
+Every other record keeps both snapshots whole. Creates and deletes have no patch
+that could describe what appeared or vanished. Edge updates have no patch either
+— one is currently computed for node updates only — so the views fall back to
+diffing the pair, which needs both sides intact.
+
+An `embedding` is dropped from every payload of every record the current code
+writes. Vectors live in the embedding sidecar; a copy here would put them back
+into every mutation record. Note that this is not retroactive: an instance that
+ran history before the vectors moved to the sidecar wrote records with the vector
+inline, and those records are left as they are (see below).
+
+Older records — written before the trimming, or before the sidecar — keep their
+full snapshots and whatever they carried at the time. They are read exactly as
+they always were, since the record shape did not change, only how much of it is
+filled in. No migration is needed for correctness and none is offered; an
+operator who wants the old vectors out of the sidecar can truncate or discard the
+history file, which the graph does not depend on.
+
+**Backup.** The sidecar is independent of `graph.json` and can be backed up,
+truncated or discarded on its own; the graph does not depend on it.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GRAPH_FILE` | `data/active/graph.json` | Path to the active graph file |
+| `EMBEDDINGS_FILE` | `<graph stem>.embeddings.bin` next to the graph | Path to the binary embedding sidecar (see *Embedding Sidecar* above) |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (see *Mutation History* above); `0` removes the count cap |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Age-based history retention, opt-in |
 | `GRAPH_SCHEMA_CONFIG` | `config/default/schema_config.json` | Path to schema configuration |
 | `SCHEMA_FILE` | *(auto-resolved from profile)* | Alternative env var for schema path |
 
@@ -178,4 +371,4 @@ For the long-term shared SaaS architecture, the target is different:
 - user access to graphs should be controlled through application-managed identity and authorization
 - the storage layer should eventually support shared persistence with row-based or equivalent record-level access constraints
 
-That future storage direction is not implemented by this document. Its purpose here is only to clarify that file-based graph storage is a current implementation choice, not the intended final architecture for shared SaaS hosting.
+That future storage direction is not implemented by this document. Its purpose here is only to clarify that file-based graph storage is a current implementation choice, not the intended final architecture for shared SaaS hosting. The seam a shared backend plugs into — and what it has to implement — is described in [PERSISTENCE_BACKENDS.md](./PERSISTENCE_BACKENDS.md).
