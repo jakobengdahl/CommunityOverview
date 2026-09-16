@@ -55,6 +55,41 @@ class AppConfig:
         default_factory=lambda: os.getenv("SESSIONS_DIR")
     )
 
+    # Which persistence backend holds the graph. "file" is the default and is
+    # what every deployment has run so far: the JSON file at GRAPH_FILE.
+    # "postgres" selects the shared store that lets several instances write one
+    # graph, and needs GRAPH_POSTGRES_DSN plus the psycopg extra in
+    # backend/requirements-postgres.txt.
+    #
+    # An unrecognised value is an error rather than a fallback to "file". A
+    # deployment that meant to move to PostgreSQL and typed the name wrong
+    # would otherwise boot happily on the file backend and look correct until
+    # the second instance started.
+    graph_backend: str = field(
+        default_factory=lambda: os.getenv("GRAPH_BACKEND", "file").strip().lower()
+    )
+    # libpq connection string for graph_backend="postgres". Carries a password
+    # in most deployments, so it comes from the environment (Secret Manager on
+    # Cloud Run) and is never logged.
+    graph_postgres_dsn: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_DSN")
+    )
+    # One database can hold several independent graphs, one per schema.
+    graph_postgres_schema: str = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCHEMA", "public")
+    )
+    # Connections this instance may hold, on top of the one LISTEN connection
+    # the backend keeps for change notification. Unset uses the backend's own
+    # default. docs/CAPACITY.md has the budget: stock PostgreSQL allows 100
+    # with 3 reserved, so N instances must fit (pool_size + 1) * N under that.
+    graph_postgres_pool_size: Optional[int] = field(
+        default_factory=lambda: (
+            int(os.environ["GRAPH_POSTGRES_POOL_SIZE"])
+            if os.getenv("GRAPH_POSTGRES_POOL_SIZE")
+            else None
+        )
+    )
+
     # Server configuration
     host: str = field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
