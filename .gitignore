@@ -72,6 +72,15 @@ data/active/sessions/
 /graph.json
 /backend/graph.json
 
+# Mutation history and the write journal - the same shape as the embedding
+# sidecar below: GraphStorage writes them next to whichever graph file is in
+# use, so match them by name rather than by any one location. The data/active/
+# copies above stay for clarity; these cover the repo root, which is where a
+# default relative GRAPH_FILE lands and therefore where `pytest backend/ -q`
+# leaves them.
+*.history.ndjson
+*.journal.ndjson
+
 # Embedding sidecar - derived data, written next to whichever graph file is in
 # use, so match it by name rather than by any one of those locations.
 *.embeddings.bin
