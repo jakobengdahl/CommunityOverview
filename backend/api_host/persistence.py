@@ -52,9 +52,9 @@ def build_persistence_backend(config: AppConfig):
 
     # Normalised once, then used. Detecting the whitespace without removing
     # it is worse than not looking: libpq treats a string as a URI only when
-    # it STARTS with postgresql://, so one leading space demotes it to
-    # keyword/value parsing, and the resulting error quotes the whole
-    # connection string back - password included - into the process log.
+    # it STARTS with postgresql:// (or postgres://), so one leading space
+    # demotes it to keyword/value parsing, and the resulting error quotes
+    # the whole connection string back - password included - into the log.
     # An unset secret rendered into the environment also arrives as "", and
     # an empty DSN is no DSN.
     dsn = (config.graph_postgres_dsn or "").strip()
@@ -62,6 +62,17 @@ def build_persistence_backend(config: AppConfig):
         raise PersistenceConfigurationError(
             "GRAPH_BACKEND=postgres needs GRAPH_POSTGRES_DSN, which is unset "
             "or empty. It is the libpq connection string for the graph store."
+        )
+
+    # Checked before the import, so a misconfiguration is diagnosable on a
+    # clone without the optional extra. The backend rejects this too, but its
+    # ValueError names `pool_size`, which is not what an operator set.
+    pool_size = config.graph_postgres_pool_size
+    if pool_size is not None and pool_size < 1:
+        raise PersistenceConfigurationError(
+            f"GRAPH_POSTGRES_POOL_SIZE={pool_size} is not usable; it is "
+            "the number of connections this instance may hold, so it must "
+            "be at least 1."
         )
 
     try:
@@ -74,17 +85,7 @@ def build_persistence_backend(config: AppConfig):
         ) from exc
 
     kwargs = {"schema": config.graph_postgres_schema}
-    pool_size = config.graph_postgres_pool_size
     if pool_size is not None:
-        # The backend rejects this too, but its ValueError names `pool_size`,
-        # which is not what an operator set. Refuse here so the message names
-        # the variable they can actually change.
-        if pool_size < 1:
-            raise PersistenceConfigurationError(
-                f"GRAPH_POSTGRES_POOL_SIZE={pool_size} is not usable; it is "
-                "the number of connections this instance may hold, so it must "
-                "be at least 1."
-            )
         kwargs["pool_size"] = pool_size
 
     return PostgresGraphPersistenceBackend(dsn, **kwargs)

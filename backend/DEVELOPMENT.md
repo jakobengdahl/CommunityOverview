@@ -202,8 +202,8 @@ uvicorn backend.api_host.server:get_app --factory --host 0.0.0.0 --port 8000
 | `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required when `GRAPH_BACKEND=postgres` |
 | `GRAPH_POSTGRES_SCHEMA` | `public` | Schema holding the graph tables; one database can serve several graphs |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Pooled connections per instance, on top of one dedicated `LISTEN` connection; must be at least 1 |
-| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained; `0` removes the count cap (age trimming, if configured, still applies) |
-| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days; unset keeps them regardless of age |
+| `HISTORY_MAX_EVENTS` | `100000` | Mutation-history records retained (file backend only — a non-file `GRAPH_BACKEND` keeps no history); `0` removes the count cap (age trimming, if configured, still applies) |
+| `HISTORY_MAX_AGE_DAYS` | *(unset)* | Drop history records older than this many days (file backend only); unset keeps them regardless of age |
 | `API_PREFIX` | `/api` | REST API URL prefix |
 | `MCP_NAME` | `community-graph` | MCP server name |
 | `OPENAI_API_KEY` | - | OpenAI API key (for chat) |

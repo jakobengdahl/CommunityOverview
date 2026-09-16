@@ -591,11 +591,21 @@ matters most — a value of `postgresql` falling back to `file` would boot
 happily and look correct until a second instance started writing the same
 graph.
 
-**Selecting `postgres` moves the graph and nothing else.** Sessions stay
-file-backed in the directory `SESSIONS_DIR` names, or one derived from the
-graph path when it is unset. Two instances sharing a database but not that
-directory share a graph and not their sessions — see
-[CAPACITY.md](CAPACITY.md) for what that condition costs in practice.
+**Selecting `postgres` moves the graph and the node vectors, and stops two
+other things.** The vectors travel inline, as an `embedding` key on each node,
+rather than in the binary sidecar the file backend keeps beside `graph.json`.
+
+Sessions do not move. They stay file-backed in the directory `SESSIONS_DIR`
+names, or one derived from the graph path when it is unset, so two instances
+sharing a database but not that directory share a graph and not their
+sessions — see [CAPACITY.md](CAPACITY.md) for what that condition costs in
+practice.
+
+Mutation history stops. `GraphStorage` builds its history sidecar only for a
+file-backed store, so under `postgres` the `/api/history` endpoints return
+nothing and `HISTORY_MAX_EVENTS` and `HISTORY_MAX_AGE_DAYS` become inert. That
+is stated under *Vectors and history* above and is repeated here because this
+is the section an operator reads before flipping the switch.
 
 `GRAPH_POSTGRES_POOL_SIZE` is the one setting here with a ceiling to fit
 under rather than a value to pick freely. *Sizing it: what an instance costs*,

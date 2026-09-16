@@ -179,7 +179,8 @@ class TestBackendSelection:
         """Detecting the whitespace without removing it is worse than not looking.
 
         libpq parses a string as a URI only when it STARTS with
-        `postgresql://`. One leading space demotes it to keyword/value
+        `postgresql://` (or `postgres://`). One leading space demotes it to
+        keyword/value
         parsing, and the resulting error quotes the whole connection string
         back — password included — into the process log, which the comment on
         `AppConfig.graph_postgres_dsn` promises never happens. Verified: the
@@ -325,6 +326,24 @@ class TestTheEnvironmentIsTheInterface:
         monkeypatch.delenv("GRAPH_POSTGRES_POOL_SIZE", raising=False)
         assert AppConfig().graph_postgres_pool_size is None
 
+    def test_a_negative_pool_size_survives_the_environment_intact(self, monkeypatch):
+        """Read as configured, then refused — never quietly rewritten.
+
+        Every other bad-pool-size test passes the value as a keyword and so
+        never runs the default_factory. An abs() there would turn -3 into a
+        working 3 and the operator would never learn their value was wrong.
+        """
+        monkeypatch.setenv("GRAPH_POSTGRES_POOL_SIZE", "-3")
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+        )
+        assert config.graph_postgres_pool_size == -3
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "-3" in str(exc.value)
+
     @pytest.mark.parametrize("blank", ["", "   "])
     def test_an_empty_pool_size_reads_as_unset(self, monkeypatch, blank):
         """`GRAPH_POSTGRES_POOL_SIZE=` is templated out, not set to nothing.
@@ -348,7 +367,13 @@ class TestRefusals:
         config = AppConfig(graph_file="graph.json", graph_backend=name)
         with pytest.raises(PersistenceConfigurationError) as exc:
             build_persistence_backend(config)
-        assert name in str(exc.value)
+        message = str(exc.value)
+        assert name in message
+        # The literal names, not `', '.join(SUPPORTED_BACKENDS)`: asserting
+        # against the constant is circular and survives shrinking it. This is
+        # the only thing telling an operator what to type instead.
+        assert "file" in message
+        assert "postgres" in message
 
     @pytest.mark.parametrize("dsn", ["", "   "])
     def test_an_empty_dsn_is_no_dsn(self, dsn):
@@ -374,7 +399,9 @@ class TestRefusals:
         )
         with pytest.raises(PersistenceConfigurationError) as exc:
             build_persistence_backend(config)
-        assert "GRAPH_POSTGRES_POOL_SIZE" in str(exc.value)
+        message = str(exc.value)
+        assert "GRAPH_POSTGRES_POOL_SIZE" in message
+        assert str(size) in message, "the message should echo what was set"
 
 
 class TestTheServerPropagatesAConfigurationError:
