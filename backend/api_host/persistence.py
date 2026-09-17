@@ -41,14 +41,39 @@ def build_persistence_backend(config: AppConfig):
     """
     backend = config.graph_backend
 
-    if backend == FILE_BACKEND:
-        return None
-
-    if backend != POSTGRES_BACKEND:
+    if backend not in SUPPORTED_BACKENDS:
         raise PersistenceConfigurationError(
             f"GRAPH_BACKEND={backend!r} is not a backend this build knows. "
             f"Supported: {', '.join(SUPPORTED_BACKENDS)}."
         )
+
+    # Before the file backend returns, because both of these are a scope that
+    # was asked for and cannot be honoured, and the failure they would
+    # otherwise reach is silence: an instance running with no isolation at all
+    # while its configuration says it has some. The backend refuses an empty
+    # scope too, but it never sees one of these - the first is refused before
+    # it is constructed and the second is never constructed at all - so the
+    # guard has to be here, where the operator's variable can be named. The
+    # pool-size guard below is the same shape for the same reason.
+    scope = config.graph_postgres_scope
+    if scope is not None and not scope.strip():
+        raise PersistenceConfigurationError(
+            "GRAPH_POSTGRES_SCOPE is set to an empty value. It is the opaque "
+            "identifier that decides which rows this instance may see, so an "
+            "empty one is not read as 'no scope wanted': unset the variable "
+            "to run without one."
+        )
+    if scope is not None and backend != POSTGRES_BACKEND:
+        raise PersistenceConfigurationError(
+            f"GRAPH_POSTGRES_SCOPE is set, and GRAPH_BACKEND={backend!r} has "
+            f"nowhere to apply it - the scope is a property of the PostgreSQL "
+            f"graph tables. Either set GRAPH_BACKEND=postgres or unset the "
+            f"scope; ignoring it would run this instance with no isolation "
+            f"while the configuration says it has some."
+        )
+
+    if backend == FILE_BACKEND:
+        return None
 
     # Normalised once, then used. Detecting the whitespace without removing
     # it is worse than not looking: libpq treats a string as a URI only when
@@ -89,8 +114,9 @@ def build_persistence_backend(config: AppConfig):
         kwargs["pool_size"] = pool_size
     # Passed only when it was set, so a deployment that names no scope
     # constructs the backend with exactly the arguments it did before the
-    # setting existed.
-    if config.graph_postgres_scope is not None:
-        kwargs["scope"] = config.graph_postgres_scope
+    # setting existed. Passed AS GIVEN: an opaque identifier is not this
+    # layer's to trim.
+    if scope is not None:
+        kwargs["scope"] = scope
 
     return PostgresGraphPersistenceBackend(dsn, **kwargs)

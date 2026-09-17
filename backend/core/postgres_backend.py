@@ -243,6 +243,21 @@ class ScopeIsolationUnavailable(RuntimeError):
     """
 
 
+class CrossScopeWriteRefused(RuntimeError):
+    """An entity write named an id that belongs to another scope.
+
+    `id` is the primary key of the table rather than of the table per scope,
+    so two scopes cannot both hold one id and a write that names another
+    scope's is not a write this instance may make. Raised rather than applied,
+    and rather than quietly skipped: applying it would destroy the other
+    scope's row - measured, with the row's content replaced and its scope
+    restamped - and skipping it would tell the caller a write happened that
+    did not. Where the policy is in force the server refuses the same write,
+    so this is the application layer agreeing with it rather than a second
+    rule.
+    """
+
+
 class PostgresGraphPersistenceBackend:
     """The graph in PostgreSQL: nodes, edges and metadata as JSONB rows.
 
@@ -1320,29 +1335,57 @@ class PostgresGraphPersistenceBackend:
             return
         columns, placeholders = self._insert_shape()
         if not self._scope_column:
-            update = sql.SQL("doc = EXCLUDED.doc")
-        # `id` is the primary key of the table, not of the table per scope, so
-        # a conflict here is a conflict with THE row of that id whatever scope
-        # it carries - there is no second row for this statement to reach past.
-        # That is the boundary the document states rather than a hole this
-        # could close: co-locating two scopes that both hold `n0` is not
-        # something the key permits, and the separation this backend offers for
-        # that is a schema each. Where the policy IS in force, the server
-        # refuses the conflicting row rather than letting it be taken over.
-        else:
-            # The scope travels with the row on an upsert too. A row written
-            # before this instance had a scope carries none, and adopting it
-            # here is what stops the store drifting into two kinds of row that
-            # the whole-graph save would then have to reconcile.
-            update = sql.SQL("doc = EXCLUDED.doc, {col} = EXCLUDED.{col}").format(
-                col=sql.Identifier(SCOPE_COLUMN)
+            conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} ({}) VALUES ({})"
+                    " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
+                ).format(self._table(table), columns, placeholders),
+                self._insert_params(operation.entity_id, operation.payload),
             )
-        conn.execute(
+            return
+        # The scope travels with the row. A row written before this instance
+        # had a scope carries none, and adopting it here is what stops the
+        # store drifting into two kinds of row that the whole-graph save would
+        # then have to reconcile.
+        #
+        # The predicate on the conflicting row is the same one every read
+        # carries, and it is what makes an upsert unable to reach a row that is
+        # not this instance's. `id` is the primary key of the TABLE rather than
+        # of the table per scope, so the conflicting row may belong to another
+        # scope - and without this the statement replaced its content and
+        # restamped its scope, which is a cross-scope write in the one path
+        # that had none. Measured before this predicate existed: the other
+        # scope's node was gone and its next load returned nothing.
+        #
+        # The row count is read rather than assumed, because a DO UPDATE whose
+        # WHERE does not match is not an error - the statement affects no rows
+        # and raises nothing, which would tell the caller a write happened that
+        # did not. Measured on PostgreSQL 16: 0 for exactly that case, and 1
+        # for a fresh insert, an own-scope update and a row carrying no scope.
+        cursor = conn.execute(
             sql.SQL(
-                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET {}"
-            ).format(self._table(table), columns, placeholders, update),
-            self._insert_params(operation.entity_id, operation.payload),
+                "INSERT INTO {} ({}) VALUES ({})"
+                " ON CONFLICT (id) DO UPDATE"
+                " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
+                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s)"
+            ).format(
+                self._table(table),
+                columns,
+                placeholders,
+                col=sql.Identifier(SCOPE_COLUMN),
+                bare=sql.Identifier(table),
+            ),
+            self._insert_params(operation.entity_id, operation.payload)
+            + (self._scope,),
         )
+        if cursor.rowcount == 0:
+            raise CrossScopeWriteRefused(
+                f"{operation.kind} {operation.entity_id!r} in schema "
+                f"{self.schema!r} carries a scope this instance may not write. "
+                f"An id is unique across the whole table, so two scopes cannot "
+                f"both hold one - see docs/PERSISTENCE_BACKENDS.md, "
+                f"'Keeping scopes apart'."
+            )
 
     # -- change notification -------------------------------------------------
 

@@ -89,11 +89,15 @@ class AppConfig:
     # behaves exactly as it did before this setting existed. What the value
     # distinguishes is the host's business: nothing here interprets it.
     #
-    # Empty reads as unset, the way GRAPH_BACKEND does above, because that is
-    # what a variable templated out of a compose file or a deploy command
-    # arrives as.
+    # Read RAW, and this is the one setting here that does not normalise. Empty
+    # does NOT read as unset the way GRAPH_BACKEND and the pool size do above,
+    # and the value is not stripped: both would turn an identifier the operator
+    # got wrong into a store that keeps nothing apart, or into a different
+    # scope than the one they set. `GRAPH_POSTGRES_SCOPE=` is refused at boot by
+    # build_persistence_backend instead - the direction a setting that decides
+    # which rows an instance can see has to be wrong in.
     graph_postgres_scope: Optional[str] = field(
-        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCOPE", "").strip() or None
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCOPE")
     )
     # Connections this instance may hold, on top of the one LISTEN connection
     # the backend keeps for change notification. Unset uses the backend's own

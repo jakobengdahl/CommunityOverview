@@ -66,6 +66,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     SCOPE_POLICY_SUFFIX,
     SCOPE_SETTING,
     SCOPED_TABLES,
+    CrossScopeWriteRefused,
     PostgresGraphPersistenceBackend,
     ScopeIsolationUnavailable,
     _channel_for,
@@ -6155,6 +6156,132 @@ class TestTheOptionalScopeSeam:
 
         assert _stored(schema, "graph_nodes") == {"old": "scope-a"}
 
+    def test_an_unscoped_instance_does_not_reach_a_scoped_row(self, schema, backends):
+        """The unscoped side of the same predicate, which is not symmetric
+        with the scoped side by accident.
+
+        An instance that named no scope sees rows carrying none - the set the
+        policy would show it - and NOT rows carrying one. The whole-graph save
+        is the half that matters: it deletes what the load returned, so an
+        instance reading every row would delete every row, and a scoped store
+        sharing the schema would lose its graph to a maintenance instance that
+        only meant to re-save its own.
+        """
+        scoped = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        plain = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([scoped, plain])
+        scoped.upsert_node(node_payload("a"))
+
+        assert [n["id"] for n in plain.load_graph_data()["nodes"]] == []
+        plain.save_graph_data(snapshot([node_payload("b")]))
+
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a", "b": None}
+        assert [n["id"] for n in scoped.load_graph_data()["nodes"]] == ["a", "b"]
+
+    def test_a_scoped_instance_does_not_traverse_another_scopes_edge(
+        self, schema, backends
+    ):
+        """The edge half of the traversal's predicate, on its own.
+
+        Both endpoints belong to the traversing scope, so only the EDGE is out
+        of scope - which is what makes this fail for a backend that filters
+        nodes and forgets edges. Without it the walk returns an edge the
+        instance may not see, and with it the far node is unreachable by that
+        road.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("a1"))
+        a.upsert_node(node_payload("a2"))
+        b.upsert_edge(edge_payload("cross", "a1", "a2"))
+
+        found = a.traverse("a1", 3)
+        assert found["edge_ids"] == [], (
+            "the walk returned an edge belonging to another scope"
+        )
+        assert found["node_ids"] == ["a1"]
+
+    def test_a_scoped_upsert_refuses_an_id_another_scope_holds(self, schema, backends):
+        """Through the suite's own DSN, where no policy applies - so this is
+        the application layer refusing, not the server.
+
+        `id` is unique across the table, so the conflicting row may be another
+        scope's, and an upsert is the one write path where the predicate cannot
+        simply hide it: before the conflict carried one, the statement replaced
+        that row's content and restamped its scope, and the other scope's next
+        load returned nothing. A no-op would be no better - the caller would be
+        told a write happened that did not - so it raises.
+        """
+        a = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        b = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-b")
+        backends.extend([a, b])
+        a.upsert_node(node_payload("n0", name="A's own"))
+
+        with pytest.raises(CrossScopeWriteRefused) as raised:
+            b.upsert_node(node_payload("n0", name="B's version"))
+        assert "n0" in str(raised.value)
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        kept = by_id(a.load_graph_data(), "nodes")["n0"]
+        assert kept["name"] == "A's own", (
+            "another scope's upsert changed the row it may not write"
+        )
+
+    def test_an_upsert_still_adopts_a_row_that_carries_no_scope(self, schema, backends):
+        """The refusal above must not catch the case it shares a statement with.
+
+        A row written before a scope was configured carries none, and the
+        predicate admits it - so an upsert of it is this instance's to make,
+        and it takes the scope with it.
+        """
+        PostgresGraphPersistenceBackend(DSN, schema=schema).upsert_node(
+            node_payload("old", name="from before")
+        )
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        backend.upsert_node(node_payload("old", name="Renamed"))
+
+        assert _stored(schema, "graph_nodes") == {"old": "scope-a"}
+        assert by_id(backend.load_graph_data(), "nodes")["old"]["name"] == "Renamed"
+
+    def test_a_column_without_its_policy_is_reported_once_asked_for(
+        self, columnless, backends, capsys
+    ):
+        """The only thing that tells an operator the server enforces nothing.
+
+        The operator added the column and not the policy - the role owns
+        nothing, so the backend cannot add either - and a scope was configured.
+        The instance then runs on its own predicate alone, which is a fact
+        about that deployment that nothing else would state.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.Identifier(SCOPE_COLUMN),
+                    )
+                )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+        capsys.readouterr()
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        printed = capsys.readouterr().out
+        assert "not its row-level security policy" in printed, (
+            f"nothing said the server enforces nothing: {printed}"
+        )
+        for table in SCOPED_TABLES:
+            assert table in printed
+        # And it runs: the application's predicate is what holds here.
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+
     # -- optional, and what happens when it cannot be provisioned ------------
 
     def test_a_store_without_the_column_is_read_and_written_as_it_was(
@@ -6281,7 +6408,13 @@ class TestTheOptionalScopeSeam:
             left = conn.execute(
                 "SELECT current_setting(%s, true)", (SCOPE_SETTING,)
             ).fetchone()[0]
-        assert left in (None, ""), f"the scope outlived its transaction: {left!r}"
+        # Falsy rather than None: measured on PostgreSQL 16, a placeholder GUC
+        # that has been set locally and reverted reads back as the empty string
+        # rather than as unset, so asserting None would fail for correct code.
+        # What matters is that no scope survives, and the empty string cannot
+        # BE a scope - the constructor refuses one, and so does the
+        # configuration layer - so it cannot match a row this instance wrote.
+        assert not left, f"the scope outlived its transaction: {left!r}"
 
     # Small enough to seed in a test and large enough that the planner
     # prefers the expression indexes over reading the table: measured on this
@@ -6424,7 +6557,7 @@ class TestTheOptionalScopeSeam:
         # seam on later without rewriting a table full of rows.
         assert _stored(schema, "graph_nodes") == {"a": None}
 
-    def test_a_provisioning_step_that_fails_leaves_the_store_readable(
+    def test_a_provisioning_step_that_fails_leaves_nothing_half_done(
         self, schema, backends, monkeypatch
     ):
         """Row-level security with no policy admits NOTHING.
@@ -6433,32 +6566,53 @@ class TestTheOptionalScopeSeam:
         to be one transaction: a store that ended up with the first and not
         the second would answer every query with an empty graph, and look
         exactly like a store whose data was gone.
+
+        WITH a scope configured, which is the only case that issues those
+        statements at all - the unscoped path returns before them, so the same
+        test without a scope refuses nothing, asserts that a store which never
+        tried is not half-way, and would pass with the two steps in either
+        order. The refusal count below is asserted for exactly that reason.
         """
         real = psycopg.Cursor.execute
+        refused = []
 
         def refuse(cur, query, params=None, *args, **kwargs):
             text = query if isinstance(query, str) else _rendered(query)
             if "ROW LEVEL SECURITY" in text.upper():
+                refused.append(text)
                 raise psycopg.errors.InsufficientPrivilege("refused for the test")
             return real(cur, query, params, *args, **kwargs)
 
         monkeypatch.setattr(psycopg.Cursor, "execute", refuse)
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
         backends.append(backend)
-        backend.save_graph_data(snapshot([node_payload("a")]))
+        # The rollback takes the ADD COLUMN with it, so the store ends with no
+        # column - and a scope with nowhere to go is the refusal, not a warning.
+        with pytest.raises(ScopeIsolationUnavailable):
+            backend.save_graph_data(snapshot([node_payload("a")]))
         monkeypatch.undo()
 
-        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+        assert refused, "no row-level-security statement was issued to refuse"
         with psycopg.connect(DSN, autocommit=True) as conn:
-            enabled = conn.execute(
-                "SELECT c.relrowsecurity FROM pg_class c"
-                " JOIN pg_namespace n ON n.oid = c.relnamespace"
-                " WHERE n.nspname = %s AND c.relname = 'graph_nodes'",
-                (schema,),
-            ).fetchone()[0]
-        assert not enabled, (
-            "row-level security was left enabled by a step that did not finish"
-        )
+            for table in SCOPED_TABLES:
+                enabled, policy = conn.execute(
+                    "SELECT c.relrowsecurity,"
+                    " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table),
+                ).fetchone()
+                assert not enabled, (
+                    f"{table} was left with row-level security enabled by a "
+                    f"step that did not finish"
+                )
+                assert not policy
+        # And an unscoped instance still reads and writes it, because the
+        # rollback left the table exactly as it found it.
+        plain = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(plain)
+        plain.save_graph_data(snapshot([node_payload("a")]))
+        assert [n["id"] for n in plain.load_graph_data()["nodes"]] == ["a"]
 
 
 class TestTheDocumentPublishesTheScopeSeam:
@@ -6470,9 +6624,12 @@ class TestTheDocumentPublishesTheScopeSeam:
     unreadable by the instance that is meant to read it.
     """
 
-    DOC = (
-        pathlib.Path(__file__).resolve().parents[3] / "docs" / "PERSISTENCE_BACKENDS.md"
-    )
+    ROOT = pathlib.Path(__file__).resolve().parents[3]
+    DOC = ROOT / "docs" / "PERSISTENCE_BACKENDS.md"
+    # The repo's canonical environment-variable table, which lists every
+    # sibling of this setting. It reads as exhaustive, so a variable missing
+    # from it reads as one that does not exist.
+    ENV_TABLE = ROOT / "backend" / "DEVELOPMENT.md"
 
     def test_the_document_names_what_the_code_uses(self):
         published = self.DOC.read_text(encoding="utf-8")
@@ -6485,3 +6642,16 @@ class TestTheDocumentPublishesTheScopeSeam:
                 f"the policy on {table} is not in the document an operator "
                 f"provisions from"
             )
+
+    def test_the_environment_table_lists_the_setting_beside_its_siblings(self):
+        """Pinned because the omission is invisible: the table listed the other
+        four `GRAPH_POSTGRES_*` variables and not this one, and nothing else
+        reads that file."""
+        listed = self.ENV_TABLE.read_text(encoding="utf-8")
+        assert "GRAPH_POSTGRES_POOL_SIZE" in listed, (
+            "this test is pinned to the wrong table"
+        )
+        assert "GRAPH_POSTGRES_SCOPE" in listed, (
+            "the setting is missing from the environment table that lists "
+            "every one of its siblings"
+        )

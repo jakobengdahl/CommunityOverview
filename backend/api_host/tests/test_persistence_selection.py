@@ -248,10 +248,15 @@ class TestBackendSelection:
         assert "pool_size" not in backend.kwargs
 
     @requires_backend_module
-    @pytest.mark.parametrize("scope", ["scope-a", "0198c1d4"])
+    @pytest.mark.parametrize("scope", ["scope-a", "0198c1d4", " padded ", "MiXeD"])
     def test_a_scope_reaches_the_backend(self, monkeypatch, scope):
         """Passed through as given: an opaque identifier, not something this
-        layer parses, shortens or lower-cases on the way."""
+        layer parses, shortens or lower-cases on the way.
+
+        The padded and mixed-case cases are the ones with teeth. A `.strip()`
+        anywhere on this path would make `GRAPH_POSTGRES_SCOPE=" a "` and
+        `scope=" a "` two different scopes for one operator input, and the
+        rows written under one unreachable under the other."""
         monkeypatch.setattr(
             "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
             StubBackend,
@@ -281,6 +286,61 @@ class TestBackendSelection:
         )
         backend = build_persistence_backend(config)
         assert "scope" not in backend.kwargs
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_set_but_empty_scope_is_refused_at_boot(self, blank):
+        """Refused here, because the backend never sees it.
+
+        An empty identifier keeps nothing apart, so treating it as "no scope
+        wanted" would run an instance with no isolation while its configuration
+        says it has some. The backend's own constructor refuses an empty scope
+        for the same reason and cannot be reached with one, so the guard has to
+        be where the operator's variable can be named.
+        """
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_scope=blank,
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_POSTGRES_SCOPE" in str(exc.value)
+
+    @pytest.mark.parametrize("backend", ["file", ""])
+    def test_a_scope_against_a_backend_that_cannot_hold_one_is_refused(self, backend):
+        """Including the DEFAULT backend, which is the dangerous one.
+
+        `GRAPH_BACKEND` unset with a scope set is a deployment that asked to be
+        separated and would have been handed the file backend, which has no
+        scope column and no policy - silently, since the factory returns before
+        it ever looks at the scope.
+        """
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend=backend or "file",
+            graph_postgres_scope="scope-a",
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_POSTGRES_SCOPE" in str(exc.value)
+
+    def test_an_unknown_backend_is_still_named_before_the_scope(self):
+        """Two things wrong at once: the operator hears about the typo.
+
+        A misspelled backend name is the error that explains the other one, and
+        reporting the scope instead would send them looking at the wrong
+        variable.
+        """
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgresql",
+            graph_postgres_scope="scope-a",
+        )
+        with pytest.raises(PersistenceConfigurationError) as exc:
+            build_persistence_backend(config)
+        assert "GRAPH_BACKEND" in str(exc.value)
+        assert "GRAPH_POSTGRES_SCOPE" not in str(exc.value)
 
 
 class TestTheServerUsesWhatWasSelected:
@@ -388,15 +448,18 @@ class TestTheEnvironmentIsTheInterface:
         monkeypatch.delenv("GRAPH_POSTGRES_SCOPE", raising=False)
         assert AppConfig().graph_postgres_scope is None
 
-    @pytest.mark.parametrize("blank", ["", "   "])
-    def test_an_empty_scope_reads_as_unset(self, monkeypatch, blank):
-        """`GRAPH_POSTGRES_SCOPE=` is a variable templated out of a deploy
-        command, and it means unset to whoever wrote it. Reaching the backend
-        it would be refused outright - correctly, since an empty identifier
-        isolates nothing - and a deployment that never asked for a scope would
-        fail to start."""
-        monkeypatch.setenv("GRAPH_POSTGRES_SCOPE", blank)
-        assert AppConfig().graph_postgres_scope is None
+    @pytest.mark.parametrize("raw", ["", "   ", " padded "])
+    def test_a_scope_survives_the_environment_intact(self, monkeypatch, raw):
+        """Read as configured, then refused or used — never quietly rewritten.
+
+        The one setting here that does NOT normalise. Empty reading as unset
+        would hand a deployment that asked to be separated an instance with no
+        isolation, and stripping would make the operator's value and the stored
+        scope two different identifiers; `build_persistence_backend` refuses
+        the empty one by name instead.
+        """
+        monkeypatch.setenv("GRAPH_POSTGRES_SCOPE", raw)
+        assert AppConfig().graph_postgres_scope == raw
 
     def test_pool_size_is_read_as_an_integer(self, monkeypatch):
         monkeypatch.setenv("GRAPH_POSTGRES_POOL_SIZE", "6")
