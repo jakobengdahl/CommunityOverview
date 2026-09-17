@@ -97,6 +97,19 @@ DOCUMENTED_DEADLOCK_RETRIES = 3
 # exact schedule, which depends on how fast the killer thread gets scheduled.
 _MEASURE_SECONDS = 5.0
 _UNPACED_FLOOR = 30
+_POSTGRES_SOURCE_FILES = (
+    pathlib.Path(__file__).resolve().parents[1] / "postgres_backend.py",
+    pathlib.Path(__file__).resolve(),
+)
+_BOUNDARY_SENSITIVE_TERMS = tuple(
+    "".join(parts)
+    for parts in (
+        ("co", "-", "ten", "ant"),
+        ("co", "_", "ten", "ant"),
+        ("ten", "ant"),
+        ("ten", "ants"),
+    )
+)
 
 
 class _RetryBoundExceeded(BaseException):
@@ -4345,12 +4358,12 @@ class TestPostgresChannelsAreOnePerStore:
         G11 is "for any schema name", and a digest shortened to fit some
         future constraint stays lower-case, stays under 63 bytes and still
         round-trips through LISTEN - so every other assertion in this class
-        survives it. What does not survive is two tenants in one database:
+        survives it. What does not survive is two stores in one database:
         they hear each other's writes and each reads the other's ids out of
         its own schema, reporting deletes for entities that exist elsewhere.
         Measured at four hex characters: a collision inside 211 names.
         """
-        names = [f"co_tenant_{i}" for i in range(20_000)]
+        names = [f"co_scope_{i}" for i in range(20_000)]
         channels = {_channel_for(name) for name in names}
         assert len(channels) == len(names), (
             f"{len(names) - len(channels)} of {len(names)} schema names share "
@@ -5259,7 +5272,9 @@ class TestPostgresReconnectsWithoutLeakingConnections:
     """
 
     def test_repeated_drops_leave_no_connections_behind(self, schema, backends):
-        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        application_name = f"co_reconnect_{uuid.uuid4().hex[:12]}"
+        dsn = psycopg.conninfo.make_conninfo(DSN, application_name=application_name)
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         collector = _Collector()
 
@@ -5268,6 +5283,8 @@ class TestPostgresReconnectsWithoutLeakingConnections:
                 return conn.execute(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
+                    " AND application_name = %s",
+                    (application_name,),
                 ).fetchone()[0]
 
         backend.start_change_notification(collector)
@@ -5865,6 +5882,24 @@ class TestTheOptionalScopeSeam:
     unless it is forced, and not to a superuser however it is declared.
     """
 
+    def test_scope_wording_stays_generic_in_source(self):
+        """The scope value is opaque, so source prose may not give it a domain."""
+        offenders = []
+        for path in _POSTGRES_SOURCE_FILES:
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                folded = line.lower()
+                if any(term in folded for term in _BOUNDARY_SENSITIVE_TERMS):
+                    offenders.append(
+                        f"{path.relative_to(path.parents[3])}:{line_number}: {line}"
+                    )
+
+        assert offenders == [], (
+            "scope wording must stay generic; replace domain-specific terms: "
+            + "\n".join(offenders)
+        )
+
     @pytest.fixture(params=["plain", "MixedCase"], ids=["plain", "needs-quoting"])
     def owner(self, request):
         """Parametrised over the schema's NAME, like the least-privilege
@@ -6151,7 +6186,7 @@ class TestTheOptionalScopeSeam:
 
         assert "smuggled" not in _stored(schema, "graph_nodes")
 
-        # And the two statements a co-tenant would actually issue. `FOR ALL`
+        # And the two statements another scope would actually issue. `FOR ALL`
         # means the USING expression governs these as well, so narrowing the
         # policy to FOR SELECT would leave the reads refused and the writes
         # through - and a test that asked only about INSERT would not notice.
