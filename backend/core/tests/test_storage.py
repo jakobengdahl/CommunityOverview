@@ -1187,6 +1187,28 @@ class TestGraphStoragePersistence:
         out = capsys.readouterr().out
         assert f"Saved 1 nodes and 0 edges to {temp_storage.json_path}" in out
 
+    def test_load_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+        backend = InMemoryPersistenceBackend(
+            initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
+        )
+
+        GraphStorage(persistence_backend=backend)
+
+        out = capsys.readouterr().out
+        assert "graph.json" not in out
+        assert "Loaded 0 nodes and 0 edges" in out
+        assert "in-memory-graph" in out
+
+    def test_missing_non_file_backend_does_not_claim_graph_json(self, capsys):
+        backend = InMemoryPersistenceBackend(initial_data=None)
+
+        GraphStorage(persistence_backend=backend)
+
+        out = capsys.readouterr().out
+        assert "graph.json" not in out
+        assert "No graph data found" in out
+        assert "in-memory-graph" in out
+
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""
         # Add data
