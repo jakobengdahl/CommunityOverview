@@ -394,13 +394,15 @@ class GraphStorage:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
 
-    def _save_destination(self) -> str:
-        """Describe where a save actually lands, for the log line.
+    def _persistence_destination(self) -> str:
+        """Describe where the graph actually lives, for the log lines.
 
         Only the file-backed backend owns a concrete path — `self.json_path`
         is a synthetic default for every other backend (see its assignment
         in `__init__`), so naming it there would claim a save landed in
         graph.json when it went to PostgreSQL, or nowhere on disk at all.
+        The load path reads the same store the save path writes, so both
+        describe it through this one helper.
         """
         if isinstance(self._persistence_backend, FileGraphPersistenceBackend):
             return str(self.json_path)
@@ -713,12 +715,13 @@ class GraphStorage:
             if not self._persistence_backend.exists():
                 if not bootstrap_if_missing:
                     print(
-                        f"Warning: cannot refresh from {self.json_path}: it is "
+                        f"Warning: cannot refresh from {self._persistence_destination()}: it is "
                         f"not there. Serving the graph in memory unchanged."
                     )
                     return
                 print(
-                    f"No graph file found at {self.json_path}, creating new empty graph"
+                    f"No graph data found in {self._persistence_destination()}, "
+                    f"creating new empty graph"
                 )
                 # An empty index has nothing to contribute, and marking it
                 # persisted is what keeps this bootstrap write from putting an
@@ -781,6 +784,17 @@ class GraphStorage:
 
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
+                    if edge.source not in nodes or edge.target not in nodes:
+                        # add_edge would invent the missing endpoint as a node
+                        # with no data, matching the refresh-path guard here.
+                        absent = (
+                            edge.source if edge.source not in nodes else edge.target
+                        )
+                        print(
+                            f"Warning: ignoring stored edge {edge.id}: "
+                            f"endpoint {absent} is not present"
+                        )
+                        continue
                     edges[edge.id] = edge
 
                 # Past here nothing can fail: the containers are replaced in
@@ -830,7 +844,8 @@ class GraphStorage:
                 self._load_embeddings()
 
                 print(
-                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
+                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from "
+                    f"{self._persistence_destination()}"
                 )
 
             except Exception as e:
@@ -1230,7 +1245,7 @@ class GraphStorage:
             self._persistence_backend.save_graph_data(data)
             print(
                 f"Saved {node_count} nodes and {edge_count} edges to "
-                f"{self._save_destination()}"
+                f"{self._persistence_destination()}"
             )
         except ExternalChangeRefused:
             # Same reason as in _do_apply, and it has to be said in both write
@@ -1843,11 +1858,17 @@ class GraphStorage:
 
         # An edge cannot outlive an endpoint. The store may well have reported
         # the edge deletions too; deleting one twice is a no-op.
-        incident = [
-            edge.id
-            for edge in self.edges.values()
-            if edge.source == node_id or edge.target == node_id
-        ]
+        incident = []
+        if self.graph.has_node(node_id):
+            seen_edges = set()
+            for _, _, edge_id in self.graph.out_edges(node_id, keys=True):
+                incident.append(edge_id)
+                seen_edges.add(edge_id)
+            for _, _, edge_id in self.graph.in_edges(node_id, keys=True):
+                if edge_id not in seen_edges:
+                    incident.append(edge_id)
+                    seen_edges.add(edge_id)
+
         for edge_id in incident:
             self._external_delete_edge(edge_id)
 
@@ -2686,13 +2707,21 @@ class GraphStorage:
 
                     # Find all edges connected to this node
                     edges_to_remove = []
-                    for edge_id, edge in self.edges.items():
-                        if edge.source == node_id or edge.target == node_id:
+                    if self.graph.has_node(node_id):
+                        seen_edges = set()
+                        for _, _, edge_id in self.graph.out_edges(node_id, keys=True):
                             edges_to_remove.append(edge_id)
-                            affected_edge_ids.append(edge_id)
-                            # Capture edge before state
-                            if edge_id not in edge_before_states:
-                                edge_before_states[edge_id] = edge.to_dict()
+                            seen_edges.add(edge_id)
+                        for _, _, edge_id in self.graph.in_edges(node_id, keys=True):
+                            if edge_id not in seen_edges:
+                                edges_to_remove.append(edge_id)
+                                seen_edges.add(edge_id)
+
+                    for edge_id in edges_to_remove:
+                        affected_edge_ids.append(edge_id)
+                        # Capture edge before state
+                        if edge_id not in edge_before_states:
+                            edge_before_states[edge_id] = self.edges[edge_id].to_dict()
 
                     # Remove edges
                     for edge_id in edges_to_remove:
