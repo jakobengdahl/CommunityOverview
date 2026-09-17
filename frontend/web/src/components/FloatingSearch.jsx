@@ -389,7 +389,7 @@ function FloatingSearch({ variant = 'floating' }) {
           type="text"
           className="floating-search-input"
           placeholder="Search graph..."
-          aria-label={t('search_panel_title')}
+          aria-label={t('mobile_nav.search_panel_title')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
