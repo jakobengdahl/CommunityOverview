@@ -135,6 +135,31 @@ class TestGraphStorageInit:
         assert len(new_storage.nodes) == 4
         assert len(new_storage.edges) == 3
 
+    def test_load_skips_edge_with_missing_endpoint(self, capsys):
+        """A stored dangling edge must not make NetworkX invent a blank node."""
+        existing = Node(id="present", type=NodeType.ACTOR, name="Present")
+        dangling = Edge(
+            id="dangling",
+            source="present",
+            target="absent",
+            type=RelationshipType.RELATES_TO,
+        )
+        backend = InMemoryPersistenceBackend(
+            {
+                "nodes": [existing.to_dict()],
+                "edges": [dangling.to_dict()],
+                "metadata": {"version": "1.0", "graph_name": "test"},
+            }
+        )
+
+        storage = GraphStorage(persistence_backend=backend)
+
+        assert "present" in storage.nodes
+        assert "absent" not in storage.nodes
+        assert "absent" not in storage.graph
+        assert "dangling" not in storage.edges
+        assert "Warning: ignoring stored edge dangling" in capsys.readouterr().out
+
 
 class TestGraphStorageCRUD:
     """Tests for CRUD operations"""

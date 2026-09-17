@@ -781,6 +781,17 @@ class GraphStorage:
 
                 for edge_data in data.get("edges", []):
                     edge = Edge.from_dict(edge_data)
+                    if edge.source not in nodes or edge.target not in nodes:
+                        # add_edge would invent the missing endpoint as a node
+                        # with no data, matching the refresh-path guard here.
+                        absent = (
+                            edge.source if edge.source not in nodes else edge.target
+                        )
+                        print(
+                            f"Warning: ignoring stored edge {edge.id}: "
+                            f"endpoint {absent} is not present"
+                        )
+                        continue
                     edges[edge.id] = edge
 
                 # Past here nothing can fail: the containers are replaced in
