@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.api_host import create_app
-from backend.core import GraphStorage
+from backend.core import Edge, GraphStorage
 
 
 class TestHealthAndRoot:
@@ -272,9 +272,15 @@ class TestHealthAndRoot:
         graph_path = tmp_path / "degraded-graph.json"
         graph_path.write_text(
             '{"nodes": [{"id": "node-1", "type": "Actor", "name": "Node 1", "communities": []}], '
-            '"edges": [{"id": "edge-1", "source": "node-1", "target": "missing-node", "type": "RELATES_TO"}]}'
+            '"edges": []}'
         )
         degraded_graph_storage = GraphStorage(str(graph_path))
+        degraded_graph_storage.edges["edge-1"] = Edge(
+            id="edge-1",
+            source="node-1",
+            target="missing-node",
+            type="RELATES_TO",
+        )
 
         with patch(
             "backend.ui.chat_logic.create_provider", return_value=mock_llm_provider
