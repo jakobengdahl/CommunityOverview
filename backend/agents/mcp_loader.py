@@ -13,10 +13,12 @@ import logging
 import subprocess
 import threading
 from typing import List, Dict, Any, Optional, Callable
+import urllib.parse
 from dataclasses import dataclass, field
 import httpx2 as httpx
 
 from .config import MCPIntegration, MCPTransport
+from backend.core.events.delivery import is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -761,10 +763,23 @@ class MCPLoader:
             url = input_args.get("url")
             if not url:
                 return {"error": "URL required"}
+            if not is_safe_url(url):
+                return {"error": "URL is not safe to fetch"}
 
             try:
-                response = httpx.get(url, timeout=30, follow_redirects=True)
-                response.raise_for_status()
+                with httpx.Client(timeout=30, follow_redirects=False) as client:
+                    current_url = url
+                    for _ in range(5):
+                        response = client.get(current_url)
+                        if response.is_redirect:
+                            location = str(response.headers.get("location", ""))
+                            next_url = urllib.parse.urljoin(current_url, location)
+                            if not is_safe_url(next_url):
+                                return {"error": "Redirected to unsafe URL"}
+                            current_url = next_url
+                            continue
+                        break
+                    response.raise_for_status()
 
                 # Simple HTML to text conversion
                 content = response.text
