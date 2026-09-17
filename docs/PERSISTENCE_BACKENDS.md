@@ -615,6 +615,26 @@ nothing and `HISTORY_MAX_EVENTS` and `HISTORY_MAX_AGE_DAYS` become inert. That
 is stated under *Vectors and history* above and is repeated here because this
 is the section an operator reads before flipping the switch.
 
+### Importing an existing graph file
+
+Use `scripts/graph_file_to_postgres.py` to copy an existing `graph.json` into
+`PostgresGraphPersistenceBackend`:
+
+```bash
+python scripts/graph_file_to_postgres.py data/active/graph.json \
+  --dsn "$GRAPH_POSTGRES_DSN" \
+  --schema "${GRAPH_POSTGRES_SCHEMA:-public}"
+```
+
+The tool refuses to replace a target that already contains graph data. Pass
+`--allow-non-empty-target` only when replacing that target is intentional. After
+the write, it reloads the target and verifies the node count, edge count, and
+that every edge endpoint refers to a stored node.
+
+The import migrates only the graph payload read from `graph.json`. Embedding
+sidecars, history sidecars, and session files are not migrated. Regenerate or
+move those artifacts separately if the deployment needs them.
+
 `GRAPH_POSTGRES_POOL_SIZE` is the one setting here with a ceiling to fit
 under rather than a value to pick freely. *Sizing it: what an instance costs*,
 below, has the arithmetic and the table; it is not repeated here, so there is
