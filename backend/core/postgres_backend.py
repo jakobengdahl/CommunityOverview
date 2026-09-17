@@ -620,6 +620,74 @@ class PostgresGraphPersistenceBackend:
             return (False, False, False)
         return (bool(row[0]), bool(row[1]), bool(row[2]))
 
+    def _try_provision_scope_isolation(self, table: str) -> None:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                if not self._column_present(conn, table):
+                    conn.execute(
+                        sql.SQL(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} text"
+                        ).format(self._table(table), sql.Identifier(SCOPE_COLUMN))
+                    )
+                enabled, forced, policy = self._policy_state(conn, table)
+                if self._scope is None:
+                    # The column, and nothing that would cost an unscoped
+                    # store its traversal plan.
+                    return
+                if not policy:
+                    # `FOR ALL`, so the same expression governs what a
+                    # session may read and what it may write: without a
+                    # WITH CHECK the server would refuse to hand a row
+                    # over and accept one written in its place.
+                    #
+                    # The NULL arm is what makes the seam optional. A
+                    # row that carries no scope is admitted whatever
+                    # the session is set to, which is every row of
+                    # every store that existed before this column did.
+                    # The other arm is unsatisfiable when the setting
+                    # is unset - `= NULL` is NULL, not true - so a
+                    # scoped row is invisible to a session that did not
+                    # say which scope it is, which is the direction
+                    # that has to fail closed.
+                    conn.execute(
+                        sql.SQL(
+                            "CREATE POLICY {} ON {} FOR ALL"
+                            " USING ({col} IS NULL"
+                            "        OR {col} = current_setting({setting}, true))"
+                        ).format(
+                            sql.Identifier(self._policy_name(table)),
+                            self._table(table),
+                            col=sql.Identifier(SCOPE_COLUMN),
+                            setting=sql.Literal(SCOPE_SETTING),
+                        )
+                    )
+                if not enabled:
+                    conn.execute(
+                        sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(
+                            self._table(table)
+                        )
+                    )
+                if not forced:
+                    # Without FORCE the policy is decoration in the
+                    # commonest deployment there is: row-level security
+                    # does not apply to a table's OWNER, and the owner
+                    # is whoever ran the migration - this application.
+                    conn.execute(
+                        sql.SQL("ALTER TABLE {} FORCE ROW LEVEL SECURITY").format(
+                            self._table(table)
+                        )
+                    )
+
+    def _scope_isolation_state(self, table: str) -> Tuple[bool, bool]:
+        """(column missing, server policy incomplete) after provisioning tried."""
+        with self._pool.connection() as conn:
+            if not self._column_present(conn, table):
+                return (True, False)
+            if self._scope is None:
+                return (False, False)
+            enabled, forced, policy = self._policy_state(conn, table)
+            return (False, not (enabled and forced and policy))
+
     def _ensure_scope_isolation(self) -> None:
         """Provision the scope column and its policy, or establish we cannot.
 
@@ -665,85 +733,25 @@ class PostgresGraphPersistenceBackend:
         """
         # No isolation level is pinned here, where the save and the entity
         # write both state theirs. Nothing in this step depends on one: the
-        # catalog re-read below runs in a transaction of its own, so it sees
-        # what the DDL transaction left whatever level the role defaults to -
-        # confirmed against a role defaulting to REPEATABLE READ.
+        # catalog re-read runs after every attempt, in a transaction of its
+        # own, so it sees what the DDL transaction left whatever level the
+        # role defaults to - confirmed against a role defaulting to REPEATABLE
+        # READ.
         missing_column: List[str] = []
         unprotected: List[str] = []
         for table in SCOPED_TABLES:
             try:
-                with self._pool.connection() as conn:
-                    with conn.transaction():
-                        if not self._column_present(conn, table):
-                            conn.execute(
-                                sql.SQL(
-                                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} text"
-                                ).format(
-                                    self._table(table), sql.Identifier(SCOPE_COLUMN)
-                                )
-                            )
-                        enabled, forced, policy = self._policy_state(conn, table)
-                        if self._scope is None:
-                            # The column, and nothing that would cost an
-                            # unscoped store its traversal plan.
-                            continue
-                        if not policy:
-                            # `FOR ALL`, so the same expression governs what a
-                            # session may read and what it may write: without a
-                            # WITH CHECK the server would refuse to hand a row
-                            # over and accept one written in its place.
-                            #
-                            # The NULL arm is what makes the seam optional. A
-                            # row that carries no scope is admitted whatever
-                            # the session is set to, which is every row of
-                            # every store that existed before this column did.
-                            # The other arm is unsatisfiable when the setting
-                            # is unset - `= NULL` is NULL, not true - so a
-                            # scoped row is invisible to a session that did not
-                            # say which scope it is, which is the direction
-                            # that has to fail closed.
-                            conn.execute(
-                                sql.SQL(
-                                    "CREATE POLICY {} ON {} FOR ALL"
-                                    " USING ({col} IS NULL"
-                                    "        OR {col} = current_setting({setting}, true))"
-                                ).format(
-                                    sql.Identifier(self._policy_name(table)),
-                                    self._table(table),
-                                    col=sql.Identifier(SCOPE_COLUMN),
-                                    setting=sql.Literal(SCOPE_SETTING),
-                                )
-                            )
-                        if not enabled:
-                            conn.execute(
-                                sql.SQL(
-                                    "ALTER TABLE {} ENABLE ROW LEVEL SECURITY"
-                                ).format(self._table(table))
-                            )
-                        if not forced:
-                            # Without FORCE the policy is decoration in the
-                            # commonest deployment there is: row-level security
-                            # does not apply to a table's OWNER, and the owner
-                            # is whoever ran the migration - this application.
-                            conn.execute(
-                                sql.SQL(
-                                    "ALTER TABLE {} FORCE ROW LEVEL SECURITY"
-                                ).format(self._table(table))
-                            )
+                self._try_provision_scope_isolation(table)
             except Exception:
                 # Swallowed on purpose: what matters is what the store ended up
                 # with, which the catalog answers below, not which statement
                 # could not be issued.
                 pass
-            with self._pool.connection() as conn:
-                if not self._column_present(conn, table):
-                    missing_column.append(table)
-                    continue
-                if self._scope is None:
-                    continue
-                enabled, forced, policy = self._policy_state(conn, table)
-                if not (enabled and forced and policy):
-                    unprotected.append(table)
+            column_missing, policy_incomplete = self._scope_isolation_state(table)
+            if column_missing:
+                missing_column.append(table)
+            if policy_incomplete:
+                unprotected.append(table)
 
         self._scope_column = not missing_column
         if self._scope is not None and missing_column:
