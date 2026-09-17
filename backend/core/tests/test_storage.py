@@ -135,6 +135,31 @@ class TestGraphStorageInit:
         assert len(new_storage.nodes) == 4
         assert len(new_storage.edges) == 3
 
+    def test_load_skips_edge_with_missing_endpoint(self, capsys):
+        """A stored dangling edge must not make NetworkX invent a blank node."""
+        existing = Node(id="present", type=NodeType.ACTOR, name="Present")
+        dangling = Edge(
+            id="dangling",
+            source="present",
+            target="absent",
+            type=RelationshipType.RELATES_TO,
+        )
+        backend = InMemoryPersistenceBackend(
+            {
+                "nodes": [existing.to_dict()],
+                "edges": [dangling.to_dict()],
+                "metadata": {"version": "1.0", "graph_name": "test"},
+            }
+        )
+
+        storage = GraphStorage(persistence_backend=backend)
+
+        assert "present" in storage.nodes
+        assert "absent" not in storage.nodes
+        assert "absent" not in storage.graph
+        assert "dangling" not in storage.edges
+        assert "Warning: ignoring stored edge dangling" in capsys.readouterr().out
+
 
 class TestGraphStorageCRUD:
     """Tests for CRUD operations"""
@@ -1161,6 +1186,28 @@ class TestGraphStoragePersistence:
 
         out = capsys.readouterr().out
         assert f"Saved 1 nodes and 0 edges to {temp_storage.json_path}" in out
+
+    def test_load_through_non_file_backend_does_not_claim_graph_json(self, capsys):
+        backend = InMemoryPersistenceBackend(
+            initial_data={"nodes": [], "edges": [], "metadata": {"version": "1.0"}}
+        )
+
+        GraphStorage(persistence_backend=backend)
+
+        out = capsys.readouterr().out
+        assert "graph.json" not in out
+        assert "Loaded 0 nodes and 0 edges" in out
+        assert "in-memory-graph" in out
+
+    def test_missing_non_file_backend_does_not_claim_graph_json(self, capsys):
+        backend = InMemoryPersistenceBackend(initial_data=None)
+
+        GraphStorage(persistence_backend=backend)
+
+        out = capsys.readouterr().out
+        assert "graph.json" not in out
+        assert "No graph data found" in out
+        assert "in-memory-graph" in out
 
     def test_save_and_reload(self, temp_storage):
         """Test that data persists across storage instances"""
