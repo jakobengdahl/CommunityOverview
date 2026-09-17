@@ -83,6 +83,22 @@ class AppConfig:
     graph_postgres_schema: str = field(
         default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCHEMA", "public")
     )
+    # An opaque identifier tagging every row this instance writes to the
+    # PostgreSQL graph store, and narrowing every row it reads to that value or
+    # to none. Unset - the default - is a store that keeps no scopes apart, and
+    # behaves exactly as it did before this setting existed. What the value
+    # distinguishes is the host's business: nothing here interprets it.
+    #
+    # Read RAW, and this is the one setting here that does not normalise. Empty
+    # does NOT read as unset the way GRAPH_BACKEND and the pool size do above,
+    # and the value is not stripped: both would turn an identifier the operator
+    # got wrong into a store that keeps nothing apart, or into a different
+    # scope than the one they set. `GRAPH_POSTGRES_SCOPE=` is refused at boot by
+    # build_persistence_backend instead - the direction a setting that decides
+    # which rows an instance can see has to be wrong in.
+    graph_postgres_scope: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCOPE")
+    )
     # Connections this instance may hold, on top of the one LISTEN connection
     # the backend keeps for change notification. Unset uses the backend's own
     # default. docs/PERSISTENCE_BACKENDS.md, "Sizing it: what an instance

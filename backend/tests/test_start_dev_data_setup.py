@@ -391,6 +391,40 @@ def path_without(tmp_path):
     return _build
 
 
+def test_a_relative_path_entry_still_resolves_the_shimmed_tool(
+    monkeypatch, tmp_path, path_without
+):
+    """`_build` above walks PATH and symlinks every tool it finds into the
+    shim directory. A relative PATH entry resolves fine while BUILDING the
+    shim, since Path.is_dir()/iterdir() are evaluated against the process's
+    cwd at that point. The bug this guards was in the symlink TARGET, not
+    the lookup: `tool.symlink_to(tool)` stores the relative path string
+    itself, and a relative symlink target is resolved against the symlink's
+    OWN directory (the shim dir) rather than the cwd that made the lookup
+    succeed - so the shimmed copy dangled even though the real tool never
+    moved. `tool.resolve()` fixes it by storing the absolute path instead.
+    No ambient PATH entry here is relative (CI and every dev box use
+    absolute PATH dirs), so this constructs one deliberately rather than
+    relying on the environment to happen to have one."""
+    real_tool = shutil.which("true")
+    assert real_tool is not None, "test needs a real 'true' binary on PATH"
+
+    relative_dir = tmp_path / "relative-bin"
+    relative_dir.mkdir()
+    (relative_dir / "true").symlink_to(real_tool)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "relative-bin" + os.pathsep + os.environ.get("PATH", ""))
+
+    shim = Path(path_without())
+    shimmed_true = shim / "true"
+
+    assert shimmed_true.is_symlink()
+    assert shimmed_true.exists(), "the shimmed tool's symlink is dangling"
+    result = subprocess.run([str(shimmed_true)])
+    assert result.returncode == 0, "the shimmed tool could not be executed"
+
+
 def _downloader_env(path_without, downloader: str) -> dict:
     """Force the script onto one download branch, skipping if it cannot."""
     if shutil.which(downloader) is None:
