@@ -582,11 +582,18 @@ construction site to drift from that one.
 | `GRAPH_POSTGRES_DSN` | *(unset)* | libpq connection string; required for `postgres` |
 | `GRAPH_POSTGRES_SCHEMA` | `public` | One database can hold several graphs, one per schema |
 | `GRAPH_POSTGRES_POOL_SIZE` | *(backend default)* | Connections this instance may hold; at least 1 |
+| `GRAPH_POSTGRES_SCOPE` | *(unset)* | An opaque identifier tagging this instance's rows; see *Keeping scopes apart*. Set-but-empty is refused, not read as unset |
 
-Four ways to get it wrong fail at boot rather than later, in
+Six ways to get it wrong fail at boot rather than later, in
 `backend/api_host/persistence.py`: an unrecognised `GRAPH_BACKEND`, `postgres`
 with no DSN (unset, empty or whitespace), `postgres` without the psycopg extra
-installed, and a `GRAPH_POSTGRES_POOL_SIZE` below 1. The first
+installed, a `GRAPH_POSTGRES_POOL_SIZE` below 1, a `GRAPH_POSTGRES_SCOPE` set
+to an empty value, and a `GRAPH_POSTGRES_SCOPE` set while `GRAPH_BACKEND` is
+not `postgres`. The last two are the ones where silence would be worst — a
+scope that is dropped leaves the instance with no isolation while the
+configuration says it has some — so neither is normalised away the way an
+empty `GRAPH_BACKEND` or pool size is, and the value is passed through
+unstripped because an opaque identifier is not ours to tidy. The first
 matters most — a value of `postgresql` falling back to `file` would boot
 happily and look correct until a second instance started writing the same
 graph.
@@ -752,7 +759,8 @@ writing a backend of your own against a shared server:
   level query is different because it filters on *expressions*
   (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
   the frontier's size decides the join strategy. Every other statement is
-  single-row key access or a parameterless read.
+  single-row key access, or a read whose only parameter is the scope — a value
+  that changes no selectivity worth a plan of its own.
 
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
@@ -784,11 +792,18 @@ then fails on **every** save.
 ```sql
 CREATE TABLE <schema>.graph_nodes (
   id text PRIMARY KEY,
-  doc jsonb NOT NULL
+  doc jsonb NOT NULL,
+  -- Optional, and nullable for a reason: a row that carries no scope is
+  -- every row of every store written before this column existed, and the
+  -- policy below admits it to every session. See "Keeping scopes apart": a
+  -- store that sets no GRAPH_POSTGRES_SCOPE leaves the column NULL on every
+  -- row it writes, and still names it in its reads.
+  scope_id text
 );
 CREATE TABLE <schema>.graph_edges (
   id text PRIMARY KEY,
-  doc jsonb NOT NULL
+  doc jsonb NOT NULL,
+  scope_id text
 );
 CREATE TABLE <schema>.graph_metadata (
   only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
@@ -806,6 +821,146 @@ CREATE TABLE <schema>.graph_metadata (
 CREATE INDEX graph_edges_source_idx ON <schema>.graph_edges ((doc->>'source'));
 CREATE INDEX graph_edges_target_idx ON <schema>.graph_edges ((doc->>'target'));
 ```
+
+#### Keeping scopes apart
+
+Each entity row can carry an **opaque scope identifier**, and a store that
+supplies one also gets a row-level security policy binding on it. It is off
+until a host asks: `GRAPH_POSTGRES_SCOPE` unset is a store whose `scope_id`
+is NULL on every row and whose tables carry no policy, which is exactly the
+store this backend wrote before the column existed.
+
+What the value *means* is the host's business. The backend stores it,
+compares it and passes it through; nothing here interprets it, and the name is
+generic because the seam is.
+
+Leaving it unset is not quite "the column is never read". Once the column is
+there an unscoped instance still names it, and its predicate reduces to
+`scope_id IS NULL` — the same set the policy would show a session that named
+no scope. On a store only that instance writes, every row carries NULL and
+nothing changes. On a store it *shares* with a scoped one, it sees the rows
+carrying no scope and not the scoped ones, and its whole-graph save deletes
+only what it saw. That is deliberate: an instance that read every row would
+delete every row.
+
+Set it and three things change.
+
+- **Every entity row this instance writes carries the value.** Both write
+  paths — the whole-graph save and the entity upsert — stamp it, including a
+  row that carried none before, so a store does not drift into two kinds of
+  row. The `graph_metadata` row is the exception, and the first boundary below
+  says what follows from that.
+- **Every statement this instance issues carries the predicate**
+  `scope_id IS NULL OR scope_id = <the value>`. That is the application layer,
+  and it holds whether or not the server enforces anything — which matters for
+  the least-privilege provisioning above, where the app role owns nothing and
+  no policy can be created at all.
+- **The tables take a policy carrying the same expression**, with
+  `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`. FORCE is not
+  decoration: a policy does not apply to a table's *owner* without it, and on
+  a self-provisioned store the owner is this application. That is the second
+  layer — what still refuses when the application's own query is wrong.
+
+The predicate admits a row that carries **no** scope to every session, which is
+what makes the seam optional: an already-populated table keeps working when
+the column lands, and a store written before a scope was configured stays
+readable after one is. It admits a row that carries **a** scope only to a
+session set to that same value — and `= NULL` is never true, so a session that
+named no scope is refused a scoped row rather than shown every one of them.
+That is the direction that has to fail closed, because an unset setting is what
+a mistake arrives as.
+
+Two boundaries and one cost, none of them accidents:
+
+- **`graph_metadata` is not covered, and for two scopes behind one set of
+  tables that is a hazard rather than a gap.** Its primary key is a column that
+  can only hold true, so it holds one row for the whole store and has nowhere
+  to put a second scope's; a column there would suggest an isolation the shape
+  cannot deliver. What follows, measured with the policy enabled *and* forced:
+  the single metadata row is readable by every scope in both directions, and
+  the next whole-graph save from either replaces it — so whatever a host puts
+  in graph metadata crosses scopes and can be destroyed by another. And because
+  `exists()` answers for the *store* rather than for the scope, a scope with no
+  rows of its own finds the store non-empty, skips the bootstrap
+  `GraphStorage` would otherwise do, and loads an empty graph carrying another
+  scope's metadata — `graph_name` included. A schema per scope has none of
+  this; one set of tables for several scopes is the shape this bullet exists to
+  rule out.
+- **`id` remains the primary key of each entity table**, so two scopes sharing
+  one table cannot both hold `n0`. An upsert therefore conflicts with *the* row
+  of that id whatever scope it carries, and the backend **refuses** such a
+  write rather than applying it: the conflicting row carries the same predicate
+  every read does, and a conflict that predicate excludes raises rather than
+  silently affecting no rows. Before it was there, the statement replaced the
+  other scope's row and restamped its scope, and that scope's next load
+  returned nothing. Where the policy is in force the server refuses the same
+  write, so the two layers agree; a whole-graph save carrying such an id fails
+  on the primary key, which is the same answer by a louder road. Louder, and
+  worth knowing before it happens: `GraphStorage` answers a failed entity write
+  by re-issuing the whole graph, so once such an id is in an instance's memory
+  every subsequent write becomes that failing save and the instance persists
+  nothing until the id leaves it. Change
+  notification is per schema too (the channel is derived from it), so two
+  scopes behind one set of tables would hear each other's entity ids announced.
+  The seam is the row-level layer *underneath* the separation this backend
+  already offers — a schema per graph — not a replacement for it.
+- **A policy costs the traversal its expression indexes.** A policy reaches a
+  query as a security qual, and PostgreSQL will not evaluate a qual that is not
+  leakproof before one. The traversal filters on `doc->>'source'`, and
+  `jsonb_object_field_text` is not marked leakproof (`texteq`, which the
+  primary key uses, is) — so for a session the policy applies to, the two
+  indexes above go unused and each level of a walk reads the edge table.
+  Measured on PostgreSQL 16: a one-id frontier over 1000 edges plans a bitmap
+  scan on both indexes without a policy and a sequential scan with one. The
+  indexes exist for a 3.7 ms against 61 ms difference at 60k edges, so this is
+  the price of the second layer, and it is the reason the policy is created
+  only for a store that configured a scope. A deployment that wants the
+  separation without the cost separates by schema and leaves the scope unset.
+
+**A scope the store cannot hold is a refusal, not a warning.** If
+`GRAPH_POSTGRES_SCOPE` is set and the tables have no `scope_id` column — an
+older store whose app role cannot `ALTER TABLE` — the backend raises at boot
+rather than writing rows that carry no scope, because such rows are readable
+by every other session on that store. Provision the column and the policy, or
+run the instance without a scope:
+
+```sql
+ALTER TABLE <schema>.graph_nodes ADD COLUMN IF NOT EXISTS scope_id text;
+ALTER TABLE <schema>.graph_edges ADD COLUMN IF NOT EXISTS scope_id text;
+
+-- Create the policy BEFORE enabling row-level security. A table with it
+-- enabled and no policy admits nothing at all, so the other order leaves a
+-- window in which the store looks empty.
+CREATE POLICY graph_nodes_scope_policy ON <schema>.graph_nodes
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+CREATE POLICY graph_edges_scope_policy ON <schema>.graph_edges
+  FOR ALL USING (scope_id IS NULL
+                 OR scope_id = current_setting('app.graph_scope', true));
+
+ALTER TABLE <schema>.graph_nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_nodes FORCE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_edges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <schema>.graph_edges FORCE ROW LEVEL SECURITY;
+```
+
+**What the upgrade itself costs.** The first boot after this change runs
+`ALTER TABLE … ADD COLUMN` on both entity tables of **every** PostgreSQL store,
+scope configured or not. The column has no default, so it is a catalog-only
+change and rewrites nothing — but it takes `ACCESS EXCLUSIVE` for the moment it
+runs, a stronger lock than the `ShareLock` the index note above warns about: it
+queues readers as well as writers, and it waits behind any transaction already
+holding the table, such as a `REPEATABLE READ` traversal or a whole-graph save.
+Brief on any store, but on a busy one it is worth taking that first boot when a
+long transaction is unlikely — or adding the column by hand beforehand with the
+statements above, after which the migration finds it there and asks for
+nothing.
+
+The backend runs those statements itself where it owns the tables, one
+transaction per table so a failure part-way cannot leave a table with
+row-level security enabled and no policy. It binds `app.graph_scope` with
+`set_config(..., is_local => true)` at the start of each transaction, so the
+value is gone when the connection returns to the pool.
 
 **Two payload restrictions** are worth knowing before pointing an existing
 graph at this backend, because neither is shared with the file backend. A

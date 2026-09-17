@@ -38,6 +38,16 @@ topology it holds in memory. The in-memory walk stays the reference - the
 answers are held identical by a differential test - and answers whenever the
 store is not current or cannot be reached.
 
+One optional seam runs across all of that. Each entity row can carry an
+OPAQUE SCOPE IDENTIFIER, and the tables carry a row-level security policy
+binding on it, so a deployment that keeps more than one graph's rows behind
+one connection can have the server - not only this code - refuse the rows
+that are not its own. It is off unless a host supplies a value: the column
+is then NULL on every row, which the policy admits, and the store behaves
+exactly as it did before the column existed. What the value MEANS is the
+host's business and never this module's; here it is a string to store,
+compare and pass through.
+
 Two payload restrictions come from JSONB and are shared with neither the
 file backend nor `graph.json`. A whole-graph save carrying one fails
 entirely; an entity write fails only the write that carries it - one
@@ -79,6 +89,30 @@ from backend.core.storage_backends import (
 # not derived from anything; it only has to be one this application uses
 # nowhere else.
 MIGRATION_LOCK_KEY = 4_872_015_733_882_119_001
+
+# The optional scope seam, in three names. The column holds the host's
+# opaque identifier, the setting carries the current session's value to the
+# server, and the policy is what the server refuses with. Deliberately
+# generic: this module stores and compares the value and never asks what it
+# distinguishes, which is the property that keeps the seam usable by any host
+# and this backend free of anyone's domain model.
+#
+# `text`, not a narrower type, for the same reason. A host that uses a UUID
+# loses nothing by storing it as text - the comparison is equality either way
+# - while a `uuid` column would refuse every host whose identifiers are not
+# UUIDs, and a malformed session value would fail the cast rather than match
+# nothing.
+SCOPE_COLUMN = "scope_id"
+SCOPE_SETTING = "app.graph_scope"
+SCOPE_POLICY_SUFFIX = "_scope_policy"
+
+# The two tables the seam covers. `graph_metadata` is deliberately not one of
+# them: its primary key is a column that can only hold true, so it holds one
+# row for the whole store and has nowhere to put a second scope's row. A
+# deployment separating scopes therefore separates their metadata the way the
+# backend already separates whole graphs - a schema each - and this column is
+# the row-level layer underneath that, not a replacement for it.
+SCOPED_TABLES = ("graph_nodes", "graph_edges")
 
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
@@ -197,6 +231,33 @@ def _channel_for(schema: str) -> str:
     return "co_graph_" + hashlib.sha256(schema.encode("utf-8")).hexdigest()[:32]
 
 
+class ScopeIsolationUnavailable(RuntimeError):
+    """A scope was configured and the store cannot keep rows apart by it.
+
+    Raised at boot rather than absorbed, because the alternative is worse
+    than not starting: a backend that was handed a scope and has no column to
+    put it in writes rows that carry no scope at all, and every other session
+    on that store can read them. A store that cannot be provisioned is an
+    operator's problem with a remedy; rows written unscoped are already
+    everyone's.
+    """
+
+
+class CrossScopeWriteRefused(RuntimeError):
+    """An entity write named an id that belongs to another scope.
+
+    `id` is the primary key of the table rather than of the table per scope,
+    so two scopes cannot both hold one id and a write that names another
+    scope's is not a write this instance may make. Raised rather than applied,
+    and rather than quietly skipped: applying it would destroy the other
+    scope's row - measured, with the row's content replaced and its scope
+    restamped - and skipping it would tell the caller a write happened that
+    did not. Where the policy is in force the server refuses the same write,
+    so this is the application layer agreeing with it rather than a second
+    rule.
+    """
+
+
 class PostgresGraphPersistenceBackend:
     """The graph in PostgreSQL: nodes, edges and metadata as JSONB rows.
 
@@ -208,6 +269,11 @@ class PostgresGraphPersistenceBackend:
     A `schema` other than the default keeps one database serving several
     independent graphs, which is also how the tests give each case a store of
     its own without a database each.
+
+    A `scope` tags every row this instance writes with the host's opaque
+    identifier and narrows every row it reads to that value or to no value at
+    all. Leave it None - the default, and what every deployment before this
+    argument existed runs - and nothing about the store changes.
     """
 
     def __init__(
@@ -217,12 +283,29 @@ class PostgresGraphPersistenceBackend:
         schema: str = "public",
         pool_size: int = DEFAULT_POOL_SIZE,
         graph_name: str = "graph",
+        scope: Optional[str] = None,
     ):
         if pool_size < 1:
             raise ValueError("pool_size must be at least 1")
+        # An empty scope is not an unscoped one. A host that templated the
+        # value out of its environment sends "" where it meant to send an
+        # identifier, and reading that as "no isolation wanted" is how a
+        # deployment that asked to be separated silently is not.
+        if scope is not None and not scope.strip():
+            raise ValueError(
+                "scope must be a non-empty identifier, or None for a store "
+                "that keeps no scopes apart"
+            )
         self.conninfo = conninfo
         self.schema = schema
         self._graph_name = graph_name
+        self._scope = scope
+        # Settled by the migration, before any statement that would name the
+        # column is built. False means the store has no scope column - an
+        # older store, or one an operator provisioned without it - and every
+        # statement below is then the one this backend issued before the
+        # column existed.
+        self._scope_column = False
         # min_size 0: a backend that is constructed and never used holds no
         # connection. The contract creates backends freely, and so does an
         # instance that boots against a store it turns out not to read.
@@ -456,6 +539,10 @@ class PostgresGraphPersistenceBackend:
                             f"Warning: could not create {name}; traversal will "
                             f"scan instead of seek: {exc}"
                         )
+            # Last, and outside the migrating transaction for the same reason
+            # the indexes are: it may legitimately fail, and a failure inside
+            # that transaction would take the tables down with it.
+            self._ensure_scope_isolation()
             self._migrated = True
 
     _INDEX_STATE = (
@@ -494,6 +581,262 @@ class PostgresGraphPersistenceBackend:
         if row is None:
             return "missing"
         return "valid" if row[0] else "invalid"
+
+    # -- the scope seam ------------------------------------------------------
+
+    _COLUMN_PRESENT = (
+        "SELECT 1 FROM pg_attribute a"
+        " JOIN pg_class c ON c.oid = a.attrelid"
+        " JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s"
+        " AND a.attnum > 0 AND NOT a.attisdropped"
+    )
+
+    _POLICY_STATE = (
+        "SELECT c.relrowsecurity, c.relforcerowsecurity,"
+        " EXISTS (SELECT 1 FROM pg_policy p"
+        "         WHERE p.polrelid = c.oid AND p.polname = %s)"
+        " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = %s AND c.relname = %s"
+    )
+
+    def _policy_name(self, table: str) -> str:
+        return f"{table}{SCOPE_POLICY_SUFFIX}"
+
+    def _column_present(self, conn, table: str) -> bool:
+        return (
+            conn.execute(
+                self._COLUMN_PRESENT, (self.schema, table, SCOPE_COLUMN)
+            ).fetchone()
+            is not None
+        )
+
+    def _policy_state(self, conn, table: str) -> Tuple[bool, bool, bool]:
+        """(rls enabled, rls forced, policy present) for `table` in this schema."""
+        row = conn.execute(
+            self._POLICY_STATE, (self._policy_name(table), self.schema, table)
+        ).fetchone()
+        if row is None:
+            return (False, False, False)
+        return (bool(row[0]), bool(row[1]), bool(row[2]))
+
+    def _ensure_scope_isolation(self) -> None:
+        """Provision the scope column and its policy, or establish we cannot.
+
+        Best-effort and outside the migrating transaction, like the traversal's
+        indexes and for the same reason: every statement here needs OWNERSHIP,
+        and the least-privilege role the migration's guards exist for holds DML
+        and no DDL. A store that cannot take the column still boots and still
+        answers - as exactly the store it was before this seam existed, since
+        no statement this backend issues names a column it has established is
+        not there.
+
+        One case does not degrade, and it is the whole point of the seam: a
+        scope was CONFIGURED and the column is missing. Writing rows that carry
+        no scope would hand them to every other session on that store, so this
+        raises instead - see ScopeIsolationUnavailable.
+
+        Order inside the transaction is load-bearing. The policy is created
+        BEFORE row-level security is switched on, because a table with RLS
+        enabled and no policy admits nothing at all: reversing the two and
+        failing in between would leave a store whose every row had vanished.
+        One transaction per table makes that unreachable rather than unlikely -
+        a failure rolls the whole step back and the catalog is re-read.
+
+        THE POLICY IS CREATED ONLY FOR A STORE THAT ASKED FOR ONE, and that is
+        a measurement rather than a preference. A policy applies to a query as
+        a security qual, and PostgreSQL will not let a qual that is not
+        leakproof be evaluated before one - so the traversal's index condition,
+        `doc->>'source' = ...`, stops being usable as one the moment a policy
+        applies to the reading role. `jsonb_object_field_text` is not marked
+        leakproof (`pg_proc.proleakproof` is false; `texteq`, which the primary
+        key uses, is true), so the expression indexes go unused and every level
+        of every walk reads the edge table instead - the 3.7 ms against 61 ms
+        this file measures elsewhere, in the wrong direction. Charging that to
+        a store that keeps no scopes apart would be charging it for a guarantee
+        it did not ask for and does not get; charging it to one that did is the
+        price of the second layer, and it is written down in
+        docs/PERSISTENCE_BACKENDS.md rather than discovered.
+
+        The COLUMN lands either way. It is inert without a policy - a nullable
+        text column nothing reads unless this instance names it - and having it
+        already there is what lets a host turn the seam on later without
+        rewriting a table full of rows.
+        """
+        # No isolation level is pinned here, where the save and the entity
+        # write both state theirs. Nothing in this step depends on one: the
+        # catalog re-read below runs in a transaction of its own, so it sees
+        # what the DDL transaction left whatever level the role defaults to -
+        # confirmed against a role defaulting to REPEATABLE READ.
+        missing_column: List[str] = []
+        unprotected: List[str] = []
+        for table in SCOPED_TABLES:
+            try:
+                with self._pool.connection() as conn:
+                    with conn.transaction():
+                        if not self._column_present(conn, table):
+                            conn.execute(
+                                sql.SQL(
+                                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} text"
+                                ).format(
+                                    self._table(table), sql.Identifier(SCOPE_COLUMN)
+                                )
+                            )
+                        enabled, forced, policy = self._policy_state(conn, table)
+                        if self._scope is None:
+                            # The column, and nothing that would cost an
+                            # unscoped store its traversal plan.
+                            continue
+                        if not policy:
+                            # `FOR ALL`, so the same expression governs what a
+                            # session may read and what it may write: without a
+                            # WITH CHECK the server would refuse to hand a row
+                            # over and accept one written in its place.
+                            #
+                            # The NULL arm is what makes the seam optional. A
+                            # row that carries no scope is admitted whatever
+                            # the session is set to, which is every row of
+                            # every store that existed before this column did.
+                            # The other arm is unsatisfiable when the setting
+                            # is unset - `= NULL` is NULL, not true - so a
+                            # scoped row is invisible to a session that did not
+                            # say which scope it is, which is the direction
+                            # that has to fail closed.
+                            conn.execute(
+                                sql.SQL(
+                                    "CREATE POLICY {} ON {} FOR ALL"
+                                    " USING ({col} IS NULL"
+                                    "        OR {col} = current_setting({setting}, true))"
+                                ).format(
+                                    sql.Identifier(self._policy_name(table)),
+                                    self._table(table),
+                                    col=sql.Identifier(SCOPE_COLUMN),
+                                    setting=sql.Literal(SCOPE_SETTING),
+                                )
+                            )
+                        if not enabled:
+                            conn.execute(
+                                sql.SQL(
+                                    "ALTER TABLE {} ENABLE ROW LEVEL SECURITY"
+                                ).format(self._table(table))
+                            )
+                        if not forced:
+                            # Without FORCE the policy is decoration in the
+                            # commonest deployment there is: row-level security
+                            # does not apply to a table's OWNER, and the owner
+                            # is whoever ran the migration - this application.
+                            conn.execute(
+                                sql.SQL(
+                                    "ALTER TABLE {} FORCE ROW LEVEL SECURITY"
+                                ).format(self._table(table))
+                            )
+            except Exception:
+                # Swallowed on purpose: what matters is what the store ended up
+                # with, which the catalog answers below, not which statement
+                # could not be issued.
+                pass
+            with self._pool.connection() as conn:
+                if not self._column_present(conn, table):
+                    missing_column.append(table)
+                    continue
+                if self._scope is None:
+                    continue
+                enabled, forced, policy = self._policy_state(conn, table)
+                if not (enabled and forced and policy):
+                    unprotected.append(table)
+
+        self._scope_column = not missing_column
+        if self._scope is not None and missing_column:
+            raise ScopeIsolationUnavailable(
+                f"a scope was configured, and {', '.join(missing_column)} in "
+                f"schema {self.schema!r} has no {SCOPE_COLUMN} column to put it "
+                f"in. Rows written now would carry no scope and be readable by "
+                f"every other session on this store. Add the column and its "
+                f"policy - docs/PERSISTENCE_BACKENDS.md has the statements - or "
+                f"run this instance without a scope."
+            )
+        if self._scope is not None and unprotected:
+            # Only when a scope is configured: a store that keeps no scopes
+            # apart is not missing anything by not having the policy, and a
+            # warning that fires when nothing is wrong teaches an operator to
+            # ignore warnings.
+            print(
+                f"Warning: {', '.join(unprotected)} in schema {self.schema!r} "
+                f"carries the {SCOPE_COLUMN} column but not its row-level "
+                f"security policy, so the scope is enforced by this "
+                f"application alone and not by the server"
+            )
+
+    def _scope_clause(self) -> Tuple[sql.Composed, Tuple]:
+        """The visibility predicate and its parameter, or nothing at all.
+
+        The same expression the policy carries, issued by the application too.
+        Two layers rather than one, and deliberately not a duplicate that could
+        drift: where the server cannot enforce the policy - a role that owns
+        nothing, a store an operator provisioned without it - this is what
+        still holds, and where it can, the two agree so a row is never visible
+        to one and not the other.
+
+        An unscoped instance passes NULL, which reduces the predicate to
+        `scope_id IS NULL` - the same set the policy shows a session that never
+        said which scope it is.
+        """
+        if not self._scope_column:
+            return sql.SQL(""), ()
+        return (
+            sql.SQL("({col} IS NULL OR {col} = %s)").format(
+                col=sql.Identifier(SCOPE_COLUMN)
+            ),
+            (self._scope,),
+        )
+
+    def _where_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` WHERE <predicate>`, or nothing when the store has no column."""
+        clause, params = self._scope_clause()
+        if not params:
+            return sql.SQL(""), ()
+        return sql.SQL(" WHERE ") + clause, params
+
+    def _and_scope(self) -> Tuple[sql.Composed, Tuple]:
+        """` AND <predicate>`, for a statement that already has a WHERE."""
+        clause, params = self._scope_clause()
+        if not params:
+            return sql.SQL(""), ()
+        return sql.SQL(" AND ") + clause, params
+
+    def _insert_shape(self) -> Tuple[sql.Composed, sql.Composed]:
+        """The column list and the placeholders an insert carries.
+
+        Both halves from one place, so a statement cannot name three columns
+        and pass two values.
+        """
+        if not self._scope_column:
+            return sql.SQL("id, doc"), sql.SQL("%s, %s")
+        return (
+            sql.SQL("id, doc, ") + sql.Identifier(SCOPE_COLUMN),
+            sql.SQL("%s, %s, %s"),
+        )
+
+    def _insert_params(self, entity_id: str, payload: Dict[str, Any]) -> Tuple:
+        row = (entity_id, psycopg.types.json.Jsonb(payload))
+        return row + (self._scope,) if self._scope_column else row
+
+    def _bind_scope(self, conn) -> None:
+        """Carry this instance's scope into the transaction, for the policy.
+
+        `set_config(..., is_local => true)` rather than `SET LOCAL`: the value
+        is a parameter, so a host's identifier reaches the server as data and
+        not as SQL text, and transaction-local means the connection goes back
+        to the pool carrying nothing - the next transaction on it starts unset,
+        which is the safe direction to be wrong in.
+
+        Nothing is issued when no scope is configured. The setting is then
+        never set, `current_setting(..., true)` answers NULL, and the policy
+        admits exactly the rows that carry no scope.
+        """
+        if self._scope is None:
+            return
+        conn.execute("SELECT set_config(%s, %s, true)", (SCOPE_SETTING, self._scope))
 
     # -- snapshot contract ---------------------------------------------------
 
@@ -538,14 +881,23 @@ class PostgresGraphPersistenceBackend:
       SELECT CASE WHEN e.doc->>'source' = ANY(%(frontier)s)
                   THEN e.doc->>'target' ELSE e.doc->>'source' END AS id
     ) far
-    LEFT JOIN {nodes} fn ON fn.id = far.id
+    LEFT JOIN {nodes} fn ON fn.id = far.id {node_scope}
     WHERE (e.doc->>'source' = ANY(%(frontier)s)
            OR e.doc->>'target' = ANY(%(frontier)s))
       AND (%(archived_ok)s OR NOT COALESCE((e.doc->>'archived')::boolean, false))
       AND (%(any_type)s OR e.doc->>'type' = ANY(%(types)s))
       AND (%(archived_ok)s OR far.id = %(anchor)s OR fn.id IS NULL
            OR NOT COALESCE((fn.doc->>'archived')::boolean, false))
+      {edge_scope}
     """
+
+    # The node half of the predicate goes in the JOIN condition, not the WHERE.
+    # A node this instance may not see has to read as an endpoint that is not a
+    # node - traversed THROUGH, not returned, which is the dangling-endpoint
+    # rule the walk already has - and a WHERE clause naming `fn` would instead
+    # turn the outer join inner and drop the edge itself.
+    _LEVEL_NODE_SCOPE = "AND (fn.{col} IS NULL OR fn.{col} = %(scope)s)"
+    _LEVEL_EDGE_SCOPE = "AND (e.{col} IS NULL OR e.{col} = %(scope)s)"
 
     def traverse(
         self,
@@ -582,9 +934,23 @@ class PostgresGraphPersistenceBackend:
         # nothing and the traversal returns the anchor alone. The protocol asks
         # for strings; this coerces an enum that arrives anyway, correctly.
         types = [getattr(t, "value", t) for t in (relationship_types or [])]
+        scoped = {
+            "node_scope": self._LEVEL_NODE_SCOPE,
+            "edge_scope": self._LEVEL_EDGE_SCOPE,
+        }
         query = sql.SQL(self._LEVEL).format(
-            edges=self._table("graph_edges"), nodes=self._table("graph_nodes")
+            edges=self._table("graph_edges"),
+            nodes=self._table("graph_nodes"),
+            **{
+                name: (
+                    sql.SQL(text).format(col=sql.Identifier(SCOPE_COLUMN))
+                    if self._scope_column
+                    else sql.SQL("")
+                )
+                for name, text in scoped.items()
+            },
         )
+        anchor_scope, anchor_params = self._and_scope()
         with self._pool.connection() as conn, conn.transaction():
             # One moment, like the load, and for the same reason. A traversal
             # is N+1 statements on one connection, and PostgreSQL's default
@@ -602,14 +968,19 @@ class PostgresGraphPersistenceBackend:
             # like the load and the save: leaving it to the environment was the
             # asymmetry.
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            # After the isolation level, which must be the transaction's first
+            # statement, and before anything that reads a scoped table.
+            self._bind_scope(conn)
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
-            # nothing at all rather than a lone anchor.
+            # nothing at all rather than a lone anchor. An anchor this instance
+            # may not see does not exist as far as it is concerned, which is
+            # the same answer for the same reason.
             present = conn.execute(
-                sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
-                    self._table("graph_nodes")
+                sql.SQL("SELECT 1 FROM {} WHERE id = %s{}").format(
+                    self._table("graph_nodes"), anchor_scope
                 ),
-                (anchor_id,),
+                (anchor_id, *anchor_params),
             ).fetchone()
             if not present:
                 return {"node_ids": [], "edge_ids": []}
@@ -630,6 +1001,7 @@ class PostgresGraphPersistenceBackend:
                         "archived_ok": bool(include_archived),
                         "any_type": not types,
                         "types": types,
+                        "scope": self._scope,
                     },
                     # Never prepared, and this is the one query in this backend
                     # that must not be. Its selectivity is the frontier's size:
@@ -696,20 +1068,24 @@ class PostgresGraphPersistenceBackend:
             with conn.transaction():
                 # Must be the transaction's first statement.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                self._bind_scope(conn)
+                where, scope_params = self._where_scope()
                 nodes = [
                     row[0]
                     for row in conn.execute(
-                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                            self._table("graph_nodes")
-                        )
+                        sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
+                            self._table("graph_nodes"), where
+                        ),
+                        scope_params or None,
                     )
                 ]
                 edges = [
                     row[0]
                     for row in conn.execute(
-                        sql.SQL("SELECT doc FROM {} ORDER BY id").format(
-                            self._table("graph_edges")
-                        )
+                        sql.SQL("SELECT doc FROM {}{} ORDER BY id").format(
+                            self._table("graph_edges"), where
+                        ),
+                        scope_params or None,
                     )
                 ]
                 row = conn.execute(
@@ -751,25 +1127,40 @@ class PostgresGraphPersistenceBackend:
                 # for the opposite reason, so leaving this one to the
                 # environment was an asymmetry, not a default.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-                # Before the first statement takes its snapshot, so a writer
-                # that waited here re-reads the store the other one left.
+                self._bind_scope(conn)
+                # Before the first statement that READS the store takes its
+                # snapshot, so a writer that waited here re-reads what the
+                # other one left. The scope binding above takes no snapshot
+                # this depends on: under READ COMMITTED the DELETE below takes
+                # its own when it starts, which is after the lock.
                 conn.execute(
                     "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
+                # Exactly the rows the load would have returned, which is what
+                # makes "replace the whole graph" mean the same thing here as
+                # it does everywhere else. Deleting less than that is the
+                # interesting failure: the load hands GraphStorage a row this
+                # statement then leaves behind, and the insert below dies on
+                # its primary key.
+                where, scope_params = self._where_scope()
                 for table in ("graph_nodes", "graph_edges"):
-                    conn.execute(sql.SQL("DELETE FROM {}").format(self._table(table)))
+                    conn.execute(
+                        sql.SQL("DELETE FROM {}{}").format(self._table(table), where),
+                        scope_params or None,
+                    )
+                columns, placeholders = self._insert_shape()
                 conn.cursor().executemany(
-                    sql.SQL("INSERT INTO {} (id, doc) VALUES (%s, %s)").format(
-                        self._table("graph_nodes")
+                    sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        self._table("graph_nodes"), columns, placeholders
                     ),
-                    [(node["id"], psycopg.types.json.Jsonb(node)) for node in nodes],
+                    [self._insert_params(node["id"], node) for node in nodes],
                 )
                 conn.cursor().executemany(
-                    sql.SQL("INSERT INTO {} (id, doc) VALUES (%s, %s)").format(
-                        self._table("graph_edges")
+                    sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                        self._table("graph_edges"), columns, placeholders
                     ),
-                    [(edge["id"], psycopg.types.json.Jsonb(edge)) for edge in edges],
+                    [self._insert_params(edge["id"], edge) for edge in edges],
                 )
                 conn.execute(
                     sql.SQL(
@@ -919,6 +1310,7 @@ class PostgresGraphPersistenceBackend:
                 # default the second writer would abort with a serialization
                 # failure instead of waiting and winning.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                self._bind_scope(conn)
                 conn.execute(
                     "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
@@ -935,18 +1327,70 @@ class PostgresGraphPersistenceBackend:
     def _apply_one(self, conn, operation: EntityOperation) -> None:
         table = "graph_nodes" if operation.kind == "node" else "graph_edges"
         if operation.action == "delete":
+            # The predicate is not redundant with the policy: where the server
+            # cannot enforce one, this is what stops an instance deleting a row
+            # that is not its to delete.
+            scope, scope_params = self._and_scope()
             conn.execute(
-                sql.SQL("DELETE FROM {} WHERE id = %s").format(self._table(table)),
-                (operation.entity_id,),
+                sql.SQL("DELETE FROM {} WHERE id = %s{}").format(
+                    self._table(table), scope
+                ),
+                (operation.entity_id, *scope_params),
             )
             return
-        conn.execute(
+        columns, placeholders = self._insert_shape()
+        if not self._scope_column:
+            conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} ({}) VALUES ({})"
+                    " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
+                ).format(self._table(table), columns, placeholders),
+                self._insert_params(operation.entity_id, operation.payload),
+            )
+            return
+        # The scope travels with the row. A row written before this instance
+        # had a scope carries none, and adopting it here is what stops the
+        # store drifting into two kinds of row that the whole-graph save would
+        # then have to reconcile.
+        #
+        # The predicate on the conflicting row is the same one every read
+        # carries, and it is what makes an upsert unable to reach a row that is
+        # not this instance's. `id` is the primary key of the TABLE rather than
+        # of the table per scope, so the conflicting row may belong to another
+        # scope - and without this the statement replaced its content and
+        # restamped its scope, which is a cross-scope write in the one path
+        # that had none. Measured before this predicate existed: the other
+        # scope's node was gone and its next load returned nothing.
+        #
+        # The row count is read rather than assumed, because a DO UPDATE whose
+        # WHERE does not match is not an error - the statement affects no rows
+        # and raises nothing, which would tell the caller a write happened that
+        # did not. Measured on PostgreSQL 16: 0 for exactly that case, and 1
+        # for a fresh insert, an own-scope update and a row carrying no scope.
+        cursor = conn.execute(
             sql.SQL(
-                "INSERT INTO {} (id, doc) VALUES (%s, %s)"
-                " ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc"
-            ).format(self._table(table)),
-            (operation.entity_id, psycopg.types.json.Jsonb(operation.payload)),
+                "INSERT INTO {} ({}) VALUES ({})"
+                " ON CONFLICT (id) DO UPDATE"
+                " SET doc = EXCLUDED.doc, {col} = EXCLUDED.{col}"
+                " WHERE ({bare}.{col} IS NULL OR {bare}.{col} = %s)"
+            ).format(
+                self._table(table),
+                columns,
+                placeholders,
+                col=sql.Identifier(SCOPE_COLUMN),
+                bare=sql.Identifier(table),
+            ),
+            self._insert_params(operation.entity_id, operation.payload)
+            + (self._scope,),
         )
+        if cursor.rowcount == 0:
+            raise CrossScopeWriteRefused(
+                f"{operation.kind} {operation.entity_id!r} in schema "
+                f"{self.schema!r} carries a scope this instance may not write. "
+                f"An id is unique across the whole table, so two scopes cannot "
+                f"both hold one - see docs/PERSISTENCE_BACKENDS.md, "
+                f"'Keeping scopes apart'."
+            )
 
     # -- change notification -------------------------------------------------
 
@@ -1289,16 +1733,26 @@ class PostgresGraphPersistenceBackend:
         agrees.
         """
         found: Dict[str, Dict[str, Any]] = {"node": {}, "edge": {}}
-        with self._pool.connection() as conn:
+        # The scope predicate below is built from what the migration found, and
+        # this method does not migrate - it does not need to, because the only
+        # caller is the listening thread and that thread exists only once
+        # `start_change_notification` has run, which does. Stated because it is
+        # the one read path here whose correctness rests on an ordering rather
+        # than on its own first line.
+        scope, scope_params = self._and_scope()
+        with self._pool.connection() as conn, conn.transaction():
+            # In a transaction of its own, because the scope is bound to one
+            # and this read is otherwise the only path here that has none.
+            self._bind_scope(conn)
             for kind, table in (("node", "graph_nodes"), ("edge", "graph_edges")):
                 ids = [entity_id for k, entity_id in pairs if k == kind]
                 if not ids:
                     continue
                 rows = conn.execute(
-                    sql.SQL("SELECT id, doc FROM {} WHERE id = ANY(%s)").format(
-                        self._table(table)
+                    sql.SQL("SELECT id, doc FROM {} WHERE id = ANY(%s){}").format(
+                        self._table(table), scope
                     ),
-                    (ids,),
+                    (ids, *scope_params),
                 ).fetchall()
                 found[kind] = {row[0]: row[1] for row in rows}
 
@@ -1381,10 +1835,18 @@ class PostgresGraphPersistenceBackend:
 
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    # The two a host must be able to catch, so they belong in a curated list
+    # as much as the tuning constants do.
+    "CrossScopeWriteRefused",
+    "ScopeIsolationUnavailable",
     "SAVE_LOCK_KEY",
     "DEFAULT_POOL_SIZE",
     "MIGRATION_LOCK_KEY",
     "NOTIFY_PAYLOAD_LIMIT",
     "NOTIFY_POLL_SECONDS",
     "NOTIFY_RECONNECT_MAX_SECONDS",
+    "SCOPE_COLUMN",
+    "SCOPE_POLICY_SUFFIX",
+    "SCOPE_SETTING",
+    "SCOPED_TABLES",
 ]
