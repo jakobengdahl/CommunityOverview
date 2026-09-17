@@ -394,13 +394,15 @@ class GraphStorage:
         """Return the backend-specific default graph name."""
         return self._persistence_backend.default_graph_name()
 
-    def _save_destination(self) -> str:
-        """Describe where a save actually lands, for the log line.
+    def _persistence_destination(self) -> str:
+        """Describe where the graph actually lives, for the log lines.
 
         Only the file-backed backend owns a concrete path — `self.json_path`
         is a synthetic default for every other backend (see its assignment
         in `__init__`), so naming it there would claim a save landed in
         graph.json when it went to PostgreSQL, or nowhere on disk at all.
+        The load path reads the same store the save path writes, so both
+        describe it through this one helper.
         """
         if isinstance(self._persistence_backend, FileGraphPersistenceBackend):
             return str(self.json_path)
@@ -713,12 +715,13 @@ class GraphStorage:
             if not self._persistence_backend.exists():
                 if not bootstrap_if_missing:
                     print(
-                        f"Warning: cannot refresh from {self.json_path}: it is "
+                        f"Warning: cannot refresh from {self._persistence_destination()}: it is "
                         f"not there. Serving the graph in memory unchanged."
                     )
                     return
                 print(
-                    f"No graph file found at {self.json_path}, creating new empty graph"
+                    f"No graph data found in {self._persistence_destination()}, "
+                    f"creating new empty graph"
                 )
                 # An empty index has nothing to contribute, and marking it
                 # persisted is what keeps this bootstrap write from putting an
@@ -841,7 +844,8 @@ class GraphStorage:
                 self._load_embeddings()
 
                 print(
-                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from {self.json_path}"
+                    f"Loaded {len(self.nodes)} nodes and {len(self.edges)} edges from "
+                    f"{self._persistence_destination()}"
                 )
 
             except Exception as e:
@@ -1241,7 +1245,7 @@ class GraphStorage:
             self._persistence_backend.save_graph_data(data)
             print(
                 f"Saved {node_count} nodes and {edge_count} edges to "
-                f"{self._save_destination()}"
+                f"{self._persistence_destination()}"
             )
         except ExternalChangeRefused:
             # Same reason as in _do_apply, and it has to be said in both write
