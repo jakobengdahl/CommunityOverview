@@ -122,13 +122,19 @@ function CreateNodeDialog({ nodeType, onClose, onSave }) {
 
   return (
     <div className="create-node-overlay" onClick={onClose}>
-      <div className="create-node-dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="create-node-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-node-dialog-title"
+      >
         <header className="create-node-header">
           <div className="create-node-header-title">
             <span className="create-node-type-dot" style={{ backgroundColor: color }} />
-            <h2>Create {nodeType}</h2>
+            <h2 id="create-node-dialog-title">Create {nodeType}</h2>
           </div>
-          <button className="close-button" onClick={onClose} aria-label="Close">
+          <button className="close-button" onClick={onClose} aria-label="Close" title="Close">
             ×
           </button>
         </header>

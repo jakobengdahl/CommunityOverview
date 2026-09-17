@@ -135,16 +135,22 @@ function EditNodeDialog({ node, onClose, onSave }) {
 
   return (
     <div className="edit-dialog-overlay" onClick={onClose}>
-      <div className="edit-dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="edit-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-node-dialog-title"
+      >
         <header className="edit-dialog-header">
           <div className="edit-dialog-header-title">
             <span
               className="edit-dialog-type-dot"
               style={{ backgroundColor: getNodeColor(formData.type) }}
             />
-            <h2>Edit {formData.type || 'Node'}</h2>
+            <h2 id="edit-node-dialog-title">Edit {formData.type || 'Node'}</h2>
           </div>
-          <button className="close-button" onClick={onClose} aria-label="Close">
+          <button className="close-button" onClick={onClose} aria-label="Close" title="Close">
             ×
           </button>
         </header>
