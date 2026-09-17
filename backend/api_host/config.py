@@ -83,6 +83,18 @@ class AppConfig:
     graph_postgres_schema: str = field(
         default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCHEMA", "public")
     )
+    # An opaque identifier tagging every row this instance writes to the
+    # PostgreSQL graph store, and narrowing every row it reads to that value or
+    # to none. Unset - the default - is a store that keeps no scopes apart, and
+    # behaves exactly as it did before this setting existed. What the value
+    # distinguishes is the host's business: nothing here interprets it.
+    #
+    # Empty reads as unset, the way GRAPH_BACKEND does above, because that is
+    # what a variable templated out of a compose file or a deploy command
+    # arrives as.
+    graph_postgres_scope: Optional[str] = field(
+        default_factory=lambda: os.getenv("GRAPH_POSTGRES_SCOPE", "").strip() or None
+    )
     # Connections this instance may hold, on top of the one LISTEN connection
     # the backend keeps for change notification. Unset uses the backend's own
     # default. docs/PERSISTENCE_BACKENDS.md, "Sizing it: what an instance

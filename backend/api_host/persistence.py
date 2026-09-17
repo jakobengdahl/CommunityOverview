@@ -87,5 +87,10 @@ def build_persistence_backend(config: AppConfig):
     kwargs = {"schema": config.graph_postgres_schema}
     if pool_size is not None:
         kwargs["pool_size"] = pool_size
+    # Passed only when it was set, so a deployment that names no scope
+    # constructs the backend with exactly the arguments it did before the
+    # setting existed.
+    if config.graph_postgres_scope is not None:
+        kwargs["scope"] = config.graph_postgres_scope
 
     return PostgresGraphPersistenceBackend(dsn, **kwargs)

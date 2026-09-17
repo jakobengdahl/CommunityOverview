@@ -247,6 +247,41 @@ class TestBackendSelection:
         backend = build_persistence_backend(config)
         assert "pool_size" not in backend.kwargs
 
+    @requires_backend_module
+    @pytest.mark.parametrize("scope", ["scope-a", "0198c1d4"])
+    def test_a_scope_reaches_the_backend(self, monkeypatch, scope):
+        """Passed through as given: an opaque identifier, not something this
+        layer parses, shortens or lower-cases on the way."""
+        monkeypatch.setattr(
+            "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
+            StubBackend,
+        )
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+            graph_postgres_scope=scope,
+        )
+        backend = build_persistence_backend(config)
+        assert backend.kwargs["scope"] == scope
+
+    @requires_backend_module
+    def test_no_scope_is_not_passed_at_all(self, monkeypatch):
+        """Unset constructs the backend with exactly the arguments it took
+        before this setting existed, rather than with an explicit None that a
+        future default would have to keep agreeing with."""
+        monkeypatch.setattr(
+            "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
+            StubBackend,
+        )
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+        )
+        backend = build_persistence_backend(config)
+        assert "scope" not in backend.kwargs
+
 
 class TestTheServerUsesWhatWasSelected:
     """The assertion the whole task exists for.
@@ -344,6 +379,24 @@ class TestTheEnvironmentIsTheInterface:
     def test_schema_defaults_to_public(self, monkeypatch):
         monkeypatch.delenv("GRAPH_POSTGRES_SCHEMA", raising=False)
         assert AppConfig().graph_postgres_schema == "public"
+
+    def test_scope_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("GRAPH_POSTGRES_SCOPE", "scope-a")
+        assert AppConfig().graph_postgres_scope == "scope-a"
+
+    def test_scope_unset_is_none(self, monkeypatch):
+        monkeypatch.delenv("GRAPH_POSTGRES_SCOPE", raising=False)
+        assert AppConfig().graph_postgres_scope is None
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_an_empty_scope_reads_as_unset(self, monkeypatch, blank):
+        """`GRAPH_POSTGRES_SCOPE=` is a variable templated out of a deploy
+        command, and it means unset to whoever wrote it. Reaching the backend
+        it would be refused outright - correctly, since an empty identifier
+        isolates nothing - and a deployment that never asked for a scope would
+        fail to start."""
+        monkeypatch.setenv("GRAPH_POSTGRES_SCOPE", blank)
+        assert AppConfig().graph_postgres_scope is None
 
     def test_pool_size_is_read_as_an_integer(self, monkeypatch):
         monkeypatch.setenv("GRAPH_POSTGRES_POOL_SIZE", "6")
