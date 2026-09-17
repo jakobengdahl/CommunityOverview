@@ -383,12 +383,13 @@ function FloatingSearch({ variant = 'floating' }) {
       ref={containerRef}
     >
       <div className="floating-search-bar">
-        <Search size={18} className="floating-search-icon" />
+        <Search size={18} className="floating-search-icon" aria-hidden="true" />
         <input
           ref={inputRef}
           type="text"
           className="floating-search-input"
           placeholder="Search graph..."
+          aria-label={t('search_panel_title')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
