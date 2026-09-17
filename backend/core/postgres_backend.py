@@ -1728,6 +1728,12 @@ class PostgresGraphPersistenceBackend:
         agrees.
         """
         found: Dict[str, Dict[str, Any]] = {"node": {}, "edge": {}}
+        # The scope predicate below is built from what the migration found, and
+        # this method does not migrate - it does not need to, because the only
+        # caller is the listening thread and that thread exists only once
+        # `start_change_notification` has run, which does. Stated because it is
+        # the one read path here whose correctness rests on an ordering rather
+        # than on its own first line.
         scope, scope_params = self._and_scope()
         with self._pool.connection() as conn, conn.transaction():
             # In a transaction of its own, because the scope is bound to one
