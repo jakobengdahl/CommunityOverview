@@ -5799,7 +5799,7 @@ def _plans(issued, dsn=DSN, scope=None):
     return plans
 
 
-def _owning_role():
+def _owning_role(mixed_case=False):
     """A non-superuser role owning a schema of its own, as a deployment has.
 
     The migration run by this role creates the tables, so the role owns them -
@@ -5811,7 +5811,7 @@ def _owning_role():
     """
     suffix = uuid.uuid4().hex[:12]
     name = f"co_own_{suffix}"
-    schema = f"co_own_{suffix}_sch"
+    schema = f"CoOwn_{suffix}" if mixed_case else f"co_own_{suffix}_sch"
     password = secrets.token_hex(16)
     created = False
     try:
@@ -5865,9 +5865,19 @@ class TestTheOptionalScopeSeam:
     unless it is forced, and not to a superuser however it is declared.
     """
 
-    @pytest.fixture
-    def owner(self):
-        yield from _owning_role()
+    @pytest.fixture(params=["plain", "MixedCase"], ids=["plain", "needs-quoting"])
+    def owner(self, request):
+        """Parametrised over the schema's NAME, like the least-privilege
+        fixture above and for the same reason.
+
+        This seam adds three quoting surfaces: the catalog lookups keyed on
+        `nspname`, the `ALTER TABLE` / `CREATE POLICY` DDL, and the BARE,
+        unqualified table reference in the upsert's `ON CONFLICT … WHERE` -
+        which is the one place in this change where an identifier reaches SQL
+        without its schema. A name that only survives quoted is what tells a
+        correct one from a lookup that parses and case-folds.
+        """
+        yield from _owning_role(mixed_case=request.param == "MixedCase")
 
     @pytest.fixture
     def other_owner(self):
@@ -6141,6 +6151,58 @@ class TestTheOptionalScopeSeam:
 
         assert "smuggled" not in _stored(schema, "graph_nodes")
 
+        # And the two statements a co-tenant would actually issue. `FOR ALL`
+        # means the USING expression governs these as well, so narrowing the
+        # policy to FOR SELECT would leave the reads refused and the writes
+        # through - and a test that asked only about INSERT would not notice.
+        for scope in ("scope-b", None):
+            with psycopg.connect(_dsn_as_role(name, password)) as conn:
+                if scope is not None:
+                    conn.execute(
+                        "SELECT set_config(%s, %s, false)", (SCOPE_SETTING, scope)
+                    )
+                updated = conn.execute(
+                    psycopg.sql.SQL(
+                        "UPDATE {}.graph_nodes SET doc = %s WHERE id = %s"
+                    ).format(psycopg.sql.Identifier(schema)),
+                    (psycopg.types.json.Jsonb(node_payload("a", name="taken")), "a"),
+                ).rowcount
+                deleted = conn.execute(
+                    psycopg.sql.SQL("DELETE FROM {}.graph_nodes WHERE id = %s").format(
+                        psycopg.sql.Identifier(schema)
+                    ),
+                    ("a",),
+                ).rowcount
+                conn.rollback()
+            assert (updated, deleted) == (0, 0), (
+                f"a session scoped {scope!r} reached another scope's row with a "
+                f"bare UPDATE/DELETE"
+            )
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+
+    def test_the_two_layers_agree_on_a_cross_scope_upsert(self, owner, backends):
+        """The refusal, asked where the server is enforcing as well.
+
+        The application half is tested through the superuser DSN, where no
+        policy applies - so nothing there pins the claim this change makes in
+        both its code and its document: that where the policy IS in force the
+        server refuses the same write. That is a genuine branch in the server
+        rather than a consequence of this SQL (how PostgreSQL treats an
+        `ON CONFLICT DO UPDATE` whose conflicting row is invisible under
+        `USING`), so if it ever changed, a host would start seeing a different
+        exception from the same misconfiguration and nothing would notice.
+        """
+        name, schema, password = owner
+        a = self._as_owner(owner, backends, scope="scope-a")
+        b = self._as_owner(owner, backends, scope="scope-b")
+        a.upsert_node(node_payload("n0", name="A's own"))
+
+        with pytest.raises(CrossScopeWriteRefused):
+            b.upsert_node(node_payload("n0", name="B's version"))
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert by_id(a.load_graph_data(), "nodes")["n0"]["name"] == "A's own"
+
     def test_the_policy_admits_a_scopeless_row_to_every_session(self, owner, backends):
         """The `IS NULL` arm, asked of a table that actually has the policy.
 
@@ -6399,6 +6461,30 @@ class TestTheOptionalScopeSeam:
             "another scope's upsert changed the row it may not write"
         )
 
+    def test_a_scoped_upsert_updates_a_row_this_instance_already_owns(
+        self, schema, backends
+    ):
+        """The arm of the refusal that must NOT refuse.
+
+        The statement has four reachable outcomes - a fresh insert, the
+        adoption of a scopeless row, an update of this instance's own row, and
+        a conflict with another scope's - and only the last is a refusal. With
+        the first three tested and this one missing, the suite cannot tell
+        "refuses a cross-scope write" from "refuses every update": passing the
+        wrong parameter to the conflict predicate collapses it to
+        `scope_id IS NULL`, and every second write to an id raises. Measured on
+        a copy with that one parameter changed - the suite stayed green and a
+        scoped instance could not update a row it had written itself.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, scope="scope-a")
+        backends.append(backend)
+
+        backend.upsert_node(node_payload("n0", name="first"))
+        backend.upsert_node(node_payload("n0", name="second"))
+
+        assert _stored(schema, "graph_nodes") == {"n0": "scope-a"}
+        assert by_id(backend.load_graph_data(), "nodes")["n0"]["name"] == "second"
+
     def test_an_upsert_still_adopts_a_row_that_carries_no_scope(self, schema, backends):
         """The refusal above must not catch the case it shares a statement with.
 
@@ -6553,6 +6639,112 @@ class TestTheOptionalScopeSeam:
         assert _stored(schema, "graph_nodes", "id") == {}, (
             "a row was written by a backend that could not scope it"
         )
+
+    @pytest.mark.parametrize(
+        "provision",
+        ["column only", "policy, not enabled", "enabled, not forced"],
+    )
+    def test_a_scope_the_server_does_not_enforce_is_reported(
+        self, columnless, backends, capsys, provision
+    ):
+        """Three ways for the server to be enforcing nothing, and the warning
+        has to fire for each.
+
+        A policy that exists but was never ENABLEd is inert, and one enabled
+        without FORCE does not apply to the table's owner - so checking only
+        that a policy is PRESENT would report a store as protected when its
+        rows are readable by every session on it. Parametrised because with
+        the column-only case alone, the `enabled` and `forced` conjuncts are
+        never the thing that decides.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            for table in SCOPED_TABLES:
+                conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        psycopg.sql.Identifier(SCOPE_COLUMN),
+                    )
+                )
+                if provision == "column only":
+                    continue
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "CREATE POLICY {} ON {}.{} FOR ALL USING ({col} IS NULL"
+                        " OR {col} = current_setting({setting}, true))"
+                    ).format(
+                        psycopg.sql.Identifier(f"{table}{SCOPE_POLICY_SUFFIX}"),
+                        psycopg.sql.Identifier(schema),
+                        psycopg.sql.Identifier(table),
+                        col=psycopg.sql.Identifier(SCOPE_COLUMN),
+                        setting=psycopg.sql.Literal(SCOPE_SETTING),
+                    )
+                )
+                if provision == "policy, not enabled":
+                    continue
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY"
+                    ).format(
+                        psycopg.sql.Identifier(schema), psycopg.sql.Identifier(table)
+                    )
+                )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
+        backends.append(backend)
+        capsys.readouterr()
+
+        backend.save_graph_data(snapshot([node_payload("a")]))
+
+        printed = capsys.readouterr().out
+        assert "not by the server" in printed, (
+            f"a store the server does not enforce was not reported ({provision}): "
+            f"{printed}"
+        )
+        # And it still runs on the application's own predicate.
+        assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
+
+    def test_an_unscoped_instance_on_a_half_provisioned_store_says_nothing(
+        self, columnless, backends, capsys
+    ):
+        """The column on one scoped table and not the other, with no scope.
+
+        The scoped instance refuses such a store. The unscoped one must run on
+        it, and run as it did before the column existed - naming the column
+        nowhere, because `graph_edges` has not got it. What decides that is
+        that the catalog re-read finds `graph_edges` missing and leaves the
+        flag False for BOTH tables; a version that took the flag from whether
+        the ALTER was attempted would read `graph_nodes` with the predicate
+        and then fail on every edge query with `column scope_id does not
+        exist`.
+        """
+        dsn, schema = columnless
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                psycopg.sql.SQL("ALTER TABLE {}.graph_nodes ADD COLUMN {} text").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(SCOPE_COLUMN),
+                )
+            )
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
+        backends.append(backend)
+        backend.exists()
+        self._assert_silent_about_the_seam(capsys.readouterr().out)
+
+        issued = _statements_issued(
+            lambda: (
+                backend.save_graph_data(
+                    snapshot([node_payload("a")], [edge_payload("e", "a", "a")])
+                ),
+                backend.traverse("a", 2),
+                backend.load_graph_data(),
+            )
+        )
+
+        named = [text for q, _ in issued if SCOPE_COLUMN in (text := _rendered(q))]
+        assert not named, f"a statement named a column graph_edges has not: {named}"
+        assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
+        assert _stored(schema, "graph_nodes") == {"a": None}
 
     def test_a_scope_refuses_a_store_with_the_column_on_only_one_table(
         self, columnless, backends

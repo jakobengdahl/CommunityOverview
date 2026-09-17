@@ -663,6 +663,11 @@ class PostgresGraphPersistenceBackend:
         already there is what lets a host turn the seam on later without
         rewriting a table full of rows.
         """
+        # No isolation level is pinned here, where the save and the entity
+        # write both state theirs. Nothing in this step depends on one: the
+        # catalog re-read below runs in a transaction of its own, so it sees
+        # what the DDL transaction left whatever level the role defaults to -
+        # confirmed against a role defaulting to REPEATABLE READ.
         missing_column: List[str] = []
         unprotected: List[str] = []
         for table in SCOPED_TABLES:
@@ -756,7 +761,7 @@ class PostgresGraphPersistenceBackend:
             # warning that fires when nothing is wrong teaches an operator to
             # ignore warnings.
             print(
-                f"Warning: {', '.join(unprotected)} in schema {self.schema} "
+                f"Warning: {', '.join(unprotected)} in schema {self.schema!r} "
                 f"carries the {SCOPE_COLUMN} column but not its row-level "
                 f"security policy, so the scope is enforced by this "
                 f"application alone and not by the server"
@@ -1830,10 +1835,18 @@ class PostgresGraphPersistenceBackend:
 
 __all__ = [
     "PostgresGraphPersistenceBackend",
+    # The two a host must be able to catch, so they belong in a curated list
+    # as much as the tuning constants do.
+    "CrossScopeWriteRefused",
+    "ScopeIsolationUnavailable",
     "SAVE_LOCK_KEY",
     "DEFAULT_POOL_SIZE",
     "MIGRATION_LOCK_KEY",
     "NOTIFY_PAYLOAD_LIMIT",
     "NOTIFY_POLL_SECONDS",
     "NOTIFY_RECONNECT_MAX_SECONDS",
+    "SCOPE_COLUMN",
+    "SCOPE_POLICY_SUFFIX",
+    "SCOPE_SETTING",
+    "SCOPED_TABLES",
 ]

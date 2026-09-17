@@ -895,7 +895,11 @@ Two boundaries and one cost, none of them accidents:
   other scope's row and restamped its scope, and that scope's next load
   returned nothing. Where the policy is in force the server refuses the same
   write, so the two layers agree; a whole-graph save carrying such an id fails
-  on the primary key, which is the same answer by a louder road. Change
+  on the primary key, which is the same answer by a louder road. Louder, and
+  worth knowing before it happens: `GraphStorage` answers a failed entity write
+  by re-issuing the whole graph, so once such an id is in an instance's memory
+  every subsequent write becomes that failing save and the instance persists
+  nothing until the id leaves it. Change
   notification is per schema too (the channel is derived from it), so two
   scopes behind one set of tables would hear each other's entity ids announced.
   The seam is the row-level layer *underneath* the separation this backend
