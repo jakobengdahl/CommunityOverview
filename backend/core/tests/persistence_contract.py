@@ -47,6 +47,7 @@ from backend.core.storage_backends import (
     TraversingBackend,
     EntityOperation,
     ExternalChange,
+    ExternalChangeRefused,
     IncrementalGraphPersistenceBackend,
     capabilities_of,
 )
@@ -846,6 +847,29 @@ class PersistenceBackendContract:
         )
         self.settle_notifications(elsewhere)
         assert storage.get_node("q") is None
+
+    def test_a_report_from_the_write_queues_own_thread_is_refused(self, factory):
+        """The one thread a report must never come from: the one the write
+        queue runs on. `GraphStorage` detects that one case and raises
+        `ExternalChangeRefused` back at whoever reported it - and refusing it
+        is not wedging: the backend must be exactly as usable afterwards as
+        it was before."""
+        if not self._notifying(factory()):
+            pytest.skip("backend does not report external changes")
+        storage = GraphStorage(persistence_backend=factory())
+        try:
+            refused = storage._io_executor.submit(
+                storage.apply_external_change, ExternalChange.unknown()
+            )
+            with pytest.raises(ExternalChangeRefused, match="backend's own thread"):
+                refused.result(timeout=30)
+
+            # And the queue still works: refusing is not wedging.
+            storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="Alpha")], [])
+            storage.flush()
+            assert storage.get_node("a") is not None
+        finally:
+            storage.shutdown_events()
 
 
 __all__ = [
