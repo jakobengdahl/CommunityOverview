@@ -631,6 +631,32 @@ The tool refuses to replace a target that already contains graph data. Pass
 the write, it reloads the target and verifies the node count, edge count, and
 that every edge endpoint refers to a stored node.
 
+**Into a store that keeps scopes apart, pass `--scope`.** A row that carries no
+scope is admitted to every session (*Keeping scopes apart*, below), so a graph
+converted without one would be readable by every scope in the store. The tool
+therefore refuses an unscoped conversion when the target shows either sign of
+keeping scopes apart: row-level security enabled, or a policy present, on
+`graph_nodes` or `graph_edges`, or rows there already carrying a scope. It
+refuses before writing anything, and `--allow-non-empty-target` does not
+override it: that flag decides whether to replace a graph, not whether to
+publish one to every scope.
+
+```bash
+python scripts/graph_file_to_postgres.py data/active/graph.json \
+  --dsn "$GRAPH_POSTGRES_DSN" \
+  --schema "${GRAPH_POSTGRES_SCHEMA:-public}" \
+  --scope "$GRAPH_POSTGRES_SCOPE"
+```
+
+With `--scope`, verification also counts the nodes and edges carrying that
+scope, rather than trusting the reload alone: a scoped session is shown every
+row that carries no scope as well as its own, so a graph written unscoped
+would pass the reload's count check with the right numbers.
+
+On such a store, an unscoped session sees none of the scoped rows, only the
+metadata row, which the store keeps once per schema for every scope.
+That is why an emptiness refusal can report metadata and no nodes or edges.
+
 The import migrates only the graph payload read from `graph.json`. Embedding
 sidecars, history sidecars, and session files are not migrated. Regenerate or
 move those artifacts separately if the deployment needs them.

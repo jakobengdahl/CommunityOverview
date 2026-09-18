@@ -3,6 +3,10 @@
 
 This migrates only the graph payload read from ``graph.json``. Embedding
 sidecars, history sidecars, and session files are intentionally not migrated.
+
+A target that keeps scopes apart is only written with ``--scope``. A row that
+carries no scope is admitted to every session, so an unscoped conversion into
+such a store would publish the whole graph to every scope in it.
 """
 
 from __future__ import annotations
@@ -31,6 +35,20 @@ class GraphBackend(Protocol):
     def save_graph_data(self, data: Dict[str, Any]) -> None: ...
 
     def close(self) -> None: ...
+
+
+class TargetInspector(Protocol):
+    """What the backend's own load and save cannot tell the conversion.
+
+    Both questions concern rows this conversion's session may not see: a
+    policy hides another scope's rows, and a scoped reader sees rows that
+    carry no scope alongside its own. So they are asked of the catalog and
+    of the scope column directly rather than of ``load_graph_data``.
+    """
+
+    def isolation_evidence(self) -> list[str]: ...
+
+    def rows_in_scope(self, scope: str) -> "GraphCounts": ...
 
 
 @dataclass(frozen=True)
@@ -65,6 +83,15 @@ def graph_has_content(data: Dict[str, Any]) -> bool:
         return True
     metadata = data.get("metadata")
     return bool(metadata) if isinstance(metadata, dict) else metadata is not None
+
+
+def describe_content(data: Dict[str, Any]) -> str:
+    counts = graph_counts(data)
+    if counts == GraphCounts(0, 0):
+        # Metadata alone, which on a store keeping scopes apart is typically
+        # another scope's: the metadata table holds one row per schema.
+        return "graph metadata but no nodes or edges visible to this conversion"
+    return f"{counts.nodes} node(s), {counts.edges} edge(s)"
 
 
 def validate_edge_endpoints(data: Dict[str, Any], *, label: str) -> None:
@@ -120,24 +147,53 @@ def convert_graph_file_to_postgres(
     graph_file: str | Path,
     target_backend: GraphBackend,
     *,
+    inspector: TargetInspector,
+    scope: str | None = None,
     allow_non_empty: bool = False,
 ) -> ConversionResult:
     source = read_graph_file(graph_file)
     validate_edge_endpoints(source, label="source graph")
 
+    # Before the emptiness check, so --allow-non-empty-target cannot reach
+    # past it: that flag answers "replace this graph?", not "publish it to
+    # every scope?", and on such a store the emptiness check sees only the
+    # shared metadata row anyway.
+    if scope is None:
+        evidence = inspector.isolation_evidence()
+        if evidence:
+            raise ConversionError(
+                "target keeps scopes apart ("
+                + "; ".join(evidence)
+                + "), and rows written without a scope are readable by every "
+                "scope in it; re-run with --scope set to the scope this graph "
+                "belongs to"
+            )
+
     if target_backend.exists():
         existing = target_backend.load_graph_data()
         if graph_has_content(existing) and not allow_non_empty:
-            counts = graph_counts(existing)
             raise ConversionError(
-                "target graph is not empty "
-                f"({counts.nodes} node(s), {counts.edges} edge(s)); re-run with "
-                "--allow-non-empty-target to replace it"
+                f"target graph is not empty (it holds {describe_content(existing)}); "
+                "re-run with --allow-non-empty-target to replace it"
             )
 
     target_backend.save_graph_data(source)
     written = target_backend.load_graph_data()
     verify_written_graph(source, written)
+
+    if scope is not None:
+        # The reload above cannot show this: a scoped reader is also shown
+        # every row that carries no scope, so a graph written unscoped would
+        # pass the count check with the right numbers.
+        expected = graph_counts(source)
+        stamped = inspector.rows_in_scope(scope)
+        if stamped != expected:
+            raise ConversionError(
+                "scope verification failed: expected "
+                f"{expected.nodes} node(s) and {expected.edges} edge(s) carrying "
+                f"the scope, found {stamped.nodes} node(s) and {stamped.edges} "
+                "edge(s)"
+            )
 
     counts = graph_counts(written)
     return ConversionResult(nodes=counts.nodes, edges=counts.edges)
@@ -166,6 +222,93 @@ def build_postgres_backend(
     if scope is not None:
         kwargs["scope"] = scope
     return PostgresGraphPersistenceBackend(dsn, **kwargs)
+
+
+class PostgresTargetInspector:
+    """Answers `TargetInspector` from the catalog, on its own connection.
+
+    Its own connection rather than the backend's pool, which is private: the
+    session it opens carries no scope setting, exactly as the conversion's
+    own does when no scope was given.
+    """
+
+    def __init__(self, dsn: str, *, schema: str) -> None:
+        self._dsn = dsn
+        self._schema = schema
+
+    def isolation_evidence(self) -> list[str]:
+        import psycopg
+        from psycopg import sql
+
+        from backend.core.postgres_backend import SCOPE_COLUMN, SCOPED_TABLES
+
+        evidence = []
+        with psycopg.connect(self._dsn) as conn:
+            for table in SCOPED_TABLES:
+                row = conn.execute(
+                    "SELECT c.relrowsecurity,"
+                    " EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid),"
+                    " EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid"
+                    "   AND a.attname = %s AND a.attnum > 0 AND NOT a.attisdropped)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (SCOPE_COLUMN, self._schema, table),
+                ).fetchone()
+                if row is None:
+                    continue
+                rls_enabled, has_policy, has_column = row
+                # Either one is a store asking the server to keep rows apart,
+                # whatever the policy is called: an operator provisioning by
+                # hand is not bound to the backend's name for it.
+                if rls_enabled or has_policy:
+                    evidence.append(f"{table} has row-level security")
+                elif has_column:
+                    # No policy, so nothing hides a scoped row from this
+                    # session: a store keeping scopes apart in the
+                    # application alone shows them here.
+                    scoped = conn.execute(
+                        sql.SQL(
+                            "SELECT count(*) FROM {}.{} WHERE {} IS NOT NULL"
+                        ).format(
+                            sql.Identifier(self._schema),
+                            sql.Identifier(table),
+                            sql.Identifier(SCOPE_COLUMN),
+                        )
+                    ).fetchone()[0]
+                    if scoped:
+                        evidence.append(f"{scoped} row(s) in {table} carry a scope")
+        return evidence
+
+    def rows_in_scope(self, scope: str) -> GraphCounts:
+        import psycopg
+        from psycopg import sql
+
+        from backend.core.postgres_backend import (
+            SCOPE_COLUMN,
+            SCOPE_SETTING,
+            SCOPED_TABLES,
+        )
+
+        counts = {}
+        with psycopg.connect(self._dsn) as conn:
+            with conn.transaction():
+                # A forced policy hides a scoped row from a session that has
+                # not said which scope it is, this one included.
+                conn.execute("SELECT set_config(%s, %s, true)", (SCOPE_SETTING, scope))
+                for table in SCOPED_TABLES:
+                    counts[table] = conn.execute(
+                        sql.SQL("SELECT count(*) FROM {}.{} WHERE {} = %s").format(
+                            sql.Identifier(self._schema),
+                            sql.Identifier(table),
+                            sql.Identifier(SCOPE_COLUMN),
+                        ),
+                        (scope,),
+                    ).fetchone()[0]
+        return GraphCounts(nodes=counts["graph_nodes"], edges=counts["graph_edges"])
+
+
+def build_postgres_inspector(dsn: str, *, schema: str) -> TargetInspector:
+    return PostgresTargetInspector(dsn, schema=schema)
 
 
 def _positive_int(value: str) -> int:
@@ -203,7 +346,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default=None,
-        help="Optional opaque scope identifier for the target rows",
+        help=(
+            "Opaque scope identifier stamped on every row written. Required "
+            "when the target keeps scopes apart; the conversion refuses "
+            "without it"
+        ),
     )
     parser.add_argument(
         "--allow-non-empty-target",
@@ -217,6 +364,7 @@ def main(
     argv: Iterable[str] | None = None,
     *,
     backend_factory: Callable[..., GraphBackend] = build_postgres_backend,
+    inspector_factory: Callable[..., TargetInspector] = build_postgres_inspector,
 ) -> int:
     args = parse_args(argv)
     backend = None
@@ -230,6 +378,8 @@ def main(
         result = convert_graph_file_to_postgres(
             args.graph_file,
             backend,
+            inspector=inspector_factory(args.dsn, schema=args.schema),
+            scope=args.scope,
             allow_non_empty=args.allow_non_empty_target,
         )
     except ConversionError as exc:

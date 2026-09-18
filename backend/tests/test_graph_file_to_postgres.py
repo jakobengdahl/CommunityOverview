@@ -6,6 +6,7 @@ import pytest
 from scripts import graph_file_to_postgres
 from scripts.graph_file_to_postgres import (
     ConversionError,
+    GraphCounts,
     convert_graph_file_to_postgres,
     main,
 )
@@ -52,6 +53,26 @@ class MemoryTarget:
         self.closed = True
 
 
+class FakeInspector:
+    """Stands in for the catalog: the isolation the target shows, and how
+    many rows it holds carrying each scope."""
+
+    def __init__(self, evidence=(), in_scope=None):
+        self.evidence = list(evidence)
+        self.in_scope = dict(in_scope or {})
+        self.asked_scopes = []
+
+    def isolation_evidence(self):
+        return list(self.evidence)
+
+    def rows_in_scope(self, scope):
+        self.asked_scopes.append(scope)
+        return self.in_scope.get(scope, GraphCounts(0, 0))
+
+
+RLS = "graph_nodes has row-level security"
+
+
 def test_copies_graph_json_into_empty_target(tmp_path):
     source = tmp_path / "graph.json"
     data = _graph(
@@ -62,7 +83,7 @@ def test_copies_graph_json_into_empty_target(tmp_path):
     _write_graph(source, data)
     target = MemoryTarget()
 
-    result = convert_graph_file_to_postgres(source, target)
+    result = convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
     assert result.nodes == 2
     assert result.edges == 1
@@ -75,7 +96,7 @@ def test_refuses_non_empty_target_without_explicit_flag(tmp_path):
     target = MemoryTarget(_graph(nodes=[_node("existing")]))
 
     with pytest.raises(ConversionError, match="target graph is not empty"):
-        convert_graph_file_to_postgres(source, target)
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
     assert target.load_graph_data()["nodes"] == [_node("existing")]
 
@@ -86,7 +107,9 @@ def test_explicit_flag_replaces_non_empty_target(tmp_path):
     _write_graph(source, replacement)
     target = MemoryTarget(_graph(nodes=[_node("existing")]))
 
-    convert_graph_file_to_postgres(source, target, allow_non_empty=True)
+    convert_graph_file_to_postgres(
+        source, target, inspector=FakeInspector(), allow_non_empty=True
+    )
 
     assert target.load_graph_data() == replacement
 
@@ -97,7 +120,7 @@ def test_refuses_source_with_missing_edge_endpoint(tmp_path):
     target = MemoryTarget()
 
     with pytest.raises(ConversionError, match="source graph has 1 edge endpoint"):
-        convert_graph_file_to_postgres(source, target)
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
     assert not target.exists()
 
@@ -112,7 +135,7 @@ def test_verifies_target_counts_after_write(tmp_path):
     target = MemoryTarget(corrupt_after_save=drop_node)
 
     with pytest.raises(ConversionError, match="target count verification failed"):
-        convert_graph_file_to_postgres(source, target)
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
 
 def test_verifies_target_edge_endpoints_after_write(tmp_path):
@@ -128,7 +151,7 @@ def test_verifies_target_edge_endpoints_after_write(tmp_path):
     target = MemoryTarget(corrupt_after_save=break_edge)
 
     with pytest.raises(ConversionError, match="target graph has 1 edge endpoint"):
-        convert_graph_file_to_postgres(source, target)
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
 
 def test_cli_closes_backend_and_reports_sidecars_not_migrated(tmp_path, capsys):
@@ -147,6 +170,7 @@ def test_cli_closes_backend_and_reports_sidecars_not_migrated(tmp_path, capsys):
     status = main(
         [str(source), "--dsn", "postgresql://example/db", "--schema", "graph"],
         backend_factory=factory,
+        inspector_factory=lambda dsn, *, schema: FakeInspector(),
     )
 
     assert status == 0
@@ -177,3 +201,135 @@ def test_cli_reports_postgres_dependency_error(monkeypatch, tmp_path, capsys):
 
     assert status == 1
     assert "requirements-postgres.txt" in capsys.readouterr().out
+
+
+# A target that keeps scopes apart. A row written without a scope is admitted
+# to every session, so the unscoped conversion is refused rather than run.
+
+
+def test_unscoped_conversion_refuses_a_target_that_keeps_scopes_apart(tmp_path):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    target = MemoryTarget()
+
+    with pytest.raises(ConversionError, match="--scope") as refused:
+        convert_graph_file_to_postgres(
+            source, target, inspector=FakeInspector(evidence=[RLS])
+        )
+
+    assert RLS in str(refused.value)
+    assert not target.exists()
+
+
+def test_allow_non_empty_does_not_override_the_scope_refusal(tmp_path):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    # Metadata alone: what an unscoped session sees of a store whose rows
+    # all belong to scopes, and exactly what that flag was offered to replace.
+    before = _graph(metadata={"graph_name": "Another scope's"})
+    target = MemoryTarget(before)
+
+    with pytest.raises(ConversionError, match="keeps scopes apart"):
+        convert_graph_file_to_postgres(
+            source,
+            target,
+            inspector=FakeInspector(evidence=[RLS]),
+            allow_non_empty=True,
+        )
+
+    assert target.load_graph_data() == before
+
+
+def test_scoped_conversion_is_not_refused_by_that_isolation(tmp_path):
+    source = tmp_path / "graph.json"
+    data = _graph(nodes=[_node("a"), _node("b")], edges=[_edge("ab", "a", "b")])
+    _write_graph(source, data)
+    target = MemoryTarget()
+    inspector = FakeInspector(evidence=[RLS], in_scope={"s1": GraphCounts(2, 1)})
+
+    result = convert_graph_file_to_postgres(
+        source, target, inspector=inspector, scope="s1"
+    )
+
+    assert (result.nodes, result.edges) == (2, 1)
+    assert target.load_graph_data() == data
+
+
+def test_a_metadata_only_target_is_described_as_that(tmp_path):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    target = MemoryTarget(_graph(metadata={"graph_name": "Existing"}))
+
+    with pytest.raises(ConversionError) as refused:
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
+
+    assert "graph metadata but no nodes or edges" in str(refused.value)
+    assert "0 node(s)" not in str(refused.value)
+
+
+def test_scoped_verification_counts_rows_carrying_the_scope(tmp_path):
+    """The reload shows the right counts, and the rows still do not carry
+    the scope - a scoped reader is also shown every row that carries none."""
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a"), _node("b")]))
+    inspector = FakeInspector(in_scope={"s1": GraphCounts(0, 0)})
+
+    with pytest.raises(ConversionError, match="scope verification failed"):
+        convert_graph_file_to_postgres(
+            source, MemoryTarget(), inspector=inspector, scope="s1"
+        )
+
+    assert inspector.asked_scopes == ["s1"]
+
+
+def test_cli_inspects_the_target_it_writes_and_passes_the_scope_through(tmp_path):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    inspectors = []
+
+    def inspector_factory(dsn, *, schema):
+        assert (dsn, schema) == ("postgresql://example/db", "graph")
+        inspectors.append(FakeInspector(in_scope={"s1": GraphCounts(1, 0)}))
+        return inspectors[0]
+
+    def backend_factory(dsn, *, schema, pool_size, scope):
+        assert scope == "s1"
+        return MemoryTarget()
+
+    status = main(
+        [
+            str(source),
+            "--dsn",
+            "postgresql://example/db",
+            "--schema",
+            "graph",
+            "--scope",
+            "s1",
+        ],
+        backend_factory=backend_factory,
+        inspector_factory=inspector_factory,
+    )
+
+    assert status == 0
+    assert inspectors[0].asked_scopes == ["s1"]
+
+
+def test_cli_refuses_an_unscoped_conversion_into_a_scoped_target(tmp_path, capsys):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    made = []
+
+    def backend_factory(dsn, *, schema, pool_size, scope):
+        made.append(MemoryTarget())
+        return made[0]
+
+    status = main(
+        [str(source), "--dsn", "postgresql://example/db", "--allow-non-empty-target"],
+        backend_factory=backend_factory,
+        inspector_factory=lambda dsn, *, schema: FakeInspector(evidence=[RLS]),
+    )
+
+    assert status == 1
+    assert "keeps scopes apart" in capsys.readouterr().out
+    assert not made[0].exists()
+    assert made[0].closed
