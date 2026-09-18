@@ -96,12 +96,14 @@ def not_empty_refusal(existing: Dict[str, Any], scope: str | None) -> str:
             f"target graph is not empty (it holds {found}); re-run with "
             "--allow-non-empty-target to replace it"
         )
-    # Under a scope, what this session sees does not settle whether the schema
+    # Under a scope, what the load returned does not settle whether the schema
     # is the scope's own - which an application start leaves holding an empty
-    # graph's metadata - or shared: a policy in force for this role hides
-    # another scope's rows, and rows carrying no scope look alike whoever
-    # wrote them. So it says what the flag would reach and leaves the call to
-    # the operator rather than guessing.
+    # graph's metadata - or shared. A scoped load returns only rows carrying
+    # no scope and this scope's own, whatever the role: the backend filters
+    # every read itself, and a policy is a second layer on top. And rows
+    # carrying no scope look alike whoever wrote them. So it says what the
+    # flag would reach and leaves the call to the operator rather than
+    # guessing.
     return (
         f"target graph is not empty (this scope sees {found}); rows carrying "
         "no scope and the metadata row are shared by every scope in the "

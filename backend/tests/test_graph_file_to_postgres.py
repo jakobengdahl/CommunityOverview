@@ -298,6 +298,20 @@ def test_scoped_verification_counts_rows_carrying_the_scope(
     assert inspector.asked_scopes == ["s1"]
 
 
+def test_scoped_verification_also_runs_when_replacing_a_target(tmp_path):
+    """Replacing is when rows the scope did not write are most likely to be
+    left behind or restamped, so the flag must not skip the count."""
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    target = MemoryTarget(_graph(nodes=[_node("old")]))
+    inspector = FakeInspector(in_scope={"s1": GraphCounts(0, 0)})
+
+    with pytest.raises(ConversionError, match="scope verification failed"):
+        convert_graph_file_to_postgres(
+            source, target, inspector=inspector, scope="s1", allow_non_empty=True
+        )
+
+
 @pytest.mark.parametrize(
     "existing, found",
     [

@@ -210,21 +210,30 @@ def test_an_unscoped_conversion_cannot_publish_a_graph_to_every_scope(
     assert _graph_name(schema) == "A"
 
 
+@pytest.mark.parametrize("scoped_in", ["graph_nodes", "graph_edges"])
 def test_a_store_keeping_scopes_apart_without_a_policy_is_refused_too(
-    store, tmp_path, capsys
+    store, tmp_path, capsys, scoped_in
 ):
     """Scopes kept apart by the application alone: nothing hides a scoped row
-    from an unscoped session, so the rows themselves are the evidence."""
+    from an unscoped session, so the rows themselves are the evidence - in
+    either table. The other table's scope is cleared so only one carries it."""
     dsn, schema = store
-    assert (
-        _convert(_graph_file(tmp_path, "A", ["a1"]), dsn, schema, "--scope", "A") == 0
-    )
+    graph = _graph_file(tmp_path, "A", ["a1", "a2"])
+    assert _convert(graph, dsn, schema, "--scope", "A") == 0
     _drop_server_isolation(schema)
+    other = "graph_edges" if scoped_in == "graph_nodes" else "graph_nodes"
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            psycopg.sql.SQL("UPDATE {} SET scope_id = NULL").format(
+                psycopg.sql.Identifier(schema, other)
+            )
+        )
+    before = _nodes_by_scope(schema)
 
     unscoped = _graph_file(tmp_path, "U", ["u1"])
     assert _convert(unscoped, dsn, schema, "--allow-non-empty-target") == 1
-    assert "carry a scope" in capsys.readouterr().out
-    assert _nodes_by_scope(schema) == {"A": 1}
+    assert f"row(s) in {scoped_in} carry a scope" in capsys.readouterr().out
+    assert _nodes_by_scope(schema) == before
 
 
 @pytest.mark.parametrize("table", ["graph_nodes", "graph_edges"])
@@ -234,8 +243,12 @@ def test_a_store_keeping_scopes_apart_without_a_policy_is_refused_too(
         ("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", "row-level security enabled"),
         # A name of the operator's choosing: the backend's is not the only one.
         ("CREATE POLICY operator_named ON {table} USING (true)", "a policy"),
+        (
+            "CREATE POLICY operator_named ON {table} AS RESTRICTIVE USING (true)",
+            "a policy",
+        ),
     ],
-    ids=["rls-without-a-policy", "a-policy-without-rls"],
+    ids=["rls-without-a-policy", "a-policy-without-rls", "a-restrictive-policy"],
 )
 def test_each_sign_of_isolation_is_refused_alone_on_either_table(
     store, tmp_path, capsys, table, sign
