@@ -298,34 +298,60 @@ def test_scoped_verification_counts_rows_carrying_the_scope(
     assert inspector.asked_scopes == ["s1"]
 
 
-def test_a_scoped_conversion_finding_only_metadata_does_not_offer_to_replace_it(
-    tmp_path,
-):
-    """Metadata and none of this scope's rows is, on a shared schema, another
-    scope's graph: the metadata row is one per schema. Suggesting the flag
-    here is what overwrote it."""
+@pytest.mark.parametrize(
+    "existing, found",
+    [
+        (_graph(metadata={"graph_name": "Existing"}), "graph metadata but no nodes"),
+        (
+            _graph(nodes=[_node("x"), _node("y")], edges=[_edge("xy", "x", "y")]),
+            "2 node(s), 1 edge(s)",
+        ),
+    ],
+    ids=["metadata-only", "rows"],
+)
+def test_a_scoped_refusal_says_what_the_flag_would_reach(tmp_path, existing, found):
+    """Under a scope the tool cannot tell the scope's own schema - which a
+    first start leaves holding an empty graph's metadata - from one another
+    scope shares. So it states what the flag reaches, for every scope, and
+    when it is safe, instead of asserting either case."""
     source = tmp_path / "graph.json"
     _write_graph(source, _graph(nodes=[_node("a")]))
-    before = _graph(metadata={"graph_name": "Another scope's"})
-    target = MemoryTarget(before)
+    target = MemoryTarget(existing)
 
     with pytest.raises(ConversionError) as refused:
         convert_graph_file_to_postgres(
             source, target, inspector=FakeInspector(), scope="s1"
         )
 
-    assert "shared by every scope in the schema" in str(refused.value)
-    assert "re-run with --allow-non-empty-target" not in str(refused.value)
-    assert target.load_graph_data() == before
+    message = str(refused.value)
+    assert found in message
+    assert "shared by every scope in the schema" in message
+    assert "pass it only if no other scope's graph shares this schema" in message
+    assert target.load_graph_data() == existing
 
 
-def test_edges_without_nodes_are_reported_as_edges(tmp_path):
+def test_an_existing_empty_target_converts_without_the_flag(tmp_path):
+    source = tmp_path / "graph.json"
+    data = _graph(nodes=[_node("a")])
+    _write_graph(source, data)
+    target = MemoryTarget(_graph())
+    assert target.exists()
+
+    convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
+
+    assert target.load_graph_data() == data
+
+
+@pytest.mark.parametrize("scope", [None, "s1"], ids=["unscoped", "scoped"])
+def test_edges_without_nodes_are_reported_as_edges(tmp_path, scope):
     source = tmp_path / "graph.json"
     _write_graph(source, _graph(nodes=[_node("a")]))
     target = MemoryTarget(_graph(edges=[_edge("xy", "x", "y")]))
 
     with pytest.raises(ConversionError, match=r"0 node\(s\), 1 edge\(s\)"):
-        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
+        convert_graph_file_to_postgres(
+            source, target, inspector=FakeInspector(), scope=scope
+        )
 
 
 def test_cli_inspects_the_target_it_writes_and_passes_the_scope_through(tmp_path):

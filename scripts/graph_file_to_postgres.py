@@ -88,25 +88,23 @@ def graph_has_content(data: Dict[str, Any]) -> bool:
 def not_empty_refusal(existing: Dict[str, Any], scope: str | None) -> str:
     counts = graph_counts(existing)
     if counts != GraphCounts(0, 0):
+        found = f"{counts.nodes} node(s), {counts.edges} edge(s)"
+    else:
+        found = "graph metadata but no nodes or edges"
+    if scope is None:
         return (
-            f"target graph is not empty (it holds {counts.nodes} node(s), "
-            f"{counts.edges} edge(s)); re-run with --allow-non-empty-target to "
-            "replace it"
+            f"target graph is not empty (it holds {found}); re-run with "
+            "--allow-non-empty-target to replace it"
         )
-    if scope is not None:
-        # Metadata and none of this scope's rows: the metadata table keeps one
-        # row per schema whatever the scope, so what is visible here is what
-        # every scope in the schema reads - typically another scope's graph.
-        # Offering the flag as the way through is what overwrote it.
-        return (
-            "target holds graph metadata but none of this scope's nodes or "
-            "edges; the metadata row is shared by every scope in the schema, "
-            "so --allow-non-empty-target would replace it for all of them - "
-            "give this scope's graph a schema of its own instead"
-        )
+    # Under a scope this session cannot tell a schema of the scope's own -
+    # which an application boot leaves holding an empty graph's metadata -
+    # from one another scope shares, whose rows the policy hides from it.
+    # So it says what the flag would reach rather than guessing which.
     return (
-        "target graph is not empty (it holds graph metadata but no nodes or "
-        "edges); re-run with --allow-non-empty-target to replace it"
+        f"target graph is not empty (this scope sees {found}); rows carrying "
+        "no scope and the metadata row are shared by every scope in the "
+        "schema, and --allow-non-empty-target replaces them for all of them - "
+        "pass it only if no other scope's graph shares this schema"
     )
 
 

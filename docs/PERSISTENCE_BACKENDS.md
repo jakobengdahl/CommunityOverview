@@ -634,7 +634,7 @@ that every edge endpoint refers to a stored node.
 **Into a store that keeps scopes apart, pass `--scope`.** A row that carries no
 scope is admitted to every session (*Keeping scopes apart*, below), so a graph
 converted without one would be readable by every scope in the store. The tool
-therefore refuses an unscoped conversion when the target shows either sign of
+therefore refuses an unscoped conversion when the target shows any sign of
 keeping scopes apart: row-level security enabled, or a policy present, on
 `graph_nodes` or `graph_edges`, or rows there already carrying a scope. It
 refuses before writing anything, and `--allow-non-empty-target` does not
@@ -653,12 +653,15 @@ scope, rather than trusting the reload alone: a scoped session is shown every
 row that carries no scope as well as its own, so a graph written unscoped
 would pass the reload's count check with the right numbers.
 
-**A scope's graph wants a schema of its own.** The metadata table keeps one row
-per schema, shared by every scope in it (*Keeping scopes apart*, below). So a
-scoped conversion into a schema that already holds another scope's graph finds
-that graph's metadata and none of its rows, and refuses. There,
-`--allow-non-empty-target` would replace the metadata every scope in the schema
-reads, and the refusal says so rather than suggesting it.
+**A scope's graph wants a schema of its own.** Rows that carry no scope, and the
+metadata table's one row per schema, are shared by every scope in the schema
+(*Keeping scopes apart*, below). So when a scoped conversion finds its target
+not empty, `--allow-non-empty-target` replaces those for every scope there, not
+only for this one. The refusal says so: pass the flag only where no other
+scope's graph shares the schema. The tool cannot tell which case it is in,
+because a policy hides another scope's rows from it. An application started
+against an empty schema saves an empty graph there, metadata included, so a
+first conversion after that start needs the flag.
 
 The import migrates only the graph payload read from `graph.json`. Embedding
 sidecars, history sidecars, and session files are not migrated. Regenerate or

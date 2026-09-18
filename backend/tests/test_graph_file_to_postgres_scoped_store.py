@@ -231,15 +231,16 @@ def test_a_store_keeping_scopes_apart_without_a_policy_is_refused_too(
 @pytest.mark.parametrize(
     "sign",
     [
-        "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
+        ("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", "row-level security enabled"),
         # A name of the operator's choosing: the backend's is not the only one.
-        "CREATE POLICY operator_named ON {table} USING (true)",
+        ("CREATE POLICY operator_named ON {table} USING (true)", "a policy"),
     ],
     ids=["rls-without-a-policy", "a-policy-without-rls"],
 )
 def test_each_sign_of_isolation_is_refused_alone_on_either_table(
     store, tmp_path, capsys, table, sign
 ):
+    sign, named = sign
     """Either sign is a store asking the server to keep rows apart, and either
     table carries it. Added to an ordinary store, so nothing else is a sign."""
     dsn, schema = store
@@ -257,14 +258,16 @@ def test_each_sign_of_isolation_is_refused_alone_on_either_table(
         )
         == 1
     )
-    assert f"keeps scopes apart ({table} has" in capsys.readouterr().out
+    assert f"keeps scopes apart ({table} has {named})" in capsys.readouterr().out
     assert _nodes_by_scope(schema) == {"<none>": 1}
 
 
-def test_a_second_scope_is_not_offered_the_first_scopes_metadata(
-    store, tmp_path, capsys
-):
-    """One schema, two scopes: the second finds only the first's metadata row,
+SHARED = "shared by every scope in the schema"
+ONLY_IF = "pass it only if no other scope's graph shares this schema"
+
+
+def test_a_second_scope_is_told_what_the_flag_would_replace(store, tmp_path, capsys):
+    """One schema, two scopes: the second sees only the first's metadata row,
     which every scope in the schema reads."""
     dsn, schema = store
     assert (
@@ -275,10 +278,44 @@ def test_a_second_scope_is_not_offered_the_first_scopes_metadata(
         _convert(_graph_file(tmp_path, "B", ["b1"]), dsn, schema, "--scope", "B") == 1
     )
     refusal = capsys.readouterr().out
-    assert "shared by every scope in the schema" in refusal
-    assert "re-run with --allow-non-empty-target" not in refusal
+    assert SHARED in refusal and ONLY_IF in refusal
     assert _graph_name(schema) == "A"
     assert _nodes_by_scope(schema) == {"A": 1}
+
+
+def test_a_scope_in_its_own_started_schema_is_pointed_at_the_flag(
+    store, tmp_path, capsys
+):
+    """The commonest way to find metadata and nothing else: the application
+    started against the empty schema and saved an empty graph. That schema is
+    the scope's own, so the refusal must leave the flag open, and it works."""
+    dsn, schema = store
+    assert (
+        _convert(_graph_file(tmp_path, "started", []), dsn, schema, "--scope", "A") == 0
+    )
+
+    graph = _graph_file(tmp_path, "A", ["a1", "a2"])
+    assert _convert(graph, dsn, schema, "--scope", "A") == 1
+    assert ONLY_IF in capsys.readouterr().out
+    assert _convert(graph, dsn, schema, "--scope", "A", "--allow-non-empty-target") == 0
+    assert _nodes_by_scope(schema) == {"A": 2}
+
+
+def test_rows_left_unscoped_are_named_as_shared_to_a_scoped_conversion(
+    store, tmp_path, capsys
+):
+    """An older graph written before any scope: its rows carry none, so every
+    scope reads them, and a scoped replace would delete them for all."""
+    dsn, schema = store
+    assert _convert(_graph_file(tmp_path, "old", ["o1", "o2"]), dsn, schema) == 0
+
+    assert (
+        _convert(_graph_file(tmp_path, "B", ["b1"]), dsn, schema, "--scope", "B") == 1
+    )
+    refusal = capsys.readouterr().out
+    assert "this scope sees 2 node(s), 1 edge(s)" in refusal
+    assert SHARED in refusal and ONLY_IF in refusal
+    assert _nodes_by_scope(schema) == {"<none>": 2}
 
 
 def test_an_ordinary_unscoped_store_is_not_refused(store, tmp_path):
