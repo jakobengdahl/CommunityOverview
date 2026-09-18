@@ -22,12 +22,15 @@ cannot be reviewed before it takes effect. The closest thing today, agent
 governance proposals, holds one tool call at a time. It carries no base version
 and replays blindly, so a later change to the same node is silently overwritten.
 
-Three facts about the current code shape the decision:
+Four facts about the current code shape the decision:
 
 - **Nodes and edges carry nothing a change could be compared against.** Nodes
   have a wall-clock `updated_at` that is client-settable on create and not
-  ordered across instances. Edges have no timestamp at all. The PostgreSQL
-  backend writes with a blind upsert.
+  ordered across instances. Edges carry only `created_at`, no update
+  timestamp. The PostgreSQL backend writes with a blind upsert.
+- **A write reaches the store after the caller already has its answer.** The
+  in-memory model changes, the event fires, and the store write follows on an
+  I/O thread. A refusal from the store cannot reach the caller.
 - **The session document is loaded, persisted and replayed whole.** It is also
   shared between instances only when the sessions directory is.
 - **Under PostgreSQL there is no mutation history**, so an audit of what a
@@ -47,10 +50,12 @@ Three facts about the current code shape the decision:
    wherever the graph is shared. The session document keeps D4's shape:
    references, layout and annotations.
 3. **Every node and edge carries a `revision` that only the storage assigns.** It
-   starts at 1 and advances by one on every applied write. Staged changes record
-   the entity they were based on, and main-graph writes can require the revision
-   they expect. A backend shared by several writers enforces that expectation
-   itself, rather than trusting any one instance.
+   starts at 1 and advances on every applied write. Staged changes record the
+   entity they were based on, and writes can require the revision they expect.
+   - Such a write, and every merge, is applied to the store synchronously,
+     before the model changes or any event fires.
+   - A backend shared by several writers enforces the expectation, and assigns
+     the revision itself, rather than trusting any one instance.
 4. **A merge never overwrites silently.** Conflicts are detected per field
    against the values the staged change was based on. An unresolved conflict
    stops the merge, and the merge applies completely or not at all.
@@ -66,16 +71,19 @@ Three facts about the current code shape the decision:
 - **Deleting a session can now lose work that exists nowhere else.** Deleting a
   session whose layer is not empty therefore needs an explicit discard.
 - **The graph model grows a field.** An older build ignores `revision` and drops
-  it from every entity it rewrites; a whole-graph save rewrites them all. The
-  contract makes that fail safe: an entity without a
-  revision reads as revision 0, and a staged change based on a later revision
-  then conflicts instead of passing.
+  it from every entity it rewrites, and a whole-graph save rewrites them all.
+  Such an entity reads as revision 0 afterwards, which ends its lineage the way
+  a delete does. Merges stay safe, because conflicts are decided on field
+  values rather than on revisions. What a downgrade loses is only the ordering.
+- **Writes that carry an expectation become synchronous.** Today's
+  fire-and-forget path stays for every other write.
 - **Every user-facing read path must compose.** That includes lexical search,
   semantic search and traversal, and it costs work per query in proportion to
   the size of the layer. The contract bounds the layer size.
 - **Merge authority becomes a real question.** The core has no accounts (D7).
-  The authorization hook gains merge and discard actions, and the default hook
-  treats them like any other mutation.
+  - The authorization hook is asked about staging, merging and discarding as
+    mutations, so a hook that refuses direct writes refuses these too.
+  - A new context field lets a hook tell them apart.
 
 The contract that implements this decision is
 [`SESSION_OVERLAY_CONTRACT.md`](../SESSION_OVERLAY_CONTRACT.md).
