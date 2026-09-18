@@ -52,10 +52,11 @@ Four facts about the current code shape the decision:
 3. **Every node and edge carries a `revision` that only the storage assigns.** It
    starts at 1 and advances on every applied write. Staged changes record the
    entity they were based on, and writes can require the revision they expect.
-   - Such a write, and every merge, is applied to the store synchronously,
-     before the model changes or any event fires.
-   - A backend shared by several writers enforces the expectation, and assigns
-     the revision itself, rather than trusting any one instance.
+   - In a store several instances write to, every write is applied
+     synchronously, and the store assigns the revision and checks the
+     expectation, rather than trusting any one instance.
+   - A single-writer store keeps today's fire-and-forget path for writes
+     without an expectation. It is synchronous for the rest, and for merges.
 4. **A merge never overwrites silently.** Conflicts are detected per field
    against the values the staged change was based on. An unresolved conflict
    stops the merge, and the merge applies completely or not at all.
@@ -75,8 +76,12 @@ Four facts about the current code shape the decision:
   Such an entity reads as revision 0 afterwards, which ends its lineage the way
   a delete does. Merges stay safe, because conflicts are decided on field
   values rather than on revisions. What a downgrade loses is only the ordering.
-- **Writes that carry an expectation become synchronous.** Today's
-  fire-and-forget path stays for every other write.
+- **In a shared store, writes become synchronous.** Each waits for the store,
+  which costs a round trip. A store failure is reported to the caller instead
+  of being healed later by a whole-graph resync.
+- **A staged session never becomes direct.** Otherwise one participant could
+  switch the session after a merge, and another participant's next write
+  would land in the graph. Direct editing resumes in a new session.
 - **Every user-facing read path must compose.** That includes lexical search,
   semantic search and traversal, and it costs work per query in proportion to
   the size of the layer. The contract bounds the layer size.

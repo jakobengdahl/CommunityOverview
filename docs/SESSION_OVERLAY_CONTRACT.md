@@ -38,7 +38,7 @@ The layer holds only what changed. It never copies the graph.
 | Term | Meaning |
 |---|---|
 | **Graph** | The persisted nodes and edges every direct write lands in. Called the *main graph* where the contrast matters. |
-| **Write mode** | `direct` (today's behaviour) or `staged`. It is fixed for a session when the session is created (§5). |
+| **Write mode** | `direct` (today's behaviour) or `staged`. It is set when a session is created, and it can only ever change from `direct` to `staged` (§5). |
 | **Layer** | A session's staged changes: at most one **entry** per entity. |
 | **Entry** | The net staged change to one node or edge: create, update or delete (§6). |
 | **Tombstone** | A delete entry. It hides the entity in the composed view. |
@@ -48,6 +48,7 @@ The layer holds only what changed. It never copies the graph.
 | **Field** | A top-level attribute of a node or edge. Each top-level key of `metadata` counts as its own field, the granularity of the existing metadata merge-patch. |
 | **Merge** | Applying selected entries to the main graph as one unit (§11). |
 | **Shared store** | A persistence backend several application instances write to at once. It declares `change_notification`; PostgreSQL is one. |
+| **Single-writer store** | A backend written by one instance only. The file backend is one. |
 
 ## 3. Invariants
 
@@ -62,9 +63,10 @@ breaks one is a defect, whatever else it achieves.
   as a direct write. That covers:
   - a session id that does not resolve;
   - an entry point that does not understand sessions;
-  - a session whose mode changed without an explicit request.
+  - two different sessions named in one request.
 
-  A caller who believes it is staging never writes to the main graph by mistake.
+  A staged session never becomes a direct one (§5.2). A caller who believes it
+  is staging therefore never writes to the main graph by mistake.
 - **I3 — Thin layer.** A layer holds entries only for entities the session
   changed. Creating, reading, merging or discarding a layer never copies
   unchanged entities.
@@ -73,23 +75,22 @@ breaks one is a defect, whatever else it achieves.
   layer tombstoned, or an edge with an endpoint the composed view lacks.
 - **I5 — Direct mode is unchanged.** With no session, or in a direct-mode
   session, reads and writes behave as before this contract. The exceptions are
-  those §4 and §18 list: `revision` appears, and writes that carry an
-  expectation are checked.
+  those §18 lists.
 - **I6 — Revisions are storage-assigned and never go backwards.** A client
   cannot set a revision. Every write the storage applies to an entity leaves it
-  at a revision higher than any the store held for that entity before.
-  - Writes that carry an expected revision are checked where the entity is
-    stored.
+  at a higher revision than the store held for that entity before.
   - Only an explicit end of lineage restarts a revision: a delete, or a
     whole-graph replacement an operator asks for (§4.2).
+  - A downgrade to a build without revisions is outside this guarantee (§4.6).
 - **I7 — No silent overwrite.** A merge applies an entry only when, for every
   field it changes, one of these holds:
   - the main graph still holds the base value;
   - the main graph already holds the staged value;
   - the caller resolved that field explicitly.
 
-  For a delete, this covers every field of the entity and every main-graph edge
-  incident to it.
+  For a node delete, this also covers every main-graph edge incident to the
+  node. The store checks these conditions inside the merge unit, not just the
+  instance before it (§11.3).
 - **I8 — Atomic merge.** A merge either applies every selected entry, and removes
   each from the layer, or applies none and leaves the layer as it was. This holds
   across a crash (§11.6).
@@ -125,10 +126,11 @@ concurrency too, and a merge cannot be safe without them.
 - A newly created entity has revision **1**.
 - Every write the storage applies to an existing entity advances its revision.
   That includes node and edge updates, archiving and unarchiving, and a merge's
-  writes. In a single-writer store it advances by exactly one. In a shared
-  store the store assigns it, as §4.4 describes.
-- A write that would leave the entity's content unchanged need not be applied.
-  If it is not applied, the revision does not move.
+  writes.
+- A direct write that would leave the entity's content unchanged need not be
+  applied. If it is not applied, the revision does not move.
+- A merge applies every operation it lists, even one that changes no content.
+  §11.6 relies on that.
 - Two things end an entity's lineage, and a later entity with the same id then
   starts again at 1:
   - deleting the entity;
@@ -149,91 +151,109 @@ Writes may carry an expectation about the entity they touch:
   delete of a node or edge. It holds when the stored revision equals it.
 - **`expect_absent`** on a create. It holds when no entity with that id exists.
 
-A write whose expectation does not hold is refused with `revision_conflict`,
-carrying the current revision (§16.3). The existing `expected_updated_at` on
-node updates keeps working unchanged. When both it and `expected_revision` are
-given, both must hold.
+A write whose expectation does not hold is refused with
+**`entity_revision_conflict`**, carrying `current_revision` (§16.3). The
+existing `expected_updated_at` on node updates keeps working unchanged. When
+both it and `expected_revision` are given, both must hold.
 
-### 4.4 Where expectations are enforced, and when
+### 4.4 Where revisions are assigned and expectations enforced
 
-Today a write changes the in-memory model, fires its event and returns, and
-reaches the store afterwards on the I/O thread. A refusal from the store could
-not reach the caller in time. So:
+Today, a write changes the in-memory model, fires its event and returns. It
+reaches the store afterwards, through a single-worker I/O queue. A shared
+store cannot work that way once revisions exist:
 
-- **A write that carries an expectation is applied synchronously.** Every merge
-  is too. The store applies the write first. Only after it commits does the
-  in-memory model change, the event fire and the call return. If the
-  expectation fails, the caller gets `revision_conflict`, and nothing else
-  happens: no memory change, no event, no retry.
-- **A refused expectation is an outcome, not a write failure.** It never marks
-  the storage for the whole-graph resync that heals a failed write.
-- **In a shared store, the store enforces the expectation and assigns the
-  revision.**
-  - The expectation is enforced by a conditional write:
-    - an update or delete applies only when the stored revision matches;
-    - a create with `expect_absent` applies only when no row with that id exists.
-  - Every write, with or without an expectation, is given the stored revision
-    plus one, computed in the same statement. It is never the value the writing
-    instance computed in memory. That is what makes I6 hold across instances.
-  - The writing instance takes the stored revision back from the store. Other
-    instances learn it through change notification, as they learn of every
-    write today.
-- **The whole-graph resync must not lower a stored revision.** In a store that
-  enforces revisions, the resync that heals a failed write reloads from the
-  store instead of overwriting it with the instance's model.
-- **A single-writer store** (the file backend) enforces expectations in process,
-  under the storage lock, synchronously as above.
-- **The new capability.** A backend that enforces expectations and assigns
-  revisions itself declares **`revision_enforcement`**. It sits next to
-  `incremental_writes` and `transactions`. `EntityOperation` gains
-  `expected_revision` and `expect_absent`.
-- **Refused combinations.** A backend that declares `change_notification`
-  without `revision_enforcement` cannot support staged sessions (§5.2).
-  Declaring `staged_sessions` on it is refused when the backend is constructed.
+- The store, not an instance, must choose the next revision.
+- A refusal from the store must reach the caller.
+
+So the two kinds of store behave differently.
+
+**In a shared store, every write is synchronous.** That covers direct writes,
+with or without an expectation, and merges.
+
+- The write goes through the same single-worker queue as today, and the caller
+  waits for it. So it is ordered after every write the instance queued before
+  it, and nothing queued later can overtake it.
+- The store applies it in one statement, or one transaction:
+  - the revision is the stored revision plus one;
+  - the expectation is checked there, as a condition of the write: an update or
+    delete applies only when the stored revision matches, and a create with
+    `expect_absent` only when no row with that id exists.
+- Only after the store commits does the instance update its in-memory model,
+  with the revision the store returned. Then the event fires, carrying that
+  revision, and the call returns.
+- A write the store refuses changes nothing in the instance and fires no event.
+  An expectation that does not hold is returned as `entity_revision_conflict`;
+  a store failure is returned as an error. Neither marks the storage for the
+  whole-graph resync that heals a failed fire-and-forget write. With no
+  fire-and-forget writes, a shared store has no such write to heal.
+- The backend declares **`revision_enforcement`**, next to `incremental_writes`
+  and `transactions`. `EntityOperation` gains `expected_revision` and
+  `expect_absent`, and returns the stored revision.
+- A backend that declares `change_notification` without `revision_enforcement`
+  cannot support staged sessions. Declaring `staged_sessions` on such a
+  backend is refused when the backend is constructed (§7).
+
+**A single-writer store keeps today's path for writes without an expectation.**
+
+- The instance is the only writer, so the revision it computes under its lock
+  is exact.
+- Its fire-and-forget writes, and the whole-graph resync that heals a failed
+  one, stay as they are.
+- A write with an expectation, and every merge, is submitted to the same queue.
+  The instance checks the expectation under the storage lock and waits for the
+  write to land before it returns.
 
 ### 4.5 Where it shows
 
 - Every read that returns an entity returns its `revision`.
-- Graph events carry it in `before` and `after`.
+- Every graph event carries it in `before` and `after`.
 - Edge update events gain a `patch`, as node updates already have.
 
 ### 4.6 Downgrade
 
 An older build ignores `revision`. It drops the field from every entity it
-rewrites: under the file backend a whole-graph save rewrites every entity, and
-under an incremental backend only the entities it writes. Those entities read as
-revision 0 afterwards, which ends their lineage as §4.2 describes.
+rewrites. Under the file backend a whole-graph save rewrites every entity;
+under an incremental backend, only the entities written.
 
-This does not make a merge unsafe, because conflicts are decided on field values
-(I7 still holds). What a downgrade loses is the ordering: revisions of the
-rewritten entities restart. A downgrade is therefore listed next to delete and
-whole-graph replacement as an end of lineage.
+Those entities read as revision 0 afterwards, which is why a downgrade is
+outside I6.
+
+It does not make a merge unsafe, because conflicts are decided on field values,
+and I7 still holds. What a downgrade loses is only the ordering of the
+rewritten entities.
 
 ## 5. Write modes
 
-### 5.1 Fixed at creation
+### 5.1 Set at creation
 
 - **Graph default:** each graph has a default write mode, `direct` unless
   configured otherwise. A deployment sets it with `SESSION_WRITE_MODE_DEFAULT`
   (`direct` | `staged`), read the way other settings are.
-- **Per session:** a session's `write_mode` is decided when the session is
-  created:
-  - it is the one the create request names, if it names one;
-  - otherwise it is the graph default at that moment.
-
-  The session also stores `write_mode_source`: `explicit` or `inherited`.
+- **A session gets its write mode when it is created.** It is the mode the
+  create request names, or else the graph default at that moment. The session
+  also stores `write_mode_source`: `explicit` or `inherited`.
+- **A staged session is always created explicitly on the server.** It is
+  created by a create request that names `staged`, or that inherits it. This
+  matters because today a browser session can exist only locally until its
+  first non-empty save.
+  - A client sends the session header (§16.1) only for a session that exists on
+    the server.
+  - A session that exists only in the browser is therefore always direct.
 - **Stability:** changing the graph default affects only sessions created
-  afterwards. A session's write mode changes only through an explicit request
-  (§5.2). It never changes as a side effect: not after a merge, not because the
-  default changed, not on reconnect.
+  afterwards. A session's mode changes only through an explicit request (§5.2).
 - **Visibility:** every response that describes a session reports `write_mode`
   and `write_mode_source`.
 
 ### 5.2 Changing it
 
-- **`direct` → `staged`:** allowed.
-- **`staged` → `direct`:** refused while the layer is not empty, with
-  `write_mode_locked`. Merge or discard first.
+- **`direct` → `staged`:** allowed. The change fans out as a session op (§15),
+  so every participant sees it.
+- **`staged` → `direct`:** never allowed. It is refused with
+  `write_mode_irreversible`.
+  - This is what makes I2 hold between participants. Once one participant has
+    merged, another could otherwise switch the session to `direct`, and the
+    first participant's next write would land in the main graph.
+  - Direct editing resumes in a new session.
 - **Unsupported backend:** a backend that does not declare `staged_sessions`
   (§7) cannot hold a layer.
   - Creating a session in, or switching one to, `staged` there is refused with
@@ -299,7 +319,7 @@ relationship applicability and the rest. They are validated against the
 - **Staging an edge create:** both endpoints must exist in the composed view.
 - **Staging a node delete:** in the same op, it also tombstones every edge
   incident to that node in the composed view, mirroring the direct cascade. The
-  merge re-checks the incident edges (§11.1).
+  merge re-checks the incident edges (§11.1, §11.3).
 - **Edge updates:** they stage only the fields a direct edge update accepts
   (`type`, `label`, `metadata`) and archive changes. Endpoints cannot change;
   moving an edge is a delete plus a create.
@@ -317,18 +337,30 @@ Layers are persisted by the **graph persistence backend**, not by the session
 store. That is how one unit can cover a merge's graph writes and its layer
 removal (I8), and how layers are shared wherever the graph is.
 
-A backend that can hold layers declares **`staged_sessions`**. In a shared
-store, it must also declare `revision_enforcement` (§4.4). It implements:
+A backend that can hold layers declares **`staged_sessions`**. A shared store
+must also declare `revision_enforcement` (§4.4). It implements:
 
 | Operation | Contract |
 |---|---|
 | `load_layer(session_id)` | Every entry of that layer. An unknown session yields an empty list. |
 | `stage(session_id, entries, removals)` | Upsert the given entries and remove the given entity keys, atomically. |
-| `merge(session_id, merge_id, operations, removals, record)` | As **one unit**: apply the graph `operations`, each synchronously and with its expectation (§4.4); remove the entries; store the merge `record`; and announce the graph changes through change notification exactly as a direct write does. A failed expectation fails the whole unit and changes nothing. A `merge_id` already recorded returns that record and does nothing else. |
+| `merge(session_id, merge_id, operations, checks, removals, record)` | See below. |
 | `discard(session_id, removals)` | Remove the given entries, or all of them. |
 | `load_merge(merge_id)` | The stored merge record, or none. |
 | `drop_layer(session_id)` | Remove the whole layer; used only by an explicit discard-and-delete (§13). |
 | `layers_in_use()` | The ids of sessions whose layers are not empty. |
+
+`merge` does the following **as one unit**:
+
+1. Verify the `checks` of §11.3.
+2. Apply the graph `operations`, each with its expectation.
+3. Remove the entries.
+4. Store the merge `record`.
+5. Announce the graph changes through change notification, exactly as a direct
+   write does.
+
+A failed check or expectation fails the whole unit and changes nothing. A
+`merge_id` already recorded returns that record and does nothing else.
 
 Backend obligations:
 
@@ -453,16 +485,18 @@ through REST, MCP, the chat assistant or an approved agent proposal:
 
 ### 9.2 The two expectations a staged write may carry
 
-These are different things with different names:
+These are different things with different names and different error codes:
 
-- **`expected_revision`** always means the **entity** revision (§4.3). On a
-  staged write it is checked against the composed entity's `revision`. That is
-  the main graph's value, since staging never advances it.
-- **`expected_session_seq`** is the session sequence number. It detects a race
-  between two participants staging in the same session. The existing session
-  tools keep their own parameter for this, named `expected_revision` as it is
-  today, because on a session tool it has only that meaning. The graph write
-  tools use `expected_session_seq`.
+- **`expected_revision`** on a graph write always means the **entity** revision
+  (§4.3). On a staged write, it is checked against the composed entity's
+  `revision`: the main graph's value, since staging never advances it. A
+  mismatch is `entity_revision_conflict`.
+- **`expected_session_seq`** on a graph write is the session sequence number. It
+  detects a race between two participants staging in the same session. A
+  mismatch is `session_seq_conflict`.
+- **The existing session tools are unchanged.** Their session-sequence check
+  keeps its parameter name, `expected_revision`, and its error code,
+  `revision_conflict`. On a session tool, those have only that meaning.
 
 Concurrent staging within one session otherwise follows D2: server-ordered.
 
@@ -549,8 +583,17 @@ What each choice does, by status:
 | `conflict` (update) | staged values win on the conflicting fields | drop | new node from the composed version | caller's values |
 | `conflict` (delete) | delete anyway, including the unstaged incident edges, each with its own expectation | drop | — | — |
 | `orphaned` | re-create under the same id, from `base` with the staged fields applied | drop | new node from `base` with the staged fields applied | — |
-| `id_taken` | the staged entity replaces the main-graph entity, as an update of every field | drop the entry; staged edges that name that id must also be resolved | create under a new id | — |
-| `dangling` | — | drop the entry | — | — |
+| `id_taken` | the staged entity replaces the main-graph entity, as an update of every field | drop | create under a new id | — |
+| `dangling` | only for a dependant of a dropped create (below): keep it, attached to the main-graph entity that holds the id | drop | — | — |
+
+**Dependants of a dropped create.** When `keep_main` drops an `id_taken` create,
+every staged edge that names that id becomes `dangling` for this merge. It must
+then be resolved:
+
+- `keep_main` drops it;
+- `take_session` keeps it, attached to the main-graph entity that holds the id.
+
+Nothing attaches it silently.
 
 **`as_new` and edges.** A staged edge create in the same merge that names the
 old id as an endpoint is created against the new id instead. Staged edge
@@ -568,13 +611,27 @@ parts by hand.
 
 ### 11.3 Races between the diff and the merge
 
-- The merge re-reads every selected entity while it validates.
-- It sends each graph write with an expectation (§4.3):
-  - `expected_revision` set to the revision it just read;
+The instance decides a merge on what it has read. The store makes sure that is
+still true when the merge applies.
+
+- Every graph write carries an expectation (§4.3):
+  - `expected_revision` set to the revision the instance just read, for an
+    update or delete;
   - `expect_absent` for every create.
-- If any expectation fails when the unit applies, the whole merge fails with
-  `merge_raced`, and nothing is written.
-- The caller re-reads the diff and tries again.
+- The unit also carries **`checks`**: every other condition the decision
+  depended on. The store verifies each one inside the unit:
+  - **Endpoints exist.** For every edge the merge creates or keeps, both
+    endpoints exist, or are created by the same unit.
+  - **Incident edges as listed.** For every node the merge deletes, the node's
+    incident edges in the store are exactly those the merge deletes with it.
+- In a shared store, the unit locks the rows those checks read, so they cannot
+  change before it commits. The same rule applies to direct writes: an edge
+  create locks its endpoint rows for share, and a node delete locks its node
+  row. So an edge create and a node delete on the same node are ordered against
+  each other, whichever instance issues them.
+- If any expectation or check fails, the whole merge fails with
+  `merge_raced`, and nothing is written. The caller re-reads the diff and tries
+  again.
 
 ### 11.4 Selection and dependencies
 
@@ -602,9 +659,9 @@ On success:
   endpoints.
 - Revisions advance as for any direct write.
 - Graph events fire after the unit commits, as for direct writes:
-  - with `origin` `session-merge`;
-  - with `correlation_id` set to the merge id;
-  - with attribution to the merging actor, and to each entry's `staged_by`.
+  - `event_origin` is `session-merge`;
+  - `event_correlation_id` is the merge id;
+  - attribution goes to the merging actor, and to each entry's `staged_by`.
 - A **merge record** is stored with the layer (§7). It holds:
   - the merge id, session id, actor and time;
   - per entry: action, entity, base revision, resulting revision and resolution.
@@ -619,27 +676,30 @@ A partial merge leaves the unselected entries in the layer untouched.
 
 **PostgreSQL.** The unit is one transaction, so nothing needs recovering.
 
-**File backend.** It is single-writer, so it follows a write-ahead sequence:
+**File backend.** It is single-writer. It holds the storage lock from step 1 to
+step 4, so no other write can touch the graph in between:
 
 1. Write the merge record, marked `pending`, to the merge log and sync it. It
    holds everything recovery needs: the selected entries, and every graph
-   operation with the revision it will produce.
+   operation with the content and revision it will produce.
 2. Apply the graph operations as one journal batch. The file backend already
-   makes a batch atomic.
+   makes a batch atomic, and a merge applies every operation it lists (§4.2).
 3. Rewrite the layer file without the merged entries.
 4. Mark the record `applied`.
 
 On load, a `pending` record is resolved against the graph itself. It does not
 rely on the journal, whose lines a checkpoint or whole-graph save removes:
 
-- **Every operation's resulting state is present in the graph:** the batch
+- **Every operation's content and revision are present in the graph:** the batch
   landed. Steps 3 and 4 are completed.
 - **None is present:** it did not land. The record is removed, and the layer is
   left as it was.
 
-The batch is atomic, so no mixed state can occur. A retry with the same
-`merge_id` finds the record: a `pending` one is resolved first, and an
-`applied` one is returned (I9).
+The lock rules out interleaved writes, and the batch is atomic, so no mixed
+state can occur.
+
+A retry with the same `merge_id` finds the record. A `pending` one is resolved
+first; an `applied` one is returned (I9).
 
 ## 12. Discard
 
@@ -656,9 +716,13 @@ The batch is atomic, so no mixed state can occur. A retry with the same
 - **Delete:** deleting a session whose layer is not empty is refused with
   `layer_not_empty`, unless the request says `discard_staged: true`. Then the
   layer is dropped first, and the delete proceeds as today (I11).
-- **D11 still applies:** every connected client gets its own new, empty
-  session. That new session gets the **deleted session's write mode**, not the
-  graph default. A client that was staging keeps staging (I2).
+- **D11 still applies:** every connected client moves to its own new, empty
+  session, generated in the browser as today.
+  - The delete notification carries the deleted session's write mode.
+  - A client leaving a `staged` session creates its replacement explicitly on
+    the server, as `staged` (§5.1), before it sends that session's header.
+
+  A client that was staging therefore keeps staging (I2).
 - **Retention:** D13 still applies. A layer lives as long as its session does.
   Whether staged work should expire is *open*.
 - **Rename:** no effect on the layer.
@@ -678,8 +742,12 @@ The authorization context gains two optional fields:
 A hook that wants to treat these differently from a direct write reads them.
 `target` keeps its existing meaning, the tool or route name.
 
-The session REST endpoints that change a layer, set a write mode or merge must
-call the hook. That is new: today's session REST endpoints do not.
+**Session routes.**
+
+- The session routes in `service/rest_api.py` call no hook today.
+- The ones that change a layer, set a write mode or merge must call it.
+- Two session routes the host serves, trigger-token and auto-add agents, already
+  do.
 
 The core still has no accounts (D7). The actor recorded on entries and merge
 records is whatever the request resolved: an actor header, or failing that the
@@ -688,14 +756,15 @@ hook's job, not this contract's.
 
 ## 15. Realtime
 
-Staging, discarding and merging are session ops. They advance the session
-sequence and fan out on the session event bus, like every other session op. The
-new op kinds are:
+Staging, discarding, merging and changing the write mode are session ops. They
+advance the session sequence and fan out on the session event bus, like every
+other session op. The new op kinds are:
 
 - **`graph_change_staged`:** carries the resulting entry, or its removal after
   collapsing;
 - **`graph_changes_discarded`:** carries the removed keys;
-- **`graph_changes_merged`:** carries the merge id and the merged keys.
+- **`graph_changes_merged`:** carries the merge id and the merged keys;
+- **`write_mode_changed`:** carries the new mode.
 
 A client re-reads composed entities, or applies the carried entries, to keep its
 canvas in step. The catch-up snapshot stays as it is: it carries session state,
@@ -721,8 +790,14 @@ the slice that implements them.
   `session_not_supported`. The header must never be ignored (I2).
 
 **Over MCP**, graph read and write tools gain an optional
-**`visualization_session_id`** argument. Where both the header and the argument
-are present, the argument wins.
+**`visualization_session_id`** argument. The same rules apply:
+
+- a tool that neither composes nor stages refuses the argument with
+  `session_not_supported`;
+- a session tool, which already names its session, refuses a header naming a
+  different session with `session_mismatch`;
+- where the header and the argument name the same session, there is nothing to
+  decide. Where they differ, the request is refused with `session_mismatch`.
 
 The name `session_id` is avoided for this argument. It already names the
 per-tab event id and the MCP transport session.
@@ -732,6 +807,8 @@ per-tab event id and the MCP transport session.
 - In a direct-mode session, a session id changes nothing about graph reads and
   writes.
 - An id that does not resolve is refused with `session_not_found` (I2).
+  Clients send it only for sessions that exist on the server (§5.1), so this
+  does not block today's local-first sessions.
 
 ### 16.2 New operations
 
@@ -740,26 +817,31 @@ per-tab event id and the MCP transport session.
 | Read the diff | `GET /api/sessions/{id}/staged` | `get_staged_changes` |
 | Merge | `POST /api/sessions/{id}/staged/merge` | `merge_staged_changes` |
 | Discard | `POST /api/sessions/{id}/staged/discard` | `discard_staged_changes` |
-| Set write mode | `PATCH /api/sessions/{id}` with `write_mode` | `set_session_write_mode` |
+| Switch to staged | `PATCH /api/sessions/{id}` with `write_mode` | `set_session_write_mode` |
+
+A session is created as staged through the existing create route and tool,
+with `write_mode` in the request.
 
 ### 16.3 Error codes
 
 Every refusal carries an `error` code, a human-readable `message` and the data
-needed to act on it. Over MCP, it also carries `success: false`.
+needed to act on it. Over MCP, it also carries `success: false`. The existing
+session-tool code `revision_conflict` is unchanged (§9.2).
 
 | Code | HTTP | Raised by |
 |---|---|---|
-| `revision_conflict` | 409 | an expectation on a direct or staged write (§4.3, §9.2) |
-| `session_seq_conflict` | 409 | `expected_session_seq` (§9.2) |
+| `entity_revision_conflict` | 409 | an entity expectation on a direct or staged write (§4.3, §9.2) |
+| `session_seq_conflict` | 409 | `expected_session_seq` on a graph write (§9.2) |
 | `merge_blocked` | 409 | an unresolved entry (§11.2) |
-| `merge_raced` | 409 | an expectation failing inside the merge unit (§11.3) |
+| `merge_raced` | 409 | an expectation or check failing inside the merge unit (§11.3) |
 | `merge_incomplete` | 422 | a selection not closed under dependencies (§11.4) |
-| `write_mode_locked` | 409 | leaving `staged` with a non-empty layer (§5.2) |
+| `write_mode_irreversible` | 409 | switching a staged session to direct (§5.2) |
 | `layer_not_empty` | 409 | deleting a session with a non-empty layer (§13) |
 | `layer_full` | 422 | exceeding the layer cap (§6.4) |
 | `staged_unsupported` | 422 | staged mode on a backend without `staged_sessions` (§5.2) |
 | `session_not_found` | 404 | a session id that does not resolve (§16.1) |
-| `session_not_supported` | 400 | a session header on a route that neither composes nor stages (§16.1) |
+| `session_not_supported` | 400 | a session on a route or tool that neither composes nor stages (§16.1) |
+| `session_mismatch` | 400 | two different sessions named in one request (§16.1) |
 
 ## 17. Frontend obligations
 
@@ -777,17 +859,28 @@ the graph when they have not is the failure this feature invites.
 
 ## 18. Compatibility
 
-- Direct mode is the default. A deployment that never enables staged mode sees
-  no behaviour change beyond two things:
-  - `revision` appears on entities;
-  - a write that carries an expectation (§4.3) is applied synchronously and
-    checked.
-- `revision` is additive in the graph file, in PostgreSQL's JSONB rows and in
-  API responses. Older clients ignore it.
+Direct mode is the default, and a deployment that never enables staged mode
+sees no behaviour change beyond these:
+
+- **`revision` appears on entities.** It is additive in the graph file, in
+  PostgreSQL's JSONB rows and in API responses. Older clients ignore it.
+- **Expectations are checked.** A write that carries one (§4.3) is checked, and
+  waits for the store.
+- **In a shared store, every write is synchronous** (§4.4).
+  - A write returns after the store commits, not before, so writes are slower
+    by one round trip.
+  - A store failure is reported to the caller, instead of being healed later
+    by a whole-graph resync.
+- **In a shared store, edge creates and node deletes on the same node are
+  ordered against each other** (§11.3).
+
+Otherwise:
+
 - The session document gains only `write_mode` and `write_mode_source`. Its
   layout, references and annotations are unchanged. D4 holds for the document,
   revised by ADR 0005.
-- The existing `expected_updated_at` optimistic check on node updates is kept.
+- The existing `expected_updated_at` optimistic check on node updates, and the
+  session tools' `revision_conflict`, are kept.
 
 ## 19. Out of scope
 
@@ -823,10 +916,10 @@ These are dependencies between parts of the design, not a schedule.
 
 | Slice | Content | Depends on |
 |---|---|---|
-| **S1** | Entity revisions (§4): the field; its advancement; expectations on direct writes, applied synchronously; store-enforced checks and store-assigned revisions in PostgreSQL; a resync that reloads rather than overwrites; `revision_enforcement`; the edge `patch`. Useful on its own. | — |
-| **S2** | The `staged_sessions` capability and the layer store (§7) in the in-memory, file and PostgreSQL backends, with contract tests, including the file backend's write-ahead merge (§11.6). | S1 |
+| **S1** | Entity revisions (§4): the field; its advancement; expectations on direct writes; synchronous writes and store-assigned revisions in a shared store; endpoint and node-row locking; `revision_enforcement`; the edge `patch`. Useful on its own. | — |
+| **S2** | The `staged_sessions` capability and the layer store (§7) in the in-memory, file and PostgreSQL backends, with contract tests, including the merge unit's checks and the file backend's write-ahead merge (§11.3, §11.6). | S1 |
 | **S3** | Write modes (§5); session binding in middleware with no silent ignoring (§16.1); staged writes (§9); permissions (§14). | S2 |
 | **S4** | Composed reads (§8) across every read in §8.2. | S3 |
 | **S5** | Diff, merge, discard and dependencies (§10–§12), over REST and MCP. | S4 |
-| **S6** | Frontend (§17). | S5 |
+| **S6** | Frontend (§17), including creating the replacement for a deleted staged session (§13). | S5 |
 | **S7** | End-to-end workshop acceptance: isolation, composed search and traversal, concurrent main-graph edits, selective merge, discard, and unchanged direct mode. | S6 |
