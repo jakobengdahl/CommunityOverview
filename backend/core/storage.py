@@ -1422,11 +1422,14 @@ class GraphStorage:
         because a miss is refilled on demand and a stale hit is served.
 
         Events are emitted so subscriptions, agents and the history see the
-        change, marked with a distinct origin so an agent that reacts by
-        writing cannot bounce it between instances forever. A change the
-        backend could not describe is a reload, and a reload emits nothing:
-        a backend that wants subscribers to see individual changes has to
-        report them as operations.
+        change, labelled with a distinct origin (`EXTERNAL_CHANGE_ORIGIN`) so
+        a subscription can opt out via `ignore_origins` if reacting to it
+        would bounce the change back between instances forever; nothing acts
+        on the origin automatically, so an agent whose subscription omits it
+        from `ignore_origins` will still bounce. A change the backend could
+        not describe is a reload, and a reload emits nothing: a backend that
+        wants subscribers to see individual changes has to report them as
+        operations.
         """
         if threading.get_ident() == self._writer_thread_id:
             # This thread is the write queue. A refresh may have to wait for
