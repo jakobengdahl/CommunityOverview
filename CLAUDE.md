@@ -208,14 +208,25 @@ git checkout -b claude/<short-description> origin/main
 
 CI runs the full suite in three attributable jobs (see `.github/workflows/ci.yml`):
 the complete backend pytest suite, the frontend vitest workspaces, and the OAuth
-gateway tests. Two further **non-required** jobs (`python-lint`, `frontend-lint`)
-run the ruff / eslint / prettier gates — see the Lint & format tooling note under
-Code Style. Reproduce what CI validates locally:
+gateway tests. Two further jobs (`python-lint`, `frontend-lint`) run the ruff /
+eslint / prettier gates; they are not in the Docker build's dependency chain,
+but they are still merge-blocking on `main` PRs via branch protection (see step
+10) — see the Lint & format tooling note under Code Style. Reproduce what CI
+validates locally:
 
 ```bash
 pytest backend/ -q          # backend-tests job (base/ML-free install)
 npm run test:unit           # frontend-tests job (all workspaces)
 pytest services/mcp_oauth_gateway/test_oauth_flow.py -q   # gateway-tests job
+```
+
+`python-lint` and `frontend-lint` are branch-protection required checks (see
+step 10), and each fails on formatting drift even when `ruff check` / `npm run
+lint` are clean — run the format-check commands too before opening a PR:
+
+```bash
+ruff format --check backend scripts   # python-lint job's format-check step
+npm run format:check                  # frontend-lint job's prettier format-check step
 ```
 
 The backend job installs only the base requirements (no ML stack); semantic search
