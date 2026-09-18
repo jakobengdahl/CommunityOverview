@@ -653,9 +653,12 @@ scope, rather than trusting the reload alone: a scoped session is shown every
 row that carries no scope as well as its own, so a graph written unscoped
 would pass the reload's count check with the right numbers.
 
-On such a store, an unscoped session sees none of the scoped rows, only the
-metadata row, which the store keeps once per schema for every scope.
-That is why an emptiness refusal can report metadata and no nodes or edges.
+**A scope's graph wants a schema of its own.** The metadata table keeps one row
+per schema, shared by every scope in it (*Keeping scopes apart*, below). So a
+scoped conversion into a schema that already holds another scope's graph finds
+that graph's metadata and none of its rows, and refuses. There,
+`--allow-non-empty-target` would replace the metadata every scope in the schema
+reads, and the refusal says so rather than suggesting it.
 
 The import migrates only the graph payload read from `graph.json`. Embedding
 sidecars, history sidecars, and session files are not migrated. Regenerate or

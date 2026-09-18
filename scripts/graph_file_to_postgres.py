@@ -85,13 +85,29 @@ def graph_has_content(data: Dict[str, Any]) -> bool:
     return bool(metadata) if isinstance(metadata, dict) else metadata is not None
 
 
-def describe_content(data: Dict[str, Any]) -> str:
-    counts = graph_counts(data)
-    if counts == GraphCounts(0, 0):
-        # Metadata alone, which on a store keeping scopes apart is typically
-        # another scope's: the metadata table holds one row per schema.
-        return "graph metadata but no nodes or edges visible to this conversion"
-    return f"{counts.nodes} node(s), {counts.edges} edge(s)"
+def not_empty_refusal(existing: Dict[str, Any], scope: str | None) -> str:
+    counts = graph_counts(existing)
+    if counts != GraphCounts(0, 0):
+        return (
+            f"target graph is not empty (it holds {counts.nodes} node(s), "
+            f"{counts.edges} edge(s)); re-run with --allow-non-empty-target to "
+            "replace it"
+        )
+    if scope is not None:
+        # Metadata and none of this scope's rows: the metadata table keeps one
+        # row per schema whatever the scope, so what is visible here is what
+        # every scope in the schema reads - typically another scope's graph.
+        # Offering the flag as the way through is what overwrote it.
+        return (
+            "target holds graph metadata but none of this scope's nodes or "
+            "edges; the metadata row is shared by every scope in the schema, "
+            "so --allow-non-empty-target would replace it for all of them - "
+            "give this scope's graph a schema of its own instead"
+        )
+    return (
+        "target graph is not empty (it holds graph metadata but no nodes or "
+        "edges); re-run with --allow-non-empty-target to replace it"
+    )
 
 
 def validate_edge_endpoints(data: Dict[str, Any], *, label: str) -> None:
@@ -172,10 +188,7 @@ def convert_graph_file_to_postgres(
     if target_backend.exists():
         existing = target_backend.load_graph_data()
         if graph_has_content(existing) and not allow_non_empty:
-            raise ConversionError(
-                f"target graph is not empty (it holds {describe_content(existing)}); "
-                "re-run with --allow-non-empty-target to replace it"
-            )
+            raise ConversionError(not_empty_refusal(existing, scope))
 
     target_backend.save_graph_data(source)
     written = target_backend.load_graph_data()
@@ -261,7 +274,15 @@ class PostgresTargetInspector:
                 # whatever the policy is called: an operator provisioning by
                 # hand is not bound to the backend's name for it.
                 if rls_enabled or has_policy:
-                    evidence.append(f"{table} has row-level security")
+                    found = [
+                        sign
+                        for sign, present in (
+                            ("row-level security enabled", rls_enabled),
+                            ("a policy", has_policy),
+                        )
+                        if present
+                    ]
+                    evidence.append(f"{table} has " + " and ".join(found))
                 elif has_column:
                     # No policy, so nothing hides a scoped row from this
                     # session: a store keeping scopes apart in the

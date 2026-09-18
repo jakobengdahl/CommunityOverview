@@ -167,6 +167,24 @@ def _ids_seen_by_scope(dsn, schema, scope):
             )
 
 
+def _drop_server_isolation(schema):
+    """Leave the scoped rows and take away everything the server enforces:
+    scopes kept apart by the application alone."""
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        for table in ("graph_nodes", "graph_edges"):
+            name = psycopg.sql.Identifier(schema, table)
+            conn.execute(
+                psycopg.sql.SQL("DROP POLICY IF EXISTS {} ON {}").format(
+                    psycopg.sql.Identifier(f"{table}_scope_policy"), name
+                )
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "ALTER TABLE {} NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY"
+                ).format(name)
+            )
+
+
 def test_an_unscoped_conversion_cannot_publish_a_graph_to_every_scope(
     store, tmp_path, capsys
 ):
@@ -181,6 +199,9 @@ def test_an_unscoped_conversion_cannot_publish_a_graph_to_every_scope(
     # session sees only the shared metadata row here, which is exactly what
     # --allow-non-empty-target was offered to replace.
     assert _convert(unscoped, dsn, schema) == 1
+    first = capsys.readouterr().out
+    assert "keeps scopes apart" in first
+    assert "--allow-non-empty-target" not in first
     assert _convert(unscoped, dsn, schema, "--allow-non-empty-target") == 1
     assert "keeps scopes apart" in capsys.readouterr().out
 
@@ -198,23 +219,65 @@ def test_a_store_keeping_scopes_apart_without_a_policy_is_refused_too(
     assert (
         _convert(_graph_file(tmp_path, "A", ["a1"]), dsn, schema, "--scope", "A") == 0
     )
-    with psycopg.connect(DSN, autocommit=True) as conn:
-        for table in ("graph_nodes", "graph_edges"):
-            name = psycopg.sql.Identifier(schema, table)
-            conn.execute(
-                psycopg.sql.SQL("DROP POLICY IF EXISTS {} ON {}").format(
-                    psycopg.sql.Identifier(f"{table}_scope_policy"), name
-                )
-            )
-            conn.execute(
-                psycopg.sql.SQL(
-                    "ALTER TABLE {} NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY"
-                ).format(name)
-            )
+    _drop_server_isolation(schema)
 
     unscoped = _graph_file(tmp_path, "U", ["u1"])
     assert _convert(unscoped, dsn, schema, "--allow-non-empty-target") == 1
     assert "carry a scope" in capsys.readouterr().out
+    assert _nodes_by_scope(schema) == {"A": 1}
+
+
+@pytest.mark.parametrize("table", ["graph_nodes", "graph_edges"])
+@pytest.mark.parametrize(
+    "sign",
+    [
+        "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
+        # A name of the operator's choosing: the backend's is not the only one.
+        "CREATE POLICY operator_named ON {table} USING (true)",
+    ],
+    ids=["rls-without-a-policy", "a-policy-without-rls"],
+)
+def test_each_sign_of_isolation_is_refused_alone_on_either_table(
+    store, tmp_path, capsys, table, sign
+):
+    """Either sign is a store asking the server to keep rows apart, and either
+    table carries it. Added to an ordinary store, so nothing else is a sign."""
+    dsn, schema = store
+    assert _convert(_graph_file(tmp_path, "G", ["g1"]), dsn, schema) == 0
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            psycopg.sql.SQL(sign.format(table="{}")).format(
+                psycopg.sql.Identifier(schema, table)
+            )
+        )
+
+    assert (
+        _convert(
+            _graph_file(tmp_path, "U", ["u1"]), dsn, schema, "--allow-non-empty-target"
+        )
+        == 1
+    )
+    assert f"keeps scopes apart ({table} has" in capsys.readouterr().out
+    assert _nodes_by_scope(schema) == {"<none>": 1}
+
+
+def test_a_second_scope_is_not_offered_the_first_scopes_metadata(
+    store, tmp_path, capsys
+):
+    """One schema, two scopes: the second finds only the first's metadata row,
+    which every scope in the schema reads."""
+    dsn, schema = store
+    assert (
+        _convert(_graph_file(tmp_path, "A", ["a1"]), dsn, schema, "--scope", "A") == 0
+    )
+
+    assert (
+        _convert(_graph_file(tmp_path, "B", ["b1"]), dsn, schema, "--scope", "B") == 1
+    )
+    refusal = capsys.readouterr().out
+    assert "shared by every scope in the schema" in refusal
+    assert "re-run with --allow-non-empty-target" not in refusal
+    assert _graph_name(schema) == "A"
     assert _nodes_by_scope(schema) == {"A": 1}
 
 
@@ -231,10 +294,14 @@ def test_an_ordinary_unscoped_store_is_not_refused(store, tmp_path):
     assert _graph_name(schema) == "H"
 
 
-def test_rows_in_scope_counts_only_rows_carrying_that_scope(store, tmp_path):
-    """Asked as the owner, under the forced policy: without the session
-    setting the policy would hide every scoped row, and a predicate admitting
-    scopeless rows would count the stray one below."""
+@pytest.mark.parametrize("server_isolation", [True, False], ids=["forced", "none"])
+def test_rows_in_scope_counts_only_rows_carrying_that_scope(
+    store, tmp_path, server_isolation
+):
+    """Asked as the owner. Under the forced policy, without the session
+    setting the policy would hide every scoped row; with no policy at all,
+    only the count's own predicate keeps the other scope's row out. Either
+    way a predicate admitting scopeless rows would count the stray one."""
     dsn, schema = store
     assert (
         _convert(
@@ -250,6 +317,9 @@ def test_rows_in_scope_counts_only_rows_carrying_that_scope(store, tmp_path):
                 ).format(psycopg.sql.Identifier(schema)),
                 (row_id, json.dumps({"id": row_id, "type": "Thing"}), scope),
             )
+
+    if not server_isolation:
+        _drop_server_isolation(schema)
 
     counted = PostgresTargetInspector(dsn, schema=schema).rows_in_scope("A")
 

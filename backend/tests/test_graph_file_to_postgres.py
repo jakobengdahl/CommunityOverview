@@ -70,7 +70,7 @@ class FakeInspector:
         return self.in_scope.get(scope, GraphCounts(0, 0))
 
 
-RLS = "graph_nodes has row-level security"
+RLS = "graph_nodes has row-level security enabled and a policy"
 
 
 def test_copies_graph_json_into_empty_target(tmp_path):
@@ -267,12 +267,28 @@ def test_a_metadata_only_target_is_described_as_that(tmp_path):
     assert "0 node(s)" not in str(refused.value)
 
 
-def test_scoped_verification_counts_rows_carrying_the_scope(tmp_path):
+@pytest.mark.parametrize(
+    "nodes, edges, in_scope",
+    [
+        (["a", "b"], [("ab", "a", "b")], GraphCounts(0, 0)),
+        (["a", "b"], [("ab", "a", "b")], GraphCounts(2, 0)),
+        (["a", "b"], [("ab", "a", "b")], GraphCounts(1, 1)),
+        ([], [], GraphCounts(1, 0)),
+    ],
+    ids=["none-stamped", "edges-unstamped", "partly-stamped", "empty-source"],
+)
+def test_scoped_verification_counts_rows_carrying_the_scope(
+    tmp_path, nodes, edges, in_scope
+):
     """The reload shows the right counts, and the rows still do not carry
-    the scope - a scoped reader is also shown every row that carries none."""
+    the scope - a scoped reader is also shown every row that carries none.
+    Any mismatch fails, in either count and in either direction."""
     source = tmp_path / "graph.json"
-    _write_graph(source, _graph(nodes=[_node("a"), _node("b")]))
-    inspector = FakeInspector(in_scope={"s1": GraphCounts(0, 0)})
+    _write_graph(
+        source,
+        _graph(nodes=[_node(n) for n in nodes], edges=[_edge(*e) for e in edges]),
+    )
+    inspector = FakeInspector(in_scope={"s1": in_scope})
 
     with pytest.raises(ConversionError, match="scope verification failed"):
         convert_graph_file_to_postgres(
@@ -280,6 +296,36 @@ def test_scoped_verification_counts_rows_carrying_the_scope(tmp_path):
         )
 
     assert inspector.asked_scopes == ["s1"]
+
+
+def test_a_scoped_conversion_finding_only_metadata_does_not_offer_to_replace_it(
+    tmp_path,
+):
+    """Metadata and none of this scope's rows is, on a shared schema, another
+    scope's graph: the metadata row is one per schema. Suggesting the flag
+    here is what overwrote it."""
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    before = _graph(metadata={"graph_name": "Another scope's"})
+    target = MemoryTarget(before)
+
+    with pytest.raises(ConversionError) as refused:
+        convert_graph_file_to_postgres(
+            source, target, inspector=FakeInspector(), scope="s1"
+        )
+
+    assert "shared by every scope in the schema" in str(refused.value)
+    assert "re-run with --allow-non-empty-target" not in str(refused.value)
+    assert target.load_graph_data() == before
+
+
+def test_edges_without_nodes_are_reported_as_edges(tmp_path):
+    source = tmp_path / "graph.json"
+    _write_graph(source, _graph(nodes=[_node("a")]))
+    target = MemoryTarget(_graph(edges=[_edge("xy", "x", "y")]))
+
+    with pytest.raises(ConversionError, match=r"0 node\(s\), 1 edge\(s\)"):
+        convert_graph_file_to_postgres(source, target, inspector=FakeInspector())
 
 
 def test_cli_inspects_the_target_it_writes_and_passes_the_scope_through(tmp_path):
