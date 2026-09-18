@@ -81,8 +81,10 @@ breaks one is a defect, whatever else it achieves.
 - **I6 — Revisions are storage-assigned and never reused.** A client cannot set
   a revision. Every write the storage applies takes a revision higher than any
   the store has assigned before, to any entity. So no two writes share a
-  revision, including across a delete and a re-creation under the same id. A
-  downgrade to a build without revisions is outside this guarantee (§4.6).
+  revision, including across a delete and a re-creation under the same id.
+  Two things are outside this guarantee: a downgrade to a build without
+  revisions (§4.6), and a restore from backup that does not raise the counter
+  (§4.2).
 - **I7 — No silent overwrite.** A merge applies an entry only when, for every
   field it changes, one of these holds:
   - the main graph still holds the base value;
@@ -147,9 +149,23 @@ concurrency too, and a merge cannot be safe without them.
   graph over a store that already holds entities. There, every written entity
   takes a fresh value of the counter, not the revision it carries, so no
   expectation taken against the old content can match the new.
-- **The counter never falls behind.** When a store is loaded, or written
-  whole, its counter is set to at least one past the highest revision it
-  holds, so later writes still stamp above every stored revision.
+- **The counter is never lowered.** It only ever moves up.
+  - When a store is loaded, or written whole, the counter is raised to at least
+    one past the highest revision it holds, if it is below that. It is never
+    set lower than it already is. In PostgreSQL the sequence is only ever
+    raised, so an instance booting while others are writing cannot move it
+    back.
+  - The single-writer store hands out revisions before the journal line that
+    records them is written. So it persists a **reservation** instead of the
+    last value it gave out. Before it hands out a value at or above the
+    persisted reservation, it durably raises the reservation by a block. On
+    load, the counter starts at the reservation. A crash therefore skips values
+    but never repeats one.
+  - **A restore from backup** must raise the restored store's counter past
+    every value handed out before the restore. The restore procedure records
+    the live counter first, and sets the restored counter above it. A restore
+    that copies files without doing that is outside I6, like a downgrade
+    (§4.6).
 - **Legacy entities.** An entity loaded without the field reads as revision
   **0**, a value no write ever assigns. Its first applied write stamps it, so no
   migration pass is needed. `0` therefore means "present, never written under
@@ -201,16 +217,32 @@ with or without an expectation, and merges.
   and the call returns.
 - **A refused expectation** changes nothing in the instance and fires no event.
   It is returned as `entity_revision_conflict`.
-- **A store failure** leaves the outcome unknown, because the write may have
-  committed with its acknowledgement lost. Before it returns, still holding the
-  lock, the instance re-reads the touched entities from the store:
-  - **They hold the content it wrote:** the write landed. The call completes as
-    a committed write: memory, event, success.
-  - **They do not:** it did not land. Memory is made to match the store, no
-    event fires, and the call fails with `write_failed`.
-  - **The store cannot be read either:** the call fails with
-    `write_outcome_unknown`. The instance reloads from the store before it
-    serves another request.
+- **A store failure** leaves the outcome open, because the write may have
+  committed with its acknowledgement lost. Content read back cannot settle
+  that: another instance may have written the same rows since. So the outcome
+  is decided on evidence only this write produces.
+  - **The evidence.** Every write in a shared store carries a unique **write
+    token**, stored with each entity it writes. The token is server-internal
+    and never returned to clients. A merge's evidence is its merge record,
+    which exists if and only if the merge unit committed (§7).
+  - **Resolving it.** Before it returns, still holding the lock, the instance
+    re-reads from the store:
+    - **Landed.** The merge record exists, or every entity written carries
+      this write's token. The call completes as a committed write: memory,
+      event, success.
+    - **Did not land.** There is no merge record, or every touched entity is
+      unchanged: the same revision it had before the write, or still absent
+      for a create. Memory is made to match the store, no event fires, and the
+      call fails with `write_failed`.
+    - **Anything else**, including a store that cannot be read, a delete whose
+      entity is now absent, or an entity changed by someone else since. The
+      call fails with `write_outcome_unknown`, and no event fires. Before it
+      serves another request, the instance reloads the touched entities from
+      the store, or the whole graph if the store could not be read.
+  - **What `write_outcome_unknown` costs.** If such a write did land, this
+    instance's subscribers get no event for it. Other instances report it as an
+    external change, as they report every write they did not make. The caller
+    re-reads before retrying.
 
   This replaces, for a shared store, the whole-graph resync that heals a failed
   fire-and-forget write. A shared store has no fire-and-forget writes to heal.
@@ -244,7 +276,8 @@ An older build ignores `revision`. It drops the field from every entity it
 rewrites. Under the file backend a whole-graph save rewrites every entity;
 under an incremental backend, only the entities written.
 
-Those entities read as revision 0 afterwards, which is why a downgrade is
+Those entities read as revision 0 afterwards. The older build also does not
+maintain the counter or its reservation (§4.2). That is why a downgrade is
 outside I6.
 
 It does not make a merge unsafe, because conflicts are decided on field values,
@@ -303,6 +336,11 @@ rewritten entities.
 - **Mirrored in the session document**, next to `name`, as `write_mode` and
   `write_mode_source`, for display. These are neither graph content nor layout,
   so D4's rule about the document still holds.
+- **Caching.** An instance may cache a record's status only when it is
+  `active` or `retired`: a record never leaves those states. A status of
+  `none` may change at any moment, when another instance switches the session
+  to staged. So it is re-read from the backend before every write, and before
+  every composing read, that names the session.
 - **Retirement.** When a staged session is deleted, its record stays, marked
   retired.
   - A retired id is never created again, explicitly or implicitly. Today a
