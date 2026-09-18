@@ -42,7 +42,9 @@ Four facts about the current code shape the decision:
    write mode, writes made in the session go to that layer instead of the graph.
    Reads made in the session see the graph with the layer applied. The graph is
    unchanged until someone explicitly merges. *Direct* mode, which is today's
-   behaviour, stays the default and stays unchanged.
+   behaviour, stays the default. Its behaviour changes only in the ways the
+   contract's §18 lists: revisions appear, and in a shared store writes become
+   synchronous.
 2. **The layer lives beside the graph, not in the session document.** The
    persistence backend that holds the graph also holds the layers, behind a
    capability it declares. That makes a merge one atomic unit together with the
@@ -50,7 +52,8 @@ Four facts about the current code shape the decision:
    wherever the graph is shared. The session document keeps D4's shape:
    references, layout and annotations.
 3. **Every node and edge carries a `revision` that only the storage assigns.** It
-   starts at 1 and advances on every applied write. Staged changes record the
+   is a graph-wide stamp that increases with every write and is never reused,
+   so a re-created entity can never pass for the one that was deleted. Staged changes record the
    entity they were based on, and writes can require the revision they expect.
    - In a store several instances write to, every write is applied
      synchronously, and the store assigns the revision and checks the
@@ -79,9 +82,13 @@ Four facts about the current code shape the decision:
 - **In a shared store, writes become synchronous.** Each waits for the store,
   which costs a round trip. A store failure is reported to the caller instead
   of being healed later by a whole-graph resync.
-- **A staged session never becomes direct.** Otherwise one participant could
-  switch the session after a merge, and another participant's next write
-  would land in the graph. Direct editing resumes in a new session.
+- **A staged session never becomes direct, on any instance.** Otherwise one
+  participant could switch the session after a merge, and another
+  participant's next write would land in the graph.
+  - The staged state is recorded with the layer, not only in the session
+    document, which instances may not share.
+  - A deleted staged session's id is retired, never re-created.
+  - Direct editing resumes in a new session.
 - **Every user-facing read path must compose.** That includes lexical search,
   semantic search and traversal, and it costs work per query in proportion to
   the size of the layer. The contract bounds the layer size.

@@ -43,7 +43,7 @@ The layer holds only what changed. It never copies the graph.
 | **Entry** | The net staged change to one node or edge: create, update or delete (§6). |
 | **Tombstone** | A delete entry. It hides the entity in the composed view. |
 | **Composed view** | The graph as seen from a staged session: main graph plus layer (§8). |
-| **Revision** | A per-entity counter only the storage assigns (§4). |
+| **Revision** | A graph-wide, strictly increasing stamp only the storage assigns. An entity's revision is the stamp of its last write (§4). |
 | **Base** | The main-graph entity as it was when an entry was first staged: its revision and its full content. |
 | **Field** | A top-level attribute of a node or edge. Each top-level key of `metadata` counts as its own field, the granularity of the existing metadata merge-patch. |
 | **Merge** | Applying selected entries to the main graph as one unit (§11). |
@@ -63,10 +63,12 @@ breaks one is a defect, whatever else it achieves.
   as a direct write. That covers:
   - a session id that does not resolve;
   - an entry point that does not understand sessions;
-  - two different sessions named in one request.
+  - two different sessions named in one request;
+  - a staged session that was deleted, however its id reappears (§5.3).
 
-  A staged session never becomes a direct one (§5.2). A caller who believes it
-  is staging therefore never writes to the main graph by mistake.
+  A staged session never becomes a direct one, on any instance (§5.2, §5.3). A
+  caller who believes it is staging therefore never writes to the main graph by
+  mistake.
 - **I3 — Thin layer.** A layer holds entries only for entities the session
   changed. Creating, reading, merging or discarding a layer never copies
   unchanged entities.
@@ -76,12 +78,11 @@ breaks one is a defect, whatever else it achieves.
 - **I5 — Direct mode is unchanged.** With no session, or in a direct-mode
   session, reads and writes behave as before this contract. The exceptions are
   those §18 lists.
-- **I6 — Revisions are storage-assigned and never go backwards.** A client
-  cannot set a revision. Every write the storage applies to an entity leaves it
-  at a higher revision than the store held for that entity before.
-  - Only an explicit end of lineage restarts a revision: a delete, or a
-    whole-graph replacement an operator asks for (§4.2).
-  - A downgrade to a build without revisions is outside this guarantee (§4.6).
+- **I6 — Revisions are storage-assigned and never reused.** A client cannot set
+  a revision. Every write the storage applies takes a revision higher than any
+  the store has assigned before, to any entity. So no two writes share a
+  revision, including across a delete and a re-creation under the same id. A
+  downgrade to a build without revisions is outside this guarantee (§4.6).
 - **I7 — No silent overwrite.** A merge applies an entry only when, for every
   field it changes, one of these holds:
   - the main graph still holds the base value;
@@ -123,25 +124,36 @@ concurrency too, and a merge cannot be safe without them.
 
 ### 4.2 How it advances
 
-- A newly created entity has revision **1**.
-- Every write the storage applies to an existing entity advances its revision.
-  That includes node and edge updates, archiving and unarchiving, and a merge's
-  writes.
-- A direct write that would leave the entity's content unchanged need not be
-  applied. If it is not applied, the revision does not move.
-- A merge applies every operation it lists, even one that changes no content.
-  §11.6 relies on that.
-- Two things end an entity's lineage, and a later entity with the same id then
-  starts again at 1:
-  - deleting the entity;
-  - an explicit whole-graph replacement that an operator asks for, such as a
-    conversion into a non-empty target.
-
-  §11.1 decides conflicts on field values, not on revision equality, so a
-  restarted lineage cannot make a stale change look current.
-- An entity loaded without the field reads as revision **0**. Its first applied
-  write gives it a revision. No migration pass is needed. `0` therefore means
-  "present, never revised under this contract", and never "absent" (§4.3).
+- **One counter.** The store keeps one revision counter for the whole graph.
+  Every write it applies to an entity sets that entity's `revision` to the
+  counter's next value. That covers a create, an update, an archive change and
+  a merge's write.
+  - Revisions therefore increase with every write, and no value is ever used
+    twice.
+  - An entity's revision is the stamp of its last write, not a count of its
+    writes.
+- **Deletes and re-creation.** A deleted entity's revision goes with it. An
+  entity later created under the same id takes a fresh value of the counter.
+  So an expectation taken before the delete can never match the new entity.
+- **Writes that change nothing.** A direct write that would leave the entity's
+  content unchanged need not be applied. If it is not applied, the revision
+  does not move.
+- **Merges apply everything.** A merge applies every operation it lists, even
+  one that changes no content. §11.6 relies on that.
+- **Whole-graph saves of the same graph keep revisions.** A checkpoint, a
+  snapshot or a resync persists the graph the instance already holds, so each
+  entity keeps the revision it has.
+- **Replacing a graph restamps it.** A conversion or import writes a different
+  graph over a store that already holds entities. There, every written entity
+  takes a fresh value of the counter, not the revision it carries, so no
+  expectation taken against the old content can match the new.
+- **The counter never falls behind.** When a store is loaded, or written
+  whole, its counter is set to at least one past the highest revision it
+  holds, so later writes still stamp above every stored revision.
+- **Legacy entities.** An entity loaded without the field reads as revision
+  **0**, a value no write ever assigns. Its first applied write stamps it, so no
+  migration pass is needed. `0` therefore means "present, never written under
+  this contract". It never means "absent" (§4.3).
 
 ### 4.3 Expectations on direct writes
 
@@ -170,22 +182,38 @@ So the two kinds of store behave differently.
 **In a shared store, every write is synchronous.** That covers direct writes,
 with or without an expectation, and merges.
 
-- The write goes through the same single-worker queue as today, and the caller
-  waits for it. So it is ordered after every write the instance queued before
-  it, and nothing queued later can overtake it.
+- The calling thread holds the storage lock from before it submits the write
+  until the in-memory model is updated and the event has fired. The write goes
+  through the same single-worker queue as today, and the caller waits for it.
+  - So writes on one instance reach memory, and fire their events, in the
+    order the store applied them. Nothing queued later can overtake one.
+  - The I/O worker never takes the storage lock, as today, so holding it
+    across the wait cannot deadlock.
+  - The cost: reads on that instance wait for an in-flight write (§18).
 - The store applies it in one statement, or one transaction:
-  - the revision is the stored revision plus one;
+  - the revision is the next value of the store's revision counter, a database
+    sequence in PostgreSQL;
   - the expectation is checked there, as a condition of the write: an update or
     delete applies only when the stored revision matches, and a create with
     `expect_absent` only when no row with that id exists.
-- Only after the store commits does the instance update its in-memory model,
-  with the revision the store returned. Then the event fires, carrying that
-  revision, and the call returns.
-- A write the store refuses changes nothing in the instance and fires no event.
-  An expectation that does not hold is returned as `entity_revision_conflict`;
-  a store failure is returned as an error. Neither marks the storage for the
-  whole-graph resync that heals a failed fire-and-forget write. With no
-  fire-and-forget writes, a shared store has no such write to heal.
+- After the store commits, the instance updates its in-memory model with the
+  revision the store returned. Then the event fires, carrying that revision,
+  and the call returns.
+- **A refused expectation** changes nothing in the instance and fires no event.
+  It is returned as `entity_revision_conflict`.
+- **A store failure** leaves the outcome unknown, because the write may have
+  committed with its acknowledgement lost. Before it returns, still holding the
+  lock, the instance re-reads the touched entities from the store:
+  - **They hold the content it wrote:** the write landed. The call completes as
+    a committed write: memory, event, success.
+  - **They do not:** it did not land. Memory is made to match the store, no
+    event fires, and the call fails with `write_failed`.
+  - **The store cannot be read either:** the call fails with
+    `write_outcome_unknown`. The instance reloads from the store before it
+    serves another request.
+
+  This replaces, for a shared store, the whole-graph resync that heals a failed
+  fire-and-forget write. A shared store has no fire-and-forget writes to heal.
 - The backend declares **`revision_enforcement`**, next to `incremental_writes`
   and `transactions`. `EntityOperation` gains `expected_revision` and
   `expect_absent`, and returns the stored revision.
@@ -195,8 +223,9 @@ with or without an expectation, and merges.
 
 **A single-writer store keeps today's path for writes without an expectation.**
 
-- The instance is the only writer, so the revision it computes under its lock
-  is exact.
+- The instance is the only writer, so it keeps the revision counter itself. It
+  stores the counter in the graph's metadata, persisted in the same journal
+  line or save as the write that advanced it.
 - Its fire-and-forget writes, and the whole-graph resync that heals a failed
   one, stay as they are.
 - A write with an expectation, and every merge, is submitted to the same queue.
@@ -260,11 +289,25 @@ rewritten entities.
     `staged_unsupported`.
   - A graph default of `staged` fails at boot, naming the setting.
 
-### 5.3 Where it is stored
+### 5.3 Where it is recorded
 
-`write_mode` and `write_mode_source` are session metadata. They are stored in
-the session document next to `name`. They are neither graph content nor layout,
-so D4's rule about the document still holds.
+- **Authoritatively, in the graph backend.** Creating a staged session, or
+  switching one to staged, writes a **staged-session record** through the layer
+  store (§7).
+  - Every instance resolves a session's write mode from that record first.
+  - A session id with a record is staged, whatever its session document says
+    and whichever instance serves it.
+  - The record lives with the layer, wherever the graph is shared. The session
+    store may not be shared (`CAPACITY.md`), so the document cannot be
+    authoritative.
+- **Mirrored in the session document**, next to `name`, as `write_mode` and
+  `write_mode_source`, for display. These are neither graph content nor layout,
+  so D4's rule about the document still holds.
+- **Retirement.** When a staged session is deleted, its record stays, marked
+  retired.
+  - A retired id is never created again, explicitly or implicitly. Today a
+    stream reconnect, a rename or a share link creates a missing session.
+  - Every request naming a retired id is refused with `session_not_found`.
 
 ## 6. The layer
 
@@ -348,6 +391,9 @@ must also declare `revision_enforcement` (§4.4). It implements:
 | `discard(session_id, removals)` | Remove the given entries, or all of them. |
 | `load_merge(merge_id)` | The stored merge record, or none. |
 | `drop_layer(session_id)` | Remove the whole layer; used only by an explicit discard-and-delete (§13). |
+| `record_staged(session_id)` | Create the session's staged-session record (§5.3). |
+| `staged_status(session_id)` | `active`, `retired` or `none`. |
+| `retire(session_id)` | Mark the record retired, in the same unit as `drop_layer`. |
 | `layers_in_use()` | The ids of sessions whose layers are not empty. |
 
 `merge` does the following **as one unit**:
@@ -561,9 +607,11 @@ without an explicit choice.
 **Why values, not revisions:**
 
 - it needs no history, which PostgreSQL mode does not keep;
-- it is immune to a restarted lineage (§4.2);
 - it lets independent edits to one entity merge cleanly, the way annotation
   field versions already do.
+
+Revisions still guard the merge against races: every write it makes carries an
+expectation (§11.3).
 
 ### 11.2 Resolutions
 
@@ -714,8 +762,10 @@ first; an `applied` one is returned (I9).
 ## 13. Session lifecycle
 
 - **Delete:** deleting a session whose layer is not empty is refused with
-  `layer_not_empty`, unless the request says `discard_staged: true`. Then the
-  layer is dropped first, and the delete proceeds as today (I11).
+  `layer_not_empty`, unless the request says `discard_staged: true`.
+  - With it, the layer is dropped and the staged-session record retired, in one
+    unit, and the delete proceeds as today (I11).
+  - Deleting a staged session whose layer is empty retires its record too.
 - **D11 still applies:** every connected client moves to its own new, empty
   session, generated in the browser as today.
   - The delete notification carries the deleted session's write mode.
@@ -842,6 +892,8 @@ session-tool code `revision_conflict` is unchanged (§9.2).
 | `session_not_found` | 404 | a session id that does not resolve (§16.1) |
 | `session_not_supported` | 400 | a session on a route or tool that neither composes nor stages (§16.1) |
 | `session_mismatch` | 400 | two different sessions named in one request (§16.1) |
+| `write_failed` | 502 | a shared-store write that did not land (§4.4) |
+| `write_outcome_unknown` | 503 | a shared-store write whose outcome could not be read back (§4.4) |
 
 ## 17. Frontend obligations
 
@@ -869,6 +921,7 @@ sees no behaviour change beyond these:
 - **In a shared store, every write is synchronous** (§4.4).
   - A write returns after the store commits, not before, so writes are slower
     by one round trip.
+  - Reads on the writing instance wait for an in-flight write.
   - A store failure is reported to the caller, instead of being healed later
     by a whole-graph resync.
 - **In a shared store, edge creates and node deletes on the same node are
@@ -916,9 +969,9 @@ These are dependencies between parts of the design, not a schedule.
 
 | Slice | Content | Depends on |
 |---|---|---|
-| **S1** | Entity revisions (§4): the field; its advancement; expectations on direct writes; synchronous writes and store-assigned revisions in a shared store; endpoint and node-row locking; `revision_enforcement`; the edge `patch`. Useful on its own. | — |
-| **S2** | The `staged_sessions` capability and the layer store (§7) in the in-memory, file and PostgreSQL backends, with contract tests, including the merge unit's checks and the file backend's write-ahead merge (§11.3, §11.6). | S1 |
-| **S3** | Write modes (§5); session binding in middleware with no silent ignoring (§16.1); staged writes (§9); permissions (§14). | S2 |
+| **S1** | Entity revisions (§4): the field; the graph-wide counter; expectations on direct writes; in a shared store, synchronous writes under the storage lock, and the failure re-read; endpoint and node-row locking; `revision_enforcement`; the edge `patch`. Useful on its own. | — |
+| **S2** | The `staged_sessions` capability and the layer store (§7), with contract tests, in the in-memory, file and PostgreSQL backends. That includes the staged-session record, the merge unit's checks and the file backend's write-ahead merge (§5.3, §11.3, §11.6). | S1 |
+| **S3** | Write modes (§5), including resolution from the record and retirement; session binding in middleware with no silent ignoring (§16.1); staged writes (§9); permissions (§14). | S2 |
 | **S4** | Composed reads (§8) across every read in §8.2. | S3 |
 | **S5** | Diff, merge, discard and dependencies (§10–§12), over REST and MCP. | S4 |
 | **S6** | Frontend (§17), including creating the replacement for a deleted staged session (§13). | S5 |
