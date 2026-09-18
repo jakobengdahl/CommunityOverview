@@ -363,10 +363,18 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
     and `graph_edges` always carry at least one row and the `rows[0] if
     rows else _EXECUTED_NEVER` branch above never takes its `else`. An
     empty save still issues both `executemany` calls - with zero rows - so
-    this is what reaches it, and what proves `_sequential_scans` treats "no
-    example row to plan with" as "skip it", not as "cannot plan it" (which
-    is the *other* branch just above, for a statement that DID run but
-    whose parameters this spy failed to capture).
+    this is what reaches it, and proves the sentinel is recorded rather than
+    the branch being dead code.
+
+    Deliberately not run through `_sequential_scans`: that helper is used
+    elsewhere only around a single narrow entity write (`WHERE id = %s`
+    against the primary key), where a scan is a regression. A whole-graph
+    `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
+    the previous graph - by design, since "replace the whole graph" means
+    every existing row is gone - and an unfiltered delete has no index to
+    seek with, so it correctly plans as a sequential scan regardless of how
+    many rows are involved. Asserting "no scan" around this call would be
+    asserting a property the production code was never meant to have.
     """
 
     def test_an_empty_saves_executemany_calls_are_read_as_never_executed(
@@ -383,11 +391,6 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
             "an empty save's executemany calls were not recorded with the "
             "'executed never' sentinel - _EXECUTED_NEVER is dead code"
         )
-        # Not an error and not a scan: `_sequential_scans` must get past
-        # these silently rather than raising the "cannot plan" error meant
-        # for a statement it failed to capture parameters for.
-        _touched, scanning = _sequential_scans(issued)
-        assert not scanning, f"an empty save's statements read as scans: {scanning}"
 
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
@@ -861,6 +864,10 @@ class TestPostgresConcurrentSavesDoNotMerge:
         real_execute = module.psycopg.Connection.execute
         seen = threading.Event()
         holder = []
+        # Filled in below, before `thread.start()` - `stalling` only reads it
+        # once the thread it names has actually begun running `run()`, so the
+        # assignment always happens before any read of it.
+        stalled_thread = []
 
         def spy_execute(conn, query, *args, **kwargs):
             # The save's own lock statement, so `holder` names the session
@@ -871,7 +878,21 @@ class TestPostgresConcurrentSavesDoNotMerge:
             return real_execute(conn, query, *args, **kwargs)
 
         def stalling(value):
-            if isinstance(value, dict) and "id" not in value:  # the metadata row
+            # `psycopg.types.json.Jsonb` is monkeypatched on the module, so
+            # every save in the process - on every schema, on every
+            # connection - calls this, not only the one this helper was
+            # asked to stall. `Jsonb()` runs synchronously on the thread
+            # that called `save_graph_data`, so checking which thread is
+            # calling scopes the stall to exactly the save this helper
+            # started: a save elsewhere that reaches its own id-less
+            # metadata write while this one is parked must sail through
+            # rather than being caught by this patch too.
+            if (
+                isinstance(value, dict)
+                and "id" not in value  # the metadata row
+                and stalled_thread
+                and threading.current_thread() is stalled_thread[0]
+            ):
                 seen.set()
                 released.wait(30)
             return real(value)
@@ -889,6 +910,7 @@ class TestPostgresConcurrentSavesDoNotMerge:
                 self.stall_errors.append(f"{type(exc).__name__}: {exc}")
 
         thread = threading.Thread(target=run, daemon=True)
+        stalled_thread.append(thread)
         thread.start()
         assert seen.wait(30), "the stalled save never reached its metadata write"
         assert holder, "the stalled save never issued its own advisory lock statement"
