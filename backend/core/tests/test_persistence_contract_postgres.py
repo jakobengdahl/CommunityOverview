@@ -18,6 +18,7 @@ import itertools
 import json
 import os
 import pathlib
+import random
 import secrets
 import threading
 import time
@@ -97,6 +98,57 @@ DOCUMENTED_DEADLOCK_RETRIES = 3
 # exact schedule, which depends on how fast the killer thread gets scheduled.
 _MEASURE_SECONDS = 5.0
 _UNPACED_FLOOR = 30
+
+
+# One shared length source for every batch-length case in this module.
+#
+# This module used to pin three fixed lengths (2, 7, 41) across the batch
+# and lock-mode tests below. A fixed set leaves every gap between its values
+# untested: a mutation gated on `len(operations) >= N`, or on the operation
+# at index N, for any N the fixed set happens to skip, is invisible to the
+# whole suite - and review repeatedly found exactly that, in the 6..39 gap
+# and above 41. Redrawing the non-structural anchors from a seeded RNG each
+# session does not close any one run's gap either, but it stops the gap from
+# being the *same* gap every run: a threshold anywhere in range eventually
+# falls on a session that draws past it, and CI runs this module on every
+# PR. `CO_TEST_PG_LENGTH_SEED` pins the seed for an exact rerun, and every
+# case that draws from it prints the seed as its first line, so a failure's
+# own captured output already carries what reproduces it.
+def _pg_length_seed() -> int:
+    override = os.environ.get("CO_TEST_PG_LENGTH_SEED")
+    if override is not None:
+        return int(override)
+    return random.SystemRandom().randrange(2**31)
+
+
+PG_LENGTH_SEED = _pg_length_seed()
+_LENGTHS_RNG = random.Random(PG_LENGTH_SEED)
+
+
+def _pg_length_seed_banner() -> str:
+    """Printed by every case that draws a length, so a failure's own
+    captured output names the seed that reproduces it - see the module-level
+    comment above `_pg_length_seed`."""
+    return (
+        f"postgres persistence-contract length seed: {PG_LENGTH_SEED} "
+        f"(rerun this exact draw with CO_TEST_PG_LENGTH_SEED={PG_LENGTH_SEED})"
+    )
+
+
+# Kept fixed rather than drawn: `TestPostgresEntityWritesTouchOneRow._long_batch`
+# cycles through 4 slots in runs of `_RUN`, and this length is what truncates
+# that cycle down to only its first slot (a delete_edge run) - a structural
+# case this family exists to cover, not a stand-in for "some short length".
+SHORT_BATCH_LENGTH = 2
+
+# The two non-structural anchors every length-sensitive case below shares -
+# one length in the gap the old fixed values left untested (6..39), and one
+# clearly past the old fixed ceiling (41) so "a long batch" stays
+# unambiguously long whatever it draws. Drawn once per session from the seed
+# above and reused everywhere a case needs "a middling batch" or "a long
+# batch" rather than its own private magic number.
+MID_BATCH_LENGTH = _LENGTHS_RNG.randint(6, 39)
+LONG_BATCH_LENGTH = _LENGTHS_RNG.randint(42, 90)
 _POSTGRES_SOURCE_FILES = (
     pathlib.Path(__file__).resolve().parents[1] / "postgres_backend.py",
     pathlib.Path(__file__).resolve(),
@@ -301,6 +353,44 @@ def _sequential_scans(issued):
             if "Seq Scan" in "\n".join(r[0] for r in rows):
                 scanning.append(text)
     return touched, scanning
+
+
+class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
+    """`_EXECUTED_NEVER`, reached rather than left as dead test infrastructure.
+
+    Every other test that calls `_statements_issued` around a save hands it
+    at least one node or edge, so the `executemany` calls for `graph_nodes`
+    and `graph_edges` always carry at least one row and the `rows[0] if
+    rows else _EXECUTED_NEVER` branch above never takes its `else`. An
+    empty save still issues both `executemany` calls - with zero rows - so
+    this is what reaches it, and proves the sentinel is recorded rather than
+    the branch being dead code.
+
+    Deliberately not run through `_sequential_scans`: that helper is used
+    elsewhere only around a single narrow entity write (`WHERE id = %s`
+    against the primary key), where a scan is a regression. A whole-graph
+    `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
+    the previous graph - by design, since "replace the whole graph" means
+    every existing row is gone - and an unfiltered delete has no index to
+    seek with, so it correctly plans as a sequential scan regardless of how
+    many rows are involved. Asserting "no scan" around this call would be
+    asserting a property the production code was never meant to have.
+    """
+
+    def test_an_empty_saves_executemany_calls_are_read_as_never_executed(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()  # migrate first, so only the save itself is captured
+
+        issued = _statements_issued(lambda: backend.save_graph_data(snapshot()))
+
+        sentinelled = [q for q, p in issued if p is _EXECUTED_NEVER]
+        assert sentinelled, (
+            "an empty save's executemany calls were not recorded with the "
+            "'executed never' sentinel - _EXECUTED_NEVER is dead code"
+        )
 
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
@@ -774,6 +864,10 @@ class TestPostgresConcurrentSavesDoNotMerge:
         real_execute = module.psycopg.Connection.execute
         seen = threading.Event()
         holder = []
+        # Filled in below, before `thread.start()` - `stalling` only reads it
+        # once the thread it names has actually begun running `run()`, so the
+        # assignment always happens before any read of it.
+        stalled_thread = []
 
         def spy_execute(conn, query, *args, **kwargs):
             # The save's own lock statement, so `holder` names the session
@@ -784,7 +878,21 @@ class TestPostgresConcurrentSavesDoNotMerge:
             return real_execute(conn, query, *args, **kwargs)
 
         def stalling(value):
-            if isinstance(value, dict) and "id" not in value:  # the metadata row
+            # `psycopg.types.json.Jsonb` is monkeypatched on the module, so
+            # every save in the process - on every schema, on every
+            # connection - calls this, not only the one this helper was
+            # asked to stall. `Jsonb()` runs synchronously on the thread
+            # that called `save_graph_data`, so checking which thread is
+            # calling scopes the stall to exactly the save this helper
+            # started: a save elsewhere that reaches its own id-less
+            # metadata write while this one is parked must sail through
+            # rather than being caught by this patch too.
+            if (
+                isinstance(value, dict)
+                and "id" not in value  # the metadata row
+                and stalled_thread
+                and threading.current_thread() is stalled_thread[0]
+            ):
                 seen.set()
                 released.wait(30)
             return real(value)
@@ -802,6 +910,7 @@ class TestPostgresConcurrentSavesDoNotMerge:
                 self.stall_errors.append(f"{type(exc).__name__}: {exc}")
 
         thread = threading.Thread(target=run, daemon=True)
+        stalled_thread.append(thread)
         thread.start()
         assert seen.wait(30), "the stalled save never reached its metadata write"
         assert holder, "the stalled save never issued its own advisory lock statement"
@@ -871,6 +980,70 @@ class TestPostgresConcurrentSavesDoNotMerge:
             {"shared", "only_first"},
             {"shared", "only_second"},
         ), f"the store holds a graph neither writer saved: {sorted(landed)}"
+
+    def test_a_save_on_a_different_schema_does_not_wait_for_this_ones_lock(
+        self, schema, backends, monkeypatch
+    ):
+        """SV_LOCKGLOBAL, the timing assertion the test above says it lacks.
+
+        `test_overlapping_saves_leave_one_writers_graph` says explicitly that
+        it does not prove the lock is keyed on the schema - a lock keyed on
+        `SAVE_LOCK_KEY` alone, with the `hashtext(schema)` half dropped,
+        passes it too, since that test only ever uses one schema. This is
+        the second schema that comment asks for: a save on it must land
+        while this schema's save is still held open, or every schema in the
+        database serialises on one save at a time - the opposite of what
+        the module docstring promises.
+        """
+        other_schema = f"{schema}_other"
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        second = PostgresGraphPersistenceBackend(DSN, schema=other_schema)
+        backends.extend([first, second])
+        try:
+            first.save_graph_data(snapshot([node_payload("seed")]))
+            second.save_graph_data(snapshot([node_payload("seed")]))
+
+            released = threading.Event()
+            # The pid `_stalled_save` reports is for a caller that asks the
+            # server whether a second write is BLOCKED on it
+            # (`_wait_until_blocking`); this test asks the opposite question
+            # - that the second schema's save is NOT blocked - which a
+            # bounded wait answers directly, with nothing to attribute.
+            stalled, _held_pid = self._stalled_save(
+                first, [node_payload("held")], released, monkeypatch
+            )
+
+            done = threading.Event()
+
+            def save_elsewhere():
+                second.save_graph_data(snapshot([node_payload("free")]))
+                done.set()
+
+            other = threading.Thread(target=save_elsewhere, daemon=True)
+            other.start()
+            landed = done.wait(10)
+            # Release before asserting anything, same reason as the lock-mode
+            # class above: failing here with the first save still parked
+            # would leave it holding a pooled connection, an open
+            # transaction and the advisory lock for the rest of its wait.
+            still_holding = stalled.is_alive()
+            released.set()
+            stalled.join(30)
+            other.join(30)
+
+            assert still_holding, "the first save let go before the probe could run"
+            assert not other.is_alive(), "the second schema's save never finished"
+            assert landed, (
+                "a save on a different schema waited for this schema's save "
+                "lock: the lock is keyed on a constant rather than "
+                "hashtext(schema), so every schema in the database "
+                "serialises on one save at a time"
+            )
+            assert self.stall_errors == [], f"the held save failed: {self.stall_errors}"
+            assert {n["id"] for n in second.load_graph_data()["nodes"]} == {"free"}
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as conn:
+                conn.execute(f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE')
 
 
 class TestPostgresBootsForALeastPrivilegeRole:
@@ -1659,6 +1832,79 @@ class TestPostgresSaveIsolation:
             f"the save inherited the connection's isolation level: {seen}"
         )
 
+    def test_a_save_that_actually_inherits_hostile_isolation_raises_rather_than_hiding_it(
+        self, schema, backends, monkeypatch
+    ):
+        """ER_SERIAL: were the SET above ever lost, its failure must still
+        reach the caller.
+
+        The test above proves the SET statement runs. This is the other
+        half the docstring names: an inheriting save that waited on the
+        advisory lock takes its snapshot before the lock, so once it
+        unblocks and tries to update the row the other writer already
+        committed, the server raises a genuine SerializationFailure (SQLSTATE
+        40001) rather than letting it proceed. Simulated here by discarding
+        the SET statement specifically - the regression this class exists to
+        catch - so the rest of the save runs for real, under the hostile
+        connection's actual REPEATABLE READ default, against a real
+        contended row. Nothing between the server and `apply_batch`'s caller
+        may turn that into a silent no-op: the caller must see the error, or
+        it believes a write landed that the store never took.
+        """
+        dsn = self._dsn_defaulting_to_repeatable_read()
+        backend = PostgresGraphPersistenceBackend(dsn, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("contested")]))
+
+        real_execute = psycopg.Connection.execute
+
+        def skip_the_override(conn, query, *args, **kwargs):
+            if "SET TRANSACTION ISOLATION LEVEL READ COMMITTED" in str(query):
+                # The regression under test: the override never reaches the
+                # server, so this transaction runs at the connection's own
+                # (hostile) default instead.
+                return None
+            return real_execute(conn, query, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", skip_the_override)
+
+        blocker = psycopg.connect(dsn, autocommit=False)
+        errors = []
+        contended = False
+        try:
+            blocker.execute(
+                psycopg.sql.SQL(
+                    "UPDATE {}.graph_nodes SET doc = doc WHERE id = %s"
+                ).format(psycopg.sql.Identifier(schema)),
+                ("contested",),
+            )
+
+            def contend():
+                try:
+                    backend.save_graph_data(
+                        snapshot([node_payload("contested", name="Second")])
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+            writer = threading.Thread(target=contend, daemon=True)
+            writer.start()
+            contended = _wait_until_blocking(blocker.info.backend_pid)
+            contended = contended and writer.is_alive()
+            blocker.commit()
+            writer.join(30)
+        finally:
+            blocker.close()
+
+        assert contended, "the writer never contended for the row"
+        assert not writer.is_alive(), "the contended save never finished"
+        assert len(errors) == 1 and isinstance(
+            errors[0], psycopg.errors.SerializationFailure
+        ), (
+            "a save that inherited REPEATABLE READ and lost the row race "
+            f"did not raise SerializationFailure to its caller: {errors!r}"
+        )
+
 
 class TestPostgresDeclaresWhatItImplements:
     """Under-declaring is invisible to the contract, by construction.
@@ -1753,32 +1999,30 @@ class TestPostgresEntityWritesTouchOneRow:
         ),
     }
 
-    # Several lengths, and no claim that this pins a property: a
-    # threshold gate can still sit in a gap between them, or above them.
-    # Closing that family would need one shared length source, randomised
-    # per run, driving every length-sensitive test; that is recorded as
-    # follow-up rather than done here.
+    # Three lengths, none of them a fresh magic number: they are the module's
+    # shared anchors (see `SHORT_BATCH_LENGTH` / `MID_BATCH_LENGTH` /
+    # `LONG_BATCH_LENGTH` at module scope), so a threshold gate that survives
+    # this family's draw this run is the same gate the lock-mode and
+    # no-lock-behind families below are also probing with. Still no claim
+    # that any one session pins the property completely - a gate can sit
+    # between whatever this session drew - only that the gap moves every
+    # run instead of sitting still at 2/7/41 forever.
     #
     # `GraphStorage.delete_nodes` builds one edge delete per edge plus one
     # node delete per node, so the length is whatever the caller deleted.
-    # These three are chosen for what each exercises, not for being new to
-    # the module - none of them is:
+    # What each of the three exercises:
     #
-    # - 2 truncates the cycle below, which is the point of running it;
-    # - 7 is the only mid-length under the cost and blast-radius
-    #   assertions - the module's other seven-operation batch is a
-    #   contract clause that checks the resulting graph and not the
-    #   statements;
-    # - 41 is the lock probe's holder length, so that length is also
-    #   reached by a test asking a different question: about the lock's
-    #   mode rather than about what a write costs.
-    #
-    # Why this comment says so little about which lengths the rest of the
-    # module drives: counts of that here have repeatedly gone wrong or
-    # gone stale. The measurements live in the branch history, where a
-    # reader can check one against the commit that made it; a comment
-    # that restates them has to be re-verified on every edit.
-    BATCH_LENGTHS = (2, 7, 41)
+    # - SHORT_BATCH_LENGTH truncates the cycle below, which is the point of
+    #   running it - see the module-level comment on that constant;
+    # - MID_BATCH_LENGTH is a length under the cost and blast-radius
+    #   assertions that is neither the truncating case nor the long one -
+    #   the module's other seven-operation batch is a contract clause that
+    #   checks the resulting graph and not the statements;
+    # - LONG_BATCH_LENGTH is also the lock probe's `batch_many` holder
+    #   length (`TestPostgresEntityWritesDoNotSerialiseAgainstEachOther`),
+    #   so that length is reached by a test asking a different question:
+    #   about the lock's mode rather than about what a write costs.
+    BATCH_LENGTHS = (SHORT_BATCH_LENGTH, MID_BATCH_LENGTH, LONG_BATCH_LENGTH)
 
     # Runs of two, cycling edge-delete, node-delete, edge-upsert,
     # node-upsert. Runs rather than strict alternation because
@@ -1787,14 +2031,16 @@ class TestPostgresEntityWritesTouchOneRow:
     # shape - and a backend that merged adjacent ones into a single
     # statement would be invisible to a batch that never has two in a row.
     # Both actions appear from length 5; a shorter length truncates the
-    # cycle, which is what makes 2 worth running as well as 41.
+    # cycle, which is what makes SHORT_BATCH_LENGTH worth running as well as
+    # the longer anchors.
     _RUN = 2
 
     @classmethod
     def _long_batch(cls, length):
         """A cycle of both kinds and both actions, in runs of two, cut off
         at a caller-chosen length - so a short length gets only the start
-        of it, which is what the comment above says 2 is for.
+        of it, which is what the comment above says SHORT_BATCH_LENGTH is
+        for.
         """
         make = (
             lambda i: EntityOperation.delete_edge(f"e{i}"),
@@ -1901,6 +2147,7 @@ class TestPostgresEntityWritesTouchOneRow:
         operation's own table, in the caller's order, and no plan that
         scans.
         """
+        print(_pg_length_seed_banner())
         backend = self._seeded(schema, backends)
 
         issued = _statements_issued(
@@ -2193,6 +2440,7 @@ class TestPostgresConcurrentEntityWrites:
         serialization failure rather than wait; the save and the batch both
         state READ COMMITTED so that they wait and win instead.
         """
+        print(_pg_length_seed_banner())
         parts = psycopg.conninfo.conninfo_to_dict(DSN)
         parts["options"] = "-c default_transaction_isolation=repeatable\\ read"
         hostile = psycopg.conninfo.make_conninfo(**parts)
@@ -2227,11 +2475,15 @@ class TestPostgresConcurrentEntityWrites:
                     else:
                         # The isolation statement stated only for short
                         # batches would leave this one aborting on a
-                        # serialization failure instead of waiting.
+                        # serialization failure instead of waiting. The
+                        # filler count is the module's shared mid-length
+                        # anchor (MID_BATCH_LENGTH) rather than a fixed 5,
+                        # so "short" cannot be defined narrowly enough to
+                        # dodge this case run after run.
                         second.apply_batch(
                             [
                                 EntityOperation.upsert_node(node_payload(f"filler{i}"))
-                                for i in range(5)
+                                for i in range(MID_BATCH_LENGTH)
                             ]
                             + [
                                 EntityOperation.upsert_node(
@@ -2419,6 +2671,51 @@ class TestPostgresEntityWritesSpendTheConnectionBudget:
         )
 
 
+class TestPostgresConnectionPoolIsConfiguredAsDocumented:
+    """CN_POOLSIZE / CN_MINSIZE / CN_NOVALIDATE.
+
+    Three properties of the pool `__init__` builds, none of them exercised
+    by any functional test: the size a caller asks for is the size
+    enforced, a backend that is constructed and never used holds no server
+    connection at all (the class docstring's own `min_size=0` claim), and a
+    pool size below the documented minimum is refused outright rather than
+    silently accepted as "however many connections psycopg feels like
+    opening".
+    """
+
+    def test_the_pool_enforces_the_requested_max_size(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=2)
+        backends.append(backend)
+        assert backend._pool.max_size == 2, (
+            f"pool_size=2 was requested; the pool enforces max_size="
+            f"{backend._pool.max_size}"
+        )
+
+    def test_an_unused_backend_holds_no_server_connection(self, schema, backends):
+        """`min_size=0`, read off the pool's own stats rather than assumed.
+
+        `pg_stat_activity` would answer the same question but shares the
+        database with whatever else is connected to it - another suite run,
+        a developer's own session - so a count taken there is attributable
+        to nobody. The pool's own stats are this backend's alone.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert backend._pool.min_size == 0, (
+            f"min_size is {backend._pool.min_size}, not the documented 0"
+        )
+        stats = backend._pool.get_stats()
+        assert stats.get("pool_size", 0) == 0, (
+            f"a backend that has done nothing yet already holds "
+            f"{stats.get('pool_size')} connection(s): min_size=0 means an "
+            "unused backend should hold none"
+        )
+
+    def test_a_pool_size_below_the_minimum_is_refused(self, schema):
+        with pytest.raises(ValueError):
+            PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=0)
+
+
 class TestPostgresBatchesSurviveADeadlock:
     """The retry bound, pinned by injection rather than by hammering.
 
@@ -2467,7 +2764,9 @@ class TestPostgresBatchesSurviveADeadlock:
             "the retry returned without applying the batch"
         )
 
-    @pytest.mark.parametrize("length", [5, 12, 40])
+    @pytest.mark.parametrize(
+        "length", [SHORT_BATCH_LENGTH, MID_BATCH_LENGTH, LONG_BATCH_LENGTH]
+    )
     def test_a_long_batch_interrupted_part_way_lands_nothing(
         self, schema, backends, length
     ):
@@ -2478,10 +2777,15 @@ class TestPostgresBatchesSurviveADeadlock:
         fresh transaction every few operations - committing the first
         chunk and failing on a later one - would satisfy that clause and
         still leave a partly-applied batch behind, which is G1 broken on
-        exactly the length production issues. Several lengths, and the
-        failure on the LAST operation, so a chunk boundary anywhere
-        earlier has already committed something by the time it happens.
+        exactly the length production issues. The module's shared length
+        anchors (see `SHORT_BATCH_LENGTH` and friends at module scope) stand
+        in for the fixed [5, 12, 40] this case used to run, so the same
+        moving gap the cost/blast-radius family closes applies here too -
+        and the failure lands on the LAST operation, so a chunk boundary
+        anywhere earlier has already committed something by the time it
+        happens.
         """
+        print(_pg_length_seed_banner())
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend.save_graph_data(snapshot([node_payload("keep")]))
@@ -2614,6 +2918,71 @@ class TestPostgresBatchesSurviveADeadlock:
         loaded = backend.load_graph_data()
         assert by_id(loaded, "nodes") == {} and by_id(loaded, "edges") == {}
 
+    def test_an_exhausted_deadlock_retry_gives_its_connections_back(
+        self, schema, backends
+    ):
+        """CN_LEAK_DEADLOCK: the deadlock path, not the payload-error path.
+
+        `TestPostgresEntityWritesSpendTheConnectionBudget
+        .test_a_failed_batch_gives_its_connection_back` proves a connection
+        comes back after a payload error - one `apply_batch`'s retry loop
+        never even sees, because it is not a `DeadlockDetected`. It says
+        nothing about the loop's own retried attempts, each of which opens
+        its own connection via a fresh `with self._pool.connection()` inside
+        `_apply_batch_once`. Only `_apply_one` is stubbed here, so every
+        attempt still runs the real connection-acquire/release path; a pool
+        of one turns a leak on any of them into the very next write hanging.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema, pool_size=1)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        real_apply_one = backend._apply_one
+
+        def always_deadlocks(conn, operation):
+            raise psycopg.errors.DeadlockDetected("injected")
+
+        backend._apply_one = always_deadlocks
+        with pytest.raises(psycopg.errors.DeadlockDetected):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+        backend._apply_one = real_apply_one
+
+        # The write after exhaustion is the whole test: with a connection
+        # leaked on any of the DEADLOCK_RETRIES + 1 attempts, the pool of
+        # one has nothing left to hand out and this blocks until the pool
+        # times out.
+        backend.upsert_node(node_payload("after"))
+        assert "after" in by_id(backend.load_graph_data(), "nodes")
+
+    def test_a_non_deadlock_error_is_not_retried(self, schema, backends):
+        """RT_WIDE: the retry names DeadlockDetected, not psycopg.Error at large.
+
+        `apply_batch` catches `psycopg.errors.DeadlockDetected` specifically.
+        A version broadened to `except psycopg.Error` would also retry a
+        payload error, a serialization failure, or any other server error up
+        to `DEADLOCK_RETRIES` extra times - each one re-issuing whatever of
+        the batch had already been re-applied before the fresh error, for an
+        error that was never transient to begin with.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        attempts = []
+
+        def always_a_different_error(operations):
+            attempts.append(1)
+            raise psycopg.errors.UniqueViolation("injected, not a deadlock")
+
+        backend._apply_batch_once = always_a_different_error
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            backend.apply_batch([EntityOperation.upsert_node(node_payload("a"))])
+
+        assert len(attempts) == 1, (
+            f"a non-deadlock psycopg.Error was retried {len(attempts) - 1} "
+            "extra time(s) rather than raised on the first attempt"
+        )
+
     def test_opposite_orderings_under_real_contention_all_land(self, schema, backends):
         """The real path, opportunistically: a cycle may or may not form."""
         first = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -2694,34 +3063,43 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
                 EntityOperation.upsert_edge(edge_payload("e", "held", "free")),
             ]
         ),
-        # Long - 41 operations - because the short holders above cannot
-        # see a lock made exclusive only for longer batches. It is still
-        # one length: a gate that opens between it and the next-longest
-        # holder walks past this too, which is why the follow-up asks for
-        # one shared length source rather than more hand-picked values.
+        # Long - LONG_BATCH_LENGTH operations, the module's shared "long
+        # batch" anchor - because the short holders above cannot see a lock
+        # made exclusive only for longer batches. It is still one length: a
+        # gate that opens between it and the next-longest holder walks past
+        # this too, which is why it is drawn from the shared, re-randomised
+        # source rather than pinned as a hand-picked value.
         "batch_many": lambda b: b.apply_batch(
             [EntityOperation.upsert_node(node_payload("held", name="Held"))]
             + [
                 EntityOperation.upsert_edge(edge_payload(f"e{i}", "held", "free"))
-                for i in range(40)
+                for i in range(LONG_BATCH_LENGTH)
             ]
         ),
-        # Delete-leading, and of middling length. Every holder above
-        # begins with an upsert, so a lock made exclusive for batches
-        # that START with a delete - which is exactly the shape
-        # `GraphStorage.delete_nodes` builds, edges first - held open
-        # here would have been invisible.
+        # Delete-leading, and of middling length (the shared MID_BATCH_LENGTH
+        # anchor). Every holder above begins with an upsert, so a lock made
+        # exclusive for batches that START with a delete - which is exactly
+        # the shape `GraphStorage.delete_nodes` builds, edges first - held
+        # open here would have been invisible.
         "batch_deletes_first": lambda b: b.apply_batch(
-            [EntityOperation.delete_edge(f"gone{i}") for i in range(8)]
+            [EntityOperation.delete_edge(f"gone{i}") for i in range(MID_BATCH_LENGTH)]
             + [EntityOperation.upsert_node(node_payload("held", name="Held"))]
         ),
         # Deletes and nothing else, which is what `delete_nodes` emits:
         # a lock keyed on "no operation in this batch is an upsert" is
         # invisible to every other holder here, the delete-leading one
-        # included, because they all end with an upsert.
+        # included, because they all end with an upsert. Split from the
+        # same shared mid-length anchor rather than a fresh pair of
+        # constants.
         "batch_all_deletes": lambda b: b.apply_batch(
-            [EntityOperation.delete_edge(f"gone{i}") for i in range(6)]
-            + [EntityOperation.delete_node(f"absent{i}") for i in range(6)]
+            [
+                EntityOperation.delete_edge(f"gone{i}")
+                for i in range(MID_BATCH_LENGTH // 2)
+            ]
+            + [
+                EntityOperation.delete_node(f"absent{i}")
+                for i in range(MID_BATCH_LENGTH // 2)
+            ]
         ),
     }
 
@@ -2729,6 +3107,7 @@ class TestPostgresEntityWritesDoNotSerialiseAgainstEachOther:
     def test_a_second_instance_writes_while_another_batch_is_open(
         self, schema, backends, holds
     ):
+        print(_pg_length_seed_banner())
         holder = PostgresGraphPersistenceBackend(DSN, schema=schema)
         other = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([holder, other])
@@ -2791,9 +3170,19 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
     substitution can be made for edges alone, or for batches alone.
     """
 
+    def _seed_then_delete(b):
+        b.upsert_node(node_payload("gone"))
+        b.delete_node("gone")
+
     WRITES = {
         "node": lambda b: b.upsert_node(node_payload("a")),
         "edge": lambda b: b.upsert_edge(edge_payload("e", "a", "a")),
+        # A delete-only case: every other write above upserts, and the
+        # substitution this class is about could as easily be made only for
+        # the delete path - `_apply_one`'s DELETE branch is a different
+        # statement from its INSERT branch, and either could be the one that
+        # took the wrong lock form.
+        "delete": _seed_then_delete,
         "batch": lambda b: b.apply_batch(
             [
                 EntityOperation.upsert_node(node_payload("a")),
@@ -2801,29 +3190,40 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
             ]
         ),
         "batch_many": lambda b: b.apply_batch(
-            [EntityOperation.upsert_node(node_payload(f"n{i}")) for i in range(40)]
+            [
+                EntityOperation.upsert_node(node_payload(f"n{i}"))
+                for i in range(LONG_BATCH_LENGTH)
+            ]
         ),
     }
 
     @pytest.mark.parametrize("write", sorted(WRITES))
     def test_no_advisory_lock_survives_an_entity_write(self, schema, backends, write):
+        print(_pg_length_seed_banner())
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend.save_graph_data(snapshot())
 
         self.WRITES[write](backend)
 
-        with psycopg.connect(DSN) as conn:
+        # Attributed to the backend under test, not counted database-wide:
+        # `pg_locks` sees every session's advisory locks, so an unrelated
+        # suite run against the same server - a second CI job, a developer's
+        # own session - would false-red this one. Asking the connection the
+        # write actually used whether *it* still holds anything narrows the
+        # question to this backend, the same way `_wait_until_blocking`
+        # narrows "is anything blocked" to "is this pid blocked".
+        with backend._pool.connection() as conn:
             held = conn.execute(
-                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
-                " AND database = (SELECT oid FROM pg_database"
-                " WHERE datname = current_database())"
+                "SELECT count(*) FROM pg_locks"
+                " WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
             ).fetchone()[0]
 
         assert held == 0, (
-            f"{held} advisory lock(s) outlived the {write} write: a "
-            "session-scoped lock on a pooled connection blocks the next "
-            "whole-graph save for the life of the process"
+            f"{held} advisory lock(s) outlived the {write} write on this "
+            "backend's own connection: a session-scoped lock on a pooled "
+            "connection blocks the next whole-graph save for the life of "
+            "the process"
         )
 
 
@@ -2888,6 +3288,7 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
     def test_an_entity_write_committing_after_a_save_is_not_swallowed(
         self, schema, backends, operation
     ):
+        print(_pg_length_seed_banner())
         saver = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([saver, writer])
@@ -2923,24 +3324,29 @@ class TestPostgresEntityWritesAgainstAWholeGraphSave:
                 elif operation == "delete_edge":
                     writer.delete_edge("e")
                 elif operation == "batch_many":
-                    # A length production issues. It is ONE length, not a
-                    # spread, so it says nothing about thresholds either
-                    # side of it: a save lock skipped for batches of 2 to
-                    # 42 survives this and the whole suite - measured. An
-                    # earlier version of this comment claimed the
-                    # opposite, in the same words the length comment on
-                    # TestPostgresEntityWritesTouchOneRow had to withdraw.
-                    # What this case buys is that the interleaving is
-                    # exercised for a batch at all. The filler ids are
-                    # absent, which is not an error and keeps the
-                    # assertion about the three that matter.
+                    # The module's shared "long batch" anchor
+                    # (LONG_BATCH_LENGTH), not a fixed 40. It is still ONE
+                    # length per run, not a spread, so it says nothing about
+                    # thresholds either side of whatever it draws - a save
+                    # lock skipped below it survives this and the whole
+                    # suite - measured, at the old fixed 40. An earlier
+                    # version of this comment claimed the opposite, in the
+                    # same words the length comment on
+                    # TestPostgresEntityWritesTouchOneRow had to withdraw;
+                    # drawing this length from the shared, re-randomised
+                    # source is what keeps that from happening again. The
+                    # filler ids are absent, which is not an error and keeps
+                    # the assertion about the three that matter.
                     writer.apply_batch(
                         [
                             EntityOperation.delete_edge("e"),
                             EntityOperation.delete_node("a"),
                             EntityOperation.delete_node("b"),
                         ]
-                        + [EntityOperation.delete_node(f"absent{i}") for i in range(40)]
+                        + [
+                            EntityOperation.delete_node(f"absent{i}")
+                            for i in range(LONG_BATCH_LENGTH)
+                        ]
                     )
                 else:
                     # An id the paused save is about to insert: without the
@@ -3147,6 +3553,43 @@ class TestPostgresLoadOnAVirginStore:
         backends.append(backend)
 
         assert backend.load_graph_data() == {"nodes": [], "edges": [], "metadata": {}}
+
+
+class TestPostgresLoadOrdersByEntityId:
+    def test_nodes_and_edges_load_in_id_order_regardless_of_insertion_order(
+        self, schema, backends
+    ):
+        """LD_NOORDER: the documented order, not whatever a heap scan gives.
+
+        `load_graph_data` states `ORDER BY id` for both tables, because a
+        plain scan makes no promise about row order at all - correct by
+        accident today, wrong the day autovacuum rewrites the table. Every
+        other save in this module hands ids to `save_graph_data` already in
+        ascending order (`n0`, `n1`, `n2`, ...), so a mutation dropping
+        `ORDER BY id` would pass every one of them by getting the right
+        answer for the wrong reason. Inserting deliberately out of order
+        closes that.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        node_ids = ["n5", "n1", "n9", "n3", "n7"]
+        edge_ids = ["e5", "e1", "e9", "e3", "e7"]
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(i) for i in node_ids],
+                [edge_payload(i, node_ids[0], node_ids[1]) for i in edge_ids],
+            )
+        )
+
+        loaded = backend.load_graph_data()
+        got_nodes = [n["id"] for n in loaded["nodes"]]
+        got_edges = [e["id"] for e in loaded["edges"]]
+        assert got_nodes == sorted(node_ids), (
+            f"nodes did not load in id order: inserted {node_ids}, got {got_nodes}"
+        )
+        assert got_edges == sorted(edge_ids), (
+            f"edges did not load in id order: inserted {edge_ids}, got {got_edges}"
+        )
 
 
 class TestPostgresSaveWritesMetadataLast:
@@ -3397,6 +3840,27 @@ class TestPostgresStoreIdentity:
         # not carry its own name.
         backend.save_graph_data(snapshot())
         assert backend.exists()
+
+    def test_exists_after_a_save_whose_metadata_is_empty(self, schema, backends):
+        """SV_SKIPEMPTYMETA: an empty metadata dict is still a save.
+
+        `exists()` reads `graph_metadata`, which `save_graph_data` writes
+        unconditionally. Every other save in this module carries
+        `snapshot()`'s non-empty metadata (`{"version": "1.0", ...}`), so a
+        mutation that skips the metadata upsert when the caller's metadata
+        is falsy - `if metadata:` guarding the write, in place of an
+        unconditional one - passes every one of them while making a real,
+        saved, empty-metadata graph permanently report as never having
+        existed.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        assert not backend.exists()
+        backend.save_graph_data({"nodes": [], "edges": [], "metadata": {}})
+        assert backend.exists(), (
+            "a save with empty metadata left graph_metadata empty, so "
+            "exists() cannot tell it from a store that was never saved"
+        )
 
     def test_two_schemas_are_two_stores(self, schema, backends):
         """One database serves several independent graphs."""
