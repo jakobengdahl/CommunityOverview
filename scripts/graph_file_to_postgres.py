@@ -96,15 +96,17 @@ def not_empty_refusal(existing: Dict[str, Any], scope: str | None) -> str:
             f"target graph is not empty (it holds {found}); re-run with "
             "--allow-non-empty-target to replace it"
         )
-    # Under a scope this session cannot tell a schema of the scope's own -
-    # which an application boot leaves holding an empty graph's metadata -
-    # from one another scope shares, whose rows the policy hides from it.
-    # So it says what the flag would reach rather than guessing which.
+    # Under a scope, what this session sees does not settle whether the schema
+    # is the scope's own - which an application start leaves holding an empty
+    # graph's metadata - or shared: a policy in force for this role hides
+    # another scope's rows, and rows carrying no scope look alike whoever
+    # wrote them. So it says what the flag would reach and leaves the call to
+    # the operator rather than guessing.
     return (
         f"target graph is not empty (this scope sees {found}); rows carrying "
         "no scope and the metadata row are shared by every scope in the "
         "schema, and --allow-non-empty-target replaces them for all of them - "
-        "pass it only if no other scope's graph shares this schema"
+        "pass it only if this schema holds no graph but this scope's"
     )
 
 

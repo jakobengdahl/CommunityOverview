@@ -301,7 +301,10 @@ def test_scoped_verification_counts_rows_carrying_the_scope(
 @pytest.mark.parametrize(
     "existing, found",
     [
-        (_graph(metadata={"graph_name": "Existing"}), "graph metadata but no nodes"),
+        (
+            _graph(metadata={"graph_name": "Existing"}),
+            "graph metadata but no nodes or edges",
+        ),
         (
             _graph(nodes=[_node("x"), _node("y")], edges=[_edge("xy", "x", "y")]),
             "2 node(s), 1 edge(s)",
@@ -323,10 +326,15 @@ def test_a_scoped_refusal_says_what_the_flag_would_reach(tmp_path, existing, fou
             source, target, inspector=FakeInspector(), scope="s1"
         )
 
-    message = str(refused.value)
-    assert found in message
-    assert "shared by every scope in the schema" in message
-    assert "pass it only if no other scope's graph shares this schema" in message
+    # Whole, not in fragments: a rewording that kept two phrases passed while
+    # saying the whole graph is shared, or that the flag reaches only this
+    # scope, or that the schema is safe here.
+    assert str(refused.value) == (
+        f"target graph is not empty (this scope sees {found}); rows carrying "
+        "no scope and the metadata row are shared by every scope in the "
+        "schema, and --allow-non-empty-target replaces them for all of them - "
+        "pass it only if this schema holds no graph but this scope's"
+    )
     assert target.load_graph_data() == existing
 
 

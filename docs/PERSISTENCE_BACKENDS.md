@@ -657,9 +657,11 @@ would pass the reload's count check with the right numbers.
 metadata table's one row per schema, are shared by every scope in the schema
 (*Keeping scopes apart*, below). So when a scoped conversion finds its target
 not empty, `--allow-non-empty-target` replaces those for every scope there, not
-only for this one. The refusal says so: pass the flag only where no other
-scope's graph shares the schema. The tool cannot tell which case it is in,
-because a policy hides another scope's rows from it. An application started
+only for this one. The refusal says so: pass the flag only if the schema holds
+no graph but this scope's, neither another scope's nor one written without a
+scope. The tool leaves that call to the operator. Where a policy is in force for
+the role running it, another scope's rows are hidden from it, and rows carrying
+no scope look alike whoever wrote them. An application started
 against an empty schema saves an empty graph there, metadata included, so a
 first conversion after that start needs the flag.
 

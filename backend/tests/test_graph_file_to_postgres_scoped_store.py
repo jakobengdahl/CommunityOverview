@@ -262,8 +262,12 @@ def test_each_sign_of_isolation_is_refused_alone_on_either_table(
     assert _nodes_by_scope(schema) == {"<none>": 1}
 
 
-SHARED = "shared by every scope in the schema"
-ONLY_IF = "pass it only if no other scope's graph shares this schema"
+SHARED = (
+    "rows carrying no scope and the metadata row are shared by every scope in "
+    "the schema, and --allow-non-empty-target replaces them for all of them"
+)
+# Last, so nothing after it can say which case this is.
+ONLY_IF = "pass it only if this schema holds no graph but this scope's\n"
 
 
 def test_a_second_scope_is_told_what_the_flag_would_replace(store, tmp_path, capsys):
