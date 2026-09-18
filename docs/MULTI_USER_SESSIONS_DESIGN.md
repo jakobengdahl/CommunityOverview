@@ -665,6 +665,11 @@ steps 6–8.
 - **D2** Conflicts: server-ordered LWW per entity; no CRDT/OT (3.3).
 - **D3** Selection claims are advisory soft locks with 30 s TTL + disconnect release (3.5).
 - **D4** Session state stores node **references** + layout + annotations, never node copies; annotations are a unified typed list (3.1).
+  *Revised for staged mode by [ADR 0005](adr/0005-sessions-may-stage-graph-changes.md):
+  a session in staged mode owns node and edge changes that are not yet in the
+  graph. They live in a layer beside the graph, not in the session document, so
+  this rule still holds for the document itself. See
+  [`SESSION_OVERLAY_CONTRACT.md`](SESSION_OVERLAY_CONTRACT.md).*
 - **D5** Two seams for SaaS: `SessionPersistenceBackend` and `SessionEventBus`; core ships file + in-process implementations only (3.2).
 - **D6** localStorage keeps only the recents index; snapshots are server-side (3.6).
 - **D7** Core identity is anonymous guest identity; session ID is the capability (3.4).
