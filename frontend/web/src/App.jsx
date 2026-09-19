@@ -1818,7 +1818,6 @@ function App() {
           // CREATE
           const { nodes: agentNodes, edges: agentEdges } = data;
           const result = await api.addNodes(agentNodes, agentEdges);
-          console.log('Agent created:', result);
 
           if (result.added_node_ids && result.added_node_ids.length > 0) {
             const nodesWithIds = agentNodes.map((node, index) => ({
