@@ -101,7 +101,11 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-_MAX_REDIRECTS = 10
+# The single redirect cap for every outbound fetch path in the backend.
+# Each hop is re-validated with is_safe_url before it is requested, so the cap
+# bounds that re-validation cost. image_ingest.py and agents/mcp_loader.py
+# import this rather than keeping their own copy, so the paths cannot drift.
+MAX_REDIRECTS = 10
 
 
 class _SSRFRedirectBlocked(Exception):
@@ -379,7 +383,7 @@ class DeliveryWorker:
         current_url = url
 
         with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-            for _ in range(_MAX_REDIRECTS):
+            for _ in range(MAX_REDIRECTS):
                 if current_method == "POST":
                     response = client.post(
                         current_url,
