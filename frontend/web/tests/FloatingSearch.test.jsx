@@ -214,4 +214,34 @@ describe('FloatingSearch federation labels', () => {
     });
     header.remove();
   });
+
+  it('stacks at intermediate widths when the full search control would not fit beside the header', async () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 760 });
+    Object.defineProperty(document.documentElement, 'clientWidth', {
+      configurable: true,
+      value: 760,
+    });
+
+    const header = document.createElement('div');
+    header.className = 'floating-header';
+    header.getBoundingClientRect = () => ({ right: 350, bottom: 58 });
+    document.body.appendChild(header);
+
+    try {
+      render(<FloatingSearch />);
+
+      await waitFor(() => {
+        const search = document.querySelector('.floating-search');
+        expect(search.dataset.stacked).toBe('true');
+        expect(search.style.getPropertyValue('--floating-search-left')).toBe('180px');
+        expect(search.style.getPropertyValue('--floating-search-width')).toBe('400px');
+        expect(search.style.getPropertyValue('--floating-header-bottom')).toBe('58px');
+      });
+    } finally {
+      header.remove();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      delete document.documentElement.clientWidth;
+    }
+  });
 });
