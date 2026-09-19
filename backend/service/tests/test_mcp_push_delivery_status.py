@@ -59,7 +59,6 @@ def test_search_graph_reports_delivery_to_live_visualization_consumer(tmp_path):
     while not subscription.queue.empty():
         events.append(subscription.queue.get_nowait())
     assert any(
-        event.get("type") == "command"
-        and event["command"]["tool"] == "search_graph"
+        event.get("type") == "command" and event["command"]["tool"] == "search_graph"
         for event in events
     )
