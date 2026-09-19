@@ -16,7 +16,7 @@ import {
   TEXT_ALIGN_VALUES,
   TEXT_ALIGN_DEFAULT_BY_KIND,
   TEXT_ALIGN_STYLES,
-  isAnnotationDraggable,
+  withAnnotationDraggability,
   ATTACHABLE_OVERLAY_KINDS,
   GENERIC_ANNOTATION_COLORS,
 } from '../utils/annotations';
@@ -651,7 +651,7 @@ function GenericAnnotationNode({ id, type, data = {}, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, locked: false };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        return withAnnotationDraggability(n, nextData);
       })
     );
     setContextMenu(null);
