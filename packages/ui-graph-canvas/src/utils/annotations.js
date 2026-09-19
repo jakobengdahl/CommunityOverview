@@ -416,6 +416,10 @@ export function isAnnotationDraggable(node) {
   return true;
 }
 
+export function withAnnotationDraggability(node, data = node?.data) {
+  return { ...node, data, draggable: isAnnotationDraggable({ ...node, data }) };
+}
+
 // Build a ReactFlow node for a note/label/arrow overlay from the host's
 // canvas-shape annotation ({id, kind, position, ...payload}).
 export function overlayToFlowNode(overlay) {
