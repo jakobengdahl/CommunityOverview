@@ -21,3 +21,4 @@ ADRs carry only the technical decision.
 | [0002](0002-env-backed-secret-provider.md) | Environment-backed default secret provider | Accepted |
 | [0003](0003-webxr-immersive-graph-client-spike.md) | WebXR immersive graph client (Quest) — spike | Proposed |
 | [0004](0004-webxr-spike-findings-and-phase-2-recommendation.md) | WebXR spike findings and Phase 2 recommendation | Accepted |
+| [0005](0005-sessions-may-stage-graph-changes.md) | Sessions may stage graph changes | Accepted |
