@@ -27,6 +27,7 @@ here as unchanged.
 """
 
 import asyncio
+import itertools
 import os
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, Mock
@@ -41,6 +42,7 @@ from backend.core.session_store import (
     SessionStore,
 )
 from backend.service import GraphService, register_mcp_tools
+from backend.service.mcp_tools import _undelivered_push_warning
 
 # A well-formed id (SESSION_ID_RE) that no session is ever created for, so the
 # "nothing knows this id" case is not confused with a formatting rejection.
@@ -806,3 +808,121 @@ def test_a_registry_that_cannot_report_consumers_makes_no_delivery_claim(tmp_pat
     assert delivery["live_consumers"] == 0
     # The command was still handed over — only the claim about it is withheld.
     assert len(blind.commands) == 1
+
+
+# ---------------------------------------------------------------------------
+# The whole warning input space at once
+# ---------------------------------------------------------------------------
+
+# Each clause fragment paired with the condition its inputs must satisfy for the
+# clause to be a statement the function actually established.
+_CLAUSE_PRECONDITIONS = {
+    "no connected client": lambda s: s["hub_presence_read"] and s["hub_clients"] == 0,
+    "presence count could not be read": lambda s: not s["hub_presence_read"],
+    "a client is connected to its op stream": (
+        lambda s: s["hub_presence_read"] and s["hub_clients"] > 0
+    ),
+    "no stored state": lambda s: not s["hub_published"] and not s["hub_publish_failed"],
+    "the publish to the shared-session hub failed": lambda s: s["hub_publish_failed"],
+    "no shared-session hub is configured": lambda s: not s["hub_configured"],
+    "no legacy push channel is configured": lambda s: not s["registry_configured"],
+    "has a registry entry but nothing": (
+        lambda s: (
+            s["registry_configured"]
+            and s["legacy_enqueued"]
+            and s["legacy_consumers"] == 0
+        )
+    ),
+    "no browser is holding": (
+        lambda s: (
+            s["registry_configured"]
+            and not (s["legacy_enqueued"] and s["legacy_consumers"] == 0)
+        )
+    ),
+}
+
+
+def _reachable_undelivered_states():
+    """Every input combination `_push_to_session` can hand the warning builder.
+
+    The skipped combinations are ones the caller cannot produce: an absent hub
+    leaves every hub fact at its default, a raise leaves ``hub_published`` false,
+    a failed presence read forces the count to zero, and an absent registry
+    leaves the legacy facts at theirs.
+    """
+    for (
+        registry_configured,
+        legacy_enqueued,
+        legacy_consumers,
+        hub_configured,
+        hub_publish_failed,
+        hub_presence_read,
+        hub_published,
+        hub_clients,
+    ) in itertools.product(
+        [True, False],
+        [True, False],
+        [0, 1],
+        [True, False],
+        [True, False],
+        [True, False],
+        [True, False],
+        [0, 2],
+    ):
+        state = {
+            "registry_configured": registry_configured,
+            "legacy_enqueued": legacy_enqueued,
+            "legacy_consumers": legacy_consumers,
+            "hub_configured": hub_configured,
+            "hub_publish_failed": hub_publish_failed,
+            "hub_presence_read": hub_presence_read,
+            "hub_published": hub_published,
+            "hub_clients": hub_clients,
+        }
+        if not hub_configured and (
+            hub_publish_failed or hub_published or hub_clients or not hub_presence_read
+        ):
+            continue
+        if hub_publish_failed and hub_published:
+            continue
+        if not hub_presence_read and hub_clients:
+            continue
+        if not registry_configured and (legacy_enqueued or legacy_consumers):
+            continue
+        delivered = (legacy_enqueued and legacy_consumers > 0) or (
+            hub_published and hub_clients > 0
+        )
+        if delivered:
+            continue  # no warning is built for a delivery
+        yield state
+
+
+def test_no_warning_clause_ever_asserts_an_unestablished_state():
+    """The invariant the per-state tests keep discovering one case at a time.
+
+    Every blocking finding on this change after the mechanism settled was a
+    clause true of a neighbouring state but not the one it was emitted for. Rather
+    than pin those case by case, this enumerates the builder's whole input space
+    and checks each emitted clause against the condition that would make it a
+    statement the code established — so a future branch that lets an unreadable
+    count read as a real zero, or describes a failed publish as an empty session,
+    fails here regardless of which state it slips through.
+    """
+    checked = 0
+    for state in _reachable_undelivered_states():
+        outcome_unknown = state["hub_published"] and not state["hub_presence_read"]
+        warning = _undelivered_push_warning(outcome_unknown=outcome_unknown, **state)
+        reason = warning.split(". A push")[0]
+        checked += 1
+        for fragment, established in _CLAUSE_PRECONDITIONS.items():
+            if fragment in reason:
+                assert established(state), (
+                    f"clause {fragment!r} is not established by {state}"
+                )
+        if outcome_unknown:
+            assert reason.startswith("It is not known whether anything received"), state
+        else:
+            assert reason.startswith("Nothing received this push"), state
+    # Guards the enumeration itself: a tightened precondition that silently
+    # skipped every state would otherwise pass vacuously.
+    assert checked == 36, f"expected 36 reachable undelivered states, got {checked}"
