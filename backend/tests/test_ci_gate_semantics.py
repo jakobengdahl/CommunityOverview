@@ -335,6 +335,24 @@ class TestTheWorkerGateWiringItself:
         assert len(workflow["jobs"][job_id]["steps"]) == 1
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
+    def test_gate_does_not_continue_on_error(self, workflow, job_id, flag):
+        """A failing gate must make the required check red.
+
+        `continue-on-error` would preserve every shell-level truth-table result
+        above while making GitHub report the gate job as successful.
+        """
+        gate = workflow["jobs"][job_id]
+        assert not gate.get("continue-on-error", False), (
+            f"{job_id} is a required-check gate and must fail closed; "
+            "do not set job-level continue-on-error"
+        )
+        for step in gate["steps"]:
+            assert not step.get("continue-on-error", False), (
+                f"{job_id} step {step.get('name')!r} is the gate verdict; "
+                "do not set step-level continue-on-error"
+            )
+
+    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_required_check_name_is_unchanged(self, workflow, job_id, flag):
         """Branch protection matches on these names; renaming one silently
         removes a required check rather than failing it."""
