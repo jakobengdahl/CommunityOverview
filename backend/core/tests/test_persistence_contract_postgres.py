@@ -6204,6 +6204,117 @@ class TestPostgresStopHoldsWithABatchAlreadyRead:
         )
 
 
+class TestReadUntilStoppedChecksTheFlagAfterEveryItem:
+    """`_read_until_stopped`'s own defence against a buffered batch: the stop
+    flag is checked again after every single notification is handled, not
+    only once per call to `conn.notifies()` - the class above is the
+    end-to-end shape this matters for, two `pg_notify` calls in one
+    transaction arriving together.
+
+    Isolated at the unit level, on a bare instance with a fake connection,
+    because `TestPostgresStopHoldsWithABatchAlreadyRead` cannot tell this
+    check apart from `_deliver`'s own `_listen_stop` guard below: removing
+    this one alone still leaves that test passing, since `_deliver` refuses
+    to call the listener regardless of how far `_read_until_stopped` got.
+    Asserting on `_handle` calls directly, with `_handle` itself replaced,
+    is what makes the two checks distinguishable.
+    """
+
+    def test_the_rest_of_a_buffered_batch_is_not_handled_after_stop(self):
+        backend = object.__new__(PostgresGraphPersistenceBackend)
+        backend._listen_stop = threading.Event()
+        handled = []
+
+        def fake_handle(payload):
+            handled.append(payload)
+            if payload == "first":
+                backend._listen_stop.set()
+
+        backend._handle = fake_handle
+
+        class _Note:
+            def __init__(self, payload):
+                self.payload = payload
+
+        class _FakeConn:
+            def notifies(self, timeout):
+                # One buffered batch: three notifications the driver hands
+                # over together, as it does when one transaction announced
+                # more than once.
+                return [_Note("first"), _Note("second"), _Note("third")]
+
+        backend._read_until_stopped(_FakeConn())
+
+        assert handled == ["first"], (
+            "the rest of a buffered batch was handled after stop was set "
+            f"mid-batch: {handled}"
+        )
+
+
+class TestDeliverRefusesAfterStop:
+    """`_deliver`'s own guard: once `_listen_stop` is set, it must not call
+    the listener - whatever stopped the read loop that reached it. Pinned
+    independently of the read loop (see the class above) so a regression
+    here is caught even in a call `_read_until_stopped`'s own check would
+    not have prevented, such as `_listen_loop`'s reconnect delivering
+    `ExternalChange.unknown()` after a stop requested mid-reconnect.
+    """
+
+    def test_the_listener_is_not_called_once_stop_is_set(self):
+        backend = object.__new__(PostgresGraphPersistenceBackend)
+        backend._listen_stop = threading.Event()
+        calls = []
+        backend._listener = lambda change: calls.append(change)
+        backend._listen_stop.set()
+
+        backend._deliver(object())
+
+        assert calls == [], "the listener was called after stop was set"
+
+
+class TestPostgresResolveKeepsOneOperationPerAnnouncedPair:
+    """`_resolve` maps `pairs` to operations one-for-one, in the order given -
+    including when the same pair is named twice. `apply_batch`'s own contract
+    allows a batch to touch one entity more than once
+    (`test_a_batch_applies_in_order_and_lands_whole` upserts node "a" twice in
+    one call), so an announcement built from such a batch would repeat a
+    pair too. GraphStorage itself never does this today - it batches nodes
+    before edges, one write per entity per batch - so the case is latent
+    rather than reachable through the production caller, but nothing in
+    `_encode` or `_resolve` refuses it, and each duplicate resolves and
+    applies independently rather than being silently collapsed to one.
+    """
+
+    def test_a_pair_announced_twice_resolves_to_two_operations(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot([node_payload("a", name="Alpha")]))
+
+        operations = backend._resolve([("node", "a"), ("node", "a")])
+
+        assert [(op.kind, op.action, op.entity_id) for op in operations] == [
+            ("node", "upsert", "a"),
+            ("node", "upsert", "a"),
+        ], "a pair announced twice did not resolve to one operation per occurrence"
+        assert all(op.payload["name"] == "Alpha" for op in operations)
+
+    def test_a_duplicated_deleted_pair_also_resolves_to_two_operations(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.save_graph_data(snapshot())
+
+        operations = backend._resolve([("node", "gone"), ("node", "gone")])
+
+        assert [
+            (op.kind, op.action, op.entity_id, op.payload) for op in operations
+        ] == [
+            ("node", "delete", "gone", None),
+            ("node", "delete", "gone", None),
+        ]
+
+
 class TestTheLevelQueryIsNeverPrepared:
     """The traversal's level query must plan against the frontier it was given.
 

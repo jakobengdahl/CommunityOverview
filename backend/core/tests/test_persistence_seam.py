@@ -3489,3 +3489,138 @@ class TestADeferredReport:
         finally:
             del backend.load_graph_data
             storage.shutdown_events()
+
+
+class TestExternalChangeSettlesEachReportOnItsOwn:
+    """Three pieces of state `apply_external_change` and `_settle_vector_index`
+    touch per report - `touched`, the pre-batch vector-index width, and the
+    reported node's own inline-fallback entry - each has to be scoped to ONE
+    report and never leak into the next, or into an unrelated node. None of
+    this is reachable through `_NotifyingBackend`'s eager reports alone; a
+    later report's local variables are simply gone by the time the next one
+    runs. What is pinned here is that they stay gone under a *hoisted* /
+    *cross-report* version of each, which nothing else in this suite would
+    catch a regression into: `apply_external_change` and `_settle_vector_index`
+    build fresh, per-call state today, and there is no test that fails if a
+    future refactor moved one of them onto `self`.
+    """
+
+    def test_touched_starts_empty_for_every_report(self):
+        """`touched` collects one batch's ids so the vector index settles
+        once per report, not once per operation. Built fresh inside
+        `apply_external_change` on every call today; hoisted to instance
+        state and left uncleared, a later report's settle would also
+        re-process an earlier report's ids - against whatever local state
+        they are in NOW, not what that earlier report said."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        seen = []
+        real_settle = storage._settle_vector_index
+
+        def spy(touched):
+            seen.append(set(touched))
+            return real_settle(touched)
+
+        storage._settle_vector_index = spy
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("a", "Alpha"))]
+                )
+            )
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("b", "Beacon"))]
+                )
+            )
+        finally:
+            storage.shutdown_events()
+
+        assert seen == [{"a"}, {"b"}], (
+            "a later report's settle saw ids an earlier report touched, so "
+            f"`touched` was not built fresh for every call: {seen}"
+        )
+
+    def test_the_pre_batch_width_is_read_fresh_for_every_report(self):
+        """`_settle_vector_index` anchors a batch that empties the index by
+        REPLACING its only vectored entries to the width it just emptied -
+        `before = self.vector_store.dimension`, read at the top of the call.
+        Remembered across reports instead of read fresh, a later report's
+        actual pre-batch width would be ignored in favour of an earlier
+        report's leftover value, and a vector of a width the real anchor
+        would refuse could be adopted because there was no anchor left to
+        refuse it with.
+        """
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            {
+                                **_node_payload("a", "Alpha"),
+                                "embedding": [0.1, 0.2, 0.3, 0.4],
+                            }
+                        )
+                    ]
+                )
+            )
+            assert storage.vector_store.get_vector_list("a") == pytest.approx(
+                [0.1, 0.2, 0.3, 0.4]
+            ), "the first report's own vector was not adopted"
+
+            # "a" is the index's only vectored node, so replacing its vector
+            # empties the index - the shape `before` exists to judge a
+            # replacement against. The fresh pre-batch width is 4; a vector
+            # of width 7 must be refused against it, not adopted for want of
+            # any anchor at all.
+            backend.listener(
+                ExternalChange.entities(
+                    [
+                        EntityOperation.upsert_node(
+                            {
+                                **_node_payload("a", "Renamed"),
+                                "embedding": [0.9] * 7,
+                            }
+                        )
+                    ]
+                )
+            )
+
+            assert storage.vector_store.get_vector_list("a") is None, (
+                "a vector of a width the fresh pre-batch anchor should have "
+                "refused was adopted instead"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_an_external_upsert_leaves_an_unrelated_nodes_fallback_vector_alone(
+        self,
+    ):
+        """`_external_upsert_node` drops the REPORTED node's own
+        inline-fallback entry (`_inline_fallback.pop(node.id, None)`) -
+        never anyone else's. A `.clear()` in its place would still look
+        right for the reported node while silently destroying every other
+        node's only durable copy of a width-refused vector - the property
+        `test_an_answer_that_changes_nothing_leaves_the_fallback_vector_alone`
+        above pins for the SAME node; this pins it for a DIFFERENT one."""
+        backend = _NotifyingBackend()
+        storage = _storage(backend)
+        try:
+            storage.add_nodes([_node("a", "Alpha"), _node("z", "Zulu")], [])
+            storage.flush()
+            storage._inline_fallback["z"] = [0.5, 0.25]
+
+            backend.listener(
+                ExternalChange.entities(
+                    [EntityOperation.upsert_node(_node_payload("a", "Renamed"))]
+                )
+            )
+
+            assert storage._inline_fallback.get("z") == [0.5, 0.25], (
+                "an external upsert to an unrelated node dropped node z's "
+                "only durable copy of its width-refused vector"
+            )
+        finally:
+            storage.shutdown_events()
