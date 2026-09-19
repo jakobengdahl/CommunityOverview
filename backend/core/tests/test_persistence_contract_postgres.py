@@ -4568,6 +4568,84 @@ class TestPostgresStartsListeningBeforeItReturns:
             backend.start_change_notification(_Collector())
 
 
+class TestPostgresRegistersListenBeforeStartReturns:
+    """The promise above is about LISTEN, not merely a connection.
+
+    Setting up `ready` as soon as `psycopg.connect()` succeeds - before the
+    `LISTEN` statement runs - would satisfy every test that only checks a
+    write survives immediately after start, because that write can still land
+    after `LISTEN` in practice. It leaves two real gaps open: a write in the
+    narrow window before `LISTEN` is registered is lost with no way to tell,
+    and - the serious one - a `LISTEN` that fails on the very first attempt no
+    longer fails `start_change_notification`, because `ready` was already set
+    on the strength of the connection alone. The caller then believes it is
+    listening when it is not, forever.
+
+    Uses the same technique as `TestPostgresSubscribesBeforeItReloads`:
+    recording when `LISTEN` actually executes, rather than racing a write into
+    a window measured in microseconds.
+    """
+
+    def test_listen_is_registered_before_start_returns(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        events = []
+        real_execute = psycopg.Connection.execute
+
+        def slow_listen(conn, query, *args, **kwargs):
+            is_listen = "LISTEN" in " ".join(str(query).split()).upper()
+            if is_listen:
+                # Widens the gap between "ready could be set" and "LISTEN has
+                # actually executed" from microseconds to something no thread
+                # switch can lose: a `ready` flipped BEFORE this call (the
+                # finding this test closes) lets the main thread record
+                # "started" while this sleep is still running, whatever the
+                # scheduler does. Recorded on the way OUT, not the way in, so
+                # it marks completion rather than the start of the attempt.
+                time.sleep(0.2)
+            result = real_execute(conn, query, *args, **kwargs)
+            if is_listen:
+                events.append("listen")
+            return result
+
+        psycopg.Connection.execute = slow_listen
+        try:
+            backend.start_change_notification(_Collector())
+            events.append("started")
+        finally:
+            psycopg.Connection.execute = real_execute
+            backend.stop_change_notification()
+
+        assert events == ["listen", "started"], (
+            "start_change_notification returned before LISTEN finished "
+            f"executing: {events}"
+        )
+
+    def test_a_listen_failure_on_the_first_attempt_fails_the_start(
+        self, schema, backends
+    ):
+        """A connection that opens fine but whose `LISTEN` does not must fail
+        the start exactly as a connection that never opens does - see
+        `test_a_connection_that_never_opens_fails_the_start` below for the
+        connect-fails sibling this mirrors."""
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        real_execute = psycopg.Connection.execute
+
+        def failing_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                raise psycopg.OperationalError("simulated LISTEN failure")
+            return real_execute(conn, query, *args, **kwargs)
+
+        psycopg.Connection.execute = failing_listen
+        try:
+            with pytest.raises(psycopg.OperationalError):
+                backend.start_change_notification(_Collector())
+        finally:
+            psycopg.Connection.execute = real_execute
+        assert backend._listen_thread is None, "a failed start left a thread behind"
+
+
 class TestPostgresStopsWhenAsked:
     """`stop_change_notification` promises the listener is not called again.
 
@@ -4946,7 +5024,22 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
     it would leave the instance stale for exactly as long as the newer one
     keeps writing, and nothing would ever put it right: there is no catch-up,
     only the next announcement, which this build cannot read either.
+
+    Every payload below happens to raise `ValueError`, `KeyError` or
+    `TypeError` out of `json.loads`/the read-back - which is why `_handle`'s
+    `except Exception:` is not itself pinned to that narrower tuple by this
+    class alone. The deeply-nested-array payload closes that gap: it raises
+    `RecursionError`, which is none of the three, so it is the one case here
+    that actually depends on the containment being `Exception` and not a
+    narrower, seemingly-equivalent list.
     """
+
+    # 2000 levels of nested JSON arrays: ~4KB, comfortably inside
+    # NOTIFY_PAYLOAD_LIMIT (8000 bytes), and deep enough that `json.loads`
+    # raises RecursionError rather than a JSONDecodeError - measured against
+    # Python's default recursion limit (1000), where 900 levels parse cleanly
+    # and 1000 already raise.
+    _DEEPLY_NESTED_ARRAY = "[" * 2000 + "]" * 2000
 
     @pytest.mark.parametrize(
         "payload",
@@ -4970,6 +5063,9 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             # other wrong type dies in the query. So the id's type has to be
             # checked here rather than left to the server.
             '{"o": "other", "ops": [["n", null]]}',
+            pytest.param(
+                _DEEPLY_NESTED_ARRAY, id="deeply-nested-array-raises-recursion-error"
+            ),
         ],
     )
     def test_an_announcement_this_build_cannot_read_reloads_the_graph(
@@ -5217,6 +5313,74 @@ class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
         named = [c for c in changes[settled:] if c.operations is not None]
         assert named, "nothing was reported once the connection settled"
         assert any(op.entity_id == "after_the_storm" for op in named[-1].operations)
+
+
+class TestPostgresReconnectLoopSurvivesNonPostgresErrors:
+    """The loop's two broad `except Exception:` clauses - the connect+LISTEN
+    attempt and the read loop around `_read_until_stopped` - are deliberately
+    wider than `psycopg.Error`.
+
+    Every test elsewhere in this module that exercises the reconnect does so
+    by killing the connection, which only ever raises a `psycopg.Error`. That
+    proves the reconnect works for the one exception family it has been
+    exercised with; it does not prove the `except Exception:` has to be that
+    wide. A narrowing to `psycopg.Error` would still pass every one of those
+    tests - and would let something like `RecursionError` (see the
+    deeply-nested-array case in
+    `TestPostgresTreatsAnUnreadableAnnouncementAsAReload`) escape the loop
+    entirely instead of triggering a reconnect: no reconnect, no reload, the
+    instance goes permanently deaf for the rest of its process life - the
+    exact failure this whole capability exists to prevent.
+
+    Injects a non-`psycopg.Error` directly into the read loop rather than
+    relying on a payload to produce one, so this is pinned independently of
+    where in the call stack a future non-Postgres exception might arise.
+    """
+
+    def test_a_non_postgres_error_from_the_read_loop_is_survived(
+        self, schema, backends
+    ):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        raised = threading.Event()
+        real_notifies = psycopg.Connection.notifies
+
+        def flaky_notifies(conn, *args, **kwargs):
+            # Not a generator: called eagerly by `conn.notifies(...)` before
+            # `_read_until_stopped`'s `for` ever iterates, so this raises
+            # inside the loop's own try rather than lazily during iteration.
+            if not raised.is_set():
+                raised.set()
+                raise ValueError("not a psycopg.Error - simulated")
+            return real_notifies(conn, *args, **kwargs)
+
+        psycopg.Connection.notifies = flaky_notifies
+        try:
+            backend.start_change_notification(collector)
+            assert raised.wait(30), "the injected exception was never hit"
+            # Same shape as test_the_listener_is_still_live_after_a_reconnect:
+            # let the reconnect's own unknown() report land first, so the
+            # write below is unambiguously reported by the connection the
+            # loop recovered onto, not raced against the recovery itself.
+            collector.wait_for(1, timeout=60)
+            settled = len(collector.changes)
+
+            writer.upsert_node(node_payload("after-non-postgres-error"))
+            changes = collector.wait_for(settled + 1, timeout=60)
+        finally:
+            psycopg.Connection.notifies = real_notifies
+            backend.stop_change_notification()
+
+        named = [c for c in changes[settled:] if c.operations is not None]
+        assert named, (
+            "nothing was reported after a non-psycopg.Error from the read "
+            "loop: the listening thread likely died instead of reconnecting"
+        )
+        assert any(
+            op.entity_id == "after-non-postgres-error" for op in named[-1].operations
+        )
 
 
 class TestPostgresDoesNotStartASecondListener:
