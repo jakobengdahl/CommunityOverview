@@ -648,6 +648,9 @@ def test_a_publish_that_landed_is_never_reported_as_a_non_delivery(tmp_path):
         assert "command" in events
 
         assert delivery["status"] == "unknown"
+        # delivered still claims only an ESTABLISHED delivery — that pairing is
+        # why a fourth status value was needed rather than relaxing delivered.
+        assert delivery["delivered"] is False
         assert delivery["warning"].startswith(
             "It is not known whether anything received this push"
         )
@@ -656,6 +659,31 @@ def test_a_publish_that_landed_is_never_reported_as_a_non_delivery(tmp_path):
         assert "no stored state" not in delivery["warning"]
     finally:
         manager.disconnect(session_id, "client-1", subscription)
+
+
+def test_an_unreadable_presence_count_never_claims_nobody_is_connected(tmp_path):
+    """Presence unreadable while the publish returns falsy without raising.
+
+    That is the ordinary "session not in the store" shape, so the publish returns
+    False rather than raising — which means this state does not reach the
+    publish-failed clause, and an unreadable count of 0 must not be reported as a
+    real zero. Nothing was published, so it IS a non-delivery; the clause just may
+    not claim the op stream is empty.
+    """
+    blind = _PresenceBlindHub(SessionStore(InMemorySessionPersistenceBackend()))
+    tools, _registry, manager = _wire(tmp_path, session_manager=blind)
+
+    subscription, _member = manager.connect(UNKNOWN_SESSION_ID, "client-1", "Tester")
+    try:
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+
+        assert delivery["status"] == "not_delivered"
+        assert "presence count could not be read" in delivery["warning"]
+        assert "no stored state" in delivery["warning"]
+        # The count was never read, so this must not be asserted.
+        assert "no connected client" not in delivery["warning"]
+    finally:
+        manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
 
 
 def test_both_hub_calls_failing_is_still_a_non_delivery(tmp_path):

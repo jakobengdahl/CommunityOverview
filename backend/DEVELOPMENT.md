@@ -927,6 +927,11 @@ same thing:
   `"unknown"` and the warning opens "It is not known whether anything received
   this push". Calling it a non-delivery would deny a push that may well have
   landed — the mirror of the false positive this report exists to remove.
+- **The publish returned falsy *and* the presence count could not be read.**
+  Nothing was published (a falsy return establishes that the store does not hold
+  the session), so this is a non-delivery — but the clause says the count was
+  unreadable rather than claiming nobody is connected, which the code never
+  established.
 
 `live_consumers` is a sum across both channels, so one browser can account for
 two during a page load: the frontend holds the legacy `EventSource` until the op

@@ -153,11 +153,19 @@ def _undelivered_push_warning(
             "published there"
         )
     elif hub_published and not hub_presence_read:
-        # Before the clauses below, which would read the unreadable count as zero.
+        # Both presence branches sit before the clauses below, which would
+        # otherwise read the count the except arm forced to zero as a real zero.
         hub_reason = (
             "the command was published to the shared-session hub, but its "
             "presence count could not be read, so whether a client received it "
             "is unknown"
+        )
+    elif not hub_presence_read:
+        # Nothing was published (a falsy return establishes that), and the count
+        # is unknown — so this may not claim that nobody is connected.
+        hub_reason = (
+            "the session has no stored state, so the hub had nothing to publish "
+            "to, and its presence count could not be read"
         )
     elif hub_clients > 0 and not hub_published:
         hub_reason = (
