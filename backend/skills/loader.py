@@ -582,10 +582,34 @@ class SkillsLoader:
             age = (datetime.now(timezone.utc) - loaded_at).total_seconds()
             if age < self._config.cache_ttl_seconds:
                 return text
+
+        from backend.core.events.delivery import is_safe_url, MAX_REDIRECTS
+
+        current_url = url
+        if not is_safe_url(current_url):
+            raise ValueError(f"Blocked attempt to fetch restricted URL: {current_url}")
+
         max_bytes = self._config.max_skill_content_bytes
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            response = await client.get(url, headers=headers or {})
-            response.raise_for_status()
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
+            redirects = 0
+            while True:
+                response = await client.get(current_url, headers=headers or {})
+                if response.status_code in (301, 302, 303, 307, 308):
+                    redirects += 1
+                    if redirects > MAX_REDIRECTS:
+                        raise ValueError(f"Exceeded redirect limit ({MAX_REDIRECTS}) for {url}")
+                    location = str(response.headers.get("location", ""))
+                    if not location:
+                        break
+                    from urllib.parse import urljoin
+                    next_url = urljoin(current_url, location)
+                    if not is_safe_url(next_url):
+                        raise ValueError(f"Blocked redirect to restricted address: {next_url}")
+                    current_url = next_url
+                    continue
+                response.raise_for_status()
+                break
+
             # Reject early if the server advertises a content length that is too big
             cl = response.headers.get("content-length")
             if cl and int(cl) > max_bytes:
