@@ -887,6 +887,30 @@ Two independent things can be true of a session id, and
 A session id that is in neither the store nor the registry is reported as not
 found, by both read tools.
 
+**A push reports its own delivery.** `search_graph`, `get_related_nodes` and
+`get_saved_view` add a `visualization_push` object to their result whenever a
+`visualization_session_id` was given. Nothing is added when it was not, so the
+field is additive and does not bump the session contract version (§9):
+
+| Field | Meaning |
+|---|---|
+| `delivered` | A consumer path took the command: the registry queued it, or the hub published it with at least one connected client. |
+| `registry_enqueued` | Queued for a browser holding the session's legacy push channel. |
+| `hub_published` | Published to the op-stream hub. The hub accepts on stored state alone, so this is true with nobody listening — on its own it is not delivery. |
+| `connected_clients` | The presence count above, read at push time. |
+| `warning` | Why nothing received it; `null` when it was delivered. |
+
+This matters because a push writes no session state — only
+`add_nodes_to_session` writes `node_refs` — so an undelivered push leaves no
+trace at all, and reading the session back afterwards cannot tell it apart from
+a push that never happened. A routine that refreshes a canvas on a schedule has
+to check `delivered` (or ask `connect_to_visualization_session` first) instead of
+reading a successful search as a refreshed canvas. `delivered` says a consumer
+path accepted the command, not that a canvas rendered it: a browser that dropped
+its legacy stream keeps its registry entry until TTL eviction, so the queue can
+accept a command nobody drains. `clear_visualization` has nothing to report — it
+refuses up front instead.
+
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent
 rearranging the canvas is just another collaborator. Coordinates are model space

@@ -92,6 +92,21 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
+# Key the push tools report delivery under. Additive, so it does not bump the
+# session contract version (docs/MCP_SESSION_LIFECYCLE_CONTRACT.md §9).
+_PUSH_REPORT_KEY = "visualization_push"
+
+# Said when a push reached no consumer. It names the stored-state tool as the
+# alternative because a push writes nothing: an agent that retries the same push
+# gets the same silence.
+_UNDELIVERED_PUSH_WARNING = (
+    "Nothing received this push: no browser is holding the session's legacy "
+    "push channel, and its op stream has no connected client. A push is not "
+    "stored, so this left no trace — use add_nodes_to_session to change what "
+    "the session holds, or connect_to_visualization_session to check for a "
+    "live canvas before pushing."
+)
+
 
 def register_mcp_tools(
     mcp,
@@ -120,9 +135,24 @@ def register_mcp_tools(
     tools_map = {}
 
     def _push(session_id, tool_name, result):
-        _push_to_session(
+        """Deliver *result* to the session's consumers; return the delivery report."""
+        return _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )
+
+    def _push_reporting(session_id, tool_name, result):
+        """``_push``, with the delivery report attached to *result*.
+
+        The three read tools return the service payload verbatim, so without
+        this an agent cannot tell a push that landed on a canvas from one that
+        went nowhere: a push writes no session state, so there is nothing to
+        read back either. The report is attached *after* the push, so the
+        payload the canvas receives never carries it.
+        """
+        report = _push(session_id, tool_name, result)
+        if report is not None and isinstance(result, dict):
+            result[_PUSH_REPORT_KEY] = report
+        return result
 
     def _claimed_node_ids(session_id, node_refs):
         """The session's *node* ids that currently hold a selection claim.
@@ -274,10 +304,18 @@ def register_mcp_tools(
                 ``semantic=True``. Applies to the local graph; federated search
                 stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE
+                is pushed live to the connected browser window via SSE. The
+                result then carries a ``visualization_push`` report saying
+                whether anything received it (``delivered``, plus
+                ``registry_enqueued`` / ``hub_published`` /
+                ``connected_clients`` and a ``warning`` when nothing did). A
+                push writes no session state, so an undelivered one leaves no
+                trace to read back — check this field rather than assuming the
+                canvas changed.
 
         Returns:
-            Dict with matching nodes and edges connecting them
+            Dict with matching nodes and edges connecting them, and
+            ``visualization_push`` when a session id was given
         """
         result = service.search_graph(
             query=query,
@@ -293,7 +331,7 @@ def register_mcp_tools(
             semantic=semantic,
             match_mode=match_mode,
         )
-        _push(visualization_session_id, "search_graph", result)
+        _push_reporting(visualization_session_id, "search_graph", result)
         return result
 
     @register_tool
@@ -329,10 +367,18 @@ def register_mcp_tools(
             include_archived: When False (default) archived edges are not traversed
                 and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE
+                is pushed live to the connected browser window via SSE. The
+                result then carries a ``visualization_push`` report saying
+                whether anything received it (``delivered``, plus
+                ``registry_enqueued`` / ``hub_published`` /
+                ``connected_clients`` and a ``warning`` when nothing did). A
+                push writes no session state, so an undelivered one leaves no
+                trace to read back — check this field rather than assuming the
+                canvas changed.
 
         Returns:
-            Dict with nodes and edges
+            Dict with nodes and edges, and ``visualization_push`` when a session
+            id was given
         """
         result = service.get_related_nodes(
             node_id=node_id,
@@ -340,7 +386,7 @@ def register_mcp_tools(
             depth=depth,
             include_archived=include_archived,
         )
-        _push(visualization_session_id, "get_related_nodes", result)
+        _push_reporting(visualization_session_id, "get_related_nodes", result)
         return result
 
     # ==================== Similarity Tools ====================
@@ -825,13 +871,22 @@ def register_mcp_tools(
         Args:
             name: Name of the saved view
             visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded live in the connected browser window via SSE
+                is loaded live in the connected browser window via SSE. The
+                result then carries a ``visualization_push`` report saying
+                whether anything received it (``delivered``, plus
+                ``registry_enqueued`` / ``hub_published`` /
+                ``connected_clients`` and a ``warning`` when nothing did). A
+                push writes no session state, so an undelivered one leaves no
+                trace to read back — check this field rather than assuming the
+                canvas changed.
 
         Returns:
-            The nodes and edges to display in the visualization, with position and hidden node data
+            The nodes and edges to display in the visualization, with position
+            and hidden node data, and ``visualization_push`` when a session id
+            was given
         """
         result = service.get_saved_view(name)
-        _push(visualization_session_id, "get_saved_view", result)
+        _push_reporting(visualization_session_id, "get_saved_view", result)
         return result
 
     @register_tool
@@ -4383,7 +4438,7 @@ def _push_to_session(
     tool_name: str,
     result: Dict[str, Any],
     session_manager=None,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """Push *result* to a browser session if *session_id* is set.
 
     When the result has nodes but no explicit *action*, defaults to
@@ -4393,9 +4448,31 @@ def _push_to_session(
     The command goes to the legacy single-consumer registry (current frontend)
     and, when a *session_manager* is supplied, is also broadcast to the new
     shared-session hub so every connected collaborator receives it (design 3.8).
+
+    Returns ``None`` when no *session_id* was given (no push was attempted),
+    otherwise a delivery report:
+
+    - ``registry_enqueued`` — the command was queued for a browser holding the
+      session's legacy push channel.
+    - ``hub_published`` — the command was published to the shared-session hub.
+      The hub accepts on the session's *stored state* alone, so this can be true
+      with nobody listening; it is not delivery on its own.
+    - ``connected_clients`` — clients reporting presence on the session's op
+      stream, the count ``connect_to_visualization_session`` reports.
+    - ``delivered`` — a consumer path accepted the command: the registry queued
+      it, or the hub published it with at least one connected client. A push
+      leaves no trace in the session's stored state (only
+      ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores
+      this cannot tell afterwards whether anything received it.
+    - ``warning`` — why nothing received it, or ``None`` when it was delivered.
+
+    ``delivered`` says a consumer path took the command, not that a canvas has
+    rendered it: a browser that dropped its legacy stream keeps its registry
+    entry until TTL eviction, so the queue can still accept a command nobody
+    drains.
     """
     if not session_id:
-        return
+        return None
     command_result = dict(result)
     if "action" not in command_result and command_result.get("nodes"):
         command_result["action"] = "add_to_visualization"
@@ -4409,11 +4486,28 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
+    registry_enqueued = False
     if session_registry and session_registry.is_valid_session_id(session_id):
-        session_registry.push_command_sync(session_id, command)
+        registry_enqueued = bool(
+            session_registry.push_command_sync(session_id, command)
+        )
+    hub_published = False
+    connected_clients = 0
     if session_manager is not None:
         try:
-            session_manager.push_command(session_id, command)
+            hub_published = bool(session_manager.push_command(session_id, command))
         except Exception:
             # Best-effort mirror to the hub; never break the legacy push path.
-            pass
+            hub_published = False
+        try:
+            connected_clients = int(session_manager.connected_count(session_id))
+        except Exception:
+            connected_clients = 0
+    delivered = registry_enqueued or (hub_published and connected_clients > 0)
+    return {
+        "delivered": delivered,
+        "registry_enqueued": registry_enqueued,
+        "hub_published": hub_published,
+        "connected_clients": connected_clients,
+        "warning": None if delivered else _UNDELIVERED_PUSH_WARNING,
+    }
