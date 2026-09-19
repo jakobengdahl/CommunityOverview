@@ -101,10 +101,13 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-# The single redirect cap for every outbound fetch path in the backend.
-# Each hop is re-validated with is_safe_url before it is requested, so the cap
-# bounds that re-validation cost. image_ingest.py and agents/mcp_loader.py
-# import this rather than keeping their own copy, so the paths cannot drift.
+# The redirect cap for the three paths that walk redirects by hand and
+# re-validate every hop with is_safe_url: the webhook delivery below, the image
+# ingest in core/image_ingest.py and the agent fetch tool in
+# agents/mcp_loader.py. Each hop is re-validated before it is requested, so the
+# cap bounds that cost; they import this constant rather than keeping their own
+# copy, so the three cannot drift apart. Other outbound requests in the backend
+# leave redirect following to httpx and are bounded by its limit, not this one.
 MAX_REDIRECTS = 10
 
 

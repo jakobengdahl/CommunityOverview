@@ -566,6 +566,10 @@ def _redirect_response(location, status_code=302):
     httpx2's raise_for_status() raises on any non-2xx, 3xx included, so the
     fixture does too. A bare Mock silently no-ops there, which would let a
     test assert behaviour that no real response has.
+
+    Nothing here reaches that raise: the loop returns at its cap before
+    calling raise_for_status(). The side effect earns its place by making a
+    reverted cap fail loudly rather than quietly resemble the fixed code.
     """
     response = Mock()
     response.is_redirect = True
@@ -603,7 +607,8 @@ def _client_returning(*responses):
     return client
 
 
-def _public_addrinfo(*ips):
+def _addrinfo(*ips):
+    """getaddrinfo answers; defaults to a single public address."""
     return [(None, None, None, None, (ip, 0)) for ip in (ips or ("93.184.216.34",))]
 
 
@@ -643,7 +648,7 @@ class TestFetchToolSSRFGuard:
         self, mock_client_cls, mock_getaddrinfo
     ):
         """A public-looking hostname whose DNS answer is internal is still blocked."""
-        mock_getaddrinfo.return_value = _public_addrinfo("10.0.0.5")
+        mock_getaddrinfo.return_value = _addrinfo("10.0.0.5")
         loader = MCPLoader([])
 
         result = loader._execute_fetch_tool(
@@ -660,7 +665,7 @@ class TestFetchToolSSRFGuard:
         self, mock_client_cls, mock_getaddrinfo
     ):
         """Resolution is fail-closed: one internal address among public ones blocks."""
-        mock_getaddrinfo.return_value = _public_addrinfo("93.184.216.34", "fe80::1")
+        mock_getaddrinfo.return_value = _addrinfo("93.184.216.34", "fe80::1")
         loader = MCPLoader([])
 
         result = loader._execute_fetch_tool(
@@ -679,6 +684,7 @@ class TestFetchToolSSRFGuard:
             result = loader._execute_fetch_tool("fetch", {"url": url})
 
             assert "error" in result, url
+            assert "content" not in result, url
 
         mock_client_cls.assert_not_called()
 
@@ -692,7 +698,7 @@ class TestFetchToolSSRFGuard:
         The initial host passes the pre-request check, so only the per-hop
         re-validation can catch this one.
         """
-        mock_getaddrinfo.return_value = _public_addrinfo()
+        mock_getaddrinfo.return_value = _addrinfo()
         client = _client_returning(
             _redirect_response("http://169.254.169.254/latest/meta-data/")
         )
@@ -715,7 +721,7 @@ class TestFetchToolSSRFGuard:
         self, mock_client_cls, mock_getaddrinfo
     ):
         """The guard must not break ordinary redirects to public addresses."""
-        mock_getaddrinfo.return_value = _public_addrinfo()
+        mock_getaddrinfo.return_value = _addrinfo()
         client = _client_returning(
             _redirect_response("http://example.com/final"),
             _ok_response("<html>final page</html>"),
@@ -746,7 +752,7 @@ class TestFetchToolSSRFGuard:
         hops. The call count pins the shared cap; the message distinguishes
         the deliberate error from the incidental one.
         """
-        mock_getaddrinfo.return_value = _public_addrinfo()
+        mock_getaddrinfo.return_value = _addrinfo()
         client = _client_returning(_redirect_response("http://example.com/next"))
         mock_client_cls.return_value = client
         loader = MCPLoader([])
@@ -769,7 +775,7 @@ class TestFetchToolSSRFGuard:
         one-hop test above and still walk a public -> public -> internal chain
         all the way in.
         """
-        mock_getaddrinfo.return_value = _public_addrinfo()
+        mock_getaddrinfo.return_value = _addrinfo()
         client = _client_returning(
             _redirect_response("http://example.com/second"),
             _redirect_response("http://169.254.169.254/latest/meta-data/"),
@@ -797,7 +803,7 @@ class TestFetchToolSSRFGuard:
         Dropping the urljoin would leave the hop hostless, fail the check and
         turn an ordinary relative redirect into an error.
         """
-        mock_getaddrinfo.return_value = _public_addrinfo()
+        mock_getaddrinfo.return_value = _addrinfo()
         client = _client_returning(
             _redirect_response("/final"),
             _ok_response("<html>final page</html>"),
@@ -812,8 +818,8 @@ class TestFetchToolSSRFGuard:
         assert result["content"] == "<html>final page</html>"
         assert client.get.call_args_list[1].args[0] == "http://example.com/final"
 
-    def test_redirect_cap_is_shared_with_the_other_outbound_fetch_paths(self):
-        """One cap for every outbound path, so they cannot drift apart again."""
+    def test_redirect_cap_is_shared_with_the_other_hop_validating_paths(self):
+        """One cap for the three hop-validating paths, so they cannot drift again."""
         from backend.core import image_ingest
         from backend.core.events import delivery
 
