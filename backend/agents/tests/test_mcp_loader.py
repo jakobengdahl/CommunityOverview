@@ -6,7 +6,7 @@ import json
 from unittest.mock import Mock, patch
 
 from backend.agents.config import MCPIntegration, MCPTransport
-from backend.agents.mcp_loader import MCPLoader, NamespacedTool
+from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
 
 
 class TestMCPLoader:
@@ -556,3 +556,201 @@ class TestConnectHttpInfoQuery:
         tools = loader._connect_http(integration)
 
         assert tools == []
+
+
+def _redirect_response(location, status_code=302):
+    """A 3xx response pointing at *location*."""
+    response = Mock()
+    response.is_redirect = True
+    response.status_code = status_code
+    response.headers = {"location": location}
+    response.text = "<html>redirecting</html>"
+    return response
+
+
+def _ok_response(text="<html>fetched</html>", status_code=200):
+    """A terminal 2xx response carrying *text*."""
+    response = Mock()
+    response.is_redirect = False
+    response.status_code = status_code
+    response.headers = {}
+    response.text = text
+    response.raise_for_status = Mock()
+    return response
+
+
+def _client_returning(*responses):
+    """A context-manager mock httpx.Client whose .get yields *responses* in order."""
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    if len(responses) == 1:
+        client.get.return_value = responses[0]
+    else:
+        client.get.side_effect = list(responses)
+    return client
+
+
+def _public_addrinfo(*ips):
+    return [(None, None, None, None, (ip, 0)) for ip in (ips or ("93.184.216.34",))]
+
+
+class TestFetchToolSSRFGuard:
+    """The WEB/fetch tool must not reach addresses the caller cannot reach itself.
+
+    These pin the guard added in PR #597 against the scenarios it was written
+    for. The guard itself lives in backend/core/events/delivery.py (is_safe_url)
+    and is deliberately not mocked here — mocking it would leave the tests
+    passing against a fetch tool that had stopped calling it.
+    """
+
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_literal_internal_ip_is_rejected_before_any_request(self, mock_client_cls):
+        """A literal private/loopback/link-local/CGNAT target never reaches the network."""
+        loader = MCPLoader([])
+
+        for url in (
+            "http://127.0.0.1/admin",
+            "http://localhost:8000/mcp",
+            "http://10.0.0.1/internal",
+            "http://192.168.1.1/router",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.64.0.1/cgnat",
+            "http://[::1]/admin",
+            "http://[fc00::1]/internal",
+        ):
+            result = loader._execute_fetch_tool("fetch", {"url": url})
+
+            assert "error" in result, url
+            assert "content" not in result, url
+
+        mock_client_cls.assert_not_called()
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_hostname_resolving_into_private_range_is_rejected(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """A public-looking hostname whose DNS answer is internal is still blocked."""
+        mock_getaddrinfo.return_value = _public_addrinfo("10.0.0.5")
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://internal.example.com/secrets"}
+        )
+
+        assert "error" in result
+        assert "content" not in result
+        mock_client_cls.assert_not_called()
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_hostname_with_any_internal_address_is_rejected(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """Resolution is fail-closed: one internal address among public ones blocks."""
+        mock_getaddrinfo.return_value = _public_addrinfo("93.184.216.34", "fe80::1")
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://dual.example.com/page"}
+        )
+
+        assert "error" in result
+        mock_client_cls.assert_not_called()
+
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_non_http_scheme_is_rejected(self, mock_client_cls):
+        """Only http(s) is fetchable — file:// and friends never reach the client."""
+        loader = MCPLoader([])
+
+        for url in ("file:///etc/passwd", "ftp://example.com/x", "javascript:alert(1)"):
+            result = loader._execute_fetch_tool("fetch", {"url": url})
+
+            assert "error" in result, url
+
+        mock_client_cls.assert_not_called()
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_redirect_into_private_range_is_not_followed(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """A public URL that redirects to an internal address must stop at the hop.
+
+        The initial host passes the pre-request check, so only the per-hop
+        re-validation can catch this one.
+        """
+        mock_getaddrinfo.return_value = _public_addrinfo()
+        client = _client_returning(
+            _redirect_response("http://169.254.169.254/latest/meta-data/")
+        )
+        mock_client_cls.return_value = client
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert "error" in result
+        assert "content" not in result
+        # The internal hop was never requested — only the original URL was.
+        assert client.get.call_count == 1
+        assert client.get.call_args.args[0] == "http://example.com/start"
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_redirect_to_public_address_is_followed(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """The guard must not break ordinary redirects to public addresses."""
+        mock_getaddrinfo.return_value = _public_addrinfo()
+        client = _client_returning(
+            _redirect_response("http://example.com/final"),
+            _ok_response("<html>final page</html>"),
+        )
+        mock_client_cls.return_value = client
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert result["content"] == "<html>final page</html>"
+        assert result["status"] == 200
+        assert client.get.call_count == 2
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_redirect_chain_beyond_cap_errors_instead_of_returning_the_3xx_body(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """An exhausted redirect chain is an error, not fetched content.
+
+        The chain here is endless but every hop is public, so the SSRF check
+        never fires; only the cap can end it. Falling out of the loop and
+        returning the last 3xx response would hand the agent a redirect page
+        as if it had been fetched.
+        """
+        mock_getaddrinfo.return_value = _public_addrinfo()
+        client = _client_returning(_redirect_response("http://example.com/next"))
+        mock_client_cls.return_value = client
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert "error" in result
+        assert "redirect" in result["error"].lower()
+        assert "content" not in result
+        assert "status" not in result
+        assert client.get.call_count == MAX_REDIRECTS
+
+    def test_redirect_cap_is_shared_with_the_other_outbound_fetch_paths(self):
+        """One cap for every outbound path, so they cannot drift apart again."""
+        from backend.core import image_ingest
+        from backend.core.events import delivery
+
+        assert MAX_REDIRECTS == delivery.MAX_REDIRECTS
+        assert image_ingest.MAX_REDIRECTS == delivery.MAX_REDIRECTS
