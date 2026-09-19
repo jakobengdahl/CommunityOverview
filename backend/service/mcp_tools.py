@@ -112,9 +112,11 @@ def _undelivered_push_warning(
     legacy_enqueued: bool,
     legacy_consumers: int,
     hub_configured: bool,
-    hub_error: bool,
+    hub_publish_failed: bool,
+    hub_presence_read: bool,
     hub_published: bool,
     hub_clients: int,
+    outcome_unknown: bool,
 ) -> str:
     """Say why nothing received a push, reading the reason off the actual state.
 
@@ -124,12 +126,13 @@ def _undelivered_push_warning(
     nobody having opened the session, and neither is a client connected to a
     session the store does not hold.
 
-    That cuts both ways, which is why an unreachable or absent channel gets its
-    own clause instead of borrowing one. A hub call that raised leaves
-    ``hub_published`` false and ``hub_clients`` zero — indistinguishable, from
-    those two booleans alone, from a quiet empty session — so saying "the session
-    has no stored state" or "no client is connected" there would assert something
-    this function never established.
+    That cuts both ways, which is why the two hub failures are told apart rather
+    than sharing a clause. A publish that raised means nothing reached the hub at
+    all — knowable, and not the same as an empty session. A publish that
+    *succeeded* while the presence count could not be read means the command did
+    go to the hub's subscribers and only their number is unknown; calling that
+    "nothing received this push" would deny a delivery that may well have
+    happened, so the whole sentence switches to the unknown form instead.
     """
     if not registry_configured:
         legacy_reason = "no legacy push channel is configured"
@@ -144,10 +147,17 @@ def _undelivered_push_warning(
 
     if not hub_configured:
         hub_reason = "no shared-session hub is configured"
-    elif hub_error:
+    elif hub_publish_failed:
         hub_reason = (
-            "the shared-session hub could not be queried (a hub call failed), so "
-            "whether anything there would have received it is unknown"
+            "the publish to the shared-session hub failed, so nothing was "
+            "published there"
+        )
+    elif hub_published and not hub_presence_read:
+        # Before the clauses below, which would read the unreadable count as zero.
+        hub_reason = (
+            "the command was published to the shared-session hub, but its "
+            "presence count could not be read, so whether a client received it "
+            "is unknown"
         )
     elif hub_clients > 0 and not hub_published:
         hub_reason = (
@@ -159,11 +169,13 @@ def _undelivered_push_warning(
     else:  # pragma: no cover - published to a connected client is a delivery
         hub_reason = "the shared-session hub did not deliver it"
 
+    prefix = (
+        "It is not known whether anything received this push: "
+        if outcome_unknown
+        else "Nothing received this push: "
+    )
     return (
-        "Nothing received this push: "
-        + "; ".join([legacy_reason, hub_reason])
-        + "."
-        + _UNDELIVERED_PUSH_REMEDY
+        prefix + "; ".join([legacy_reason, hub_reason]) + "." + _UNDELIVERED_PUSH_REMEDY
     )
 
 
@@ -4519,8 +4531,11 @@ def _push_to_session(
       involved, by ``mint_trigger_token`` and the session auto-add tools. The hub
       likewise accepts a publish on the session's *stored state* alone, so it can
       succeed with nobody listening.
-    - ``status`` — ``"delivered"``, ``"not_delivered"``, or ``"not_requested"``
-      when no session id was given.
+    - ``status`` — ``"delivered"``, ``"not_delivered"``, ``"unknown"``, or
+      ``"not_requested"`` when no session id was given. ``"unknown"`` means the
+      command was published to the hub but its presence count could not be read,
+      so its subscribers may well have received it: treat it as "not confirmed",
+      not as a failure, and do not retry blindly.
     - ``live_consumers`` — consumers actually attached to the session: those
       draining the legacy queue plus the clients reporting presence on the op
       stream (the count ``connect_to_visualization_session`` returns). A queue
@@ -4561,31 +4576,43 @@ def _push_to_session(
             legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
-    # Tracked separately from the two booleans below: a failed hub call leaves
-    # them both falsy, which on its own is indistinguishable from a quiet empty
-    # session, and the warning must not report a state it never established.
-    hub_error = False
+    # The two hub calls fail independently and mean different things, so they are
+    # tracked apart. Collapsing them loses the distinction between "nothing
+    # reached the hub" and "the hub took it but we cannot see who was listening",
+    # and the second of those must not be reported as a non-delivery.
+    hub_publish_failed = False
+    hub_presence_read = True
     if session_manager is not None:
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
             hub_clients = 0
-            hub_error = True
+            hub_presence_read = False
         try:
             hub_published = bool(session_manager.push_command(session_id, command))
         except Exception:
             # Best-effort mirror to the hub; never break the legacy push path.
             hub_published = False
-            hub_error = True
+            hub_publish_failed = True
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (
         hub_published and hub_clients > 0
     )
+    # Published to the hub, but the presence count was unreadable: its subscribers
+    # did receive the command and only their number is unknown. Reporting that as
+    # a non-delivery would deny a push that landed, so it is reported as unknown.
+    outcome_unknown = not delivered and hub_published and not hub_presence_read
+    if delivered:
+        status = "delivered"
+    elif outcome_unknown:
+        status = "unknown"
+    else:
+        status = "not_delivered"
     delivery = {
         "requested": True,
         "delivered": delivered,
-        "status": "delivered" if delivered else "not_delivered",
+        "status": status,
         "live_consumers": legacy_consumers + hub_clients,
     }
     if not delivered:
@@ -4594,8 +4621,10 @@ def _push_to_session(
             legacy_enqueued=legacy_enqueued,
             legacy_consumers=legacy_consumers,
             hub_configured=session_manager is not None,
-            hub_error=hub_error,
+            hub_publish_failed=hub_publish_failed,
+            hub_presence_read=hub_presence_read,
             hub_published=hub_published,
             hub_clients=hub_clients,
+            outcome_unknown=outcome_unknown,
         )
     return delivery

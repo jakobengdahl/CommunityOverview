@@ -554,6 +554,18 @@ class _FullyBrokenHub(_BrokenHub):
         raise RuntimeError("presence unreachable")
 
 
+class _PresenceBlindHub(SessionManager):
+    """The inverse partial failure: presence unreadable, the bus working.
+
+    The two hub calls reach different collaborators — ``connected_count`` the
+    presence registry, ``push_command`` the store and the bus — so this is a real
+    state, and the one in which a published command has no readable audience.
+    """
+
+    def connected_count(self, session_id):
+        raise RuntimeError("presence unreachable")
+
+
 @pytest.mark.asyncio
 async def test_a_broken_hub_is_reported_not_raised(tmp_path):
     """A hub failure must not break the tool, nor be reported as delivery."""
@@ -580,19 +592,18 @@ def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):
 
         assert delivery["live_consumers"] == 1
         assert delivery["delivered"] is False
-        assert "could not be queried" in delivery["warning"]
+        assert delivery["status"] == "not_delivered"
+        assert "the publish to the shared-session hub failed" in delivery["warning"]
     finally:
         manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
 
 
-def test_a_failed_hub_call_is_not_reported_as_an_empty_session(tmp_path):
-    """A hub that raised must not be described as a session with no state.
+def test_a_failed_publish_is_not_reported_as_an_empty_session(tmp_path):
+    """A publish that raised must not be described as a session with no state.
 
-    The publish failure leaves ``hub_published`` false and, in the fully broken
-    case, ``hub_clients`` zero — the same two booleans a quiet empty session
-    produces. Saying "the session has no stored state" or "no client is
-    connected" there would assert something the code never established, which is
-    the class of false statement this warning exists to avoid.
+    The failure leaves ``hub_published`` false — the same boolean a session the
+    store does not hold produces. Saying "the session has no stored state" there
+    would assert something the code never established.
     """
     broken = _BrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
     tools, _registry, manager = _wire(tmp_path, session_manager=broken)
@@ -601,22 +612,62 @@ def test_a_failed_hub_call_is_not_reported_as_an_empty_session(tmp_path):
 
     subscription, _member = manager.connect(session_id, "client-1", "Tester")
     try:
-        warning = _delivery(tools, session_id)["warning"]
-        assert "could not be queried" in warning
-        assert "no stored state" not in warning
-        assert "no connected client" not in warning
+        delivery = _delivery(tools, session_id)
+        # Nothing reached the hub, so this IS a non-delivery — knowably so.
+        assert delivery["status"] == "not_delivered"
+        assert delivery["warning"].startswith("Nothing received this push")
+        assert "the publish to the shared-session hub failed" in delivery["warning"]
+        assert "no stored state" not in delivery["warning"]
+        assert "no connected client" not in delivery["warning"]
+        # The presence count was readable and is reported, so the warning must not
+        # claim it could not be read.
+        assert delivery["live_consumers"] == 1
+        assert "could not be read" not in delivery["warning"]
     finally:
         manager.disconnect(session_id, "client-1", subscription)
 
-    # Presence unreadable as well: still the hub-failure reason, never "nobody
-    # is connected" — a client is in fact attached.
+
+def test_a_publish_that_landed_is_never_reported_as_a_non_delivery(tmp_path):
+    """The mirror failure: presence unreadable, publish fine.
+
+    ``connected_count`` and ``push_command`` fail independently, so the command
+    can reach the hub's subscribers while their number is unknown. Reporting that
+    as ``not_delivered`` denied a push that had in fact landed — the mirror of the
+    false positive this whole report exists to remove — so it is ``unknown``.
+    """
+    blind = _PresenceBlindHub(SessionStore(InMemorySessionPersistenceBackend()))
+    tools, _registry, manager = _wire(tmp_path, session_manager=blind)
+    session_id = _new_session(tools)
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        delivery = _delivery(tools, session_id)
+
+        # The subscriber really did get it — that is what makes "not_delivered"
+        # a lie rather than a conservative guess.
+        events = [e["type"] for e in _drain_hub(subscription)]
+        assert "command" in events
+
+        assert delivery["status"] == "unknown"
+        assert delivery["warning"].startswith(
+            "It is not known whether anything received this push"
+        )
+        assert "presence count could not be read" in delivery["warning"]
+        assert "no connected client" not in delivery["warning"]
+        assert "no stored state" not in delivery["warning"]
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+
+def test_both_hub_calls_failing_is_still_a_non_delivery(tmp_path):
+    """Nothing was published, so the outcome is known even with presence blind."""
     fully = _FullyBrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
     tools, _registry, manager = _wire(tmp_path, session_manager=fully)
     subscription, _member = manager.connect(UNKNOWN_SESSION_ID, "client-1", "Tester")
     try:
-        warning = _delivery(tools, UNKNOWN_SESSION_ID)["warning"]
-        assert "could not be queried" in warning
-        assert "no connected client" not in warning
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+        assert delivery["status"] == "not_delivered"
+        assert "the publish to the shared-session hub failed" in delivery["warning"]
+        assert "no connected client" not in delivery["warning"]
     finally:
         manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
 

@@ -896,7 +896,7 @@ field is additive and does not bump the session contract version (§9):
 |---|---|
 | `requested` | Whether a push was attempted at all. |
 | `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it **and** at least one client is on the op stream. Neither half suffices alone. |
-| `status` | `"delivered"`, `"not_delivered"`, or `"not_requested"` when no session id was given. |
+| `status` | `"delivered"`, `"not_delivered"`, `"unknown"`, or `"not_requested"` when no session id was given. `"unknown"` is the one case where `delivered: false` does **not** mean the push failed — see below. |
 | `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
 | `warning` | Present only when undelivered, naming the state that made it so. |
 
@@ -914,10 +914,19 @@ holding its legacy push channel open" line is not.
 `live_consumers` can be non-zero while `delivered` is false: a client that joined
 a session the store does not hold is genuinely connected, but `push_command`
 publishes only for a stored session, so nothing was sent to it. The `warning`
-names which state applies, and an unreachable or unconfigured hub gets its own
-clause rather than borrowing one — a hub call that raised leaves the same two
-booleans falsy as a quiet empty session, so reporting it as "no client is
-connected" would assert something the code never established.
+names which state applies, and each failure gets its own clause rather than
+borrowing one, because the two hub calls fail independently and do not mean the
+same thing:
+
+- **The publish raised.** Nothing reached the hub at all. Knowable, and reported
+  as such — not as "the session has no stored state", which is a different state
+  with the same two falsy booleans.
+- **The publish succeeded but the presence count could not be read.** The command
+  *did* go to the hub's subscribers; only their number is unknown. This is the one
+  case where `delivered: false` does not mean the push failed, so `status` is
+  `"unknown"` and the warning opens "It is not known whether anything received
+  this push". Calling it a non-delivery would deny a push that may well have
+  landed — the mirror of the false positive this report exists to remove.
 
 `live_consumers` is a sum across both channels, so one browser can account for
 two during a page load: the frontend holds the legacy `EventSource` until the op
