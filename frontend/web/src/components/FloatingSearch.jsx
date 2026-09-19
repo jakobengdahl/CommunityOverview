@@ -54,13 +54,13 @@ function FloatingSearch({ variant = 'floating' }) {
       const edgeGap = 16;
       const chromeGap = 12;
       const maximumWidth = 400;
-      const minimumUsableWidth = 240;
       const leftEdge = safeLeft + edgeGap;
       const rightEdge = viewportWidth - safeRight - edgeGap;
       const centeredLeft = (viewportWidth - maximumWidth) / 2;
       const left = Math.max(leftEdge, centeredLeft, headerRect.right + chromeGap);
-      const width = Math.max(0, Math.min(maximumWidth, rightEdge - left));
-      const stacked = viewportWidth <= 600 || width < minimumUsableWidth;
+      const availableInlineWidth = rightEdge - left;
+      const width = Math.max(0, Math.min(maximumWidth, availableInlineWidth));
+      const stacked = viewportWidth <= 600 || availableInlineWidth < maximumWidth;
 
       const phoneStack = stacked && viewportWidth <= 600;
       const stackedWidth = phoneStack
@@ -79,6 +79,7 @@ function FloatingSearch({ variant = 'floating' }) {
         '--floating-search-width',
         `${Math.round(stacked ? stackedWidth : width)}px`
       );
+      search.style.setProperty('--floating-search-transform', 'translateX(0)');
       search.style.setProperty('--floating-header-bottom', `${Math.ceil(headerRect.bottom)}px`);
     };
     const measure = () => {

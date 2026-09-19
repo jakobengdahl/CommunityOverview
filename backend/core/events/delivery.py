@@ -101,7 +101,15 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
-_MAX_REDIRECTS = 10
+# The redirect cap for the three paths that walk redirects by hand and
+# re-validate every hop with is_safe_url: the webhook delivery below, the image
+# ingest in core/image_ingest.py and the agent fetch tool in
+# agents/mcp_loader.py. Each hop is re-validated before it is requested, so the
+# cap bounds that cost; they import this constant rather than keeping their own
+# copy, so the three cannot drift apart. Other outbound requests in the backend
+# do not use this cap: they either leave redirect handling to their HTTP
+# client, or follow no redirects at all.
+MAX_REDIRECTS = 10
 
 
 class _SSRFRedirectBlocked(Exception):
@@ -379,7 +387,7 @@ class DeliveryWorker:
         current_url = url
 
         with httpx.Client(timeout=self._timeout, follow_redirects=False) as client:
-            for _ in range(_MAX_REDIRECTS):
+            for _ in range(MAX_REDIRECTS):
                 if current_method == "POST":
                     response = client.post(
                         current_url,
