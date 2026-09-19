@@ -5,10 +5,15 @@ what a backend is actually held to. Subclass `PersistenceBackendContract` in
 a test module, provide a `factory` fixture, and every test here runs against
 your backend. Three implementations are held to it in this repo: the file
 backend, the in-memory reference backend below, and the optional PostgreSQL
-backend, which is developed against exactly this class and meets everything
-here but the change-notification clauses and the backwards-compatibility
-one - the latter because a store written by a previous release of that
-backend does not exist yet.
+backend, which is developed against exactly this class and meets every
+clause here - change notification included, since PostgreSQL's transport
+always reports via the deferred `entities_read_on_demand` form - except the
+backwards-compatibility one, skipped because a store written by a previous
+release of that backend does not exist yet. The in-memory reference backend
+below reports eagerly by default and can be constructed with `deferred=True`
+to report the same way PostgreSQL does, so the deferred path is also held to
+every clause here by a backend that needs no server to run; see its
+docstring.
 
 What a subclass provides:
 
@@ -35,7 +40,7 @@ import copy
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 import pytest
 
@@ -123,11 +128,32 @@ class InMemoryGraphPersistenceBackend:
     Both writes are atomic the simplest way there is: the new state is built
     first and swapped in at the end, so a failure part-way - in a copy, say -
     leaves the store exactly as it was.
+
+    `deferred` decides how an entity write reports itself to other instances.
+    Off (the default) embeds the payload in the announcement, exactly as
+    every version of this class has - the shape every existing subclass of
+    `PersistenceBackendContract` below is already held to. On, it reports via
+    `ExternalChange.entities_read_on_demand`, reading the entities' current
+    content back out of the store at delivery time instead - the shape
+    PostgreSQL uses, and the one this store is equally able to serve, since
+    it already holds its own content to re-read.
+    `TestInMemoryBackendContractWithDeferredReports` in
+    `test_persistence_contract_memory.py` runs with it on, so the deferred
+    path - not just PostgreSQL's transport for it - is held to every
+    notification clause in `PersistenceBackendContract` by at least one
+    backend that needs no server to run.
     """
 
-    def __init__(self, store: Dict[str, Any], *, incremental: bool = True):
+    def __init__(
+        self,
+        store: Dict[str, Any],
+        *,
+        incremental: bool = True,
+        deferred: bool = False,
+    ):
         self._store = store
         self._incremental = incremental
+        self._deferred = deferred
         self._lock = store.setdefault("lock", threading.Lock())
         store.setdefault("nodes", {})
         store.setdefault("edges", {})
@@ -198,7 +224,43 @@ class InMemoryGraphPersistenceBackend:
             self._store["nodes"] = nodes
             self._store["edges"] = edges
             self._store["written"] = True
-        self._notify_others(ExternalChange.entities(operations))
+        self._notify_others(self._describe(operations))
+
+    def _describe(self, operations: Sequence[EntityOperation]) -> ExternalChange:
+        """The announcement for one batch, eager or deferred per `self._deferred`."""
+        if not self._deferred:
+            return ExternalChange.entities(operations)
+        identifiers = [(op.kind, op.entity_id) for op in operations]
+        return ExternalChange.entities_read_on_demand(
+            lambda: self._read_back(identifiers)
+        )
+
+    def _read_back(
+        self, identifiers: Sequence[Tuple[str, str]]
+    ) -> List[EntityOperation]:
+        """Answer `identifiers` with what the store holds right now.
+
+        Read at delivery time, on the notifier thread - never at dispatch,
+        which is the one thing that makes this the deferred form rather than
+        the eager one with extra steps. An id absent now is a delete, whatever
+        the batch that announced it did; one present is an upsert carrying the
+        current content, which may already differ from what that batch wrote
+        if a later write landed first.
+        """
+        with self._lock:
+            nodes = self._store["nodes"]
+            edges = self._store["edges"]
+            resolved = []
+            for kind, entity_id in identifiers:
+                table = nodes if kind == "node" else edges
+                doc = table.get(entity_id)
+                if doc is None:
+                    resolved.append(EntityOperation(kind, "delete", entity_id))
+                else:
+                    resolved.append(
+                        EntityOperation(kind, "upsert", entity_id, copy.deepcopy(doc))
+                    )
+            return resolved
 
     def checkpoint(self) -> None:
         pass  # nothing is deferred
