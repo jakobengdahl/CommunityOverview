@@ -240,7 +240,10 @@ describe('FloatingSearch federation labels', () => {
       });
     } finally {
       header.remove();
-      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        value: originalInnerWidth,
+      });
       delete document.documentElement.clientWidth;
     }
   });
