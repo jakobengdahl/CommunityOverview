@@ -135,12 +135,67 @@ class TestSessionStoreActivityIntegration:
         record = session.activity_log[0]
         assert record["op"] == "annotation_created"
         assert record["actor"] == "actor-1"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
         assert record["before"] is None
         assert record["after"]["id"] == "note-1"
         assert record["inverse_op"] == {
             "op": "annotation_deleted",
             "annotation_id": "note-1",
         }
+
+    def test_annotation_updated_activity_record_omits_unused_affected_fields(self):
+        store = _store()
+        session = store.create()
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "old"},
+                "client_id": "actor-1",
+            },
+        )
+        applied = store.apply_state_op(
+            session,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "type": "note", "text": "new"},
+                "client_id": "actor-1",
+            },
+        )
+        assert applied is not None
+        record = session.activity_log[-1]
+        assert record["op"] == "annotation_updated"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
+        assert record["before"]["text"] == "old"
+        assert record["after"]["text"] == "new"
+
+    def test_annotation_created_upsert_activity_record_omits_unused_affected_fields(
+        self,
+    ):
+        store = _store()
+        session = store.create()
+        store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "old"},
+                "client_id": "actor-1",
+            },
+        )
+        applied = store.apply_state_op(
+            session,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "type": "note", "text": "new"},
+                "client_id": "actor-1",
+            },
+        )
+        assert applied is not None
+        record = session.activity_log[-1]
+        assert record["op"] == "annotation_created"
+        assert record["affected"] == {"kind": "annotation", "id": "note-1"}
+        assert record["before"]["text"] == "old"
+        assert record["after"]["text"] == "new"
 
     def test_no_actor_no_activity_record(self):
         store = _store()
@@ -234,7 +289,9 @@ class TestSessionStoreActivityIntegration:
         )
         delete_record = session.activity_log[-1]
         assert delete_record["op"] == "annotation_deleted"
+        assert delete_record["affected"] == {"kind": "annotation", "id": "note-1"}
         assert delete_record["before"]["text"] == "hi"
+        assert delete_record["after"] is None
         assert delete_record["inverse_op"]["op"] == "annotation_created"
         assert delete_record["inverse_op"]["annotation"]["text"] == "hi"
 
