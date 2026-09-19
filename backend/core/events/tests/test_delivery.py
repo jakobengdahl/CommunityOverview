@@ -398,6 +398,10 @@ class TestDeliveryWorker:
             # Must be dropped immediately — no retry, no follow-through to the internal address
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
+            # The per-hop check only runs if httpx is told not to follow
+            # redirects itself, at both the client and the call.
+            assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
+            assert mock_client.post.call_args.kwargs["follow_redirects"] is False
             assert "169.254.169.254" in results[0].error_message
         finally:
             worker.stop(wait=True)

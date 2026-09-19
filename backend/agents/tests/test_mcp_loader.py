@@ -567,9 +567,11 @@ def _redirect_response(location, status_code=302):
     fixture does too. A bare Mock silently no-ops there, which would let a
     test assert behaviour that no real response has.
 
-    Nothing here reaches that raise: the loop returns at its cap before
-    calling raise_for_status(). The side effect earns its place by making a
-    reverted cap fail loudly rather than quietly resemble the fixed code.
+    Nothing here reaches that raise on the current code path; it is there for
+    fidelity, not coverage. Note that it makes a reverted cap resemble the
+    fixed code MORE closely, not less, since the old loop fell through onto
+    raise_for_status() and so also produced an error. What pins the cap is the
+    exact error message and the call count asserted below, not this fixture.
     """
     response = Mock()
     response.is_redirect = True
@@ -714,6 +716,10 @@ class TestFetchToolSSRFGuard:
         # The internal hop was never requested — only the original URL was.
         assert client.get.call_count == 1
         assert client.get.call_args.args[0] == "http://example.com/start"
+        # The hand-rolled hop loop only runs if httpx is told not to follow
+        # redirects itself; with follow_redirects=True every check below is
+        # dead code and the mock replays its script regardless.
+        assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.agents.mcp_loader.httpx.Client")

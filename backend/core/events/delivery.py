@@ -107,7 +107,8 @@ def is_safe_url(url: str) -> bool:
 # agents/mcp_loader.py. Each hop is re-validated before it is requested, so the
 # cap bounds that cost; they import this constant rather than keeping their own
 # copy, so the three cannot drift apart. Other outbound requests in the backend
-# leave redirect following to httpx and are bounded by its limit, not this one.
+# do not use this cap: they either leave redirect handling to their HTTP
+# client, or follow no redirects at all.
 MAX_REDIRECTS = 10
 
 
