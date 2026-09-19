@@ -120,9 +120,12 @@ def register_mcp_tools(
     tools_map = {}
 
     def _push(session_id, tool_name, result):
-        _push_to_session(
+        delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )
+        if session_id and isinstance(result, dict):
+            result["visualization_delivery"] = delivery
+        return delivery
 
     def _claimed_node_ids(session_id, node_refs):
         """The session's *node* ids that currently hold a selection claim.
@@ -4383,7 +4386,7 @@ def _push_to_session(
     tool_name: str,
     result: Dict[str, Any],
     session_manager=None,
-) -> None:
+) -> Dict[str, Any]:
     """Push *result* to a browser session if *session_id* is set.
 
     When the result has nodes but no explicit *action*, defaults to
@@ -4395,7 +4398,7 @@ def _push_to_session(
     shared-session hub so every connected collaborator receives it (design 3.8).
     """
     if not session_id:
-        return
+        return {"requested": False, "delivered": False, "status": "not_requested"}
     command_result = dict(result)
     if "action" not in command_result and command_result.get("nodes"):
         command_result["action"] = "add_to_visualization"
@@ -4409,11 +4412,29 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
+    legacy_delivered = False
+    shared_delivered = False
+    live_consumers = 0
     if session_registry and session_registry.is_valid_session_id(session_id):
-        session_registry.push_command_sync(session_id, command)
+        legacy_delivered = bool(session_registry.push_command_sync(session_id, command))
     if session_manager is not None:
         try:
-            session_manager.push_command(session_id, command)
+            live_consumers = max(0, int(session_manager.connected_count(session_id)))
+            shared_pushed = bool(session_manager.push_command(session_id, command))
+            shared_delivered = live_consumers > 0 and shared_pushed
         except Exception:
             # Best-effort mirror to the hub; never break the legacy push path.
             pass
+    delivered = legacy_delivered or shared_delivered
+    delivery = {
+        "requested": True,
+        "delivered": delivered,
+        "status": "delivered" if delivered else "not_delivered",
+        "live_consumers": live_consumers + (1 if legacy_delivered else 0),
+    }
+    if not delivered:
+        delivery["warning"] = (
+            "No live visualization consumer was detected for this session; "
+            "the tool result was returned here but may not have appeared in a browser."
+        )
+    return delivery
