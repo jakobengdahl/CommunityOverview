@@ -6,7 +6,7 @@ import {
   DEFAULT_LABEL_FONT_SIZE,
   rotationStyle,
   isRemoteLocked,
-  isAnnotationDraggable,
+  withAnnotationDraggability,
   remoteEditBadge,
 } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
@@ -153,7 +153,7 @@ function LabelNode({ id, data, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, locked: false };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        return withAnnotationDraggability(n, nextData);
       })
     );
     setContextMenu(null);

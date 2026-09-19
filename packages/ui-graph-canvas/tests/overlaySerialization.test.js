@@ -7,6 +7,7 @@ import {
   isArrowHeld,
   isRemoteLocked,
   isAnnotationDraggable,
+  withAnnotationDraggability,
   nodeCenter,
   findSnapTarget,
   resolveAnchoredArrow,
@@ -117,6 +118,32 @@ describe('overlay serialization', () => {
     expect(node.data.locked).toBe(true);
     expect(node.data.rotation).toBe(30);
     expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it.each(['note', 'label', 'shape', 'freehand'])(
+    'recomputes draggable when unlocking a locked %s node',
+    (type) => {
+      const next = withAnnotationDraggability(
+        { id: `${type}-1`, type, data: { locked: true }, draggable: false },
+        { locked: false }
+      );
+      expect(next.data.locked).toBe(false);
+      expect(next.draggable).toBe(true);
+    }
+  );
+
+  it('keeps an anchored arrow non-draggable after its lock flag changes', () => {
+    const next = withAnnotationDraggability(
+      {
+        id: 'arrow-1',
+        type: 'arrow',
+        data: { locked: true, endAnchor: 'node-1' },
+        draggable: false,
+      },
+      { locked: false, endAnchor: 'node-1' }
+    );
+    expect(next.data.locked).toBe(false);
+    expect(next.draggable).toBe(false);
   });
 
   // smallfix-annotation-version-dropped-by-browser-pipeline: `version`/
