@@ -9,7 +9,7 @@ import {
   hasPressureData,
   segmentsFromCurvePoints,
 } from '../utils/freehandPath';
-import { isRemoteLocked, isAnnotationDraggable, remoteEditBadge } from '../utils/annotations';
+import { isRemoteLocked, withAnnotationDraggability, remoteEditBadge } from '../utils/annotations';
 import AnnotationLayerControls, { useAnnotationLayer } from './AnnotationLayerControls';
 import AnnotationDuplicateControl, { useAnnotationDuplicate } from './AnnotationDuplicateControl';
 import { NearbyObjectMenuSection, useAnnotationMenuKeyNav } from './ContextMenus';
@@ -180,7 +180,7 @@ function FreehandAnnotationNode({ id, data, selected }) {
       nds.map((n) => {
         if (n.id !== id) return n;
         const nextData = { ...n.data, locked: false };
-        return { ...n, data: nextData, draggable: isAnnotationDraggable({ ...n, data: nextData }) };
+        return withAnnotationDraggability(n, nextData);
       })
     );
     setContextMenu(null);
