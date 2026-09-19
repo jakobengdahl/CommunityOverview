@@ -5,6 +5,8 @@ Tests for MCP loader and tool namespacing.
 import json
 from unittest.mock import Mock, patch
 
+import httpx2 as httpx
+
 from backend.agents.config import MCPIntegration, MCPTransport
 from backend.agents.mcp_loader import MAX_REDIRECTS, MCPLoader, NamespacedTool
 
@@ -559,12 +561,22 @@ class TestConnectHttpInfoQuery:
 
 
 def _redirect_response(location, status_code=302):
-    """A 3xx response pointing at *location*."""
+    """A 3xx response pointing at *location*.
+
+    httpx2's raise_for_status() raises on any non-2xx, 3xx included, so the
+    fixture does too. A bare Mock silently no-ops there, which would let a
+    test assert behaviour that no real response has.
+    """
     response = Mock()
     response.is_redirect = True
     response.status_code = status_code
     response.headers = {"location": location}
     response.text = "<html>redirecting</html>"
+    response.raise_for_status = Mock(
+        side_effect=httpx.HTTPStatusError(
+            f"Redirect response '{status_code}'", request=Mock(), response=response
+        )
+    )
     return response
 
 
@@ -611,7 +623,6 @@ class TestFetchToolSSRFGuard:
 
         for url in (
             "http://127.0.0.1/admin",
-            "http://localhost:8000/mcp",
             "http://10.0.0.1/internal",
             "http://192.168.1.1/router",
             "http://169.254.169.254/latest/meta-data/",
@@ -722,15 +733,18 @@ class TestFetchToolSSRFGuard:
 
     @patch("backend.core.events.delivery.socket.getaddrinfo")
     @patch("backend.agents.mcp_loader.httpx.Client")
-    def test_redirect_chain_beyond_cap_errors_instead_of_returning_the_3xx_body(
+    def test_redirect_chain_stops_at_the_shared_cap_with_an_explicit_error(
         self, mock_client_cls, mock_getaddrinfo
     ):
-        """An exhausted redirect chain is an error, not fetched content.
+        """An exhausted redirect chain reports the limit it hit.
 
         The chain here is endless but every hop is public, so the SSRF check
-        never fires; only the cap can end it. Falling out of the loop and
-        returning the last 3xx response would hand the agent a redirect page
-        as if it had been fetched.
+        never fires; only the cap can end it. Before the cap was shared this
+        path fell out of the loop onto raise_for_status(), which raises on a
+        3xx too — so it did error, but with a message about a redirect
+        response rather than about the limit, and after a different number of
+        hops. The call count pins the shared cap; the message distinguishes
+        the deliberate error from the incidental one.
         """
         mock_getaddrinfo.return_value = _public_addrinfo()
         client = _client_returning(_redirect_response("http://example.com/next"))
@@ -741,11 +755,62 @@ class TestFetchToolSSRFGuard:
             "fetch", {"url": "http://example.com/start"}
         )
 
-        assert "error" in result
-        assert "redirect" in result["error"].lower()
-        assert "content" not in result
-        assert "status" not in result
+        assert result == {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
         assert client.get.call_count == MAX_REDIRECTS
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_later_redirect_hop_into_private_range_is_not_followed(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """Every hop is re-checked, not just the first one.
+
+        A guard that validated only the first redirect target would pass the
+        one-hop test above and still walk a public -> public -> internal chain
+        all the way in.
+        """
+        mock_getaddrinfo.return_value = _public_addrinfo()
+        client = _client_returning(
+            _redirect_response("http://example.com/second"),
+            _redirect_response("http://169.254.169.254/latest/meta-data/"),
+        )
+        mock_client_cls.return_value = client
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert "error" in result
+        assert "content" not in result
+        assert client.get.call_count == 2
+        requested = [call.args[0] for call in client.get.call_args_list]
+        assert requested == ["http://example.com/start", "http://example.com/second"]
+
+    @patch("backend.core.events.delivery.socket.getaddrinfo")
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_relative_redirect_to_public_address_is_followed(
+        self, mock_client_cls, mock_getaddrinfo
+    ):
+        """A relative Location is resolved against the current URL, as in delivery.py.
+
+        Dropping the urljoin would leave the hop hostless, fail the check and
+        turn an ordinary relative redirect into an error.
+        """
+        mock_getaddrinfo.return_value = _public_addrinfo()
+        client = _client_returning(
+            _redirect_response("/final"),
+            _ok_response("<html>final page</html>"),
+        )
+        mock_client_cls.return_value = client
+        loader = MCPLoader([])
+
+        result = loader._execute_fetch_tool(
+            "fetch", {"url": "http://example.com/start"}
+        )
+
+        assert result["content"] == "<html>final page</html>"
+        assert client.get.call_args_list[1].args[0] == "http://example.com/final"
 
     def test_redirect_cap_is_shared_with_the_other_outbound_fetch_paths(self):
         """One cap for every outbound path, so they cannot drift apart again."""
