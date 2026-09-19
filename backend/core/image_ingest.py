@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import httpx2 as httpx
 from PIL import Image, UnidentifiedImageError
 
-from .events.delivery import is_safe_url
+from .events.delivery import MAX_REDIRECTS, is_safe_url
 
 # SVG/GIF/etc are rejected: SVG can carry script content, GIF animation is
 # not preserved by the optimizer (a re-encode would silently drop frames).
@@ -60,10 +60,6 @@ DEFAULT_MAX_SESSION_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_LONGEST_SIDE = 2560
 WEBP_QUALITY = 82
 _FETCH_TIMEOUT_SECONDS = 10.0
-# Mirrors backend/core/events/delivery.py's redirect cap for the same reason:
-# each hop is re-validated against is_safe_url, so a bounded number of hops
-# keeps that re-validation cost bounded too.
-_MAX_FETCH_REDIRECTS = 10
 
 
 class ImageIngestError(ValueError):
@@ -183,7 +179,7 @@ def fetch_image_bytes(
         # uses for its AsyncClient.
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             current_url = url
-            for _ in range(_MAX_FETCH_REDIRECTS):
+            for _ in range(MAX_REDIRECTS):
                 with client.stream("GET", current_url) as response:
                     if response.is_redirect:
                         location = str(response.headers.get("location", ""))
@@ -210,9 +206,7 @@ def fetch_image_bytes(
                     if not data:
                         raise ImageFetchError("image_url returned an empty body")
                     return data
-            raise ImageFetchError(
-                f"image_url exceeded {_MAX_FETCH_REDIRECTS} redirects"
-            )
+            raise ImageFetchError(f"image_url exceeded {MAX_REDIRECTS} redirects")
     except SourceImageTooLarge:
         raise
     except ImageFetchError:

@@ -14,7 +14,12 @@ from backend.core.events.models import (
     DeliveryStatus,
     SubscriptionInfo,
 )
-from backend.core.events.delivery import DeliveryWorker, DeliveryItem, is_safe_url
+from backend.core.events.delivery import (
+    MAX_REDIRECTS,
+    DeliveryWorker,
+    DeliveryItem,
+    is_safe_url,
+)
 
 
 def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02):
@@ -393,6 +398,10 @@ class TestDeliveryWorker:
             # Must be dropped immediately — no retry, no follow-through to the internal address
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
+            # The per-hop check only runs if httpx is told not to follow
+            # redirects itself, at both the client and the call.
+            assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
+            assert mock_client.post.call_args.kwargs["follow_redirects"] is False
             assert "169.254.169.254" in results[0].error_message
         finally:
             worker.stop(wait=True)
@@ -556,6 +565,9 @@ class TestDeliveryWorker:
             assert len(results) == 1
             assert results[0].status == DeliveryStatus.DROPPED
             assert results[0].error_message == "Exceeded redirect limit"
+            # Pin the effective cap, not just the outcome: any limit that
+            # eventually terminates satisfies the assertions above.
+            assert mock_client.post.call_count == MAX_REDIRECTS
         finally:
             worker.stop(wait=True)
 
