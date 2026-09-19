@@ -93,17 +93,26 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 _DEFAULT_SESSION_NAME = "Untitled session"
 
 # Appended to every undelivered-push warning: a push writes nothing, so an
-# agent that simply retries it gets the same silence.
+# agent that simply retries it gets the same silence. It deliberately does NOT
+# send the caller to connect_to_visualization_session as the pre-push check:
+# that tool's reachability verdict counts a bare registry entry, which is the
+# false positive this report exists to remove.
 _UNDELIVERED_PUSH_REMEDY = (
     " A push is not stored, so this left no trace — use add_nodes_to_session to "
-    "change what the session holds, or connect_to_visualization_session to "
-    "check a session before pushing."
+    "change what the session holds. Trust this report rather than "
+    "connect_to_visualization_session's reachability line, which counts a "
+    "registry entry that outlives the browser that created it; its "
+    "connected_clients count is sound."
 )
 
 
 def _undelivered_push_warning(
+    *,
+    registry_configured: bool,
     legacy_enqueued: bool,
     legacy_consumers: int,
+    hub_configured: bool,
+    hub_error: bool,
     hub_published: bool,
     hub_clients: int,
 ) -> str:
@@ -114,26 +123,45 @@ def _undelivered_push_warning(
     stale queue entry with nothing draining it is not the same situation as
     nobody having opened the session, and neither is a client connected to a
     session the store does not hold.
+
+    That cuts both ways, which is why an unreachable or absent channel gets its
+    own clause instead of borrowing one. A hub call that raised leaves
+    ``hub_published`` false and ``hub_clients`` zero — indistinguishable, from
+    those two booleans alone, from a quiet empty session — so saying "the session
+    has no stored state" or "no client is connected" there would assert something
+    this function never established.
     """
-    reasons = []
-    if legacy_enqueued and legacy_consumers == 0:
-        reasons.append(
+    if not registry_configured:
+        legacy_reason = "no legacy push channel is configured"
+    elif legacy_enqueued and legacy_consumers == 0:
+        legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
             "draining it (an entry outlives the browser that created it, and is "
             "also created without one)"
         )
     else:
-        reasons.append("no browser is holding the session's legacy push channel")
-    if hub_clients > 0 and not hub_published:
-        reasons.append(
+        legacy_reason = "no browser is holding the session's legacy push channel"
+
+    if not hub_configured:
+        hub_reason = "no shared-session hub is configured"
+    elif hub_error:
+        hub_reason = (
+            "the shared-session hub could not be queried (a hub call failed), so "
+            "whether anything there would have received it is unknown"
+        )
+    elif hub_clients > 0 and not hub_published:
+        hub_reason = (
             "a client is connected to its op stream, but the session has no "
             "stored state, so the hub had nothing to publish to"
         )
-    else:
-        reasons.append("its op stream has no connected client")
+    elif hub_clients == 0:
+        hub_reason = "its op stream has no connected client"
+    else:  # pragma: no cover - published to a connected client is a delivery
+        hub_reason = "the shared-session hub did not deliver it"
+
     return (
         "Nothing received this push: "
-        + "; ".join(reasons)
+        + "; ".join([legacy_reason, hub_reason])
         + "."
         + _UNDELIVERED_PUSH_REMEDY
     )
@@ -171,8 +199,14 @@ def register_mcp_tools(
         The three read tools return the service payload verbatim, so without
         this an agent cannot tell a push that landed on a canvas from one that
         went nowhere: a push writes no session state, so there is nothing to
-        read back either. The report is attached *after* the push, so the
-        payload the canvas receives never carries it.
+        read back either.
+
+        What keeps this report out of what the canvas receives is the copy
+        ``_push_to_session`` takes (``command_result = dict(result)``), not the
+        ordering here: both delivery paths hand the command over asynchronously
+        — the legacy queue via ``loop.call_soon``, the hub by passing the object
+        to subscribers — so a later mutation of a shared ``result`` would still
+        be visible to them. Do not remove that copy.
         """
         delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
@@ -4527,16 +4561,22 @@ def _push_to_session(
             legacy_consumers = max(0, int(counter(session_id)))
     hub_published = False
     hub_clients = 0
+    # Tracked separately from the two booleans below: a failed hub call leaves
+    # them both falsy, which on its own is indistinguishable from a quiet empty
+    # session, and the warning must not report a state it never established.
+    hub_error = False
     if session_manager is not None:
         try:
             hub_clients = max(0, int(session_manager.connected_count(session_id)))
         except Exception:
             hub_clients = 0
+            hub_error = True
         try:
             hub_published = bool(session_manager.push_command(session_id, command))
         except Exception:
             # Best-effort mirror to the hub; never break the legacy push path.
             hub_published = False
+            hub_error = True
     # Each path needs both halves: a queue that took the command AND something
     # draining it, or a publish that happened AND a client on the op stream.
     delivered = (legacy_enqueued and legacy_consumers > 0) or (
@@ -4550,6 +4590,12 @@ def _push_to_session(
     }
     if not delivered:
         delivery["warning"] = _undelivered_push_warning(
-            legacy_enqueued, legacy_consumers, hub_published, hub_clients
+            registry_configured=bool(session_registry),
+            legacy_enqueued=legacy_enqueued,
+            legacy_consumers=legacy_consumers,
+            hub_configured=session_manager is not None,
+            hub_error=hub_error,
+            hub_published=hub_published,
+            hub_clients=hub_clients,
         )
     return delivery

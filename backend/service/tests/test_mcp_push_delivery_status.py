@@ -169,6 +169,16 @@ def test_stored_session_with_no_consumer_reports_undelivered(wired):
     assert delivery["warning"]
     assert "add_nodes_to_session" in delivery["warning"]
     assert set(delivery) == UNDELIVERED_KEYS
+    # The warning must name THIS state and not a neighbouring one: there is no
+    # registry entry, and the hub was reachable and simply had no listener.
+    # Matched on the distinctive reason clauses, since the remedy sentence
+    # mentions a registry entry too.
+    assert "no connected client" in delivery["warning"]
+    assert "has a registry entry but nothing" not in delivery["warning"]
+    assert "no stored state" not in delivery["warning"]
+    assert "could not be queried" not in delivery["warning"]
+    # And it must not send the caller to a check with the same false positive.
+    assert "Trust this report" in delivery["warning"]
     # The push left no trace to read back — the half of the defect that makes
     # the report the only way to notice.
     assert manager.get_session(session_id).state.get("node_refs", []) == []
@@ -185,7 +195,14 @@ def test_unknown_session_reports_undelivered_on_both_paths(wired):
     assert delivery["delivered"] is False
     assert delivery["status"] == "not_delivered"
     assert delivery["live_consumers"] == 0
-    assert delivery["warning"]
+    assert "no browser is holding" in delivery["warning"]
+    assert "no connected client" in delivery["warning"]
+    # Nothing holds this id, so neither the entry clause nor the presence clause
+    # may appear — the branch table's two "quiet" outcomes are the ones a
+    # truthiness-only assertion would let drift. Matched on the distinctive
+    # clause text, since the remedy sentence mentions a registry entry too.
+    assert "has a registry entry but nothing" not in delivery["warning"]
+    assert "a client is connected to its op stream" not in delivery["warning"]
 
 
 def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
@@ -329,6 +346,14 @@ async def test_legacy_consumer_reports_delivered_and_receives_the_command(wired)
         assert received[0]["tool"] == "search_graph"
         assert received[0]["result"]["nodes"]
 
+        # A second push to the SAME still-attached consumer. Pushing once per
+        # consumer would not notice a ref-count that delivery consumes, which
+        # would turn the verdict into the mirror-image false negative.
+        second = _delivery(tools, session_id)
+        assert second["delivered"] is True
+        assert second["live_consumers"] == 1
+        assert await _settle(lambda: len(received) == 2)
+
 
 @pytest.mark.asyncio
 async def test_delivery_report_is_not_fed_back_into_the_canvas_payload(wired):
@@ -419,6 +444,10 @@ def test_presence_without_stored_state_is_not_delivery(wired):
         assert delivery["live_consumers"] == 1
         assert delivery["delivered"] is False
         assert "no stored state" in delivery["warning"]
+        # This state is "hub reachable, nothing to publish to", which must not be
+        # reported as the hub having failed, nor as nobody being connected.
+        assert "could not be queried" not in delivery["warning"]
+        assert "no connected client" not in delivery["warning"]
         # Nothing but the join echo reached the subscriber.
         assert [e["type"] for e in _drain_hub(subscription)] == ["presence_joined"]
     finally:
@@ -551,9 +580,84 @@ def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):
 
         assert delivery["live_consumers"] == 1
         assert delivery["delivered"] is False
-        assert delivery["warning"]
+        assert "could not be queried" in delivery["warning"]
     finally:
         manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
+
+
+def test_a_failed_hub_call_is_not_reported_as_an_empty_session(tmp_path):
+    """A hub that raised must not be described as a session with no state.
+
+    The publish failure leaves ``hub_published`` false and, in the fully broken
+    case, ``hub_clients`` zero — the same two booleans a quiet empty session
+    produces. Saying "the session has no stored state" or "no client is
+    connected" there would assert something the code never established, which is
+    the class of false statement this warning exists to avoid.
+    """
+    broken = _BrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
+    tools, _registry, manager = _wire(tmp_path, session_manager=broken)
+    session_id = _new_session(tools)
+    assert manager.get_session(session_id) is not None, "the session IS stored"
+
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        warning = _delivery(tools, session_id)["warning"]
+        assert "could not be queried" in warning
+        assert "no stored state" not in warning
+        assert "no connected client" not in warning
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+    # Presence unreadable as well: still the hub-failure reason, never "nobody
+    # is connected" — a client is in fact attached.
+    fully = _FullyBrokenHub(SessionStore(InMemorySessionPersistenceBackend()))
+    tools, _registry, manager = _wire(tmp_path, session_manager=fully)
+    subscription, _member = manager.connect(UNKNOWN_SESSION_ID, "client-1", "Tester")
+    try:
+        warning = _delivery(tools, UNKNOWN_SESSION_ID)["warning"]
+        assert "could not be queried" in warning
+        assert "no connected client" not in warning
+    finally:
+        manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
+
+
+def test_an_attached_consumer_whose_enqueue_failed_is_not_delivered(tmp_path):
+    """Both halves of the legacy path are required, not just the consumer.
+
+    ``push_command_sync`` returns False when it is called off the event-loop
+    thread with no injected loop, so a consumer can be attached while the command
+    was never enqueued. Claiming delivery there would report a command that was
+    dropped.
+    """
+
+    class _EnqueueFailsRegistry:
+        def is_valid_session_id(self, session_id):
+            return True
+
+        def session_exists(self, session_id):
+            return True
+
+        def push_command_sync(self, session_id, command):
+            return False
+
+        def consumer_count(self, session_id):
+            return 1
+
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage)
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools = register_mcp_tools(
+        mock_mcp, service, session_registry=_EnqueueFailsRegistry()
+    )
+    tools["add_nodes"](
+        nodes=[{"id": "alpha", "type": "Actor", "name": "Alpha"}], edges=[]
+    )
+
+    delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+
+    assert delivery["delivered"] is False
+    assert delivery["live_consumers"] == 1
 
 
 def test_no_registry_configured_reports_the_hub_verdict_only(tmp_path):
@@ -566,6 +670,9 @@ def test_no_registry_configured_reports_the_hub_verdict_only(tmp_path):
 
     assert delivery["delivered"] is False
     assert delivery["live_consumers"] == 0
+    # An absent channel gets its own clause rather than being described as a
+    # browser that is not holding one.
+    assert "no legacy push channel is configured" in delivery["warning"]
 
 
 @pytest.mark.asyncio
@@ -577,6 +684,8 @@ async def test_no_manager_configured_reports_the_legacy_verdict_only(tmp_path):
     undelivered = _delivery(tools, UNKNOWN_SESSION_ID)
     assert undelivered["delivered"] is False
     assert undelivered["live_consumers"] == 0
+    assert "no shared-session hub is configured" in undelivered["warning"]
+    assert "no connected client" not in undelivered["warning"]
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID):
         delivery = _delivery(tools, UNKNOWN_SESSION_ID)
