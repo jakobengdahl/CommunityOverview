@@ -4970,6 +4970,11 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             # other wrong type dies in the query. So the id's type has to be
             # checked here rather than left to the server.
             '{"o": "other", "ops": [["n", null]]}',
+            # Well under PostgreSQL's payload cap, but deep enough that
+            # json.loads raises RecursionError rather than the ValueError,
+            # KeyError and TypeError shapes above. Narrowing the parse
+            # containment to those ordinary cases kills the listening thread.
+            "[" * 1000 + "0" + "]" * 1000,
         ],
     )
     def test_an_announcement_this_build_cannot_read_reloads_the_graph(
@@ -5036,6 +5041,51 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
+
+    def test_a_non_driver_read_failure_reconnects_and_keeps_reporting(
+        self, schema, backends, monkeypatch
+    ):
+        """The reconnect loop is not only for psycopg failures.
+
+        A failure in the reading loop can come from code beside the driver -
+        for example a parser edge not contained by `_handle`. If the outer
+        loop catches only psycopg errors, that exception ends the one thread
+        that would ever hear the next write.
+        """
+        import backend.core.postgres_backend as module
+
+        monkeypatch.setattr(module, "_NOTIFY_RECONNECT_MIN_SECONDS", 0.05)
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.extend([backend, writer])
+        collector = _Collector()
+        injected = threading.Event()
+        real_read = type(backend)._read_until_stopped
+
+        def fail_once(self, conn):
+            if not injected.is_set():
+                injected.set()
+                raise RuntimeError("injected non-driver read failure")
+            return real_read(self, conn)
+
+        backend._read_until_stopped = fail_once.__get__(backend)
+        backend.start_change_notification(collector)
+        try:
+            assert injected.wait(30), "the injected read failure was never reached"
+            (reload,) = collector.wait_for(1, timeout=10)
+            assert reload.operations is None
+
+            writer.upsert_node(node_payload("after_non_driver_failure"))
+            changes = collector.wait_for(2, timeout=30)
+        finally:
+            backend.stop_change_notification()
+
+        assert any(
+            change.operations
+            and [op.entity_id for op in change.operations]
+            == ["after_non_driver_failure"]
+            for change in changes[1:]
+        ), "the listener thread died after a non-driver read failure"
 
 
 class TestPostgresBacksOffWhenTheConnectionKeepsDropping:
@@ -6011,6 +6061,75 @@ class TestPostgresSubscribesBeforeItReloads:
         assert events.index("report") > 1, (
             f"the reconnect reported before re-registering LISTEN: {events}"
         )
+
+
+class TestPostgresStartReturnsOnlyAfterListen:
+    """Start's promise is that the channel is registered when it returns.
+
+    Returning after the socket connects but before the LISTEN statement
+    finishes creates a boot-time stale window, and also hides a first LISTEN
+    failure from the caller. The assertion blocks the statement itself rather
+    than racing a writer into a microsecond gap.
+    """
+
+    def test_start_waits_for_the_listen_statement_to_finish(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        listen_entered = threading.Event()
+        release_listen = threading.Event()
+        returned = threading.Event()
+        errors = []
+        real_execute = psycopg.Connection.execute
+
+        def block_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                listen_entered.set()
+                assert release_listen.wait(30), "test never released LISTEN"
+            return real_execute(conn, query, *args, **kwargs)
+
+        def start():
+            try:
+                backend.start_change_notification(_Collector())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                returned.set()
+
+        psycopg.Connection.execute = block_listen
+        starter = threading.Thread(target=start, daemon=True)
+        starter.start()
+        try:
+            assert listen_entered.wait(30), "start never reached LISTEN"
+            assert not returned.wait(0.2), (
+                "start returned before the LISTEN statement completed"
+            )
+            release_listen.set()
+            assert returned.wait(30), "start did not return after LISTEN completed"
+            if errors:
+                raise errors[0]
+        finally:
+            psycopg.Connection.execute = real_execute
+            release_listen.set()
+            starter.join(30)
+            backend.stop_change_notification()
+
+    def test_a_first_listen_failure_is_reported_to_start(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        real_execute = psycopg.Connection.execute
+
+        def fail_listen(conn, query, *args, **kwargs):
+            if "LISTEN" in " ".join(str(query).split()).upper():
+                raise psycopg.OperationalError("injected LISTEN failure")
+            return real_execute(conn, query, *args, **kwargs)
+
+        psycopg.Connection.execute = fail_listen
+        try:
+            with pytest.raises(psycopg.OperationalError, match="LISTEN failure"):
+                backend.start_change_notification(_Collector())
+        finally:
+            psycopg.Connection.execute = real_execute
+            backend.stop_change_notification()
 
 
 class TestPostgresStopHoldsWithABatchAlreadyRead:
