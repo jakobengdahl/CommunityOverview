@@ -24,6 +24,18 @@ callers that genuinely run in a separate thread (e.g. background workers
 or future framework changes).  In that case the loop reference injected
 at startup via set_event_loop() is used instead.
 
+Entries vs. consumers
+---------------------
+A session entry says only that some id has been registered: ``get_or_create``
+creates one, and callers that merely want the session to survive the periodic
+prune (``mint_trigger_token``, the session auto-add tools) create one with no
+browser anywhere.  Nothing removes an entry when the SSE connection closes, and
+every push refreshes ``last_seen`` so TTL eviction never reclaims a session that
+is being pushed to.  So an entry outlives its browser indefinitely and cannot
+support a claim that a push will be read.  ``has_consumer`` answers that
+question instead, ref-counted by ``stream`` for as long as something is actually
+draining the queue.
+
 Single-consumer design (V1 known limitation)
 --------------------------------------------
 Each session holds one queue.  If two SSE connections open for the same
@@ -64,6 +76,11 @@ class SessionRegistry:
     def __init__(self) -> None:
         self._sessions: Dict[str, dict] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # How many consumers are currently draining each session's queue.
+        # Deliberately not stored in the session entry: TTL eviction can drop
+        # and re-create that entry under a consumer that never left, which would
+        # reset the count while the consumer is still there.
+        self._consumers: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Event-loop injection
@@ -124,6 +141,20 @@ class SessionRegistry:
 
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
+
+    def has_consumer(self, session_id: str) -> bool:
+        """True while something is draining this session's queue.
+
+        A registry *entry* answers a different question and must not be read as
+        this one. An entry is created by ``get_or_create`` — including from
+        ``mint_trigger_token`` and the session auto-add tools, with no browser
+        involved — nothing removes it when the SSE connection closes, and every
+        push refreshes ``last_seen``, so ``cleanup_stale`` never reclaims a
+        session that is being pushed to. An entry therefore outlives the browser
+        that created it indefinitely, which is why "a command was enqueued" is
+        not evidence that anything will read it.
+        """
+        return self._consumers.get(session_id, 0) > 0
 
     # ------------------------------------------------------------------
     # Pulse-trigger tokens
@@ -222,21 +253,32 @@ class SessionRegistry:
         blocked on an orphaned queue.
         """
         self.get_or_create(session_id)
-        while True:
-            # Re-anchor to the current session entry in case it was evicted and
-            # re-created since the previous iteration.
-            if session_id not in self._sessions:
-                self.get_or_create(session_id)
-            queue = self._sessions[session_id]["queue"]
-            try:
-                command = await asyncio.wait_for(queue.get(), timeout=25.0)
-                self._touch(session_id)
-                yield command
-            except asyncio.TimeoutError:
-                # Keep the session alive while the SSE connection is open,
-                # even when the canvas hasn't changed (no state uploads).
-                self._touch(session_id)
-                yield {"type": "ping"}
+        # Registering the consumer is what makes a push to this session
+        # verifiable as delivered; the ``finally`` releases it when the caller
+        # stops iterating, which for the SSE route is the connection closing.
+        self._consumers[session_id] = self._consumers.get(session_id, 0) + 1
+        try:
+            while True:
+                # Re-anchor to the current session entry in case it was evicted
+                # and re-created since the previous iteration.
+                if session_id not in self._sessions:
+                    self.get_or_create(session_id)
+                queue = self._sessions[session_id]["queue"]
+                try:
+                    command = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    self._touch(session_id)
+                    yield command
+                except asyncio.TimeoutError:
+                    # Keep the session alive while the SSE connection is open,
+                    # even when the canvas hasn't changed (no state uploads).
+                    self._touch(session_id)
+                    yield {"type": "ping"}
+        finally:
+            remaining = self._consumers.get(session_id, 0) - 1
+            if remaining > 0:
+                self._consumers[session_id] = remaining
+            else:
+                self._consumers.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Maintenance

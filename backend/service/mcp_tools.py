@@ -96,16 +96,51 @@ _DEFAULT_SESSION_NAME = "Untitled session"
 # session contract version (docs/MCP_SESSION_LIFECYCLE_CONTRACT.md §9).
 _PUSH_REPORT_KEY = "visualization_push"
 
-# Said when a push reached no consumer. It names the stored-state tool as the
-# alternative because a push writes nothing: an agent that retries the same push
-# gets the same silence.
-_UNDELIVERED_PUSH_WARNING = (
-    "Nothing received this push: no browser is holding the session's legacy "
-    "push channel, and its op stream has no connected client. A push is not "
-    "stored, so this left no trace — use add_nodes_to_session to change what "
-    "the session holds, or connect_to_visualization_session to check for a "
-    "live canvas before pushing."
+# Appended to every undelivered-push warning: a push writes nothing, so an
+# agent that simply retries it gets the same silence.
+_UNDELIVERED_PUSH_REMEDY = (
+    " A push is not stored, so this left no trace — use add_nodes_to_session to "
+    "change what the session holds, or connect_to_visualization_session to "
+    "check a session before pushing."
 )
+
+
+def _undelivered_push_warning(
+    registry_enqueued: bool,
+    registry_consumer: bool,
+    hub_published: bool,
+    connected_clients: int,
+) -> str:
+    """Say why nothing received a push, reading the reason off the actual state.
+
+    Several distinct states leave a push undelivered and they do not share a
+    remedy, so one fixed sentence would be a false statement in some of them: a
+    stale queue entry with nothing draining it is not the same situation as
+    nobody having opened the session, and neither is a client connected to a
+    session the store does not hold.
+    """
+    reasons = []
+    if registry_enqueued and not registry_consumer:
+        reasons.append(
+            "the session's legacy push channel has a registry entry but nothing "
+            "draining it (an entry outlives the browser that created it, and is "
+            "also created without one)"
+        )
+    else:
+        reasons.append("no browser is holding the session's legacy push channel")
+    if connected_clients > 0 and not hub_published:
+        reasons.append(
+            "a client is connected to its op stream, but the session has no "
+            "stored state, so the hub had nothing to publish to"
+        )
+    else:
+        reasons.append("its op stream has no connected client")
+    return (
+        "Nothing received this push: "
+        + "; ".join(reasons)
+        + "."
+        + _UNDELIVERED_PUSH_REMEDY
+    )
 
 
 def register_mcp_tools(
@@ -307,8 +342,9 @@ def register_mcp_tools(
                 is pushed live to the connected browser window via SSE. The
                 result then carries a ``visualization_push`` report saying
                 whether anything received it (``delivered``, plus
-                ``registry_enqueued`` / ``hub_published`` /
-                ``connected_clients`` and a ``warning`` when nothing did). A
+                ``registry_enqueued`` / ``registry_consumer`` /
+                ``hub_published`` / ``connected_clients`` and a ``warning``
+                when nothing did). A
                 push writes no session state, so an undelivered one leaves no
                 trace to read back — check this field rather than assuming the
                 canvas changed.
@@ -370,8 +406,9 @@ def register_mcp_tools(
                 is pushed live to the connected browser window via SSE. The
                 result then carries a ``visualization_push`` report saying
                 whether anything received it (``delivered``, plus
-                ``registry_enqueued`` / ``hub_published`` /
-                ``connected_clients`` and a ``warning`` when nothing did). A
+                ``registry_enqueued`` / ``registry_consumer`` /
+                ``hub_published`` / ``connected_clients`` and a ``warning``
+                when nothing did). A
                 push writes no session state, so an undelivered one leaves no
                 trace to read back — check this field rather than assuming the
                 canvas changed.
@@ -874,8 +911,9 @@ def register_mcp_tools(
                 is loaded live in the connected browser window via SSE. The
                 result then carries a ``visualization_push`` report saying
                 whether anything received it (``delivered``, plus
-                ``registry_enqueued`` / ``hub_published`` /
-                ``connected_clients`` and a ``warning`` when nothing did). A
+                ``registry_enqueued`` / ``registry_consumer`` /
+                ``hub_published`` / ``connected_clients`` and a ``warning``
+                when nothing did). A
                 push writes no session state, so an undelivered one leaves no
                 trace to read back — check this field rather than assuming the
                 canvas changed.
@@ -4452,24 +4490,29 @@ def _push_to_session(
     Returns ``None`` when no *session_id* was given (no push was attempted),
     otherwise a delivery report:
 
-    - ``registry_enqueued`` — the command was queued for a browser holding the
-      session's legacy push channel.
+    - ``registry_enqueued`` — the command was queued on the session's legacy push
+      channel. On its own this says only that a registry entry exists, which is
+      not evidence of a reader: an entry outlives the browser that created it
+      (nothing removes it when the SSE connection closes, and every push
+      refreshes its TTL, so it is never reclaimed while being pushed to) and is
+      also created with no browser involved, by ``mint_trigger_token`` and the
+      session auto-add tools.
+    - ``registry_consumer`` — something is currently draining that queue, which
+      is the half that makes the legacy path a delivery.
     - ``hub_published`` — the command was published to the shared-session hub.
       The hub accepts on the session's *stored state* alone, so this can be true
-      with nobody listening; it is not delivery on its own.
+      with nobody listening; it is not delivery on its own either.
     - ``connected_clients`` — clients reporting presence on the session's op
       stream, the count ``connect_to_visualization_session`` reports.
-    - ``delivered`` — a consumer path accepted the command: the registry queued
-      it, or the hub published it with at least one connected client. A push
-      leaves no trace in the session's stored state (only
-      ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores
-      this cannot tell afterwards whether anything received it.
+    - ``delivered`` — a live consumer took the command: the legacy queue accepted
+      it *and* something is draining that queue, or the hub published it with at
+      least one connected client. A push leaves no trace in the session's stored
+      state (only ``add_nodes_to_session`` writes ``node_refs``), so a caller
+      that ignores this cannot tell afterwards whether anything received it.
     - ``warning`` — why nothing received it, or ``None`` when it was delivered.
 
-    ``delivered`` says a consumer path took the command, not that a canvas has
-    rendered it: a browser that dropped its legacy stream keeps its registry
-    entry until TTL eviction, so the queue can still accept a command nobody
-    drains.
+    ``delivered`` means a consumer was attached when the command was enqueued,
+    not that the canvas has finished applying it.
     """
     if not session_id:
         return None
@@ -4487,10 +4530,16 @@ def _push_to_session(
         "command_id": secrets.token_hex(8),
     }
     registry_enqueued = False
+    registry_consumer = False
     if session_registry and session_registry.is_valid_session_id(session_id):
         registry_enqueued = bool(
             session_registry.push_command_sync(session_id, command)
         )
+        # A registry that cannot answer this cannot support a delivery claim, so
+        # the verdict falls back to the hub rather than assuming a reader.
+        has_consumer = getattr(session_registry, "has_consumer", None)
+        if callable(has_consumer):
+            registry_consumer = bool(has_consumer(session_id))
     hub_published = False
     connected_clients = 0
     if session_manager is not None:
@@ -4503,11 +4552,23 @@ def _push_to_session(
             connected_clients = int(session_manager.connected_count(session_id))
         except Exception:
             connected_clients = 0
-    delivered = registry_enqueued or (hub_published and connected_clients > 0)
+    delivered = (registry_enqueued and registry_consumer) or (
+        hub_published and connected_clients > 0
+    )
     return {
         "delivered": delivered,
         "registry_enqueued": registry_enqueued,
+        "registry_consumer": registry_consumer,
         "hub_published": hub_published,
         "connected_clients": connected_clients,
-        "warning": None if delivered else _UNDELIVERED_PUSH_WARNING,
+        "warning": (
+            None
+            if delivered
+            else _undelivered_push_warning(
+                registry_enqueued,
+                registry_consumer,
+                hub_published,
+                connected_clients,
+            )
+        ),
     }

@@ -894,22 +894,36 @@ field is additive and does not bump the session contract version (§9):
 
 | Field | Meaning |
 |---|---|
-| `delivered` | A consumer path took the command: the registry queued it, or the hub published it with at least one connected client. |
-| `registry_enqueued` | Queued for a browser holding the session's legacy push channel. |
-| `hub_published` | Published to the op-stream hub. The hub accepts on stored state alone, so this is true with nobody listening — on its own it is not delivery. |
+| `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it with at least one connected client. |
+| `registry_enqueued` | The command was queued on the session's legacy push channel. On its own this means only that a registry entry exists — see below. |
+| `registry_consumer` | Something is currently draining that queue. This is the half that makes the legacy path a delivery. |
+| `hub_published` | Published to the op-stream hub. The hub accepts on stored state alone, so this is true with nobody listening — on its own it is not delivery either. |
 | `connected_clients` | The presence count above, read at push time. |
-| `warning` | Why nothing received it; `null` when it was delivered. |
+| `warning` | Why nothing received it, naming the state that made it so; `null` when it was delivered. |
 
 This matters because a push writes no session state — only
 `add_nodes_to_session` writes `node_refs` — so an undelivered push leaves no
 trace at all, and reading the session back afterwards cannot tell it apart from
 a push that never happened. A routine that refreshes a canvas on a schedule has
 to check `delivered` (or ask `connect_to_visualization_session` first) instead of
-reading a successful search as a refreshed canvas. `delivered` says a consumer
-path accepted the command, not that a canvas rendered it: a browser that dropped
-its legacy stream keeps its registry entry until TTL eviction, so the queue can
-accept a command nobody drains. `clear_visualization` has nothing to report — it
-refuses up front instead.
+reading a successful search as a refreshed canvas.
+
+**Why an entry in the push registry is not a consumer.** A registry entry is
+created by `get_or_create`, including by `mint_trigger_token` and the session
+auto-add tools with no browser involved. Nothing removes it when the SSE
+connection closes, and `push_command_sync` refreshes `last_seen` on every push
+while `cleanup_stale` keys on `last_seen` — so a session that is being pushed to
+is *never* TTL-evicted, and an entry outlives the browser that created it
+indefinitely. `registry_enqueued` alone therefore cannot support a delivery
+claim: without the consumer ref-count (`SessionRegistry.has_consumer`, held for
+as long as `stream()` is draining the queue) a nightly push into a session whose
+tab closed months ago would report `delivered: true` forever. `clear_visualization`
+gates on `session_exists` and so still has that looseness; it is a narrower gate
+than it reads as.
+
+`delivered` means a consumer was attached when the command was enqueued, not
+that the canvas has finished applying it. `clear_visualization` has nothing to
+report — it refuses up front instead.
 
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent
