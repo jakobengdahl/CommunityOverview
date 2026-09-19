@@ -852,7 +852,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `save_view` | Save a named view (creates SavedView node) |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_visualization_session_state` | Read a session's visible and selected node ids |
-| `clear_visualization` | Clear the canvas in the browsers displaying a session (requires a browser holding the legacy push channel open) |
+| `clear_visualization` | Clear the canvas in the browsers displaying a session (requires a registry entry for the session — a narrower gate than "a browser is watching", see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
@@ -886,6 +886,71 @@ Two independent things can be true of a session id, and
 
 A session id that is in neither the store nor the registry is reported as not
 found, by both read tools.
+
+**A push reports its own delivery.** `search_graph`, `get_related_nodes` and
+`get_saved_view` add a `visualization_delivery` object to their result whenever a
+`visualization_session_id` was given. Nothing is added when it was not, so the
+field is additive and does not bump the session contract version (§9):
+
+| Field | Meaning |
+|---|---|
+| `requested` | Whether a push was attempted at all. |
+| `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it **and** at least one client is on the op stream. Neither half suffices alone. |
+| `status` | `"delivered"`, `"not_delivered"`, `"unknown"`, or `"not_requested"` when no session id was given. `"unknown"` is the one case where `delivered: false` does **not** mean the push failed — see below. |
+| `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
+| `warning` | Present only when undelivered, naming the state that made it so. |
+
+This matters because a push writes no session state — only
+`add_nodes_to_session` writes `node_refs` — so an undelivered push leaves no
+trace at all, and reading the session back afterwards cannot tell it apart from
+a push that never happened. A routine that refreshes a canvas on a schedule has
+to check `delivered` instead of reading a successful search as a refreshed
+canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
+verdict for that check: it resolves a session through `session_exists`, so it
+reports a bare registry entry as a reachable canvas — the same false positive
+described below. Its `connected_clients` count is sound; its "a browser is
+holding its legacy push channel open" line is not.
+
+`live_consumers` can be non-zero while `delivered` is false: a client that joined
+a session the store does not hold is genuinely connected, but `push_command`
+publishes only for a stored session, so nothing was sent to it. The `warning`
+names which state applies, and each failure gets its own clause rather than
+borrowing one, because the two hub calls fail independently and do not mean the
+same thing:
+
+- **The publish raised.** Nothing reached the hub at all. Knowable, and reported
+  as such — not as "the session has no stored state", which is a different state
+  with the same two falsy booleans.
+- **The publish succeeded but the presence count could not be read.** The command
+  *did* go to the hub's subscribers; only their number is unknown. This is the one
+  case where `delivered: false` does not mean the push failed, so `status` is
+  `"unknown"` and the warning opens "It is not known whether anything received
+  this push". Calling it a non-delivery would deny a push that may well have
+  landed — the mirror of the false positive this report exists to remove.
+
+`live_consumers` is a sum across both channels, so one browser can account for
+two during a page load: the frontend holds the legacy `EventSource` until the op
+stream is ready. Read it as "consumer connections that would receive this
+command", not as a count of people watching.
+
+**Why an entry in the push registry is not a consumer.** A registry entry is
+created by `get_or_create`, including by `mint_trigger_token` and the session
+auto-add tools with no browser involved. Nothing removes it when the SSE
+connection closes, and `push_command_sync` refreshes `last_seen` on every push
+while `cleanup_stale` keys on `last_seen` — so a session that is being pushed to
+is *never* TTL-evicted, and an entry outlives the browser that created it
+indefinitely. "The queue accepted the command" therefore cannot support a
+delivery claim on its own: without the consumer ref-count
+(`SessionRegistry.consumer_count` / `has_consumer`, held for as long as
+`stream()` is draining the queue) a nightly push into a session whose tab closed
+months ago would report `delivered: true` forever, and would inflate
+`live_consumers` with a reader that is not there. `clear_visualization` gates on
+`session_exists` and so still has that looseness; it is a narrower gate than it
+reads as.
+
+`delivered` means a consumer was attached when the command was enqueued, not
+that the canvas has finished applying it. `clear_visualization` has nothing to
+report — it refuses up front instead.
 
 `get_visualization_layout` / `apply_visualization_layout` operate on a shared
 visualization session (the `SessionManager` op protocol), so an AI agent

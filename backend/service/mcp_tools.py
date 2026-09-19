@@ -92,6 +92,92 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
+# Appended to every undelivered-push warning: a push writes nothing, so an
+# agent that simply retries it gets the same silence. It deliberately does NOT
+# send the caller to connect_to_visualization_session as the pre-push check:
+# that tool's reachability verdict counts a bare registry entry, which is the
+# false positive this report exists to remove.
+_UNDELIVERED_PUSH_REMEDY = (
+    " A push is not stored, so this left no trace — use add_nodes_to_session to "
+    "change what the session holds. Trust this report rather than "
+    "connect_to_visualization_session's reachability line, which counts a "
+    "registry entry that outlives the browser that created it; its "
+    "connected_clients count is sound."
+)
+
+
+def _undelivered_push_warning(
+    *,
+    registry_configured: bool,
+    legacy_enqueued: bool,
+    legacy_consumers: int,
+    hub_configured: bool,
+    hub_publish_failed: bool,
+    hub_presence_read: bool,
+    hub_published: bool,
+    hub_clients: int,
+    outcome_unknown: bool,
+) -> str:
+    """Say why nothing received a push, reading the reason off the actual state.
+
+    Several distinct states leave a push undelivered and they do not share a
+    remedy, so one fixed sentence would be a false statement in some of them: a
+    stale queue entry with nothing draining it is not the same situation as
+    nobody having opened the session, and neither is a client connected to a
+    session the store does not hold.
+
+    That cuts both ways, which is why the two hub failures are told apart rather
+    than sharing a clause. A publish that raised means nothing reached the hub at
+    all — knowable, and not the same as an empty session. A publish that
+    *succeeded* while the presence count could not be read means the command did
+    go to the hub's subscribers and only their number is unknown; calling that
+    "nothing received this push" would deny a delivery that may well have
+    happened, so the whole sentence switches to the unknown form instead.
+    """
+    if not registry_configured:
+        legacy_reason = "no legacy push channel is configured"
+    elif legacy_enqueued and legacy_consumers == 0:
+        legacy_reason = (
+            "the session's legacy push channel has a registry entry but nothing "
+            "draining it (an entry outlives the browser that created it, and is "
+            "also created without one)"
+        )
+    else:
+        legacy_reason = "no browser is holding the session's legacy push channel"
+
+    if not hub_configured:
+        hub_reason = "no shared-session hub is configured"
+    elif hub_publish_failed:
+        hub_reason = (
+            "the publish to the shared-session hub failed, so nothing was "
+            "published there"
+        )
+    elif hub_published and not hub_presence_read:
+        # Before the clauses below, which would read the unreadable count as zero.
+        hub_reason = (
+            "the command was published to the shared-session hub, but its "
+            "presence count could not be read, so whether a client received it "
+            "is unknown"
+        )
+    elif hub_clients > 0 and not hub_published:
+        hub_reason = (
+            "a client is connected to its op stream, but the session has no "
+            "stored state, so the hub had nothing to publish to"
+        )
+    elif hub_clients == 0:
+        hub_reason = "its op stream has no connected client"
+    else:  # pragma: no cover - published to a connected client is a delivery
+        hub_reason = "the shared-session hub did not deliver it"
+
+    prefix = (
+        "It is not known whether anything received this push: "
+        if outcome_unknown
+        else "Nothing received this push: "
+    )
+    return (
+        prefix + "; ".join([legacy_reason, hub_reason]) + "." + _UNDELIVERED_PUSH_REMEDY
+    )
+
 
 def register_mcp_tools(
     mcp,
@@ -120,6 +206,20 @@ def register_mcp_tools(
     tools_map = {}
 
     def _push(session_id, tool_name, result):
+        """Push *result*, and report on *result* whether anything received it.
+
+        The three read tools return the service payload verbatim, so without
+        this an agent cannot tell a push that landed on a canvas from one that
+        went nowhere: a push writes no session state, so there is nothing to
+        read back either.
+
+        What keeps this report out of what the canvas receives is the copy
+        ``_push_to_session`` takes (``command_result = dict(result)``), not the
+        ordering here: both delivery paths hand the command over asynchronously
+        — the legacy queue via ``loop.call_soon``, the hub by passing the object
+        to subscribers — so a later mutation of a shared ``result`` would still
+        be visible to them. Do not remove that copy.
+        """
         delivery = _push_to_session(
             session_registry, session_id, tool_name, result, session_manager
         )
@@ -277,10 +377,17 @@ def register_mcp_tools(
                 ``semantic=True``. Applies to the local graph; federated search
                 stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE
+                is pushed live to the connected browser window via SSE. The
+                result then carries a ``visualization_delivery`` report saying
+                whether anything actually received it (``delivered``,
+                ``status``, ``live_consumers``, and a ``warning`` naming the
+                state when nothing did). A push writes no session state, so an
+                undelivered one leaves no trace to read back — check this field
+                rather than assuming the canvas changed.
 
         Returns:
-            Dict with matching nodes and edges connecting them
+            Dict with matching nodes and edges connecting them, and
+            ``visualization_delivery`` when a session id was given
         """
         result = service.search_graph(
             query=query,
@@ -332,10 +439,17 @@ def register_mcp_tools(
             include_archived: When False (default) archived edges are not traversed
                 and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE
+                is pushed live to the connected browser window via SSE. The
+                result then carries a ``visualization_delivery`` report saying
+                whether anything actually received it (``delivered``,
+                ``status``, ``live_consumers``, and a ``warning`` naming the
+                state when nothing did). A push writes no session state, so an
+                undelivered one leaves no trace to read back — check this field
+                rather than assuming the canvas changed.
 
         Returns:
-            Dict with nodes and edges
+            Dict with nodes and edges, and ``visualization_delivery`` when a
+            session id was given
         """
         result = service.get_related_nodes(
             node_id=node_id,
@@ -828,10 +942,18 @@ def register_mcp_tools(
         Args:
             name: Name of the saved view
             visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded live in the connected browser window via SSE
+                is loaded live in the connected browser window via SSE. The
+                result then carries a ``visualization_delivery`` report saying
+                whether anything actually received it (``delivered``,
+                ``status``, ``live_consumers``, and a ``warning`` naming the
+                state when nothing did). A push writes no session state, so an
+                undelivered one leaves no trace to read back — check this field
+                rather than assuming the canvas changed.
 
         Returns:
-            The nodes and edges to display in the visualization, with position and hidden node data
+            The nodes and edges to display in the visualization, with position
+            and hidden node data, and ``visualization_delivery`` when a session
+            id was given
         """
         result = service.get_saved_view(name)
         _push(visualization_session_id, "get_saved_view", result)
@@ -4396,6 +4518,36 @@ def _push_to_session(
     The command goes to the legacy single-consumer registry (current frontend)
     and, when a *session_manager* is supplied, is also broadcast to the new
     shared-session hub so every connected collaborator receives it (design 3.8).
+
+    Returns a ``visualization_delivery`` report:
+
+    - ``requested`` — whether a push was attempted at all.
+    - ``delivered`` — a live consumer took the command: the legacy queue accepted
+      it *and* something is draining that queue, or the hub published it with at
+      least one connected client. Neither half suffices alone. A queue entry is
+      not a reader: it outlives the browser that created it (nothing removes it
+      when the SSE connection closes, and every push refreshes its TTL, so it is
+      never reclaimed while being pushed to) and is also created with no browser
+      involved, by ``mint_trigger_token`` and the session auto-add tools. The hub
+      likewise accepts a publish on the session's *stored state* alone, so it can
+      succeed with nobody listening.
+    - ``status`` — ``"delivered"``, ``"not_delivered"``, ``"unknown"``, or
+      ``"not_requested"`` when no session id was given. ``"unknown"`` means the
+      command was published to the hub but its presence count could not be read,
+      so its subscribers may well have received it: treat it as "not confirmed",
+      not as a failure, and do not retry blindly.
+    - ``live_consumers`` — consumers actually attached to the session: those
+      draining the legacy queue plus the clients reporting presence on the op
+      stream (the count ``connect_to_visualization_session`` returns). A queue
+      entry with nothing draining it counts for nothing here.
+    - ``warning`` — present only when undelivered, naming the state that made it
+      so.
+
+    A push leaves no trace in the session's stored state (only
+    ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores this
+    report cannot tell afterwards whether anything received the push.
+    ``delivered`` means a consumer was attached when the command was enqueued,
+    not that the canvas has finished applying it.
     """
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}
@@ -4412,29 +4564,67 @@ def _push_to_session(
         "result": command_result,
         "command_id": secrets.token_hex(8),
     }
-    legacy_delivered = False
-    shared_delivered = False
-    live_consumers = 0
+    legacy_enqueued = False
+    legacy_consumers = 0
     if session_registry and session_registry.is_valid_session_id(session_id):
-        legacy_delivered = bool(session_registry.push_command_sync(session_id, command))
+        legacy_enqueued = bool(session_registry.push_command_sync(session_id, command))
+        # A registry that cannot report its consumers cannot support a delivery
+        # claim, so the verdict falls back to the hub rather than assuming a
+        # reader that may not be there.
+        counter = getattr(session_registry, "consumer_count", None)
+        if callable(counter):
+            legacy_consumers = max(0, int(counter(session_id)))
+    hub_published = False
+    hub_clients = 0
+    # The two hub calls fail independently and mean different things, so they are
+    # tracked apart. Collapsing them loses the distinction between "nothing
+    # reached the hub" and "the hub took it but we cannot see who was listening",
+    # and the second of those must not be reported as a non-delivery.
+    hub_publish_failed = False
+    hub_presence_read = True
     if session_manager is not None:
         try:
-            live_consumers = max(0, int(session_manager.connected_count(session_id)))
-            shared_pushed = bool(session_manager.push_command(session_id, command))
-            shared_delivered = live_consumers > 0 and shared_pushed
+            hub_clients = max(0, int(session_manager.connected_count(session_id)))
+        except Exception:
+            hub_clients = 0
+            hub_presence_read = False
+        try:
+            hub_published = bool(session_manager.push_command(session_id, command))
         except Exception:
             # Best-effort mirror to the hub; never break the legacy push path.
-            pass
-    delivered = legacy_delivered or shared_delivered
+            hub_published = False
+            hub_publish_failed = True
+    # Each path needs both halves: a queue that took the command AND something
+    # draining it, or a publish that happened AND a client on the op stream.
+    delivered = (legacy_enqueued and legacy_consumers > 0) or (
+        hub_published and hub_clients > 0
+    )
+    # Published to the hub, but the presence count was unreadable: its subscribers
+    # did receive the command and only their number is unknown. Reporting that as
+    # a non-delivery would deny a push that landed, so it is reported as unknown.
+    outcome_unknown = not delivered and hub_published and not hub_presence_read
+    if delivered:
+        status = "delivered"
+    elif outcome_unknown:
+        status = "unknown"
+    else:
+        status = "not_delivered"
     delivery = {
         "requested": True,
         "delivered": delivered,
-        "status": "delivered" if delivered else "not_delivered",
-        "live_consumers": live_consumers + (1 if legacy_delivered else 0),
+        "status": status,
+        "live_consumers": legacy_consumers + hub_clients,
     }
     if not delivered:
-        delivery["warning"] = (
-            "No live visualization consumer was detected for this session; "
-            "the tool result was returned here but may not have appeared in a browser."
+        delivery["warning"] = _undelivered_push_warning(
+            registry_configured=bool(session_registry),
+            legacy_enqueued=legacy_enqueued,
+            legacy_consumers=legacy_consumers,
+            hub_configured=session_manager is not None,
+            hub_publish_failed=hub_publish_failed,
+            hub_presence_read=hub_presence_read,
+            hub_published=hub_published,
+            hub_clients=hub_clients,
+            outcome_unknown=outcome_unknown,
         )
     return delivery
