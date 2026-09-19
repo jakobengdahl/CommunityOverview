@@ -19,7 +19,6 @@ function seedDirtySessionState() {
     editingNode: { id: 'a2', name: 'Node A2' },
     editingEdge: { id: 'e1', source: 'a1', target: 'a2', type: 'RELATES_TO' },
     deleteDialog: { nodeId: 'a1', nodeName: 'Node A1', isMultiple: false },
-    contextMenu: { x: 1, y: 2, nodeId: 'a1' },
     selectedNodeId: 'a1',
     selectedGraphNodes: [{ id: 'a1', name: 'Node A1' }],
   });
@@ -49,7 +48,6 @@ describe('graphStore.resetSessionScopedState', () => {
     expect(state.activeExperts).toEqual([]);
     expect(state.detailNode).toBeNull();
     expect(state.editingNode).toBeNull();
-    expect(state.contextMenu).toBeNull();
     expect(state.selectedNodeId).toBeNull();
     expect(state.selectedGraphNodes).toEqual([]);
   });
@@ -188,7 +186,6 @@ describe('graphStore.clearVisualization', () => {
     expect(s.editingNode).toBeNull();
     expect(s.editingEdge).toBeNull();
     expect(s.deleteDialog).toBeNull();
-    expect(s.contextMenu).toBeNull();
   });
 
   // A clear is not a session switch: the assistant conversation and the experts

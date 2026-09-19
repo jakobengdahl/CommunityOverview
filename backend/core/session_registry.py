@@ -142,8 +142,8 @@ class SessionRegistry:
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
 
-    def has_consumer(self, session_id: str) -> bool:
-        """True while something is draining this session's queue.
+    def consumer_count(self, session_id: str) -> int:
+        """How many consumers are currently draining this session's queue.
 
         A registry *entry* answers a different question and must not be read as
         this one. An entry is created by ``get_or_create`` — including from
@@ -154,7 +154,11 @@ class SessionRegistry:
         that created it indefinitely, which is why "a command was enqueued" is
         not evidence that anything will read it.
         """
-        return self._consumers.get(session_id, 0) > 0
+        return self._consumers.get(session_id, 0)
+
+    def has_consumer(self, session_id: str) -> bool:
+        """True while something is draining this session's queue."""
+        return self.consumer_count(session_id) > 0
 
     # ------------------------------------------------------------------
     # Pulse-trigger tokens

@@ -888,18 +888,17 @@ A session id that is in neither the store nor the registry is reported as not
 found, by both read tools.
 
 **A push reports its own delivery.** `search_graph`, `get_related_nodes` and
-`get_saved_view` add a `visualization_push` object to their result whenever a
+`get_saved_view` add a `visualization_delivery` object to their result whenever a
 `visualization_session_id` was given. Nothing is added when it was not, so the
 field is additive and does not bump the session contract version (§9):
 
 | Field | Meaning |
 |---|---|
-| `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it with at least one connected client. |
-| `registry_enqueued` | The command was queued on the session's legacy push channel. On its own this means only that a registry entry exists — see below. |
-| `registry_consumer` | Something is currently draining that queue. This is the half that makes the legacy path a delivery. |
-| `hub_published` | Published to the op-stream hub. The hub accepts on stored state alone, so this is true with nobody listening — on its own it is not delivery either. |
-| `connected_clients` | The presence count above, read at push time. |
-| `warning` | Why nothing received it, naming the state that made it so; `null` when it was delivered. |
+| `requested` | Whether a push was attempted at all. |
+| `delivered` | A live consumer took the command: the legacy queue accepted it **and** something is draining that queue, or the hub published it **and** at least one client is on the op stream. Neither half suffices alone. |
+| `status` | `"delivered"`, `"not_delivered"`, or `"not_requested"` when no session id was given. |
+| `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
+| `warning` | Present only when undelivered, naming the state that made it so. |
 
 This matters because a push writes no session state — only
 `add_nodes_to_session` writes `node_refs` — so an undelivered push leaves no
@@ -908,18 +907,25 @@ a push that never happened. A routine that refreshes a canvas on a schedule has
 to check `delivered` (or ask `connect_to_visualization_session` first) instead of
 reading a successful search as a refreshed canvas.
 
+`live_consumers` can be non-zero while `delivered` is false: a client that joined
+a session the store does not hold is genuinely connected, but `push_command`
+publishes only for a stored session, so nothing was sent to it. The `warning`
+distinguishes that case from an empty session.
+
 **Why an entry in the push registry is not a consumer.** A registry entry is
 created by `get_or_create`, including by `mint_trigger_token` and the session
 auto-add tools with no browser involved. Nothing removes it when the SSE
 connection closes, and `push_command_sync` refreshes `last_seen` on every push
 while `cleanup_stale` keys on `last_seen` — so a session that is being pushed to
 is *never* TTL-evicted, and an entry outlives the browser that created it
-indefinitely. `registry_enqueued` alone therefore cannot support a delivery
-claim: without the consumer ref-count (`SessionRegistry.has_consumer`, held for
-as long as `stream()` is draining the queue) a nightly push into a session whose
-tab closed months ago would report `delivered: true` forever. `clear_visualization`
-gates on `session_exists` and so still has that looseness; it is a narrower gate
-than it reads as.
+indefinitely. "The queue accepted the command" therefore cannot support a
+delivery claim on its own: without the consumer ref-count
+(`SessionRegistry.consumer_count` / `has_consumer`, held for as long as
+`stream()` is draining the queue) a nightly push into a session whose tab closed
+months ago would report `delivered: true` forever, and would inflate
+`live_consumers` with a reader that is not there. `clear_visualization` gates on
+`session_exists` and so still has that looseness; it is a narrower gate than it
+reads as.
 
 `delivered` means a consumer was attached when the command was enqueued, not
 that the canvas has finished applying it. `clear_visualization` has nothing to

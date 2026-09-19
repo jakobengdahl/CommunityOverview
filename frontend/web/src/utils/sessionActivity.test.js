@@ -997,6 +997,32 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
 
+    it.each([
+      { name: '0 to null', before: { value: 0 }, after: { value: null } },
+      { name: '0 to cleared', before: { value: 0 }, after: {} },
+      { name: 'null to 0', before: { value: null }, after: { value: 0 } },
+      { name: 'cleared to 0', before: {}, after: { value: 0 } },
+    ])('reports a vote_dot value change from $name', ({ before, after }) => {
+      expect(
+        describeActivity(
+          record({
+            op: 'annotation_updated',
+            before: { type: 'vote_dot', ...before },
+            after: { type: 'vote_dot', ...after },
+          })
+        ).key
+      ).toBe('history.desc.annotation_updated_text');
+    });
+
+    it('keeps 0 equivalent to unset for non-vote_dot materialized defaults', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'note', z: 1, style: { opacity: null } },
+        after: { type: 'note', z: 1, style: { opacity: 0 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
     it('compares nested objects and arrays by value, not identity', () => {
       const same = record({
         op: 'annotation_updated',

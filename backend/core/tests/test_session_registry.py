@@ -302,7 +302,7 @@ class TestTriggerTokens:
 
 
 class TestConsumerRefCount:
-    """``has_consumer`` tracks something actually draining the queue.
+    """``consumer_count`` / ``has_consumer`` track something actually draining.
 
     An *entry* answers a different question: it is created by ``get_or_create``,
     nothing removes it when a connection closes, and every push refreshes its
@@ -312,6 +312,12 @@ class TestConsumerRefCount:
 
     @staticmethod
     async def _attach(reg, session_id, received):
+        """Start draining, and wait until THIS consumer has registered.
+
+        Waiting on ``has_consumer`` would return immediately when another
+        consumer is already attached, so the count is what has to move.
+        """
+        before = reg.consumer_count(session_id)
         gen = reg.stream(session_id)
 
         async def drain():
@@ -321,7 +327,7 @@ class TestConsumerRefCount:
 
         task = asyncio.create_task(drain())
         for _ in range(500):
-            if reg.has_consumer(session_id):
+            if reg.consumer_count(session_id) > before:
                 break
             await asyncio.sleep(0)
         return gen, task
@@ -340,9 +346,11 @@ class TestConsumerRefCount:
         reg.get_or_create("1234-5678")
         assert reg.session_exists("1234-5678") is True
         assert reg.has_consumer("1234-5678") is False
+        assert reg.consumer_count("1234-5678") == 0
 
     def test_unknown_session_has_no_consumer(self):
         assert SessionRegistry().has_consumer("1234-5678") is False
+        assert SessionRegistry().consumer_count("1234-5678") == 0
 
     @pytest.mark.asyncio
     async def test_streaming_registers_and_releases_the_consumer(self):
@@ -369,14 +377,17 @@ class TestConsumerRefCount:
         reg = SessionRegistry()
         first_gen, first_task = await self._attach(reg, "1234-5678", [])
         second_gen, second_task = await self._attach(reg, "1234-5678", [])
+        assert reg.consumer_count("1234-5678") == 2
 
         await self._detach(first_gen, first_task)
+        assert reg.consumer_count("1234-5678") == 1
         assert reg.has_consumer("1234-5678") is True, (
             "releasing one of two consumers must not clear the other"
         )
 
         await self._detach(second_gen, second_task)
         assert reg.has_consumer("1234-5678") is False
+        assert reg.consumer_count("1234-5678") == 0
 
     @pytest.mark.asyncio
     async def test_consumer_survives_ttl_eviction_of_its_entry(self):

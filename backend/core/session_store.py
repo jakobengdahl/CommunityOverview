@@ -932,7 +932,6 @@ class SessionStore:
                     "affected": {
                         "kind": "annotation",
                         "id": incoming_id,
-                        "fields": sorted(annotation.keys()),
                     },
                     "before": prior,
                     "after": existing,
@@ -956,7 +955,6 @@ class SessionStore:
                     "affected": {
                         "kind": "annotation",
                         "id": annotation["id"],
-                        "fields": None,
                     },
                     "before": None,
                     "after": annotation,
@@ -1023,7 +1021,6 @@ class SessionStore:
                 "affected": {
                     "kind": "annotation",
                     "id": target["id"],
-                    "fields": sorted(incoming.keys()),
                 },
                 "before": prior,
                 "after": target,
@@ -1043,7 +1040,7 @@ class SessionStore:
             applied["annotation_id"] = ann_id
             if removed is not None:
                 activity_kwargs = {
-                    "affected": {"kind": "annotation", "id": ann_id, "fields": None},
+                    "affected": {"kind": "annotation", "id": ann_id},
                     "before": removed,
                     "after": None,
                     "inverse_op": {"op": "annotation_created", "annotation": removed},

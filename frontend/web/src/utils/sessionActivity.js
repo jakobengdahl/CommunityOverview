@@ -51,23 +51,42 @@ function geometryOf(annotation) {
  * anything has been set on it. Every spelling of "unset" reads as one value,
  * so a producer writing `0` where another wrote nothing is not a change.
  */
-function isEmptyValue(value) {
-  if (value === undefined || value === null || value === false || value === '' || value === 0) {
+function isEmptyValue(value, { zeroIsEmpty = true } = {}) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === false ||
+    value === '' ||
+    (zeroIsEmpty && value === 0)
+  ) {
     return true;
   }
   if (Array.isArray(value)) return value.length === 0;
   return typeof value === 'object' && Object.keys(value).length === 0;
 }
 
-/** Deep value equality, with every "unset" spelling treated as one value. */
-function sameValue(a, b) {
+function sameValueOptions(path, annotationType) {
+  return {
+    zeroIsEmpty: !(annotationType === 'vote_dot' && path.length === 1 && path[0] === 'value'),
+  };
+}
+
+/**
+ * Deep value equality, with every "unset" spelling treated as one value.
+ * `vote_dot.value` is the exception: 0 is a real vote value there, not an
+ * omitted default.
+ */
+function sameValue(a, b, path = [], annotationType) {
+  const options = sameValueOptions(path, annotationType);
   if (a === b) return true;
-  if (isEmptyValue(a) || isEmptyValue(b)) return isEmptyValue(a) && isEmptyValue(b);
+  if (isEmptyValue(a, options) || isEmptyValue(b, options)) {
+    return isEmptyValue(a, options) && isEmptyValue(b, options);
+  }
   if (typeof a !== 'object' || typeof b !== 'object') return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const key of keys) {
-    if (!sameValue(a[key], b[key])) return false;
+    if (!sameValue(a[key], b[key], path.concat(key), annotationType)) return false;
   }
   return true;
 }
@@ -189,9 +208,17 @@ function browserWriteBack(annotation) {
  * fails the second test precisely because it lands somewhere the round trip
  * would not have.
  */
-function userChanged(before, after, normalised) {
-  if (sameValue(before, after)) return false;
-  return !sameValue(after, normalised);
+function userChanged(before, after, normalised, path = [], annotationType) {
+  if (sameValue(before, after, path, annotationType)) return false;
+  if (
+    annotationType === 'vote_dot' &&
+    path.length === 1 &&
+    path[0] === 'value' &&
+    (before === 0 || after === 0)
+  ) {
+    return true;
+  }
+  return !sameValue(after, normalised, path, annotationType);
 }
 
 /**
@@ -241,9 +268,12 @@ function changedFields(before, after, normalised) {
   if (!before || typeof before !== 'object') return null;
   if (!after || typeof after !== 'object') return null;
   const changed = new Set();
+  const annotationType = before.type || before.kind || after.type || after.kind;
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (BOOKKEEPING_FIELDS.has(key)) continue;
-    if (userChanged(before[key], after[key], normalised[key])) changed.add(key);
+    if (userChanged(before[key], after[key], normalised[key], [key], annotationType)) {
+      changed.add(key);
+    }
   }
   return changed;
 }

@@ -46,14 +46,8 @@ from backend.service import GraphService, register_mcp_tools
 # "nothing knows this id" case is not confused with a formatting rejection.
 UNKNOWN_SESSION_ID = "9999-8888-7777-6666"
 
-REPORT_KEYS = {
-    "delivered",
-    "registry_enqueued",
-    "registry_consumer",
-    "hub_published",
-    "connected_clients",
-    "warning",
-}
+DELIVERED_KEYS = {"requested", "delivered", "status", "live_consumers"}
+UNDELIVERED_KEYS = DELIVERED_KEYS | {"warning"}
 
 
 def _wire(tmp_path, *, with_registry=True, with_manager=True, session_manager=None):
@@ -92,6 +86,10 @@ def _new_session(tools):
 
 def _search(tools, session_id):
     return tools["search_graph"](query="Alpha", visualization_session_id=session_id)
+
+
+def _delivery(tools, session_id):
+    return _search(tools, session_id)["visualization_delivery"]
 
 
 async def _settle(predicate, turns=500):
@@ -163,14 +161,14 @@ def test_stored_session_with_no_consumer_reports_undelivered(wired):
 
     result = _search(tools, session_id)
 
-    push = result["visualization_push"]
-    assert push["delivered"] is False
-    assert push["hub_published"] is True
-    assert push["connected_clients"] == 0
-    assert push["registry_enqueued"] is False
-    assert push["registry_consumer"] is False
-    assert push["warning"]
-    assert "add_nodes_to_session" in push["warning"]
+    delivery = result["visualization_delivery"]
+    assert delivery["requested"] is True
+    assert delivery["delivered"] is False
+    assert delivery["status"] == "not_delivered"
+    assert delivery["live_consumers"] == 0
+    assert delivery["warning"]
+    assert "add_nodes_to_session" in delivery["warning"]
+    assert set(delivery) == UNDELIVERED_KEYS
     # The push left no trace to read back — the half of the defect that makes
     # the report the only way to notice.
     assert manager.get_session(session_id).state.get("node_refs", []) == []
@@ -182,14 +180,12 @@ def test_unknown_session_reports_undelivered_on_both_paths(wired):
     """An id nothing holds: neither path even accepted the command."""
     tools, _registry, _manager = wired
 
-    push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+    delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-    assert push["delivered"] is False
-    assert push["hub_published"] is False
-    assert push["registry_enqueued"] is False
-    assert push["registry_consumer"] is False
-    assert push["connected_clients"] == 0
-    assert push["warning"]
+    assert delivery["delivered"] is False
+    assert delivery["status"] == "not_delivered"
+    assert delivery["live_consumers"] == 0
+    assert delivery["warning"]
 
 
 def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
@@ -210,10 +206,11 @@ def test_undelivered_is_reported_for_every_pushing_read_tool(wired):
         ),
     }
     for tool_name, call in calls.items():
-        push = call().get("visualization_push")
-        assert push is not None, f"{tool_name} reported no delivery status"
-        assert push["delivered"] is False, tool_name
-        assert push["warning"], tool_name
+        delivery = call().get("visualization_delivery")
+        assert delivery is not None, f"{tool_name} reported no delivery status"
+        assert delivery["delivered"] is False, tool_name
+        assert delivery["live_consumers"] == 0, tool_name
+        assert delivery["warning"], tool_name
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +232,9 @@ async def test_the_nightly_push_stops_being_delivered_when_the_tab_closes(wired)
     session_id = _new_session(tools)
 
     async with _legacy_consumer(registry, session_id):
-        push = _search(tools, session_id)["visualization_push"]
-        assert push["delivered"] is True
-        assert push["registry_consumer"] is True
+        delivery = _delivery(tools, session_id)
+        assert delivery["delivered"] is True
+        assert delivery["live_consumers"] == 1
 
     # The tab is gone. The entry is not.
     assert registry.session_exists(session_id) is True
@@ -245,14 +242,16 @@ async def test_the_nightly_push_stops_being_delivered_when_the_tab_closes(wired)
     assert manager.connected_count(session_id) == 0
 
     for night in (1, 2):
-        push = _search(tools, session_id)["visualization_push"]
-        assert push["registry_enqueued"] is True, night
-        assert push["registry_consumer"] is False, night
-        assert push["delivered"] is False, night
-        assert push["warning"], night
+        delivery = _delivery(tools, session_id)
+        assert delivery["delivered"] is False, night
+        assert delivery["status"] == "not_delivered", night
+        # The stale entry must not be counted as a consumer.
+        assert delivery["live_consumers"] == 0, night
+        assert delivery["warning"], night
         # The warning must name the state that actually applies, not "no browser
         # is holding the channel" — there IS an entry, with nothing draining it.
-        assert "nothing" in push["warning"] and "draining" in push["warning"], night
+        assert "nothing" in delivery["warning"], night
+        assert "draining" in delivery["warning"], night
 
 
 @pytest.mark.asyncio
@@ -267,10 +266,9 @@ async def test_a_bare_registry_entry_alone_is_never_delivery(wired):
 
     registry.get_or_create(session_id)
 
-    push = _search(tools, session_id)["visualization_push"]
-    assert push["registry_enqueued"] is True
-    assert push["registry_consumer"] is False
-    assert push["delivered"] is False
+    delivery = _delivery(tools, session_id)
+    assert delivery["delivered"] is False
+    assert delivery["live_consumers"] == 0
 
 
 @pytest.mark.asyncio
@@ -302,10 +300,9 @@ async def test_a_session_auto_add_agent_does_not_make_a_push_delivered(tmp_path)
     assert created["success"] is True
     assert registry.session_exists(session_id) is True
 
-    push = _search(tools, session_id)["visualization_push"]
-    assert push["registry_enqueued"] is True
-    assert push["registry_consumer"] is False
-    assert push["delivered"] is False
+    delivery = _delivery(tools, session_id)
+    assert delivery["delivered"] is False
+    assert delivery["live_consumers"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +317,13 @@ async def test_legacy_consumer_reports_delivered_and_receives_the_command(wired)
     session_id = _new_session(tools)
 
     async with _legacy_consumer(registry, session_id) as received:
-        push = _search(tools, session_id)["visualization_push"]
+        delivery = _delivery(tools, session_id)
 
-        assert push["registry_enqueued"] is True
-        assert push["registry_consumer"] is True
-        assert push["delivered"] is True
-        assert push["warning"] is None
+        assert delivery["delivered"] is True
+        assert delivery["status"] == "delivered"
+        assert delivery["live_consumers"] == 1
+        assert "warning" not in delivery
+        assert set(delivery) == DELIVERED_KEYS
 
         assert await _settle(lambda: len(received) == 1)
         assert received[0]["tool"] == "search_graph"
@@ -342,7 +340,7 @@ async def test_delivery_report_is_not_fed_back_into_the_canvas_payload(wired):
         _search(tools, session_id)
 
         assert await _settle(lambda: len(received) == 1)
-        assert "visualization_push" not in received[0]["result"]
+        assert "visualization_delivery" not in received[0]["result"]
 
 
 @pytest.mark.asyncio
@@ -351,12 +349,11 @@ async def test_legacy_delivery_alone_is_enough_without_any_hub_session(tmp_path)
     tools, registry, _manager = _wire(tmp_path)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
-        push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        assert push["hub_published"] is False
-        assert push["registry_consumer"] is True
-        assert push["delivered"] is True
-        assert push["warning"] is None
+        assert delivery["delivered"] is True
+        assert delivery["live_consumers"] == 1
+        assert "warning" not in delivery
         assert await _settle(lambda: len(received) == 1)
 
 
@@ -371,17 +368,16 @@ def test_connected_hub_client_reports_delivered_and_receives_the_command(wired):
     session_id = _new_session(tools)
     subscription, _member = manager.connect(session_id, "client-1", "Tester")
     try:
-        push = _search(tools, session_id)["visualization_push"]
+        delivery = _delivery(tools, session_id)
 
-        assert push["hub_published"] is True
-        assert push["connected_clients"] == 1
-        assert push["registry_enqueued"] is False
-        assert push["delivered"] is True
-        assert push["warning"] is None
+        assert delivery["delivered"] is True
+        assert delivery["status"] == "delivered"
+        assert delivery["live_consumers"] == 1
+        assert "warning" not in delivery
 
         commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
         assert [c["command"]["tool"] for c in commands] == ["search_graph"]
-        assert "visualization_push" not in commands[0]["command"]["result"]
+        assert "visualization_delivery" not in commands[0]["command"]["result"]
     finally:
         manager.disconnect(session_id, "client-1", subscription)
 
@@ -395,13 +391,13 @@ def test_hub_delivery_stops_being_reported_when_the_client_leaves(wired):
     tools, _registry, manager = wired
     session_id = _new_session(tools)
     subscription, _member = manager.connect(session_id, "client-1", "Tester")
-    assert _search(tools, session_id)["visualization_push"]["delivered"] is True
+    assert _delivery(tools, session_id)["delivered"] is True
 
     manager.disconnect(session_id, "client-1", subscription)
 
-    push = _search(tools, session_id)["visualization_push"]
-    assert push["connected_clients"] == 0
-    assert push["delivered"] is False
+    delivery = _delivery(tools, session_id)
+    assert delivery["live_consumers"] == 0
+    assert delivery["delivered"] is False
 
 
 def test_presence_without_stored_state_is_not_delivery(wired):
@@ -410,19 +406,19 @@ def test_presence_without_stored_state_is_not_delivery(wired):
     ``SessionManager.connect`` registers presence and subscribes without
     materialising the session, while ``push_command`` publishes only for a
     session the store holds. So the hub publishes nothing while a client is
-    connected — reported undelivered, and the warning must say which state this
-    is rather than claiming nobody is connected.
+    connected: the client is real and counted, but it received nothing, so the
+    push is undelivered and the warning must say which state this is rather than
+    claiming nobody is connected.
     """
     tools, _registry, manager = wired
 
     subscription, _member = manager.connect(UNKNOWN_SESSION_ID, "client-1", "Tester")
     try:
-        push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        assert push["connected_clients"] == 1
-        assert push["hub_published"] is False
-        assert push["delivered"] is False
-        assert "no stored state" in push["warning"]
+        assert delivery["live_consumers"] == 1
+        assert delivery["delivered"] is False
+        assert "no stored state" in delivery["warning"]
         # Nothing but the join echo reached the subscriber.
         assert [e["type"] for e in _drain_hub(subscription)] == ["presence_joined"]
     finally:
@@ -430,7 +426,7 @@ def test_presence_without_stored_state_is_not_delivery(wired):
 
 
 def test_two_connections_from_one_client_count_as_one(wired):
-    """``connected_clients`` counts clients, not connections.
+    """``live_consumers`` counts clients, not connections, on the hub side.
 
     Pins the count against the same source ``connect_to_visualization_session``
     reports, so the two tools cannot drift apart on a fast reconnect.
@@ -440,13 +436,10 @@ def test_two_connections_from_one_client_count_as_one(wired):
     first, _ = manager.connect(session_id, "client-1", "Tester")
     second, _ = manager.connect(session_id, "client-1", "Tester")
     try:
-        assert (
-            _search(tools, session_id)["visualization_push"]["connected_clients"] == 1
-        )
+        assert _delivery(tools, session_id)["live_consumers"] == 1
         third, _ = manager.connect(session_id, "client-2", "Other")
         try:
-            report = _search(tools, session_id)["visualization_push"]
-            assert report["connected_clients"] == 2
+            assert _delivery(tools, session_id)["live_consumers"] == 2
         finally:
             manager.disconnect(session_id, "client-2", third)
     finally:
@@ -454,8 +447,24 @@ def test_two_connections_from_one_client_count_as_one(wired):
         manager.disconnect(session_id, "client-1", first)
 
 
+@pytest.mark.asyncio
+async def test_both_paths_attached_are_counted_together(wired):
+    """A browser on the legacy channel and a client on the op stream are two."""
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id):
+        subscription, _member = manager.connect(session_id, "client-1", "Tester")
+        try:
+            delivery = _delivery(tools, session_id)
+            assert delivery["delivered"] is True
+            assert delivery["live_consumers"] == 2
+        finally:
+            manager.disconnect(session_id, "client-1", subscription)
+
+
 # ---------------------------------------------------------------------------
-# Shape: additive only
+# Shape
 # ---------------------------------------------------------------------------
 
 
@@ -465,22 +474,21 @@ def test_no_session_id_leaves_the_result_shape_untouched(wired):
 
     result = tools["search_graph"](query="Alpha")
 
-    assert "visualization_push" not in result
+    assert "visualization_delivery" not in result
 
 
 def test_the_report_is_the_only_difference_a_session_id_makes(wired):
-    """Contract §9 additive change: one new key, every existing key untouched."""
+    """One added key; every existing key of the payload untouched."""
     tools, _registry, _manager = wired
     session_id = _new_session(tools)
 
     without = tools["search_graph"](query="Alpha")
     with_push = _search(tools, session_id)
 
-    assert set(with_push) - set(without) == {"visualization_push"}
+    assert set(with_push) - set(without) == {"visualization_delivery"}
     assert set(without) - set(with_push) == set()
     for key, value in without.items():
         assert with_push[key] == value, key
-    assert set(with_push["visualization_push"]) == REPORT_KEYS
 
 
 def test_clear_visualization_result_shape_is_unchanged(wired):
@@ -490,12 +498,12 @@ def test_clear_visualization_result_shape_is_unchanged(wired):
 
     refused = tools["clear_visualization"](visualization_session_id=session_id)
     assert refused["success"] is False
-    assert "visualization_push" not in refused
+    assert "visualization_delivery" not in refused
 
     registry.get_or_create(session_id)
     cleared = tools["clear_visualization"](visualization_session_id=session_id)
     assert cleared["success"] is True
-    assert "visualization_push" not in cleared
+    assert "visualization_delivery" not in cleared
 
 
 # ---------------------------------------------------------------------------
@@ -524,13 +532,11 @@ async def test_a_broken_hub_is_reported_not_raised(tmp_path):
     tools, registry, _manager = _wire(tmp_path, session_manager=broken)
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID) as received:
-        push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        assert push["hub_published"] is False
-        assert push["connected_clients"] == 0
         # The legacy path is independent and still delivers.
-        assert push["registry_consumer"] is True
-        assert push["delivered"] is True
+        assert delivery["delivered"] is True
+        assert delivery["live_consumers"] == 1
         assert await _settle(lambda: len(received) == 1)
 
 
@@ -541,12 +547,11 @@ def test_a_broken_hub_with_live_presence_is_not_reported_delivered(tmp_path):
 
     subscription, _member = manager.connect(UNKNOWN_SESSION_ID, "client-1", "Tester")
     try:
-        push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-        assert push["connected_clients"] == 1
-        assert push["hub_published"] is False
-        assert push["delivered"] is False
-        assert push["warning"]
+        assert delivery["live_consumers"] == 1
+        assert delivery["delivered"] is False
+        assert delivery["warning"]
     finally:
         manager.disconnect(UNKNOWN_SESSION_ID, "client-1", subscription)
 
@@ -557,12 +562,10 @@ def test_no_registry_configured_reports_the_hub_verdict_only(tmp_path):
     assert registry is None
     session_id = _new_session(tools)
 
-    push = _search(tools, session_id)["visualization_push"]
+    delivery = _delivery(tools, session_id)
 
-    assert push["registry_enqueued"] is False
-    assert push["registry_consumer"] is False
-    assert push["hub_published"] is True
-    assert push["delivered"] is False
+    assert delivery["delivered"] is False
+    assert delivery["live_consumers"] == 0
 
 
 @pytest.mark.asyncio
@@ -571,20 +574,19 @@ async def test_no_manager_configured_reports_the_legacy_verdict_only(tmp_path):
     tools, registry, manager = _wire(tmp_path, with_manager=False)
     assert manager is None
 
-    undelivered = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
-    assert undelivered["hub_published"] is False
-    assert undelivered["connected_clients"] == 0
+    undelivered = _delivery(tools, UNKNOWN_SESSION_ID)
     assert undelivered["delivered"] is False
+    assert undelivered["live_consumers"] == 0
 
     async with _legacy_consumer(registry, UNKNOWN_SESSION_ID):
-        push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
-        assert push["registry_consumer"] is True
-        assert push["delivered"] is True
-        assert push["warning"] is None
+        delivery = _delivery(tools, UNKNOWN_SESSION_ID)
+        assert delivery["delivered"] is True
+        assert delivery["live_consumers"] == 1
+        assert "warning" not in delivery
 
 
 def test_a_registry_that_cannot_report_consumers_makes_no_delivery_claim(tmp_path):
-    """An older or foreign registry without ``has_consumer`` must not be assumed live."""
+    """An older or foreign registry without the consumer count is not assumed live."""
 
     class _ConsumerBlindRegistry:
         def __init__(self):
@@ -610,10 +612,9 @@ def test_a_registry_that_cannot_report_consumers_makes_no_delivery_claim(tmp_pat
         nodes=[{"id": "alpha", "type": "Actor", "name": "Alpha"}], edges=[]
     )
 
-    push = _search(tools, UNKNOWN_SESSION_ID)["visualization_push"]
+    delivery = _delivery(tools, UNKNOWN_SESSION_ID)
 
-    assert push["registry_enqueued"] is True
-    assert push["registry_consumer"] is False
-    assert push["delivered"] is False
+    assert delivery["delivered"] is False
+    assert delivery["live_consumers"] == 0
     # The command was still handed over — only the claim about it is withheld.
     assert len(blind.commands) == 1
