@@ -407,7 +407,8 @@ def test_a_relative_path_entry_still_resolves_the_shimmed_tool(
     absolute PATH dirs), so this constructs one deliberately rather than
     relying on the environment to happen to have one."""
     real_tool = shutil.which("true")
-    assert real_tool is not None, "test needs a real 'true' binary on PATH"
+    if real_tool is None:
+        pytest.skip("true required")
 
     relative_dir = tmp_path / "relative-bin"
     relative_dir.mkdir()
