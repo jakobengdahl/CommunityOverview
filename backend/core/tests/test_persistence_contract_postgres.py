@@ -3874,9 +3874,7 @@ class TestPostgresStoreIdentity:
             with psycopg.connect(DSN, autocommit=True) as conn:
                 conn.execute(f'DROP SCHEMA IF EXISTS "{other}" CASCADE')
 
-    def test_a_saved_schema_refuses_a_different_graph_identity(
-        self, schema, backends
-    ):
+    def test_a_saved_schema_refuses_a_different_graph_identity(self, schema, backends):
         first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
         second = PostgresGraphPersistenceBackend(
             DSN, schema=schema, graph_name="second"

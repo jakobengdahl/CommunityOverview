@@ -309,6 +309,7 @@ class PostgresGraphPersistenceBackend:
         self.schema = schema
         self._graph_name = graph_name
         self._scope = scope
+        self._graph_identity_checked = False
         # Settled by the migration, before any statement that would name the
         # column is built. False means the store has no scope column - an
         # older store, or one an operator provisioned without it - and every
@@ -557,16 +558,18 @@ class PostgresGraphPersistenceBackend:
                     self._claim_or_check_graph_identity(conn)
             self._migrated = True
 
-    def _metadata_without_graph_identity(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def _metadata_without_graph_identity(
+        self, metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
         metadata = dict(metadata)
         metadata.pop(GRAPH_IDENTITY_KEY, None)
         return metadata
 
-    def _claim_or_check_graph_identity(self, conn) -> None:
+    def _claim_or_check_graph_identity(self, conn, *, force: bool = False) -> None:
+        if self._graph_identity_checked and not force:
+            return
         row = conn.execute(
-            sql.SQL("SELECT doc FROM {} LIMIT 1").format(
-                self._table("graph_metadata")
-            )
+            sql.SQL("SELECT doc FROM {} LIMIT 1").format(self._table("graph_metadata"))
         ).fetchone()
         if row is None:
             return
@@ -575,17 +578,17 @@ class PostgresGraphPersistenceBackend:
         if claimed is None:
             metadata[GRAPH_IDENTITY_KEY] = self._graph_name
             conn.execute(
-                sql.SQL("UPDATE {} SET doc = %s").format(
-                    self._table("graph_metadata")
-                ),
+                sql.SQL("UPDATE {} SET doc = %s").format(self._table("graph_metadata")),
                 (psycopg.types.json.Jsonb(metadata),),
             )
+            self._graph_identity_checked = True
             return
         if claimed != self._graph_name:
             raise GraphIdentityCollision(
                 f"PostgreSQL schema {self.schema!r} is already claimed by "
                 f"graph {claimed!r}, not {self._graph_name!r}"
             )
+        self._graph_identity_checked = True
 
     _INDEX_STATE = (
         "SELECT i.indisvalid FROM pg_class c"
@@ -1192,7 +1195,7 @@ class PostgresGraphPersistenceBackend:
                     "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
-                self._claim_or_check_graph_identity(conn)
+                self._claim_or_check_graph_identity(conn, force=True)
                 # Exactly the rows the load would have returned, which is what
                 # makes "replace the whole graph" mean the same thing here as
                 # it does everywhere else. Deleting less than that is the
