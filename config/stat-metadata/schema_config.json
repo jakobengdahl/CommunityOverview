@@ -332,7 +332,7 @@
       },
       "HAS_VARIABLE": {
         "description": "Has variable (data structure contains an instance variable)",
-        "source_types": ["DataStructure"],
+        "source_types": ["DataStructure", "RegisterVersion"],
         "target_types": ["InstanceVariable"]
       },
       "HAS_QUESTIONNAIRE": {
@@ -389,19 +389,27 @@
         "target_types": ["DataSet"]
       },
       "HAS_VARIANT": {
-        "description": "Has variant (register has a register variant; classification version has a variant)"
+        "description": "Has variant (register has a register variant; classification version has a variant)",
+        "source_types": ["Register", "ClassificationVersion"],
+        "target_types": ["RegisterVariant", "ClassificationVariant"]
       },
       "HAS_VERSION": {
-        "description": "Has version (register variant has a register version; classification series has a version)"
+        "description": "Has version (register variant has a register version; classification series has a version)",
+        "source_types": ["RegisterVariant", "ClassificationSeries"],
+        "target_types": ["RegisterVersion", "ClassificationVersion"]
       },
       "HAS_POPULATION": {
-        "description": "Has population (a register version describes a population)"
+        "description": "Has population (a register version describes a population)",
+        "source_types": ["RegisterVersion"],
+        "target_types": ["Population"]
       },
       "SOURCED_FROM": {
         "description": "Sourced from (a dataset originates from an actor)"
       },
       "OF_UNIT_TYPE": {
-        "description": "Of unit type (a population consists of units of a unit type)"
+        "description": "Of unit type (a population consists of units of a unit type)",
+        "source_types": ["Population"],
+        "target_types": ["UnitType"]
       },
       "USES_CLASSIFICATION": {
         "description": "Uses classification (an instance variable or value domain is defined by a statistical classification)",
