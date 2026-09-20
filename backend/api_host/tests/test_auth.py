@@ -9,7 +9,7 @@ from backend.api_host import create_app, AppConfig
 
 
 @pytest.fixture
-def auth_enabled_app(temp_graph_file, temp_static_dirs) -> TestClient:
+def auth_enabled_app(temp_graph_file, temp_static_dirs, tmp_path) -> TestClient:
     """TestClient with Basic auth enabled."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
@@ -19,13 +19,14 @@ def auth_enabled_app(temp_graph_file, temp_static_dirs) -> TestClient:
         auth_enabled=True,
         auth_username="admin",
         auth_password="secretpassword",
+        sessions_dir=str(tmp_path / "auth-enabled-sessions"),
     )
     app = create_app(config)
     return TestClient(app)
 
 
 @pytest.fixture
-def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
+def bearer_auth_app(temp_graph_file, temp_static_dirs, tmp_path) -> TestClient:
     """TestClient with bearer-only auth enabled (no password)."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
@@ -34,6 +35,7 @@ def bearer_auth_app(temp_graph_file, temp_static_dirs) -> TestClient:
         widget_static_path=widget_path,
         auth_enabled=True,
         auth_bearer_token="test-bearer-token-123",
+        sessions_dir=str(tmp_path / "bearer-auth-sessions"),
     )
     app = create_app(config)
     return TestClient(app)

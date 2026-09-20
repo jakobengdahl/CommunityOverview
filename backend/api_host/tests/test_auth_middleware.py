@@ -30,6 +30,7 @@ def _make_config(**overrides) -> tuple:
         auth_username="admin",
         auth_password=None,
         mcp_basic_auth=False,
+        sessions_dir=f"{graph_path}.sessions",
     )
     defaults.update(overrides)
     return AppConfig(**defaults), graph_path
