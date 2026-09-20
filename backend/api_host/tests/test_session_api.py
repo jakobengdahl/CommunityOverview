@@ -11,10 +11,12 @@ import base64
 import io
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.requests import Request
 
+from backend.core.session_manager import RateLimited
 from backend.service import rest_api as rest_api_module
 from backend.service.rest_api import _MAX_IMAGE_INGEST_BODY_BYTES
 
@@ -348,6 +350,65 @@ class TestSessionOps:
         assert "note-1" in resp.json()["detail"]
         state = test_app.get(f"/api/sessions/{sid}").json()["state"]
         assert state["annotations"][0].get("text") != "hijacked"
+
+    def test_posting_client_id_mcp_agent_does_not_drain_the_mcp_bucket(
+        self, test_app: TestClient
+    ):
+        """`client_id` on this endpoint is unauthenticated and caller-chosen, so
+        a browser can post the exact marker (`mcp-agent`) every MCP write tool
+        attributes its ops to. That must not spend the reserved MCP budget —
+        `/ops` always draws from `session_manager._bucket`, never
+        `_mcp_bucket`, regardless of the `client_id` value posted
+        (smallfix-ops-client-id-can-collide-with-mcp-agent-marker)."""
+        from backend.core.session_manager import _TokenBucket
+
+        session_manager = test_app.app.state.session_manager
+        # A tiny, otherwise-untouched stand-in for the reserved MCP budget.
+        session_manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        # Far more ops traffic than the MCP-reserved bucket could survive —
+        # if this were drawing from _mcp_bucket, the second call would 429.
+        for _ in range(5):
+            resp = test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={"client_id": "mcp-agent", "ops": []},
+            )
+            assert resp.status_code == 200
+
+        # The MCP-reserved bucket must still hold its one untouched token.
+        session_manager.apply_layout(
+            sid, "mcp-agent", positions={"n1": {"x": 1, "y": 1}}
+        )
+        with pytest.raises(RateLimited):
+            session_manager.apply_layout(
+                sid, "mcp-agent", positions={"n1": {"x": 2, "y": 2}}
+            )
+
+    def test_legitimate_mcp_write_unaffected_by_ordinary_ops_traffic(
+        self, test_app: TestClient
+    ):
+        """Ordinary browser traffic on `/ops` — including plenty of it — must
+        not throttle the MCP write path, because the two no longer share a
+        bucket."""
+        from backend.core.session_manager import _TokenBucket
+
+        session_manager = test_app.app.state.session_manager
+        session_manager._bucket = _TokenBucket(1.0, 0.0)
+        sid = test_app.post("/api/sessions", json={}).json()["id"]
+
+        assert (
+            test_app.post(
+                f"/api/sessions/{sid}/ops",
+                json={"client_id": "some-browser", "ops": []},
+            ).status_code
+            == 200
+        )
+        # The browser bucket is now spent, but the MCP write still succeeds.
+        result = session_manager.apply_layout(
+            sid, "mcp-agent", positions={"n1": {"x": 3, "y": 4}}
+        )
+        assert result["moved"] == 1
 
 
 class TestSessionActivityAndUndo:

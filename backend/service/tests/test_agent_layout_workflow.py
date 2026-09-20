@@ -414,9 +414,12 @@ class TestErrorModel:
 
     def test_rate_limited_is_reported(self, layout_tools):
         # An exhausted token bucket surfaces a retryable rate_limited error (§11).
+        # apply_visualization_layout is an MCP write path, so it draws from
+        # manager._mcp_bucket (dedicated, unreachable from a browser-supplied
+        # client_id), not the browser-facing manager._bucket /ops uses.
         tools_map, manager = layout_tools
         session = _session_with_nodes(manager, ["a"])
-        manager._bucket = _TokenBucket(0.0, 0.0)  # no tokens, no refill
+        manager._mcp_bucket = _TokenBucket(0.0, 0.0)  # no tokens, no refill
         result = tools_map["apply_visualization_layout"](
             session_id=session.id, positions={"a": {"x": 1, "y": 1}}
         )

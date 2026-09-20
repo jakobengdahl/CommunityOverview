@@ -3403,10 +3403,12 @@ class TestUpsertImageAnnotation:
             rate_limit_key="5.6.7.8",
         )
 
-    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_op_bucket(self):
-        """The MCP path passes no key and must keep drawing from the op bucket
-        under its own client id — dropping that fallback would leave it
-        unthrottled entirely."""
+    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_mcp_bucket(
+        self,
+    ):
+        """The MCP path passes no key and must keep drawing from the dedicated
+        MCP bucket under its own client id — dropping that fallback would
+        leave it unthrottled entirely."""
         mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
         s = mgr.create_session()
 
