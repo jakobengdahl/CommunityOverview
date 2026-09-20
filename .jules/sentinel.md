@@ -1,0 +1,5 @@
+## 2024-05-24 - Prefix Match Authentication Bypass
+
+**Vulnerability:** A route bypass vulnerability existed in Starlette/FastAPI middleware where paths were checked using a weak `.startswith("/prefix/")` prefix match on the URL. An attacker could exploit this by requesting a route matching the prefix without the trailing slash (e.g. `/sessions_bypass`), entirely avoiding authentication checks that relied on this prefix match logic.
+**Learning:** `request.url.path.startswith("/prefix/")` effectively guards any sub-routes within the prefix but leaves the exact route `/prefix` unprotected unless `request.url.path == "/prefix"` is explicitly added. In previous versions of the software, `request.url.path.startswith("/prefix/")` was incorrectly used as shorthand to cover `/prefix` or `/prefix/`.
+**Prevention:** Avoid relying solely on `request.url.path.startswith("/prefix/")` to protect base routes. Instead, combine exact match with prefix matching (`if request.url.path == "/prefix" or request.url.path.startswith("/prefix/"):`) to ensure accurate base route and sub-route verification.
