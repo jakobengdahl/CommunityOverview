@@ -563,7 +563,7 @@ def register_mcp_tools(
     def update_node(
         node_id: str,
         updates: Dict[str, Any],
-        metadata_merge: bool = False,
+        metadata_merge: bool = True,
         expected_updated_at: Optional[str] = None,
         event_session_id: Optional[str] = None,
         event_correlation_id: Optional[str] = None,
@@ -574,13 +574,11 @@ def register_mcp_tools(
         Args:
             node_id: ID of the node to update
             updates: Dict with fields to update (name, description, summary, tags, aliases, metadata)
-            metadata_merge: When True, the `metadata` object is merged field-by-field
-                onto the node's existing metadata instead of replacing it wholesale:
-                only the keys you send are changed, other keys are preserved, and a
-                key whose value is null (None) is removed. Default False keeps the
-                legacy behaviour where `metadata` replaces the whole object — so a
-                caller must resend every key to avoid dropping it. Use merge mode for
-                safe concurrent writebacks that each touch a different key.
+            metadata_merge: Defaults to True. The `metadata` object is merged
+                field-by-field onto the node's existing metadata: only the keys
+                you send are changed, other keys are preserved, and a key whose
+                value is null (None) is removed. Pass False only when you intend
+                `metadata` to replace the whole object and drop unspecified keys.
             expected_updated_at: Optional optimistic-concurrency guard. Pass the
                 `updated_at` value you last read for this node; the update is
                 rejected (result has success=False and conflict=True) if the node
