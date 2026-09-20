@@ -1610,7 +1610,12 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
             counted = []
 
             def _counting(self, query, *args, **kwargs):
-                counted.append(query)
+                text = str(query)
+                # The graph-identity guard may run once at the start of the
+                # first traversal in a fresh backend. These tests measure
+                # traversal convergence only, so ignore that guard query.
+                if "graph_metadata" not in text:
+                    counted.append(query)
                 return original(self, query, *args, **kwargs)
 
             # Every depth from the exact one to far beyond it: a bound taken
@@ -1681,7 +1686,12 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         counted = []
 
         def _counting(self, query, *args, **kwargs):
-            counted.append(query)
+            text = str(query)
+            # The graph-identity guard may run once at the start of the first
+            # traversal in a fresh backend. These tests measure traversal
+            # convergence only, so ignore that guard query.
+            if "graph_metadata" not in text:
+                counted.append(query)
             return original(self, query, *args, **kwargs)
 
         try:
