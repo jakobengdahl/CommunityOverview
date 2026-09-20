@@ -5,7 +5,9 @@ import {
   applyOps,
   hydrateNodes,
   pendingNodeIds,
+  renderableEdges,
   renderableNodes,
+  nodeDetail,
   sceneFromSession,
   withClaims,
   withRoster,
@@ -22,7 +24,12 @@ const sessionPayload = {
   resolved: {
     nodes: [
       { id: 'n1', name: 'Alpha', type: 'Actor' },
-      { id: 'n2', name: 'Beta', type: 'Initiative' },
+      {
+        id: 'n2',
+        name: 'Beta',
+        type: 'Initiative',
+        metadata: { description: 'A useful summary.' },
+      },
     ],
     edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
   },
@@ -37,12 +44,23 @@ describe('sceneFromSession', () => {
       id: 'n1',
       name: 'Alpha',
       type: 'Actor',
+      summary: null,
+      metadata: null,
       x: 10,
       y: 20,
       hydrated: true,
     });
     expect(scene.hiddenNodeIds).toEqual(['n2']);
     expect(pendingNodeIds(scene)).toEqual([]);
+    expect(scene.edges.e1).toEqual({ id: 'e1', source: 'n1', target: 'n2', type: null });
+    expect(scene.hiddenEdgeIds).toEqual([]);
+    expect(nodeDetail(scene, 'n2')).toEqual({
+      id: 'n2',
+      name: 'Beta',
+      type: 'Initiative',
+      summary: 'A useful summary.',
+      hydrated: true,
+    });
   });
 
   it('materialises no node from a stored position whose node no longer resolves', () => {
@@ -161,11 +179,46 @@ describe('applyOp', () => {
     expect(applyOp(base, { op: 'session_renamed', name: 'Renamed' }).name).toBe('Renamed');
   });
 
+  it('adds, hides, shows and removes renderable edges from the existing op vocabulary', () => {
+    const added = applyOp(base, {
+      op: 'edges_added',
+      edges: [{ id: 'e2', source: 'n1', target: 'n2', type: 'RELATES_TO' }],
+    });
+    expect(renderableEdges(added)).toEqual([
+      { id: 'e1', source: 'n1', target: 'n2', type: null },
+      { id: 'e2', source: 'n1', target: 'n2', type: 'RELATES_TO' },
+    ]);
+
+    const hidden = applyOp(added, { op: 'edges_hidden', edge_ids: ['e1'] });
+    expect(renderableEdges(hidden).map((e) => e.id)).toEqual(['e2']);
+
+    const shown = applyOp(hidden, { op: 'edges_shown', edge_ids: ['e1'] });
+    expect(renderableEdges(shown).map((e) => e.id)).toEqual(['e1', 'e2']);
+
+    const removed = applyOp(shown, { op: 'edges_removed', edge_ids: ['e2'] });
+    expect(removed.edges.e2).toBeUndefined();
+    expect(renderableEdges(removed).map((e) => e.id)).toEqual(['e1']);
+  });
+
+  it('does not render an edge whose endpoint is hidden or unpositioned', () => {
+    const hidden = applyOp(base, { op: 'nodes_hidden', node_ids: ['n1'] });
+    expect(renderableEdges(hidden)).toEqual([]);
+
+    const unpositioned = applyOps(base, [
+      { op: 'nodes_added', node_ids: ['n3'] },
+      { op: 'edges_added', edges: [{ id: 'e3', source: 'n1', target: 'n3' }] },
+    ]);
+    expect(renderableEdges(unpositioned).map((e) => e.id)).toEqual(['e1']);
+  });
+
+  it('removes edges attached to a removed node', () => {
+    const scene = applyOp(base, { op: 'nodes_removed', node_ids: ['n1'] });
+    expect(scene.edges.e1).toBeUndefined();
+    expect(renderableEdges(scene)).toEqual([]);
+  });
+
   it('leaves the scene untouched for ops this client does not render', () => {
     for (const op of [
-      { op: 'edges_added', edges: [{ id: 'e2', source: 'n1', target: 'n2' }] },
-      { op: 'edges_removed', edge_ids: ['e1'] },
-      { op: 'edges_hidden', edge_ids: ['e1'] },
       { op: 'annotation_created', annotation: { id: 'a1', kind: 'note' } },
       { op: 'group_membership_changed', group_id: 'a1', member_node_ids: ['n1'] },
       undefined,
@@ -202,6 +255,20 @@ describe('hydrateNodes', () => {
     const scene = hydrateNodes(added, [{ id: 'n3', name: 'Gamma', type: 'Goal' }]);
     expect(scene.nodes.n3).toMatchObject({ name: 'Gamma', type: 'Goal', hydrated: true });
     expect(pendingNodeIds(scene)).toEqual([]);
+  });
+
+  it('preserves optional node summary fields for the read-only detail HUD', () => {
+    const added = applyOp(EMPTY_SCENE, { op: 'nodes_added', node_ids: ['n3'] });
+    const scene = hydrateNodes(added, [
+      { id: 'n3', name: 'Gamma', type: 'Goal', description: 'Plain detail text.' },
+    ]);
+    expect(nodeDetail(scene, 'n3')).toEqual({
+      id: 'n3',
+      name: 'Gamma',
+      type: 'Goal',
+      summary: 'Plain detail text.',
+      hydrated: true,
+    });
   });
 
   it('ignores details for a node that was removed while the read was in flight', () => {
