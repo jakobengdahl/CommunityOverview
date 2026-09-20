@@ -220,6 +220,13 @@ class TestConfigLoader:
             "WILDCARD", "Other", "Target"
         )["allowed"]
         assert config_loader.relationship_type_allows_node_types(
+            "DIRECTED",
+            "SourceContainer",
+            "TargetContainer",
+            source_subtypes=["Source"],
+            target_subtypes=["Target"],
+        )["allowed"]
+        assert config_loader.relationship_type_allows_node_types(
             "GLOBAL", "Other", "Source"
         )["allowed"]
 

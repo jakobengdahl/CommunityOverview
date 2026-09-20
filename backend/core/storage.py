@@ -2026,7 +2026,11 @@ class GraphStorage:
         from backend.config import config_loader
 
         decision = config_loader.relationship_type_allows_node_types(
-            edge.type_str, source_node.type_str, target_node.type_str
+            edge.type_str,
+            source_node.type_str,
+            target_node.type_str,
+            source_node.subtypes,
+            target_node.subtypes,
         )
         if not decision.get("allowed"):
             raise ValueError(decision.get("message") or "Relationship type not allowed")

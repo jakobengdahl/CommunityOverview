@@ -592,12 +592,18 @@ def get_schema() -> Dict[str, Any]:
 
 
 def relationship_type_allows_node_types(
-    relationship_type: str, source_type: str, target_type: str
+    relationship_type: str,
+    source_type: str,
+    target_type: str,
+    source_subtypes: list[str] | None = None,
+    target_subtypes: list[str] | None = None,
 ) -> Dict[str, Any]:
     """Validate relationship type applicability for a directed source->target pair.
 
     Missing source_types/target_types rules are intentionally permissive for
     backward compatibility. A "*" entry on either side also permits any node type.
+    Profile rules may name either a concrete node type or one of that node's
+    subtypes.
     """
     schema = _get_loader().config.schema_
     config = schema.relationship_types.get(relationship_type)
@@ -612,11 +618,13 @@ def relationship_type_allows_node_types(
     if not source_rules and not target_rules:
         return {"allowed": True, "message": ""}
 
-    source_allowed = (
-        not source_rules or "*" in source_rules or source_type in source_rules
+    source_candidates = {source_type, *(source_subtypes or [])}
+    target_candidates = {target_type, *(target_subtypes or [])}
+    source_allowed = not source_rules or "*" in source_rules or bool(
+        source_candidates.intersection(source_rules)
     )
-    target_allowed = (
-        not target_rules or "*" in target_rules or target_type in target_rules
+    target_allowed = not target_rules or "*" in target_rules or bool(
+        target_candidates.intersection(target_rules)
     )
 
     if source_allowed and target_allowed:
