@@ -620,11 +620,15 @@ def relationship_type_allows_node_types(
 
     source_candidates = {source_type, *(source_subtypes or [])}
     target_candidates = {target_type, *(target_subtypes or [])}
-    source_allowed = not source_rules or "*" in source_rules or bool(
-        source_candidates.intersection(source_rules)
+    source_allowed = (
+        not source_rules
+        or "*" in source_rules
+        or bool(source_candidates.intersection(source_rules))
     )
-    target_allowed = not target_rules or "*" in target_rules or bool(
-        target_candidates.intersection(target_rules)
+    target_allowed = (
+        not target_rules
+        or "*" in target_rules
+        or bool(target_candidates.intersection(target_rules))
     )
 
     if source_allowed and target_allowed:

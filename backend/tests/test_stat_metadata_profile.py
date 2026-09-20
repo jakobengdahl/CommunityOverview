@@ -26,9 +26,10 @@ def test_stat_metadata_coding_edges_match_configured_profile_rules():
     nodes = {node["id"]: node for node in graph["nodes"]}
     checked_relationships = {"USES_CODE_LIST", "USES_CLASSIFICATION"}
 
-    assert schema["relationship_types"]["USES_CLASSIFICATION"][
-        "source_types"
-    ] == ["InstanceVariable", "ValueDomain"]
+    assert schema["relationship_types"]["USES_CLASSIFICATION"]["source_types"] == [
+        "InstanceVariable",
+        "ValueDomain",
+    ]
     assert schema["relationship_types"]["USES_CLASSIFICATION"]["target_types"] == [
         "Classification"
     ]
