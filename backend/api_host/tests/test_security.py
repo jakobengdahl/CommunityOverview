@@ -36,7 +36,9 @@ def test_cors_wildcard_no_credentials(temp_graph_file, temp_static_dirs, tmp_pat
     assert response.headers.get("access-control-allow-credentials") is None
 
 
-def test_cors_specific_origin_allows_credentials(temp_graph_file, temp_static_dirs, tmp_path):
+def test_cors_specific_origin_allows_credentials(
+    temp_graph_file, temp_static_dirs, tmp_path
+):
     """Test that specific origins allow credentials."""
     web_path, widget_path = temp_static_dirs
     config = AppConfig(
