@@ -34352,7 +34352,7 @@
       "id": "e-act-nace",
       "source": "var-economic-activity",
       "target": "cl-nace",
-      "type": "USES_CODE_LIST",
+      "type": "USES_CLASSIFICATION",
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:00:00.000000"
@@ -34361,7 +34361,7 @@
       "id": "e-region-cl",
       "source": "var-region",
       "target": "cl-region",
-      "type": "USES_CODE_LIST",
+      "type": "USES_CLASSIFICATION",
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:00:00.000000"
@@ -34397,7 +34397,7 @@
       "id": "e-label-nace",
       "source": "var-activity-label",
       "target": "cl-nace",
-      "type": "USES_CODE_LIST",
+      "type": "USES_CLASSIFICATION",
       "label": "",
       "metadata": {},
       "created_at": "2026-06-18T09:00:00.000000"
