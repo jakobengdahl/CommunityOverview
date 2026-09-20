@@ -807,15 +807,15 @@ class MCPLoader:
         # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
 
-        base_path = "/tmp/agent-workspace"
+        base_path = os.path.realpath("/tmp/agent-workspace")
         os.makedirs(base_path, exist_ok=True)
 
         path = input_args.get("path", "")
         if not path:
             return {"error": "Path required"}
 
-        # Security: ensure path is within workspace
-        full_path = os.path.normpath(os.path.join(base_path, path))
+        # Security: ensure path is within workspace after resolving symlinks.
+        full_path = os.path.realpath(os.path.join(base_path, path))
         if os.path.commonpath([base_path, full_path]) != base_path:
             return {"error": "Path must be within agent workspace"}
 

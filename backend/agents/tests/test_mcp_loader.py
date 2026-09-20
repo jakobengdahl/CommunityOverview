@@ -3,6 +3,7 @@ Tests for MCP loader and tool namespacing.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import httpx2 as httpx
@@ -509,6 +510,44 @@ class TestMCPLoaderLifecycle:
 
         assert "error" in result
         assert result["error"] == "Path must be within agent workspace"
+
+    def test_execute_fs_tool_read_file_blocks_symlink_escape(self, tmp_path):
+        """Test that read_file blocks symlinks pointing outside the workspace."""
+        loader = MCPLoader([])
+        workspace = Path("/tmp/agent-workspace")
+        workspace.mkdir(exist_ok=True)
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("secret", encoding="utf-8")
+        symlink_path = workspace / f"outside-read-{tmp_path.name}.txt"
+        symlink_path.symlink_to(outside_file)
+
+        try:
+            result = loader._execute_fs_tool("read_file", {"path": symlink_path.name})
+        finally:
+            symlink_path.unlink(missing_ok=True)
+
+        assert result == {"error": "Path must be within agent workspace"}
+
+    def test_execute_fs_tool_write_file_blocks_symlink_escape(self, tmp_path):
+        """Test that write_file blocks symlinks pointing outside the workspace."""
+        loader = MCPLoader([])
+        workspace = Path("/tmp/agent-workspace")
+        workspace.mkdir(exist_ok=True)
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("original", encoding="utf-8")
+        symlink_path = workspace / f"outside-write-{tmp_path.name}.txt"
+        symlink_path.symlink_to(outside_file)
+
+        try:
+            result = loader._execute_fs_tool(
+                "write_file",
+                {"path": symlink_path.name, "content": "modified"},
+            )
+        finally:
+            symlink_path.unlink(missing_ok=True)
+
+        assert result == {"error": "Path must be within agent workspace"}
+        assert outside_file.read_text(encoding="utf-8") == "original"
 
 
 class TestConnectHttpInfoQuery:
