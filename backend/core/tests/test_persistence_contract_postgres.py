@@ -68,6 +68,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     SCOPE_SETTING,
     SCOPED_TABLES,
     CrossScopeWriteRefused,
+    GraphIdentityCollision,
     PostgresGraphPersistenceBackend,
     ScopeIsolationUnavailable,
     _channel_for,
@@ -919,14 +920,8 @@ class TestPostgresConcurrentSavesDoNotMerge:
     def test_overlapping_saves_leave_one_writers_graph(
         self, schema, backends, monkeypatch
     ):
-        # Different graph_name, same store: this falsifies a lock keyed on
-        # graph_name specifically, which two instances of one graph need
-        # not agree on. It does not prove the lock is keyed on the schema
-        # - a lock keyed on a bare constant would pass this too, and
-        # closing that needs a timing assertion against a second schema,
-        # not attempted here.
         first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
-        second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="b")
+        second = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="a")
         backends.extend([first, second])
         first.save_graph_data(snapshot([node_payload("seed")]))
 
@@ -3878,6 +3873,67 @@ class TestPostgresStoreIdentity:
         finally:
             with psycopg.connect(DSN, autocommit=True) as conn:
                 conn.execute(f'DROP SCHEMA IF EXISTS "{other}" CASCADE')
+
+    def test_a_saved_schema_refuses_a_different_graph_identity(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.save_graph_data(snapshot([node_payload("b")]))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    def test_a_saved_schema_refuses_reads_from_a_different_graph_identity(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.load_graph_data()
+
+    def test_two_first_writers_with_different_graph_identities_cannot_both_save(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        assert not first.exists()
+        assert not second.exists()
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.save_graph_data(snapshot([node_payload("b")]))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
+
+    def test_a_saved_schema_refuses_entity_writes_from_a_different_graph_identity(
+        self, schema, backends
+    ):
+        first = PostgresGraphPersistenceBackend(DSN, schema=schema, graph_name="first")
+        second = PostgresGraphPersistenceBackend(
+            DSN, schema=schema, graph_name="second"
+        )
+        backends.extend([first, second])
+
+        first.save_graph_data(snapshot([node_payload("a")]))
+
+        with pytest.raises(GraphIdentityCollision):
+            second.upsert_node(node_payload("b"))
+        assert [n["id"] for n in first.load_graph_data()["nodes"]] == ["a"]
 
 
 class _Collector:
