@@ -1343,6 +1343,17 @@ export class SessionSyncClient {
     if (list.length) this._enqueue([{ op: 'edges_updated', edges: list }]);
   }
 
+  /**
+   * Queue already-formed session ops from a renderer that has no full canvas
+   * snapshot to diff. Intended for small, generic protocol ops such as a single
+   * `node_moved`; callers that own a complete mirror should keep using
+   * `syncState`.
+   */
+  sendOps(ops) {
+    const list = (ops || []).filter((op) => op && typeof op.op === 'string');
+    if (list.length) this._enqueue(list);
+  }
+
   _enqueue(ops) {
     for (const op of ops) this._queue.push(op);
     this._scheduleFlush();

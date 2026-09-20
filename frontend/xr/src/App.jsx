@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { XR, createXRStore } from '@react-three/xr';
 import * as THREE from 'three';
+import { DEFAULT_DOME, layoutBounds, layoutPositionFromRay } from './domeLayout.js';
 import { domeSceneData, selectionDetail } from './domeScene.js';
 import { EMPTY_SCENE } from './sceneModel.js';
 import { SceneSession, isValidSessionId } from './sceneSession.js';
@@ -57,6 +58,7 @@ const PLACEHOLDER_SCENE = {
 // scene reduction and the teardown when the id changes or the app unmounts.
 function useSceneSession(sessionId) {
   const [state, setState] = useState(IDLE_SESSION_STATE);
+  const sessionRef = useRef(null);
 
   useEffect(() => {
     if (!sessionId) return undefined;
@@ -70,17 +72,30 @@ function useSceneSession(sessionId) {
       loadNodeDetails: api.getNodeDetails,
       onChange: setState,
     });
+    sessionRef.current = session;
     session.connect();
-    return () => session.close();
+    return () => {
+      session.close();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
   }, [sessionId]);
+
+  const setLocalSelection = useCallback((nodeId) => {
+    sessionRef.current?.setLocalSelection(nodeId);
+  }, []);
+
+  const moveNode = useCallback((nodeId, position, opts) => {
+    return sessionRef.current?.moveNode(nodeId, position, opts) ?? false;
+  }, []);
 
   // The session reports which id its state belongs to, so switching sessions
   // never renders the previous one's scene while the new stream is still
   // opening — and the effect needs no synchronous setState to reset it.
-  if (!sessionId) return IDLE_SESSION_STATE;
-  return state.sessionId === sessionId
-    ? state
-    : { ...IDLE_SESSION_STATE, sessionId, status: 'connecting' };
+  const visibleState =
+    state.sessionId === sessionId
+      ? state
+      : { ...IDLE_SESSION_STATE, sessionId, status: sessionId ? 'connecting' : 'idle' };
+  return { ...visibleState, setLocalSelection, moveNode };
 }
 
 function makeTextTexture({
@@ -173,6 +188,7 @@ function NodeCard({ node, selected, onSelect }) {
   return (
     <Billboard position={node.position}>
       <mesh
+        userData={{ xrNodeId: node.id }}
         onClick={(event) => {
           event.stopPropagation();
           onSelect(node.id);
@@ -189,6 +205,165 @@ function NodeCard({ node, selected, onSelect }) {
       ) : null}
     </Billboard>
   );
+}
+
+function poseToRay(inputSource, frame, referenceSpace, target) {
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const origin = target.origin;
+  const direction = target.direction;
+  let pose = inputSource.targetRaySpace
+    ? frame.getPose(inputSource.targetRaySpace, referenceSpace)
+    : null;
+
+  if (!pose && inputSource.hand) {
+    const tip = inputSource.hand.get?.('index-finger-tip');
+    const wrist = inputSource.hand.get?.('wrist');
+    const tipPose = tip ? frame.getJointPose?.(tip, referenceSpace) : null;
+    const wristPose = wrist ? frame.getJointPose?.(wrist, referenceSpace) : null;
+    if (!tipPose || !wristPose) return false;
+    origin.set(
+      tipPose.transform.position.x,
+      tipPose.transform.position.y,
+      tipPose.transform.position.z
+    );
+    direction
+      .set(
+        tipPose.transform.position.x - wristPose.transform.position.x,
+        tipPose.transform.position.y - wristPose.transform.position.y,
+        tipPose.transform.position.z - wristPose.transform.position.z
+      )
+      .normalize();
+    return direction.lengthSq() > 0;
+  }
+
+  if (!pose) return false;
+  matrix.fromArray(pose.transform.matrix);
+  origin.setFromMatrixPosition(matrix);
+  quat.setFromRotationMatrix(matrix);
+  direction.set(0, 0, -1).applyQuaternion(quat).normalize();
+  return true;
+}
+
+function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveCommit }) {
+  const { gl, scene } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const raysRef = useRef(new Map());
+  const activeRef = useRef(new Map());
+  const listenersRef = useRef(null);
+  const latestRef = useRef({ enabled, hitNode: null, onMoveCommit, onSelect });
+
+  const rayForSource = useCallback((inputSource) => raysRef.current.get(inputSource) || null, []);
+
+  const hitNode = useCallback(
+    (ray) => {
+      if (!ray) return null;
+      const targets = [];
+      scene.traverse((object) => {
+        if (object.userData?.xrNodeId) targets.push(object);
+      });
+      raycaster.set(ray.origin, ray.direction);
+      return raycaster.intersectObjects(targets, false)[0]?.object.userData.xrNodeId || null;
+    },
+    [raycaster, scene]
+  );
+
+  const layoutPointForRay = useCallback(
+    (ray) =>
+      ray
+        ? layoutPositionFromRay(ray.origin, ray.direction, layoutBounds, {
+            radius: DEFAULT_DOME.baseRadius,
+            eyeHeight: EYE_HEIGHT,
+          })
+        : null,
+    [layoutBounds]
+  );
+
+  useEffect(() => {
+    latestRef.current = { enabled, hitNode, onMoveCommit, onSelect };
+  }, [enabled, hitNode, onMoveCommit, onSelect]);
+
+  const attachSessionListeners = useCallback(
+    (session) => {
+      if (listenersRef.current?.session === session) return;
+      if (listenersRef.current) {
+        const { session: previous, handleSelectStart, handleSelectEnd } = listenersRef.current;
+        previous.removeEventListener('selectstart', handleSelectStart);
+        previous.removeEventListener('selectend', handleSelectEnd);
+      }
+      if (!session) {
+        listenersRef.current = null;
+        return;
+      }
+
+      const handleSelectStart = (event) => {
+        const ray = rayForSource(event.inputSource);
+        const nodeId = latestRef.current.hitNode?.(ray);
+        if (!nodeId) return;
+        latestRef.current.onSelect(nodeId);
+        if (latestRef.current.enabled) {
+          activeRef.current.set(event.inputSource, { nodeId, lastPosition: null });
+        }
+      };
+
+      const handleSelectEnd = (event) => {
+        const active = activeRef.current.get(event.inputSource);
+        activeRef.current.delete(event.inputSource);
+        if (active?.lastPosition) {
+          latestRef.current.onMoveCommit(active.nodeId, active.lastPosition);
+        }
+      };
+
+      session.addEventListener('selectstart', handleSelectStart);
+      session.addEventListener('selectend', handleSelectEnd);
+      listenersRef.current = { session, handleSelectStart, handleSelectEnd };
+    },
+    [rayForSource]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (!listenersRef.current) return;
+      const { session, handleSelectStart, handleSelectEnd } = listenersRef.current;
+      session.removeEventListener('selectstart', handleSelectStart);
+      session.removeEventListener('selectend', handleSelectEnd);
+      listenersRef.current = null;
+    };
+  }, []);
+
+  useFrame((_state, _delta, frame) => {
+    const session = gl.xr.getSession?.();
+    attachSessionListeners(session || null);
+    const referenceSpace = gl.xr.getReferenceSpace?.();
+    if (!session || !referenceSpace || !frame) return;
+
+    const liveSources = new Set(session.inputSources || []);
+    for (const inputSource of liveSources) {
+      const ray = raysRef.current.get(inputSource) || {
+        origin: new THREE.Vector3(),
+        direction: new THREE.Vector3(0, 0, -1),
+      };
+      if (poseToRay(inputSource, frame, referenceSpace, ray)) {
+        raysRef.current.set(inputSource, ray);
+      }
+
+      const active = activeRef.current.get(inputSource);
+      if (!active) continue;
+      const position = layoutPointForRay(ray);
+      if (!position) continue;
+      active.lastPosition = position;
+      onMovePreview(active.nodeId, position);
+    }
+
+    for (const inputSource of raysRef.current.keys()) {
+      if (!liveSources.has(inputSource)) {
+        raysRef.current.delete(inputSource);
+        activeRef.current.delete(inputSource);
+      }
+    }
+  });
+
+  return null;
 }
 
 function EdgeLine({ edge }) {
@@ -294,7 +469,13 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(null);
-  const { scene, status, error: sessionError } = useSceneSession(sessionId);
+  const {
+    scene,
+    status,
+    error: sessionError,
+    setLocalSelection,
+    moveNode,
+  } = useSceneSession(sessionId);
   // Guards against a second create being started before the first resolves —
   // each one materialises a session server-side, so a double tap in a headset
   // must not leave an orphan behind.
@@ -338,14 +519,48 @@ export default function App() {
     () => domeSceneData(activeScene, { eyeHeight: EYE_HEIGHT }),
     [activeScene]
   );
+  const activeLayoutBounds = useMemo(
+    () => layoutBounds(Object.values(activeScene.nodes)),
+    [activeScene]
+  );
   const selectedDetail = useMemo(
     () => selectionDetail(activeScene, selectedNodeId),
     [activeScene, selectedNodeId]
   );
 
   useEffect(() => {
-    if (selectedNodeId && !selectedDetail) setSelectedNodeId(null);
-  }, [selectedDetail, selectedNodeId]);
+    if (!selectedNodeId || selectedDetail) return;
+    if (sessionId && status === 'connected') setLocalSelection(null);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setSelectedNodeId(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDetail, selectedNodeId, sessionId, setLocalSelection, status]);
+
+  const handleSelectNode = useCallback(
+    (nodeId) => {
+      setSelectedNodeId(nodeId);
+      if (sessionId && status === 'connected') setLocalSelection(nodeId);
+    },
+    [sessionId, setLocalSelection, status]
+  );
+
+  const handleMovePreview = useCallback(
+    (nodeId, position) => {
+      if (sessionId && status === 'connected') moveNode(nodeId, position, { sync: false });
+    },
+    [moveNode, sessionId, status]
+  );
+
+  const handleMoveCommit = useCallback(
+    (nodeId, position) => {
+      if (sessionId && status === 'connected') moveNode(nodeId, position, { sync: true });
+    },
+    [moveNode, sessionId, status]
+  );
 
   const connectedSummary =
     status === 'connected'
@@ -420,7 +635,14 @@ export default function App() {
             data={domeData}
             selectedNodeId={selectedNodeId}
             selectedDetail={selectedDetail}
-            onSelect={setSelectedNodeId}
+            onSelect={handleSelectNode}
+          />
+          <XrRayInput
+            enabled={Boolean(sessionId && status === 'connected')}
+            layoutBounds={activeLayoutBounds}
+            onSelect={handleSelectNode}
+            onMovePreview={handleMovePreview}
+            onMoveCommit={handleMoveCommit}
           />
         </XR>
       </Canvas>

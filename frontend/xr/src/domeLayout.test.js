@@ -4,6 +4,8 @@ import {
   zoomToRadius,
   sphericalToCartesian,
   domePosition,
+  layoutPositionFromDomePoint,
+  layoutPositionFromRay,
   layoutBounds,
 } from './domeLayout.js';
 
@@ -212,5 +214,55 @@ describe('layoutBounds', () => {
       { x: 1, y: 10 },
     ]);
     expect(b).toEqual({ minX: -5, maxX: 7, minY: -3, maxY: 10 });
+  });
+});
+
+describe('layoutPositionFromDomePoint', () => {
+  const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 100 };
+
+  it('round-trips a dome point back into the graph layout coordinate space', () => {
+    const source = { x: 80, y: 25 };
+    const point = domePosition(source.x, source.y, bounds);
+    const layout = layoutPositionFromDomePoint(point, bounds);
+    expect(layout.x).toBeCloseTo(source.x);
+    expect(layout.y).toBeCloseTo(source.y);
+  });
+
+  it('clamps rays outside the comfortable wrap to the layout extent', () => {
+    const layout = layoutPositionFromDomePoint({ x: 100, y: 100, z: 0 }, bounds);
+    expect(layout.x).toBe(100);
+    expect(layout.y).toBeCloseTo(0, 2);
+  });
+
+  it('uses the degenerate coordinate for a single-node extent', () => {
+    const bounds = { minX: 42, maxX: 42, minY: 7, maxY: 7 };
+    expect(layoutPositionFromDomePoint({ x: 0, y: 0, z: -6 }, bounds)).toEqual({
+      x: 42,
+      y: 7,
+    });
+  });
+});
+
+describe('layoutPositionFromRay', () => {
+  const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 100 };
+
+  it('projects a controller ray onto the dome and returns session coordinates', () => {
+    const target = domePosition(75, 40, bounds);
+    const layout = layoutPositionFromRay(
+      { x: 0, y: 1.5, z: 0 },
+      { x: target.x, y: target.y, z: target.z },
+      bounds,
+      { eyeHeight: 1.5 }
+    );
+    expect(layout.x).toBeCloseTo(75);
+    expect(layout.y).toBeCloseTo(40);
+  });
+
+  it('returns null for a zero-length ray direction', () => {
+    expect(
+      layoutPositionFromRay({ x: 0, y: 1.5, z: 0 }, { x: 0, y: 0, z: 0 }, bounds, {
+        eyeHeight: 1.5,
+      })
+    ).toBeNull();
   });
 });
