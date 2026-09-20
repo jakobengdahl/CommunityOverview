@@ -86,7 +86,9 @@ def test_stat_metadata_register_population_demo_slice_is_present():
     assert nodes["register-total-population"]["type"] == "DataSet"
     assert "Register" in nodes["register-total-population"]["subtypes"]
     assert "RegisterVariant" in nodes["register-variant-resident-persons"]["subtypes"]
-    assert "RegisterVersion" in nodes["register-version-resident-persons-2025"]["subtypes"]
+    assert (
+        "RegisterVersion" in nodes["register-version-resident-persons-2025"]["subtypes"]
+    )
     assert nodes["population-registered-residents-sweden"]["type"] == "Population"
 
     expected_edges = {
@@ -163,9 +165,9 @@ def test_stat_metadata_register_population_edges_match_profile_rules():
         source = nodes[edge["source"]]
         target = nodes[edge["target"]]
         relationship_config = schema["relationship_types"][edge["type"]]
-        if _allows(
-            relationship_config.get("source_types", []), source
-        ) and _allows(relationship_config.get("target_types", []), target):
+        if _allows(relationship_config.get("source_types", []), source) and _allows(
+            relationship_config.get("target_types", []), target
+        ):
             continue
 
         violations.append(edge["id"])
