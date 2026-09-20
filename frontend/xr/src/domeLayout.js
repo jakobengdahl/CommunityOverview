@@ -35,6 +35,11 @@ function normalize(value, min, max) {
   return Number.isFinite(n) ? n : 0.5;
 }
 
+function denormalize(value, min, max) {
+  if (max <= min) return Number.isFinite(min) ? min : 0;
+  return min + clamp(value, 0, 1) * (max - min);
+}
+
 // Map a zoom scalar (1 = neutral, >1 = zoomed in) to a dome radius. Zooming in
 // pulls the shell closer; the result is always within [minRadius, maxRadius],
 // including on the non-positive-zoom fallback path.
@@ -74,6 +79,63 @@ export function domePosition(x, y, bounds, opts = {}) {
   // Screen y grows downward; invert so a smaller y sits higher on the dome.
   const elevation = (0.5 - ny) * vFovRad;
   return sphericalToCartesian(shellRadius, azimuth, elevation);
+}
+
+// Inverse of `domePosition` for a point on, or near, the dome shell. The input
+// point is relative to the dome centre, not world-space eye height.
+export function layoutPositionFromDomePoint(point, bounds, opts = {}) {
+  const { hFovRad, vFovRad } = { ...DEFAULT_DOME, ...opts };
+  const x = Number(point?.x) || 0;
+  const y = Number(point?.y) || 0;
+  const z = Number(point?.z) || -1;
+  const radius = Math.sqrt(x * x + y * y + z * z);
+  if (!(radius > 0)) {
+    return {
+      x: denormalize(0.5, bounds.minX, bounds.maxX),
+      y: denormalize(0.5, bounds.minY, bounds.maxY),
+    };
+  }
+  const azimuth = Math.atan2(x, -z);
+  const elevation = Math.asin(clamp(y / radius, -1, 1));
+  return {
+    x: denormalize(azimuth / hFovRad + 0.5, bounds.minX, bounds.maxX),
+    y: denormalize(0.5 - elevation / vFovRad, bounds.minY, bounds.maxY),
+  };
+}
+
+// Project a controller/hand ray onto the dome shell and return the compatible
+// 2D session coordinates for that point. `origin` and `direction` are world
+// coordinates; the dome centre is `[0, eyeHeight, 0]`.
+export function layoutPositionFromRay(origin, direction, bounds, opts = {}) {
+  const { baseRadius, radius, eyeHeight = 0 } = { ...DEFAULT_DOME, ...opts };
+  const shellRadius = radius ?? baseRadius;
+  const ox = Number(origin?.x) || 0;
+  const oy = (Number(origin?.y) || 0) - eyeHeight;
+  const oz = Number(origin?.z) || 0;
+  let dx = Number(direction?.x) || 0;
+  let dy = Number(direction?.y) || 0;
+  let dz = Number(direction?.z) || 0;
+  const dLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (!(dLen > 0)) return null;
+  dx /= dLen;
+  dy /= dLen;
+  dz /= dLen;
+
+  const b = 2 * (ox * dx + oy * dy + oz * dz);
+  const c = ox * ox + oy * oy + oz * oz - shellRadius * shellRadius;
+  const disc = b * b - 4 * c;
+  if (disc < 0) return null;
+  const sqrtDisc = Math.sqrt(disc);
+  const t0 = (-b - sqrtDisc) / 2;
+  const t1 = (-b + sqrtDisc) / 2;
+  const t = t0 > 0 ? t0 : t1 > 0 ? t1 : null;
+  if (t === null) return null;
+
+  return layoutPositionFromDomePoint(
+    { x: ox + dx * t, y: oy + dy * t, z: oz + dz * t },
+    bounds,
+    opts
+  );
 }
 
 // Extent of a list of {x, y} layout positions. An empty layout — or one whose
