@@ -1,31 +1,10 @@
+import { getNodeColor } from '../../../packages/ui-graph-canvas/src/utils/nodeColors.js';
 import { domePosition, layoutBounds } from './domeLayout.js';
 import { nodeDetail, renderableEdges, renderableNodes } from './sceneModel.js';
 
-const TYPE_COLORS = Object.freeze({
-  Actor: '#3B82F6',
-  Initiative: '#10B981',
-  Capability: '#F97316',
-  Resource: '#FBBF24',
-  Legislation: '#EF4444',
-  Theme: '#14B8A6',
-  Goal: '#6366F1',
-  Event: '#D946EF',
-  Data: '#06B6D4',
-  Dataset: '#06B6D4',
-  Risk: '#DC2626',
-  ActiveKnowledgeCollection: '#F59E0B',
-  Agent: '#EC4899',
-  EventSubscription: '#8B5CF6',
-  SavedView: '#6B7280',
-  Group: '#646cff',
-});
-
-export const DEFAULT_NODE_COLOR = '#9CA3AF';
-
 export function nodeColor(node) {
   if (node?.claim?.color) return node.claim.color;
-  if (node?.type && TYPE_COLORS[node.type]) return TYPE_COLORS[node.type];
-  return DEFAULT_NODE_COLOR;
+  return getNodeColor(node?.type);
 }
 
 export function formatNodeTitle(node) {
@@ -34,6 +13,14 @@ export function formatNodeTitle(node) {
 
 export function formatNodeSubtitle(node) {
   return node?.type || 'Unknown type';
+}
+
+export function cardLabel(node) {
+  return {
+    title: formatNodeTitle(node),
+    subtitle: formatNodeSubtitle(node),
+    footer: node?.id || '',
+  };
 }
 
 function withEyeHeight(point, eyeHeight) {
@@ -64,12 +51,12 @@ export function domeSceneData(scene, { eyeHeight = 0, ...domeOptions } = {}) {
   const bounds = layoutBounds(nodes);
   const cards = nodes.map((node) => {
     const position = withEyeHeight(domePosition(node.x, node.y, bounds, domeOptions), eyeHeight);
+    const label = cardLabel(node);
     return {
       ...node,
       position,
       color: nodeColor(node),
-      title: formatNodeTitle(node),
-      subtitle: formatNodeSubtitle(node),
+      ...label,
     };
   });
   const cardsById = new Map(cards.map((node) => [node.id, node]));
