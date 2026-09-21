@@ -6,9 +6,12 @@ Covers: SKILL.md parsing, allowed-tools handling, sanitization,
         cache key normalisation, prompt block rendering.
 """
 
+import contextlib
+
 import pytest
 from unittest.mock import patch
 
+from backend.skills import loader as loader_module
 from backend.skills.loader import (
     SkillDefinition,
     SkillsConfig,
@@ -507,3 +510,200 @@ class TestValidateDomain:
         loader = SkillsLoader(config)
         with pytest.raises(ValueError, match="disabled"):
             loader._validate_domain("https://github.com/org/repo/SKILL.md")
+
+
+# ---------------------------------------------------------------------------
+# Redirect handling (SSRF)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _mock_http(handler):
+    """Give the loader's AsyncClient a MockTransport, keeping its own kwargs."""
+    real_client = loader_module.httpx.AsyncClient
+
+    def factory(**kwargs):
+        return real_client(
+            transport=loader_module.httpx.MockTransport(handler), **kwargs
+        )
+
+    with patch.object(loader_module.httpx, "AsyncClient", factory):
+        yield
+
+
+def _recording_handler(responses):
+    """Serve `responses` in order, recording every request that was made."""
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        return responses[len(seen) - 1]
+
+    return handle, seen
+
+
+def _redirect_to(location):
+    return loader_module.httpx.Response(302, headers={"location": location})
+
+
+def _ok(body="# skill"):
+    return loader_module.httpx.Response(200, text=body)
+
+
+class TestFetchTextRedirects:
+    """A skill URL is operator-supplied input that triggers an outbound request.
+
+    Validating only the first URL leaves a trusted domain -- or an open
+    redirect on one -- able to steer the fetch somewhere neither control would
+    have allowed as a starting point.
+    """
+
+    def _loader(self):
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=[
+                "github.com",
+                "raw.githubusercontent.com",
+                "api.github.com",
+            ],
+        )
+        return SkillsLoader(config)
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_to_an_internal_address_is_refused_and_never_requested(
+        self,
+    ):
+        """Isolates the SSRF guard from the allowlist: the redirect target is
+        ON the allowlist here, so only is_safe_url can refuse it.
+
+        That is the real shape of the threat — an allowed name that points
+        inward — and it is what an allowlist cannot see. The target is an IP
+        literal, so the real is_safe_url decides it without DNS.
+        """
+        config = SkillsConfig(
+            allow_external_skills=True,
+            trusted_domains=["raw.githubusercontent.com", "169.254.169.254"],
+        )
+        handler, seen = _recording_handler(
+            [_redirect_to("http://169.254.169.254/latest/meta-data/"), _ok()]
+        )
+
+        with _mock_http(handler):
+            with pytest.raises(ValueError, match="disallowed address"):
+                await SkillsLoader(config)._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1, "the internal address must never be requested"
+        assert seen[0].url.host == "raw.githubusercontent.com"
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_off_the_trusted_domain_allowlist_is_refused(self):
+        """is_safe_url alone would allow this: the target is publicly routable.
+
+        The allowlist is this loader's own control and must survive a redirect.
+        """
+        handler, seen = _recording_handler(
+            [_redirect_to("https://evil.example/x"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="allowlist"):
+                await self._loader()._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1, "the untrusted host must never be requested"
+
+    @pytest.mark.asyncio
+    async def test_a_cross_host_redirect_drops_the_authorization_header(self):
+        """httpx drops credentials across hosts when it follows a redirect
+        itself; walking the chain by hand must not lose that."""
+        handler, seen = _recording_handler(
+            [_redirect_to("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await self._loader()._fetch_text(
+                "https://api.github.com/repos/o/r/contents/SKILL.md",
+                headers={
+                    "Authorization": "Bearer secret-token",
+                    "Accept": "application/json",
+                },
+            )
+
+        assert len(seen) == 2
+        assert seen[0].headers.get("authorization") == "Bearer secret-token"
+        assert "authorization" not in seen[1].headers
+        assert seen[1].headers.get("accept") == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_a_same_host_redirect_keeps_the_authorization_header(self):
+        handler, seen = _recording_handler(
+            [_redirect_to("https://api.github.com/repos/o/r/contents/OTHER.md"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await self._loader()._fetch_text(
+                "https://api.github.com/repos/o/r/contents/SKILL.md",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        assert len(seen) == 2
+        assert seen[1].headers.get("authorization") == "Bearer secret-token"
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_chain_longer_than_the_cap_is_refused(self):
+        hops = [
+            _redirect_to(f"https://api.github.com/hop/{i}")
+            for i in range(loader_module.MAX_REDIRECTS + 1)
+        ]
+        handler, seen = _recording_handler(hops)
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="Exceeded"):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == loader_module.MAX_REDIRECTS
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_without_a_location_is_refused_not_parsed_as_content(self):
+        """raise_for_status() would not fire on a 302, so an empty Location
+        must not fall through into the body-reading path."""
+        handler, seen = _recording_handler(
+            [loader_module.httpx.Response(302, text="not a skill")]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="Location"):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_response_still_returns_its_body_in_one_request(self):
+        handler, seen = _recording_handler([_ok("# hello")])
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            text = await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert text == "# hello"
+        assert len(seen) == 1

@@ -25,10 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import httpx2 as httpx
 from pydantic import BaseModel, Field
+
+from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -573,8 +575,21 @@ class SkillsLoader:
         response body from a trusted domain before detecting the oversize.
         Caches the raw text so Stage 2 (full-skill load) can re-parse from
         cache without making a second HTTP request.
+
+        A skill URL is operator-supplied input that triggers an outbound
+        request, so redirects are not auto-followed: each hop is fetched with
+        ``follow_redirects=False`` and its target re-validated before it is
+        requested, the same way ``backend/core/image_ingest.py`` and
+        ``backend/agents/mcp_loader.py`` walk their redirect chains. Both of
+        this loader's controls are re-applied per hop — ``_validate_domain``
+        (the ``trusted_domains`` allowlist) and ``is_safe_url`` (the SSRF
+        address guard ``delivery.py`` uses) — because validating only the
+        first URL leaves a trusted domain, or an open redirect on one, able to
+        send the fetch to an internal address or off the allowlist entirely.
         """
         self._validate_domain(url)
+        if not is_safe_url(url):
+            raise ValueError(f"URL resolves to a disallowed address: {url}")
         # Return cached text if still within TTL
         cached = self._text_cache.get(url)
         if cached:
@@ -583,20 +598,46 @@ class SkillsLoader:
             if age < self._config.cache_ttl_seconds:
                 return text
         max_bytes = self._config.max_skill_content_bytes
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            response = await client.get(url, headers=headers or {})
-            response.raise_for_status()
-            # Reject early if the server advertises a content length that is too big
-            cl = response.headers.get("content-length")
-            if cl and int(cl) > max_bytes:
-                raise ValueError(
-                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                )
-            content = response.text
-            if len(content.encode()) > max_bytes:
-                raise ValueError(
-                    f"Content from {url} exceeds max size ({max_bytes} bytes)"
-                )
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
+            current_url = url
+            hop_headers = dict(headers or {})
+            for _ in range(MAX_REDIRECTS):
+                response = await client.get(current_url, headers=hop_headers)
+                if response.is_redirect:
+                    location = str(response.headers.get("location", ""))
+                    if not location:
+                        raise ValueError(
+                            f"Redirect without a Location header from {current_url}"
+                        )
+                    next_url = urljoin(current_url, location)
+                    self._validate_domain(next_url)
+                    if not is_safe_url(next_url):
+                        raise ValueError(
+                            f"Redirect to a disallowed address: {next_url}"
+                        )
+                    # httpx drops credentials on a cross-host redirect when it
+                    # follows one itself; this walk must do the same, or the
+                    # GitHub token in _github_headers() would be replayed to
+                    # whatever other trusted_domains host answered.
+                    if urlparse(next_url).hostname != urlparse(current_url).hostname:
+                        hop_headers.pop("Authorization", None)
+                    current_url = next_url
+                    continue
+                response.raise_for_status()
+                # Reject early if the server advertises a content length that is too big
+                cl = response.headers.get("content-length")
+                if cl and int(cl) > max_bytes:
+                    raise ValueError(
+                        f"Content from {url} exceeds max size ({max_bytes} bytes)"
+                    )
+                content = response.text
+                if len(content.encode()) > max_bytes:
+                    raise ValueError(
+                        f"Content from {url} exceeds max size ({max_bytes} bytes)"
+                    )
+                break
+            else:
+                raise ValueError(f"Exceeded {MAX_REDIRECTS} redirects for {url}")
         self._text_cache[url] = (content, datetime.now(timezone.utc))
         return content
 
