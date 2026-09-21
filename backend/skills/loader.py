@@ -12,6 +12,14 @@ Security:
 - Content is sanitized against prompt injection patterns
 - Dangerous HTML elements stripped; safe markup preserved
 - Domain allowlist configurable via SkillsConfig
+- SSRF address guard on every URL fetched, INCLUDING the first: a URL whose
+  hostname resolves to a private, loopback, link-local, CGNAT or reserved
+  address is refused even when its domain is in trusted_domains, and there is
+  no config override. A SKILL.md served from an internal host is therefore not
+  a supported configuration.
+- Redirects are not auto-followed; every hop is re-checked against both the
+  allowlist and the address guard before it is requested, and credentials are
+  dropped when a hop leaves the origin they were sent to
 - Maximum content size enforced
 - Failed fetches are logged and skipped without crashing
 """
@@ -62,6 +70,38 @@ _DANGEROUS_TAG_RE = re.compile(
 
 DEFAULT_MAX_CONTENT_BYTES = 50_000
 DEFAULT_MAX_BODY_CHARS = 8_000
+
+
+def _origin(url: str) -> tuple:
+    """(scheme, host, port) with the default port made explicit."""
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return (parsed.scheme, parsed.hostname, port)
+
+
+def _leaves_origin(current_url: str, next_url: str) -> bool:
+    """True when a redirect leaves the origin credentials were sent to.
+
+    Mirrors httpx's own rule, including its single exception: an http->https
+    upgrade on the same host is not a departure, so the credential survives it.
+    """
+    current, following = _origin(current_url), _origin(next_url)
+    if current == following:
+        return False
+    upgraded = (
+        current[0] == "http"
+        and following[0] == "https"
+        and current[1] == following[1]
+        and current[2] == 80
+        and following[2] == 443
+    )
+    return not upgraded
+
+
+def _drop_authorization(headers: Dict[str, str]) -> None:
+    """Remove the Authorization header whatever casing the caller used."""
+    for name in [name for name in headers if name.lower() == "authorization"]:
+        del headers[name]
 
 
 class SkillsConfig(BaseModel):
@@ -586,6 +626,11 @@ class SkillsLoader:
         address guard ``delivery.py`` uses) — because validating only the
         first URL leaves a trusted domain, or an open redirect on one, able to
         send the fetch to an internal address or off the allowlist entirely.
+
+        ``is_safe_url`` also gates the **initial** URL, which ``trusted_domains``
+        alone previously did not: an allowlisted host that resolves to an
+        internal address is now refused before any request, with no override.
+        That check resolves DNS, so it runs on cache hits too.
         """
         self._validate_domain(url)
         if not is_safe_url(url):
@@ -615,12 +660,16 @@ class SkillsLoader:
                         raise ValueError(
                             f"Redirect to a disallowed address: {next_url}"
                         )
-                    # httpx drops credentials on a cross-host redirect when it
-                    # follows one itself; this walk must do the same, or the
+                    # httpx drops credentials when a redirect leaves the
+                    # ORIGIN -- scheme, host and port, not host alone -- with
+                    # one exception: a plain http->https upgrade on the same
+                    # host keeps them. This walk must match that, or the
                     # GitHub token in _github_headers() would be replayed to
-                    # whatever other trusted_domains host answered.
-                    if urlparse(next_url).hostname != urlparse(current_url).hostname:
-                        hop_headers.pop("Authorization", None)
+                    # a sibling subdomain (_validate_domain admits any
+                    # subdomain of a trusted domain), to another port, or
+                    # over cleartext after an https->http downgrade.
+                    if _leaves_origin(current_url, next_url):
+                        _drop_authorization(hop_headers)
                     current_url = next_url
                     continue
                 response.raise_for_status()

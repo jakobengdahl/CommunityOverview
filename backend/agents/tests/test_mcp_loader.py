@@ -864,9 +864,11 @@ class TestFetchToolSSRFGuard:
         assert client.get.call_args_list[1].args[0] == "http://example.com/final"
 
     def test_redirect_cap_is_shared_with_the_other_hop_validating_paths(self):
-        """One cap for the three hop-validating paths, so they cannot drift again."""
+        """One cap for the four hop-validating paths, so they cannot drift again."""
         from backend.core import image_ingest
         from backend.core.events import delivery
+        from backend.skills import loader as skills_loader
 
         assert MAX_REDIRECTS == delivery.MAX_REDIRECTS
         assert image_ingest.MAX_REDIRECTS == delivery.MAX_REDIRECTS
+        assert skills_loader.MAX_REDIRECTS == delivery.MAX_REDIRECTS
