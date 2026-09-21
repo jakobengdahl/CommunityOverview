@@ -1384,12 +1384,16 @@ export class SessionSyncClient {
       const pending = this._queue.splice(0);
       return (async () => {
         for (const op of pending) {
+          const batch = [op];
           try {
             // Bounded like every other ops POST (_postOps) so a hung request on
             // teardown cannot stall this drain loop indefinitely.
-            await this._postOps([op]);
+            this._inFlightOps = this._inFlightOps.concat(batch);
+            await this._postOps(batch);
           } catch {
             /* best-effort teardown flush */
+          } finally {
+            this._removeInFlight(batch);
           }
         }
       })();
