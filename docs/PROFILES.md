@@ -450,10 +450,8 @@ seed that keeps it gives every instance seeded from it the same lineage. A test
 carries the key.
 
 Metadata keys on `Variable` are snake_case, matching the convention every other
-profile follows. Nine camelCase keys remain on `DataSet`, `DataStructure` and
-`StatisticalProgramme` from an earlier import; none has a declared counterpart,
-so they are undeclared and left for a hygiene pass that renames and declares
-them together. A `Variable` node's
+profile follows. Metadata keys on `DataSet`, `DataStructure` and
+`StatisticalProgramme` are snake_case and declared in the profile fields. A `Variable` node's
 semantic role is carried by its subtypes (`Identifier`, `Measure`, `Attribute`)
 and nowhere else — some nodes still hold a leftover `role` metadata key from an
 earlier import, which is deliberately left undeclared: declaring it would give

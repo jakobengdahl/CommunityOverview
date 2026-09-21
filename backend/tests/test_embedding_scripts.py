@@ -8,6 +8,7 @@ so on a deployment that sets it they wrote to a sidecar the app never reads.
 """
 
 import json
+import io
 import os
 import pickle
 import sys
@@ -27,7 +28,11 @@ from backend.core.embedding_sidecar import (
     resolve_sidecar_path,
 )
 from scripts.generate_embeddings import generate_embeddings  # noqa: E402
-from scripts.migrate_embeddings import migrate_embeddings  # noqa: E402
+from scripts.migrate_embeddings import (  # noqa: E402
+    ALLOWED_PICKLE_GLOBALS,
+    RestrictedUnpickler,
+    migrate_embeddings,
+)
 
 DIM = 8
 
@@ -51,6 +56,20 @@ def workspace():
 def _write_pickle(directory: Path, embeddings: dict) -> None:
     with open(directory / "embeddings.pkl", "wb") as f:
         pickle.dump({"embeddings": embeddings}, f)
+
+
+def _restricted_loads(payload: bytes):
+    return RestrictedUnpickler(io.BytesIO(payload)).load()
+
+
+class TestRestrictedUnpickler:
+    def test_allows_numpy_2_scalar_globals(self):
+        assert ("numpy._core.multiarray", "scalar") in ALLOWED_PICKLE_GLOBALS
+        assert ("numpy", "_core.multiarray") not in ALLOWED_PICKLE_GLOBALS
+
+        loaded = _restricted_loads(pickle.dumps(np.float32(1.25), protocol=4))
+
+        assert loaded == np.float32(1.25)
 
 
 class TestResolveSidecarPath:
