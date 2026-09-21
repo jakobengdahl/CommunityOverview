@@ -87,6 +87,60 @@ describe('domeSceneData', () => {
     expect(data.cards.map((card) => card.id)).toEqual(['n1']);
     expect(data.edges).toEqual([]);
   });
+
+  it('splits visible nodes into detailed cards and instanced marker data', () => {
+    const dense = denseScene(6);
+    const data = domeSceneData(dense, { maxNodes: 5, maxDetailedNodes: 2 });
+
+    expect(data.cards.map((card) => card.id)).toEqual(['n00', 'n01']);
+    expect(data.markers.map((marker) => marker.id)).toEqual(['n02', 'n03', 'n04']);
+    expect(data.budget).toEqual({
+      totalNodes: 6,
+      visibleNodes: 5,
+      detailedNodes: 2,
+      markerNodes: 3,
+      hiddenByBudget: 1,
+    });
+  });
+
+  it('keeps a selected node inside the node-count ceiling', () => {
+    const data = domeSceneData(denseScene(6), {
+      selectedNodeId: 'n05',
+      maxNodes: 3,
+      maxDetailedNodes: 3,
+    });
+
+    expect(data.cards.map((card) => card.id)).toEqual(['n00', 'n01', 'n05']);
+  });
+
+  it('only emits edges whose endpoints are inside the node-count ceiling', () => {
+    const data = domeSceneData(denseScene(4), { maxNodes: 2, maxDetailedNodes: 1 });
+
+    expect(data.cards.map((card) => card.id)).toEqual(['n00']);
+    expect(data.markers.map((marker) => marker.id)).toEqual(['n01']);
+    expect(data.edges.map((edge) => edge.id)).toEqual(['e00']);
+  });
+
+  it('keeps retained node positions stable when a budget hides later nodes', () => {
+    const full = domeSceneData(denseScene(6));
+    const budgeted = domeSceneData(denseScene(6), { maxNodes: 3, maxDetailedNodes: 3 });
+
+    expect(budgeted.cards[0].position).toEqual(full.cards[0].position);
+    expect(budgeted.cards[1].position).toEqual(full.cards[1].position);
+    expect(budgeted.cards[2].position).toEqual(full.cards[2].position);
+  });
+
+  it('keeps existing card positions stable when selected-node preservation swaps in a later node', () => {
+    const budgeted = domeSceneData(denseScene(6), { maxNodes: 3, maxDetailedNodes: 3 });
+    const withSelection = domeSceneData(denseScene(6), {
+      selectedNodeId: 'n05',
+      maxNodes: 3,
+      maxDetailedNodes: 3,
+    });
+
+    expect(withSelection.cards[0].position).toEqual(budgeted.cards[0].position);
+    expect(withSelection.cards[1].position).toEqual(budgeted.cards[1].position);
+  });
 });
 
 describe('selectionDetail', () => {
@@ -105,3 +159,26 @@ describe('selectionDetail', () => {
     expect(selectionDetail(scene, 'missing')).toBeNull();
   });
 });
+
+function denseScene(count) {
+  const positions = {};
+  const nodes = [];
+  const edges = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = `n${String(i).padStart(2, '0')}`;
+    positions[id] = { x: i * 10, y: i * 5 };
+    nodes.push({ id, name: `Node ${i}`, type: 'Actor' });
+    if (i > 0) {
+      edges.push({
+        id: `e${String(i - 1).padStart(2, '0')}`,
+        source: `n${String(i - 1).padStart(2, '0')}`,
+        target: id,
+      });
+    }
+  }
+  return sceneFromSession({
+    id: '1111-2222-3333-4444',
+    state: { positions, hidden_node_ids: [], hidden_edge_ids: [] },
+    resolved: { nodes, edges },
+  });
+}

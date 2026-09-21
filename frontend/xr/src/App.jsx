@@ -11,7 +11,7 @@ import {
   zoomToDensity,
   zoomToRadius,
 } from './domeLayout.js';
-import { domeSceneData, selectionDetail } from './domeScene.js';
+import { XR_NODE_BUDGET, domeSceneData, selectionDetail } from './domeScene.js';
 import { EMPTY_SCENE } from './sceneModel.js';
 import { SceneSession, isValidSessionId } from './sceneSession.js';
 // The REST layer is reused from the 2D client as-is (ADR 0003 reuse map); see
@@ -35,6 +35,7 @@ const store = createXRStore();
 // eye height. The flat-preview camera below sits at this same height, and the
 // framing argument in its comment depends on the two staying equal.
 const EYE_HEIGHT = 1.5;
+const NODE_CARD_SIZE = [1.25, 0.55];
 
 // Read `?session=<short-id>` once at startup. Sharing a session as a link is
 // the desktop client's contract (§5) and is the only bearable way to join one
@@ -207,7 +208,7 @@ function NodeCard({ node, selected, onSelect }) {
           onSelect(node.id);
         }}
       >
-        <planeGeometry args={[1.25, 0.55]} />
+        <planeGeometry args={NODE_CARD_SIZE} />
         <meshBasicMaterial map={texture} transparent toneMapped={false} />
       </mesh>
       {node.claim ? (
@@ -217,6 +218,52 @@ function NodeCard({ node, selected, onSelect }) {
         </mesh>
       ) : null}
     </Billboard>
+  );
+}
+
+function InstancedNodeMarkers({ nodes, selectedNodeId, onSelect }) {
+  const meshRef = useRef(null);
+  const color = useMemo(() => new THREE.Color(), []);
+  const matrix = useMemo(() => new THREE.Matrix4(), []);
+  const position = useMemo(() => new THREE.Vector3(), []);
+  const quaternion = useMemo(() => new THREE.Quaternion(), []);
+  const scaleVector = useMemo(() => new THREE.Vector3(), []);
+
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      const selected = node.id === selectedNodeId;
+      const scale = selected ? 0.11 : 0.075;
+      matrix.compose(
+        position.set(node.position.x, node.position.y, node.position.z),
+        quaternion,
+        scaleVector.set(scale, scale, scale)
+      );
+      mesh.setMatrixAt(i, matrix);
+      mesh.setColorAt(i, color.set(selected ? '#ffffff' : node.color));
+    }
+    mesh.count = nodes.length;
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [color, matrix, nodes, position, quaternion, scaleVector, selectedNodeId]);
+
+  if (!nodes.length) return null;
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, nodes.length]}
+      userData={{ xrNodeIds: nodes.map((node) => node.id) }}
+      onClick={(event) => {
+        event.stopPropagation();
+        const nodeId = nodes[event.instanceId]?.id;
+        if (nodeId) onSelect(nodeId);
+      }}
+    >
+      <sphereGeometry args={[1, 12, 8]} />
+      <meshBasicMaterial vertexColors toneMapped={false} />
+    </instancedMesh>
   );
 }
 
@@ -289,10 +336,13 @@ function XrRayInput({
       if (!ray) return null;
       const targets = [];
       scene.traverse((object) => {
-        if (object.userData?.xrNodeId) targets.push(object);
+        if (object.userData?.xrNodeId || object.userData?.xrNodeIds) targets.push(object);
       });
       raycaster.set(ray.origin, ray.direction);
-      return raycaster.intersectObjects(targets, false)[0]?.object.userData.xrNodeId || null;
+      const hit = raycaster.intersectObjects(targets, false)[0];
+      if (!hit) return null;
+      if (hit.object.userData.xrNodeId) return hit.object.userData.xrNodeId;
+      return hit.object.userData.xrNodeIds?.[hit.instanceId] || null;
     },
     [raycaster, scene]
   );
@@ -495,6 +545,11 @@ function DomeGraph({ data, selectedNodeId, onSelect, selectedDetail }) {
           onSelect={onSelect}
         />
       ))}
+      <InstancedNodeMarkers
+        nodes={data.markers}
+        selectedNodeId={selectedNodeId}
+        onSelect={onSelect}
+      />
       <InWorldHud detail={selectedDetail} />
     </group>
   );
@@ -621,8 +676,15 @@ export default function App() {
     return { ...view, radius: zoomToRadius(domeNav.zoom) };
   }, [activeLayoutBounds, domeNav]);
   const domeData = useMemo(
-    () => domeSceneData(activeScene, { eyeHeight: EYE_HEIGHT, ...domeOptions }),
-    [activeScene, domeOptions]
+    () =>
+      domeSceneData(activeScene, {
+        eyeHeight: EYE_HEIGHT,
+        selectedNodeId,
+        maxNodes: XR_NODE_BUDGET.maxNodes,
+        maxDetailedNodes: XR_NODE_BUDGET.maxDetailedNodes,
+        ...domeOptions,
+      }),
+    [activeScene, domeOptions, selectedNodeId]
   );
   const selectedDetail = useMemo(
     () => selectionDetail(activeScene, selectedNodeId),
@@ -677,7 +739,9 @@ export default function App() {
 
   const connectedSummary =
     status === 'connected'
-      ? `, ${plural(domeData.cards.length, 'node')}, ${plural(domeData.edges.length, 'edge')}, ${plural(activeScene.roster.length, 'client')}`
+      ? `, ${plural(domeData.budget.visibleNodes, 'node')}, ${plural(domeData.edges.length, 'edge')}, ${plural(activeScene.roster.length, 'client')}${
+          domeData.budget.hiddenByBudget ? `, ${domeData.budget.hiddenByBudget} over XR budget` : ''
+        }`
       : null;
 
   return (
