@@ -287,6 +287,24 @@ function reactFlowArraysEqual(a, b) {
 }
 
 /**
+ * Value-equality for a remote selection/edit-lease marker
+ * (`{clientId, color, displayName}` or `null`), used by the two mirror
+ * effects below instead of `===`. `sessionSyncClient.getRemoteSelections()`
+ * and `getRemoteLeases()` unconditionally build a fresh marker object for
+ * every entry on every call (see their doc comments in `sessionSyncClient.js`),
+ * so a reference comparison against the previous marker is always false even
+ * when the underlying claim/lease is unchanged — exactly the reference-vs-
+ * value gap `reactFlowArraysEqual` above exists to close for whole arrays.
+ * Comparing the three fields directly is cheaper than routing a single small
+ * object through JSON.stringify.
+ */
+function remoteMarkerEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.clientId === b.clientId && a.color === b.color && a.displayName === b.displayName;
+}
+
+/**
  * GraphCanvas - Main graph visualization component
  */
 function GraphCanvasInner({
@@ -4549,7 +4567,8 @@ function GraphCanvasInner({
       const next = nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteSelections?.[n.id] ?? null;
-        if (marker === (n.data?.remoteSelection ?? null)) return n;
+        const prevMarker = n.data?.remoteSelection ?? null;
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
         changed = true;
         return { ...n, data: { ...n.data, remoteSelection: marker } };
       });
@@ -4577,8 +4596,10 @@ function GraphCanvasInner({
         const prevMarker = n.data?.remoteLease ?? null;
         // `draggable` and the rest of `nextData` are a pure function of `n`
         // plus this one field, so an unchanged marker means an unchanged
-        // result — the cheap check that lets this stay a no-op run.
-        if (marker === prevMarker) return n;
+        // result — the cheap check that lets this stay a no-op run. Compared
+        // by value (see `remoteMarkerEqual`'s doc comment): `getRemoteLeases()`
+        // mints a fresh object per call, so `===` was always false here.
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
         const nextData = { ...n.data, remoteLease: marker };
         const draggable = isAnnotationDraggable({ ...n, data: nextData });
         // A group that may be dragged resolves `draggable` to `undefined`, so
