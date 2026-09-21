@@ -330,6 +330,16 @@ version: "1.0"
 
 Skills can also be loaded from external URLs via `skills_urls` on expert agent configs, or fetched from GitHub repos by pointing to the repo URL.
 
+`trusted_domains` is necessary but not sufficient. Every skill URL is also
+checked against the same SSRF address guard the webhook, image-ingest and
+agent-fetch paths use: a hostname that resolves to a private, loopback,
+link-local, CGNAT or reserved address is refused even when its domain is
+allowlisted, and there is no config override. A SKILL.md served from an
+internal host is therefore not a supported configuration. Redirects are not
+followed automatically — each hop must satisfy both `trusted_domains` and the
+address guard, so an allowlisted host cannot redirect a fetch off the
+allowlist or inward.
+
 **Shipped skills:**
 
 | Skill | Profile | Description |
