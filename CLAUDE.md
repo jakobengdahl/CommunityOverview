@@ -229,6 +229,11 @@ ruff format --check backend scripts   # python-lint job's format-check step
 npm run format:check                  # frontend-lint job's prettier format-check step
 ```
 
+The project pins ruff below 0.16 deliberately. If a newer local ruff is on your
+PATH, it may also reformat Python examples inside Markdown files, producing churn
+that CI's pinned formatter will not require; use the repo-installed/pinned ruff
+before accepting Markdown formatting diffs.
+
 The backend job installs only the base requirements (no ML stack); semantic search
 and chat fall back to their mock paths, so no model is downloaded in CI.
 
