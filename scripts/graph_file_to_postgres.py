@@ -40,10 +40,11 @@ class GraphBackend(Protocol):
 class TargetInspector(Protocol):
     """What the backend's own load and save cannot tell the conversion.
 
-    Both questions concern rows this conversion's session may not see: a
-    policy hides another scope's rows, and a scoped reader sees rows that
-    carry no scope alongside its own. So they are asked of the catalog and
-    of the scope column directly rather than of ``load_graph_data``.
+    Both questions concern rows this conversion's session may not see: the
+    backend's own scope predicate hides another scope's rows, with a policy
+    as a second, separate layer, and a scoped reader sees rows that carry no
+    scope alongside its own. So they are asked of the catalog and of the
+    scope column directly rather than of ``load_graph_data``.
     """
 
     def isolation_evidence(self) -> list[str]: ...
