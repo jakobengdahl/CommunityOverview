@@ -54,3 +54,26 @@ describe('canvas touch gestures depend on explicit touch-action rules', () => {
     expect(hasDeclaration(css, '.react-flow__node textarea', 'touch-action:\\s*auto')).toBe(true);
   });
 });
+
+describe('canvas phone overlays stay clear of host chrome', () => {
+  const css = readStylesheet('GraphCanvas.css');
+
+  it('moves the marks legend to the right canvas chrome column at phone widths', () => {
+    expect(css).toMatch(/@media \(max-width: 768px\)/);
+    expect(
+      hasDeclaration(
+        css,
+        '.graph-marks-legend',
+        'right:\\s*calc\\(12px \\+ env\\(safe-area-inset-right\\)\\)'
+      )
+    ).toBe(true);
+    expect(hasDeclaration(css, '.graph-marks-legend', 'left:\\s*auto')).toBe(true);
+    expect(
+      hasDeclaration(
+        css,
+        '.graph-marks-legend',
+        'max-width:\\s*min\\(220px, calc\\(100% - 24px\\)\\)'
+      )
+    ).toBe(true);
+  });
+});
