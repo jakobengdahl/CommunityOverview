@@ -1788,8 +1788,12 @@ export class SessionSyncClient {
           staleRemoteAnnotation = isAnnotationOpStale(this._baseline, op);
           this._baseline = foldRemoteAnnotationOp(this._baseline, op);
         }
-        if (this.handlers.onRemoteOps && !staleRemoteAnnotation)
-          this.handlers.onRemoteOps([op], { clientId: data.client_id });
+        if (this.handlers.onRemoteOps && !staleRemoteAnnotation) {
+          this.handlers.onRemoteOps([op], {
+            clientId: data.client_id,
+            sessionId: this.sessionId,
+          });
+        }
         break;
       }
       case 'presence_joined':

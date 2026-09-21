@@ -415,6 +415,7 @@ describe('SessionSyncClient', () => {
     });
     expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'node_moved', node_id: 'a' }], {
       clientId: 'client-other',
+      sessionId: '1234-5678',
     });
     expect(client.seq).toBe(2);
   });
@@ -442,7 +443,10 @@ describe('SessionSyncClient', () => {
     // the ingest endpoint — but the broadcast is attributed to the server's
     // marker, not to 'client-me'.
     es.emit({ type: 'op', client_id: 'human-image-ingest', op: imageOp, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([imageOp], { clientId: 'human-image-ingest' });
+    expect(onRemoteOps).toHaveBeenCalledWith([imageOp], {
+      clientId: 'human-image-ingest',
+      sessionId: '1234-5678',
+    });
   });
 
   // Regression for the undo self-echo-drop fix
@@ -467,7 +471,10 @@ describe('SessionSyncClient', () => {
     // the undo endpoint — but the broadcast is attributed to the server's
     // marker, not to 'client-me'.
     es.emit({ type: 'op', client_id: 'undo-replay', op: inverseOp, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([inverseOp], { clientId: 'undo-replay' });
+    expect(onRemoteOps).toHaveBeenCalledWith([inverseOp], {
+      clientId: 'undo-replay',
+      sessionId: '1234-5678',
+    });
   });
 
   // foldLocalOp is App.jsx's other half of the image-ingest fix: applied
@@ -703,7 +710,10 @@ describe('SessionSyncClient', () => {
     es.emit({ type: 'snapshot', seq: 0, session: { state: { node_refs: ['a', 'b'] } } });
     const op = { op: 'edges_added', edges: [{ id: 'e1', source: 'a', target: 'b' }] };
     es.emit({ type: 'op', client_id: 'client-other', op, seq: 1 });
-    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'client-other' });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
     // Edges are graph-derived, not mirror state: re-syncing the same node set
     // must emit nothing (the edge op left no residue that could echo back out).
     client.setBaseline({ node_refs: ['a', 'b'] });
@@ -770,8 +780,14 @@ describe('SessionSyncClient', () => {
     const updated = { op: 'edges_updated', edges: [{ id: 'e1', type: 'DEPENDS_ON' }] };
     es.emit({ type: 'op', client_id: 'client-other', op: removed, seq: 1 });
     es.emit({ type: 'op', client_id: 'client-other', op: updated, seq: 2 });
-    expect(onRemoteOps).toHaveBeenCalledWith([removed], { clientId: 'client-other' });
-    expect(onRemoteOps).toHaveBeenCalledWith([updated], { clientId: 'client-other' });
+    expect(onRemoteOps).toHaveBeenCalledWith([removed], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
+    expect(onRemoteOps).toHaveBeenCalledWith([updated], {
+      clientId: 'client-other',
+      sessionId: '1234-5678',
+    });
     // Edges are graph-derived, not mirror state: re-syncing the same node set
     // must emit nothing (neither op left residue that could echo back out).
     client.setBaseline({ node_refs: ['a', 'b'] });
@@ -803,7 +819,10 @@ describe('SessionSyncClient', () => {
       seq: 3,
     };
     FakeEventSource.instances[0].emit({ type: 'op', client_id: 'mcp-agent', op, seq: 3 });
-    expect(onRemoteOps).toHaveBeenCalledWith([op], { clientId: 'mcp-agent' });
+    expect(onRemoteOps).toHaveBeenCalledWith([op], {
+      clientId: 'mcp-agent',
+      sessionId: '1234-5678',
+    });
     expect(onRemoteOps.mock.calls[0][0][0].animation).toEqual({
       animate: true,
       duration_ms: 400,
@@ -1372,6 +1391,7 @@ describe('SessionSyncClient', () => {
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
     expect(onRemoteOps).toHaveBeenCalledWith([{ op: 'nodes_added', node_ids: ['theirs'] }], {
       clientId: 'client-other',
+      sessionId: '1234-5678',
     });
   });
 });
@@ -2360,7 +2380,10 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     // A genuinely newer broadcast must still reach onRemoteOps — round 5's
     // fix must not turn into a "collaboration doesn't work" regression by
     // over-suppressing delivery of real updates.
-    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-B' });
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], {
+      clientId: 'client-B',
+      sessionId: '1234-5678',
+    });
   });
 
   it('a stale broadcast followed by a genuinely newer one: the stale one is dropped but the newer one still applies', async () => {
@@ -2409,7 +2432,10 @@ describe('remote broadcast reordering vs. an already-acked own write (round 3 fo
     // onRemoteOps sees only the genuinely newer broadcast — the stale one
     // never reaches it (and so never reaches a canvas wired to it either).
     expect(onRemoteOps).toHaveBeenCalledTimes(1);
-    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], { clientId: 'client-C' });
+    expect(onRemoteOps).toHaveBeenCalledWith([newerOp], {
+      clientId: 'client-C',
+      sessionId: '1234-5678',
+    });
   });
 });
 
