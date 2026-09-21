@@ -6,7 +6,13 @@ import { resolveAttachedPosition } from '../src/utils/annotations';
 // A live node store so onNodeDragStop's getFlowNodes()/setNodes read and
 // write the same array, the same harness GraphCanvasUndo.test.jsx uses to
 // exercise real drag wiring end to end.
-const store = vi.hoisted(() => ({ nodes: [], edges: [], handlers: {} }));
+const store = vi.hoisted(() => ({
+  nodes: [],
+  edges: [],
+  handlers: {},
+  probeAttachTargetId: null,
+  probeAttachKind: 'label',
+}));
 
 // Mirrors ANNOTATION_TYPES (utils/annotations.js) — kept as its own literal
 // set (rather than importing that module here) so this mock factory, which
@@ -24,7 +30,23 @@ const OVERLAY_NODE_TYPES = new Set([
   'group',
 ]);
 
-vi.mock('reactflow', () => {
+vi.mock('reactflow', async () => {
+  const React = await vi.importActual('react');
+  const { AnnotationContext } = await vi.importActual('../src/components/AnnotationContext');
+
+  const NearbyAttachProbe = () => {
+    const { attachNearby } = React.useContext(AnnotationContext);
+    if (!store.probeAttachTargetId) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => attachNearby(store.probeAttachTargetId, store.probeAttachKind)}
+      >
+        probe attach nearby
+      </button>
+    );
+  };
+
   // Renders only annotation-kind nodes through the real `nodeTypes` map
   // GraphCanvas builds (GenericAnnotationNode, NoteNode, ArrowNode, …) —
   // exactly like real ReactFlow does — so an annotation's OWN context menu
@@ -45,6 +67,7 @@ vi.mock('reactflow', () => {
     store.handlers = props;
     return (
       <div data-testid="react-flow">
+        <NearbyAttachProbe />
         {(props.nodes || [])
           .filter((n) => OVERLAY_NODE_TYPES.has(n.type))
           .map((n) => {
@@ -73,7 +96,7 @@ vi.mock('reactflow', () => {
     addEdge: (_params, edges) => edges,
     useReactFlow: () => ({
       getNodes: () => store.nodes,
-      getEdges: () => [],
+      getEdges: () => store.edges,
       setNodes: vi.fn(),
       setEdges: vi.fn(),
       screenToFlowPosition: () => ({ x: 0, y: 0 }),
@@ -90,6 +113,14 @@ vi.mock('reactflow', () => {
 
 const nodeById = (id) => store.nodes.find((n) => n.id === id);
 
+const resetStore = () => {
+  store.nodes = [];
+  store.edges = [];
+  store.handlers = {};
+  store.probeAttachTargetId = null;
+  store.probeAttachKind = 'label';
+};
+
 // task-annotation-render-direct-manipulation: dragging a label/text/icon
 // near a node (re)attaches it; dragging one outside every snap zone
 // detaches it and keeps the dropped position (docs/ANNOTATION_CONTRACT.md's
@@ -101,11 +132,7 @@ const nodeById = (id) => store.nodes.find((n) => n.id === id);
 // pure-function level by resolveAttachedPosition in overlaySerialization.test.js,
 // the same split the pre-existing arrow-anchor effect uses.
 describe('GraphCanvas attachment: drag-to-attach/detach', () => {
-  beforeEach(() => {
-    store.nodes = [];
-    store.edges = [];
-    store.handlers = {};
-  });
+  beforeEach(() => resetStore());
   afterEach(() => cleanup());
 
   it('attaches a dropped label to the nearest node, storing the drop offset', () => {
@@ -285,11 +312,7 @@ describe('GraphCanvas attachment: drag-to-attach/detach', () => {
 // on every render here — a plain graph node injected only into `store.nodes`
 // does not survive the render `onNodeContextMenu` itself triggers.
 describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
-  beforeEach(() => {
-    store.nodes = [];
-    store.edges = [];
-    store.handlers = {};
-  });
+  beforeEach(() => resetStore());
   afterEach(() => cleanup());
 
   const openNodeMenu = (nodeId) => {
@@ -467,6 +490,31 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
     expect(screen.queryByText('Add nearby')).toBeNull();
     expect(screen.queryByRole('button', { name: '+ Label' })).toBeNull();
   });
+
+  it('refuses direct nearby attachment when the requested target is an arrow node or edge', () => {
+    const onAnnotationChange = vi.fn();
+    store.probeAttachTargetId = 'arrow-1';
+    render(<GraphCanvas nodes={[]} edges={[]} onAnnotationChange={onAnnotationChange} />);
+
+    const arrow = {
+      id: 'arrow-1',
+      type: 'arrow',
+      position: { x: 100, y: 100 },
+      data: { dx: 120, dy: 0 },
+    };
+    store.nodes = [arrow];
+    fireEvent.click(screen.getByRole('button', { name: 'probe attach nearby' }));
+
+    expect(store.nodes).toEqual([arrow]);
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+
+    store.edges = [{ id: 'edge-1', source: 'source-1', target: 'target-1' }];
+    store.probeAttachTargetId = 'edge-1';
+    fireEvent.click(screen.getByRole('button', { name: 'probe attach nearby' }));
+
+    expect(store.nodes).toEqual([arrow]);
+    expect(onAnnotationChange).not.toHaveBeenCalled();
+  });
 });
 
 // dec-annotation-lock-semantics point 1: `locked` freezes ALL geometry
@@ -475,11 +523,7 @@ describe('GraphCanvas attachment: creation via the Nearby object menu', () => {
 // far from the overlay's stored geometry, so an unfixed effect (which
 // resolves on every `nodes` change, mount included) would visibly move it.
 describe('GraphCanvas attachment/anchor: locked annotations freeze geometry', () => {
-  beforeEach(() => {
-    store.nodes = [];
-    store.edges = [];
-    store.handlers = {};
-  });
+  beforeEach(() => resetStore());
   afterEach(() => cleanup());
 
   it('does not move a locked, attached label when its target node has moved', () => {
@@ -539,11 +583,7 @@ describe('GraphCanvas attachment/anchor: locked annotations freeze geometry', ()
 // were keyed on anything other than the kind itself, this would be the case
 // that slips through and silently starts following again.
 describe('GraphCanvas attachment: a vote_dot never follows a stale attachment', () => {
-  beforeEach(() => {
-    store.nodes = [];
-    store.edges = [];
-    store.handlers = {};
-  });
+  beforeEach(() => resetStore());
   afterEach(() => cleanup());
 
   it('does not move an unlocked vote_dot toward a target named by its stale attachment', () => {
