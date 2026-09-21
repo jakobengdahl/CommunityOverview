@@ -5,23 +5,23 @@ import argparse
 from pathlib import Path
 
 
+ALLOWED_PICKLE_GLOBALS = {
+    ("numpy.core.multiarray", "_reconstruct"),
+    ("numpy", "ndarray"),
+    ("numpy", "dtype"),
+    ("numpy.core.numeric", "_frombuffer"),
+    ("numpy.core.multiarray", "scalar"),
+    ("numpy", "float64"),
+    ("numpy", "float32"),
+    ("numpy._core.multiarray", "_reconstruct"),
+    ("numpy._core.multiarray", "scalar"),
+    ("numpy._core.numeric", "_frombuffer"),
+}
+
+
 class RestrictedUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        # Allow specific safe classes for unpickling
-        allowed_classes = {
-            ("numpy.core.multiarray", "_reconstruct"),
-            ("numpy", "ndarray"),
-            ("numpy", "dtype"),
-            ("numpy.core.numeric", "_frombuffer"),
-            ("numpy.core.multiarray", "scalar"),
-            ("numpy", "float64"),
-            ("numpy", "float32"),
-            ("numpy", "_core.multiarray"),
-            ("numpy._core.multiarray", "_reconstruct"),
-            ("numpy._core.numeric", "_frombuffer"),
-        }
-
-        if (module, name) in allowed_classes:
+        if (module, name) in ALLOWED_PICKLE_GLOBALS:
             return super().find_class(module, name)
 
         raise pickle.UnpicklingError(f"Global '{module}.{name}' is forbidden")
