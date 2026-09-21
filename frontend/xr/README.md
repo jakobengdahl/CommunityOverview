@@ -24,6 +24,10 @@ contracts, the session-sync protocol, or the existing 2D web client.
   tracked controllers or hand input can select a node, advertise the generic
   session selection claim, preview a drag on the dome, and commit it as a
   `node_moved` op in the same 2D coordinate space as the desktop client.
+- **Dome navigation**: zoom increases layout density while also bringing the
+  shell closer, horizontal pan wraps across the actual layout width, vertical
+  pan clamps at the layout edges with indicators, and empty-background ray
+  grabs pan the dome separately from node ray selection.
 - **Shared-session sync**, reusing the existing protocol with no change to it:
   - `src/sceneSession.js` opens `GET /api/sessions/{id}/stream` through
     `frontend/web/src/services/sessionSyncClient.js` — imported across the
@@ -53,8 +57,8 @@ minimal rather than issuing extra reads.
 
 ### Not yet wired (next tasks)
 
-SDF text labels, dome-radius zoom navigation, controller comfort locomotion, and
-hardware performance work are still to come — as is lifting
+SDF text labels, controller comfort locomotion, and hardware performance work
+are still to come — as is lifting
 `sessionSyncClient.js` and the session helpers of `api.js` out of
 `frontend/web` into a shared package, now that a second consumer exists.
 Annotation and group ops are still ignored by the scene model rather than
