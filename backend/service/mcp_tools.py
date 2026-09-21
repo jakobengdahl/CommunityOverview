@@ -982,41 +982,52 @@ def register_mcp_tools(
     # ==================== Visualization Session Tools ====================
 
     @register_tool
-    def clear_visualization(visualization_session_id: str) -> Dict[str, Any]:
+    def clear_visualization(
+        visualization_session_id: str, expected_revision: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
         Clear all nodes, edges, and annotations from the visualization canvas.
 
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
-        This is a live-canvas command, and it *gates* on the legacy push
-        channel: it refuses unless a browser is holding that channel open for
-        the session, which is narrower than "someone is watching" — a browser
-        that has moved to the op stream reports presence in
-        ``connect_to_visualization_session`` and still gets refused here, even
-        though the command would have reached it. The tools that act on the
-        session's stored state have no such requirement.
+        This is a live-canvas command. It refuses unless a browser is currently
+        reachable through the shared-session op stream or the legacy push
+        channel. The tools that act on the session's stored state have no such
+        live-client requirement.
+
+        When ``expected_revision`` is supplied and the session has stored state,
+        the clear is rejected unless it matches the current session revision.
+        This mirrors the optimistic-concurrency contract used by
+        ``add_nodes_to_session`` and ``apply_visualization_layout``.
 
         Args:
             visualization_session_id: The browser session ID shown in the header
                 (e.g. "8244-1742")
+            expected_revision: If given, the clear is rejected unless it equals
+                the session's current ``revision``. Omit for fire-and-forget
+                live-canvas clears.
 
         Returns:
-            Dict with success status and message
+            Dict with success status and message. On a concurrency clash returns
+            success=false with error=revision_conflict and the current revision.
         """
-        if not session_registry:
-            return {"success": False, "error": "Session registry not available"}
-        if not session_registry.is_valid_session_id(visualization_session_id):
+        if session_registry is None and session_manager is None:
+            return {
+                "success": False,
+                "error": "Visualization sessions are not available",
+            }
+        if not is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
                 "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
             }
-        if not session_registry.session_exists(visualization_session_id):
+        stored, clients, push_target = _session_facts(visualization_session_id)
+        if not push_target and clients <= 0:
             # Keep the contract's not-found error for an id that names no
-            # session at all (§8); "nobody is holding the legacy channel" is a
+            # session at all (§8); "nobody has a live canvas open" is a
             # different condition and must not be reported as if the session
             # existed.
-            stored, _, _ = _session_facts(visualization_session_id)
             if not stored:
                 return {
                     "success": False,
@@ -1030,9 +1041,29 @@ def register_mcp_tools(
                 "success": False,
                 "error": (
                     f"Session '{visualization_session_id}' exists, but no "
-                    "browser is holding its legacy push channel open, which is "
-                    "what this command is gated on."
+                    "browser is connected to its op stream or holding its "
+                    "legacy push channel open."
                 ),
+            }
+        session = (
+            session_manager.get_session(visualization_session_id)
+            if session_manager is not None
+            else None
+        )
+        if (
+            expected_revision is not None
+            and session is not None
+            and expected_revision != session.seq
+        ):
+            return {
+                "success": False,
+                "error": "revision_conflict",
+                "message": (
+                    "The session changed since it was read. Re-read the "
+                    "session and retry with the current revision."
+                ),
+                "expected_revision": expected_revision,
+                "current_revision": session.seq,
             }
         result = {
             "action": "clear_visualization",

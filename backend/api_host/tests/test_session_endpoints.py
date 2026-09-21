@@ -372,10 +372,10 @@ class TestClearVisualization:
         assert data["success"] is False
         assert "not found" in data["error"].lower()
 
-    def test_clear_reports_the_missing_push_channel_for_a_stored_session(
+    def test_clear_reports_no_live_client_for_a_stored_session(
         self, test_app: TestClient, headless_session
     ):
-        """A session that exists but has no legacy push channel is a different
+        """A session that exists but has no live canvas is a different
         failure from one that does not exist, and says so."""
         clear = test_app.app.state.tools_map["clear_visualization"]
         session_id = headless_session()
@@ -384,7 +384,20 @@ class TestClearVisualization:
 
         assert data["success"] is False
         assert "not found" not in data["error"].lower()
+        assert "op stream" in data["error"].lower()
         assert "legacy push channel" in data["error"].lower()
+
+    def test_clear_session_with_only_op_stream_presence_succeeds(
+        self, test_app: TestClient, headless_session
+    ):
+        """A connected op-stream client is enough; no legacy registry entry is required."""
+        clear = test_app.app.state.tools_map["clear_visualization"]
+        session_id = headless_session()
+        test_app.app.state.session_manager.presence.join(session_id, "client-1", "Tester")
+
+        data = clear(visualization_session_id=session_id)
+
+        assert data["success"] is True
 
     def test_clear_open_session_succeeds(self, test_app: TestClient):
         # The push transport itself is covered by the search_graph push tests; a
@@ -395,6 +408,35 @@ class TestClearVisualization:
 
         clear = test_app.app.state.tools_map["clear_visualization"]
         data = clear(visualization_session_id=session_id)
+        assert data["success"] is True
+
+    def test_clear_rejects_stale_expected_revision(
+        self, test_app: TestClient, headless_session
+    ):
+        clear = test_app.app.state.tools_map["clear_visualization"]
+        session_id = headless_session()
+        _open_browser(test_app, session_id)
+        test_app.app.state.session_manager.add_node_refs(session_id, "setup", ["n1"])
+
+        data = clear(visualization_session_id=session_id, expected_revision=0)
+
+        assert data["success"] is False
+        assert data["error"] == "revision_conflict"
+        assert data["expected_revision"] == 0
+        assert data["current_revision"] == test_app.app.state.session_manager.get_session(
+            session_id
+        ).seq
+
+    def test_clear_accepts_matching_expected_revision(
+        self, test_app: TestClient, headless_session
+    ):
+        clear = test_app.app.state.tools_map["clear_visualization"]
+        session_id = headless_session()
+        _open_browser(test_app, session_id)
+        current = test_app.app.state.session_manager.get_session(session_id).seq
+
+        data = clear(visualization_session_id=session_id, expected_revision=current)
+
         assert data["success"] is True
 
 

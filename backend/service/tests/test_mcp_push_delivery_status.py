@@ -21,8 +21,8 @@ end: consumer attached, consumer gone, and the push after that.
 Both paths run against the real ``SessionRegistry`` / ``SessionManager``, and
 each delivered case drains the consumer it claims to have reached.
 
-``clear_visualization`` also pushes, but it already refuses unless the session has
-a registry entry, so it is self-reporting already and its result shape is pinned
+``clear_visualization`` also pushes, but it already refuses unless a live client
+is reachable, so it is self-reporting already and its result shape is pinned
 here as unchanged.
 """
 
@@ -523,7 +523,7 @@ def test_the_report_is_the_only_difference_a_session_id_makes(wired):
 
 
 def test_clear_visualization_result_shape_is_unchanged(wired):
-    """It gates on the registry instead of reporting, and keeps doing so."""
+    """It gates before pushing instead of reporting, and keeps doing so."""
     tools, registry, _manager = wired
     session_id = _new_session(tools)
 
@@ -533,6 +533,17 @@ def test_clear_visualization_result_shape_is_unchanged(wired):
 
     registry.get_or_create(session_id)
     cleared = tools["clear_visualization"](visualization_session_id=session_id)
+    assert cleared["success"] is True
+    assert "visualization_delivery" not in cleared
+
+
+def test_clear_visualization_accepts_op_stream_presence_without_registry(tmp_path):
+    tools, _registry, manager = _wire(tmp_path, with_registry=False)
+    session_id = _new_session(tools)
+    manager.presence.join(session_id, "client-1", "Tester")
+
+    cleared = tools["clear_visualization"](visualization_session_id=session_id)
+
     assert cleared["success"] is True
     assert "visualization_delivery" not in cleared
 

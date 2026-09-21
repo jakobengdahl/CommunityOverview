@@ -95,6 +95,27 @@ describe('applyEdgeUpdate', () => {
     expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
   });
 
+  it('does not resurrect a cleared canvas when the edge update resolves', async () => {
+    const h = harness();
+    const call = deferred();
+    const updateEdge = vi.fn(() => call.promise);
+
+    const inFlight = applyEdgeUpdate({ ...h, updateEdge });
+    expect(updateEdge).toHaveBeenCalled();
+
+    useGraphStore.getState().clearVisualization();
+    call.release();
+    const applied = await inFlight;
+
+    expect(applied).toBe(false);
+    expect(h.updateVisualization).not.toHaveBeenCalled();
+    expect(h.syncRef.current.sendEdgesUpdated).not.toHaveBeenCalled();
+    expect(h.setEditingEdge).not.toHaveBeenCalled();
+    expect(useGraphStore.getState().nodes).toEqual([]);
+    expect(useGraphStore.getState().edges).toEqual([]);
+    expect(h.showNotification).toHaveBeenCalledWith('success', 'Edge updated');
+  });
+
   // The session-scoped work runs inside the same try as the PUT, so announcing
   // success before it would let a throw there contradict itself: "Edge updated"
   // followed by "Could not update edge" for an edit that actually landed.
