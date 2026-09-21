@@ -229,6 +229,11 @@ ruff format --check backend scripts   # python-lint job's format-check step
 npm run format:check                  # frontend-lint job's prettier format-check step
 ```
 
+The project pins ruff below 0.16 deliberately. If a newer local ruff is on your
+PATH, it may also reformat Python examples inside Markdown files, producing churn
+that CI's pinned formatter will not require; use the repo-installed/pinned ruff
+before accepting Markdown formatting diffs.
+
 The backend job installs only the base requirements (no ML stack); semantic search
 and chat fall back to their mock paths, so no model is downloaded in CI.
 
@@ -448,7 +453,7 @@ every surviving `test-durability` and `unfalsifiable` finding — as **one**
 residue, and merge. A "meaningful gap" in the tests is a `test-durability`
 finding and goes to that node, not into this loop. A round that comes back with
 its findings unlabelled is not a completed round — ask the reviewers for the
-labels rather than guessing them — but it counts toward the five-round backstop
+labels rather than guessing them — but it counts toward the ten-round backstop
 all the same, and two unlabelled rounds in a row are themselves a stop-and-ask.
 Otherwise "ask again" is an unbounded loop inside the bounded one. If a label is
 disputed and the loop runs on anyway, three consecutive rounds with no
@@ -456,11 +461,11 @@ disputed and the loop runs on anyway, three consecutive rounds with no
 
 **Backstops — stop and ask Jakob, never continue silently and never merge on
 one.** **Termination wins:** a round with no `production-defect` ends the loop
-and the merge proceeds, even if it is the fifth round or the one that crosses a
+and the merge proceeds, even if it is the tenth round or the one that crosses a
 threshold. Check the backstops only when the round just read left a
 `production-defect`, or came back unlabelled. Then stop and ask when:
 
-- **five review rounds** on one change — unlabelled rounds included; or
+- **ten review rounds** on one change — unlabelled rounds included; or
 - a **test diff both more than 10× the production diff and above 500 lines**.
   The ratio alone means nothing on a small change: the three-line fix plus the
   regression test this file requires routinely exceeds 10×, while the runaway

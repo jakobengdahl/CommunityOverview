@@ -2009,7 +2009,8 @@ function App() {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
         }
       },
-      onRemoteOps: (ops) => {
+      onRemoteOps: (ops, meta = {}) => {
+        if (meta.sessionId && meta.sessionId !== sessionId) return;
         (ops || []).forEach((op) => applyRemoteOp(op));
       },
       // This client's own annotation write just got acked with a fresh

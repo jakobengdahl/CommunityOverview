@@ -95,6 +95,12 @@ _DEFAULT_MAX_OP_BATCH_BYTES = 256 * 1024
 _DEFAULT_LOOKUP_BUCKET_CAPACITY = 60.0
 _DEFAULT_LOOKUP_REFILL_PER_SEC = 2.0
 
+# Human image ingest is keyed by request source, not by the browser-declared
+# op client id. Keep its default ceiling with the other source-keyed guard
+# instead of granting a second full high-frequency op lane.
+_DEFAULT_IMAGE_BUCKET_CAPACITY = _DEFAULT_LOOKUP_BUCKET_CAPACITY
+_DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC = _DEFAULT_LOOKUP_REFILL_PER_SEC
+
 # Stable marker distinct from any real browser `graph_client_id`, used only for
 # the *broadcast* attribution of an undo's replayed inverse op — see
 # `_HUMAN_IMAGE_INGEST_CLIENT_ID` in rest_api.py for the identical trap this
@@ -490,6 +496,8 @@ class SessionManager:
         bucket_refill_per_sec: float = _DEFAULT_BUCKET_REFILL_PER_SEC,
         lookup_bucket_capacity: float = _DEFAULT_LOOKUP_BUCKET_CAPACITY,
         lookup_refill_per_sec: float = _DEFAULT_LOOKUP_REFILL_PER_SEC,
+        image_bucket_capacity: float = _DEFAULT_IMAGE_BUCKET_CAPACITY,
+        image_refill_per_sec: float = _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
     ) -> None:
         self.store = store
         self.bus = event_bus or InProcessEventBus()
@@ -503,13 +511,16 @@ class SessionManager:
         self._lookup_bucket = _TokenBucket(
             lookup_bucket_capacity, lookup_refill_per_sec
         )
-        # Separate keyspace, same sizing as the op bucket. The human image
+        # Separate keyspace with a source-keyed ceiling. The human image
         # ingest endpoint keys this on the request source rather than on a
         # client-declared id (see ``upsert_image_annotation``'s
         # ``rate_limit_key``); mixing source-derived keys into ``_bucket``
         # would let a client pick a ``client_id`` equal to a victim's source
-        # key and drain that victim's image budget through ``/ops``.
-        self._image_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
+        # key and drain that victim's image budget through ``/ops``. It also
+        # must not be sized like the high-frequency op bucket by default, or
+        # image ingest becomes an additional full write lane for the same
+        # source-keyed actor.
+        self._image_bucket = _TokenBucket(image_bucket_capacity, image_refill_per_sec)
         # Separate keyspace again, same sizing. Every synchronous MCP write
         # method below (apply_layout, add_node_refs, upsert_annotation,
         # update_annotation, delete_annotation, set_group_members, and
@@ -1387,12 +1398,6 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if rate_limit_key is not None:
-            if not self._image_bucket.consume(rate_limit_key, 1):
-                raise RateLimited()
-        elif not self._mcp_bucket.consume(client_id, 1):
-            raise RateLimited()
-
         if self._lock(session_id).locked():
             raise LayoutBusy()
 
@@ -1444,6 +1449,13 @@ class SessionManager:
             lease_client_id if lease_client_id is not None else client_id,
             op,
         )
+
+        if rate_limit_key is not None:
+            if not self._image_bucket.consume(rate_limit_key, 1):
+                raise RateLimited()
+        elif not self._mcp_bucket.consume(client_id, 1):
+            raise RateLimited()
+
         applied = self._apply_op_sync(session, session_id, client_id, op)
         if applied is None:
             raise AnnotationRecentlyDeleted(annotation.get("id"))

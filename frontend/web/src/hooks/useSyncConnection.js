@@ -13,6 +13,8 @@ import { SessionSyncClient } from '../services/sessionSyncClient';
 export function useSyncConnection(sessionId) {
   const syncRef = useRef(null);
   const syncHandlersRef = useRef({});
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
   const [remotePositions, setRemotePositions] = useState(null);
   // A single MCP-initiated batch layout to animate (contract §9–§10), kept apart
   // from remotePositions so an agent's arrange tweens while ordinary remote drags
@@ -68,6 +70,12 @@ export function useSyncConnection(sessionId) {
         if (!isCurrentClient()) return;
         syncHandlersRef.current[handlerName]?.(...args);
       };
+      const callRemoteOpsIfCurrentSession = (...args) => {
+        if (!isCurrentClient()) return;
+        const meta = args[args.length - 1];
+        if (meta?.sessionId && meta.sessionId !== activeSessionIdRef.current) return;
+        syncHandlersRef.current.onRemoteOps?.(...args);
+      };
       client = new SessionSyncClient({
         sessionId: targetId,
         clientId: api.getClientId(),
@@ -81,7 +89,7 @@ export function useSyncConnection(sessionId) {
             syncHandlersRef.current.onReady?.(...a);
           },
           onResync: (...a) => callIfCurrent('onResync', ...a),
-          onRemoteOps: (...a) => callIfCurrent('onRemoteOps', ...a),
+          onRemoteOps: (...a) => callRemoteOpsIfCurrentSession(...a),
           onPresence: (...a) => callIfCurrent('onPresence', ...a),
           onSelections: (...a) => callIfCurrent('onSelections', ...a),
           onLeases: (...a) => callIfCurrent('onLeases', ...a),

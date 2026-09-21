@@ -1,11 +1,13 @@
 """Integrity checks for the bundled stat-metadata profile."""
 
 import json
+import re
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE_DIR = REPO_ROOT / "config" / "stat-metadata"
+CAMEL_CASE_PATTERN = re.compile(r"[a-z][A-Z]")
 
 
 def _load_json(name: str) -> dict:
@@ -18,6 +20,40 @@ def _node_type_candidates(node: dict) -> set[str]:
 
 def _allows(rules: list[str], node: dict) -> bool:
     return not rules or "*" in rules or bool(set(rules) & _node_type_candidates(node))
+
+
+def test_stat_metadata_profile_metadata_keys_are_snake_case():
+    graph = _load_json("graph.json")
+    demo_enrichment = _load_json("demo_enrichment.json")
+
+    offenders = []
+    for node in [*graph["nodes"], *demo_enrichment.get("nodes", [])]:
+        for key in node.get("metadata", {}):
+            if CAMEL_CASE_PATTERN.search(key):
+                offenders.append((node["id"], key))
+
+    assert offenders == []
+
+
+def test_stat_metadata_profile_declares_dataset_programme_structure_metadata():
+    schema = _load_json("schema_config.json")["schema"]
+    graph = _load_json("graph.json")
+    checked_types = {"DataSet", "DataStructure", "StatisticalProgramme"}
+    declared_fields = {
+        node_type: set(config["fields"])
+        for node_type, config in schema["node_types"].items()
+        if node_type in checked_types
+    }
+
+    undeclared = []
+    for node in graph["nodes"]:
+        if node["type"] not in checked_types:
+            continue
+        for key in node.get("metadata", {}):
+            if key not in declared_fields[node["type"]]:
+                undeclared.append((node["id"], node["type"], key))
+
+    assert undeclared == []
 
 
 def test_stat_metadata_coding_edges_match_configured_profile_rules():
