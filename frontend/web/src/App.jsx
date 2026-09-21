@@ -403,22 +403,21 @@ function App() {
           removeIds.forEach((id) => removeEdge(id));
           return removeIds.some((id) => existing.has(id));
         }
-        case 'edges_updated':
-          // A collaborator changed an edge's attributes (e.g. its relationship
-          // type). Merge them in place; if the edge isn't present here,
-          // updateEdgeData is a harmless no-op and a later hydration recovers
-          // the current value from the graph.
-          {
-            const existing = new Set(store.edges.map((e) => e.id));
-            let applied = false;
-            (op.edges || []).forEach((e) => {
-              if (e && e.id) {
-                if (existing.has(e.id)) applied = true;
-                updateEdgeData(e.id, e);
-              }
-            });
-            return applied;
-          }
+        case 'edges_updated': // A collaborator changed an edge's attributes (e.g. its relationship
+        // type). Merge them in place; if the edge isn't present here,
+        // updateEdgeData is a harmless no-op and a later hydration recovers
+        // the current value from the graph.
+        {
+          const existing = new Set(store.edges.map((e) => e.id));
+          let applied = false;
+          (op.edges || []).forEach((e) => {
+            if (e && e.id) {
+              if (existing.has(e.id)) applied = true;
+              updateEdgeData(e.id, e);
+            }
+          });
+          return applied;
+        }
         case 'edges_hidden': {
           const current = store.hiddenEdgeIds || [];
           const currentSet = new Set(current);
