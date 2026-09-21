@@ -76,3 +76,100 @@ def test_stat_metadata_code_list_edges_do_not_target_classifications():
     ]
 
     assert offenders == []
+
+
+def test_stat_metadata_register_population_demo_slice_is_present():
+    graph = _load_json("graph.json")
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    edges = {edge["id"]: edge for edge in graph["edges"]}
+
+    assert nodes["register-total-population"]["type"] == "DataSet"
+    assert "Register" in nodes["register-total-population"]["subtypes"]
+    assert "RegisterVariant" in nodes["register-variant-resident-persons"]["subtypes"]
+    assert (
+        "RegisterVersion" in nodes["register-version-resident-persons-2025"]["subtypes"]
+    )
+    assert nodes["population-registered-residents-sweden"]["type"] == "Population"
+
+    expected_edges = {
+        "edge-popstats-produces-total-population-register": (
+            "bf0d2ed9-851f-4351-b388-fd8a14db12a4",
+            "register-total-population",
+            "PRODUCES",
+        ),
+        "edge-total-population-register-has-resident-variant": (
+            "register-total-population",
+            "register-variant-resident-persons",
+            "HAS_VARIANT",
+        ),
+        "edge-resident-variant-has-2025-version": (
+            "register-variant-resident-persons",
+            "register-version-resident-persons-2025",
+            "HAS_VERSION",
+        ),
+        "edge-resident-version-has-population": (
+            "register-version-resident-persons-2025",
+            "population-registered-residents-sweden",
+            "HAS_POPULATION",
+        ),
+        "edge-registered-residents-of-person": (
+            "population-registered-residents-sweden",
+            "9a4aee96-ff85-4c21-8da2-460f165cc486",
+            "OF_UNIT_TYPE",
+        ),
+        "edge-resident-version-has-region-variable": (
+            "register-version-resident-persons-2025",
+            "d26ea773-50c2-4eda-a2e0-eceed76550ae",
+            "HAS_VARIABLE",
+        ),
+        "edge-pop-region-uses-nuts": (
+            "d26ea773-50c2-4eda-a2e0-eceed76550ae",
+            "cl-region",
+            "USES_CLASSIFICATION",
+        ),
+    }
+
+    for edge_id, (source, target, edge_type) in expected_edges.items():
+        edge = edges[edge_id]
+        assert (edge["source"], edge["target"], edge["type"]) == (
+            source,
+            target,
+            edge_type,
+        )
+
+    assert edges["edge-resident-version-has-population"]["metadata"] == {
+        "reference_date": "2025-12-31",
+        "coverage_basis": "Resident registration at reference date",
+    }
+    assert "question_hint" in edges["edge-pop-region-uses-nuts"]["metadata"]
+
+
+def test_stat_metadata_register_population_edges_match_profile_rules():
+    schema = _load_json("schema_config.json")["schema"]
+    graph = _load_json("graph.json")
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    checked_edge_ids = {
+        "edge-total-population-register-has-resident-variant",
+        "edge-resident-variant-has-2025-version",
+        "edge-resident-version-has-population",
+        "edge-registered-residents-of-person",
+        "edge-resident-version-has-region-variable",
+        "edge-pop-region-uses-nuts",
+    }
+
+    violations = []
+    for edge in graph["edges"]:
+        if edge["id"] not in checked_edge_ids:
+            continue
+
+        source = nodes[edge["source"]]
+        target = nodes[edge["target"]]
+        relationship_config = schema["relationship_types"][edge["type"]]
+        if _allows(relationship_config.get("source_types", []), source) and _allows(
+            relationship_config.get("target_types", []), target
+        ):
+            continue
+
+        violations.append(edge["id"])
+
+    assert violations == []

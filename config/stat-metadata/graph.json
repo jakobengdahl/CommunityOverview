@@ -2201,6 +2201,114 @@
       "updated_at": "2026-05-19T09:25:30.362452"
     },
     {
+      "id": "register-total-population",
+      "type": "DataSet",
+      "name": "Total Population Register",
+      "description": "Public demo register representing the administrative population register used as a source for register-based population statistics. The register is modelled as a DataSet with register subtypes so it can have variants and dated versions.",
+      "summary": "Demo register source for population statistics; modelled as a DataSet:Register",
+      "purpose": "Source register for population stock and demographic event statistics.",
+      "owner": "National statistical authority",
+      "source_system": "Administrative population register",
+      "tags": [
+        "population",
+        "register",
+        "demo",
+        "administrative-data"
+      ],
+      "subtypes": [
+        "Register"
+      ],
+      "metadata": {
+        "confidentialityLevel": "Source register metadata only",
+        "datasetType": "Administrative register",
+        "coverage": "Persons registered as resident in Sweden"
+      },
+      "embedding": null,
+      "created_at": "2026-06-22T16:59:16.928797+00:00",
+      "updated_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "register-variant-resident-persons",
+      "type": "DataSet",
+      "name": "Resident persons register variant",
+      "description": "Register variant scoped to persons recorded as resident for official population statistics. It narrows the broader population register to person-level resident records used for end-of-period population stock production.",
+      "summary": "Resident-persons variant of the total population register",
+      "purpose": "Register variant for resident person records used in population stock statistics.",
+      "tags": [
+        "population",
+        "register-variant",
+        "resident-persons",
+        "demo"
+      ],
+      "subtypes": [
+        "RegisterVariant"
+      ],
+      "metadata": {
+        "variant_scope": "Resident persons",
+        "unit_record": "Person"
+      },
+      "embedding": null,
+      "created_at": "2026-06-22T16:59:16.928797+00:00",
+      "updated_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "register-version-resident-persons-2025",
+      "type": "DataSet",
+      "name": "Resident persons register version 2025",
+      "description": "Demo register version for resident persons at the 2025 reference date. The version is linked to the population it describes and to the variables available for statistical use.",
+      "summary": "2025 version of the resident-persons register variant",
+      "version": "2025",
+      "status": "Active",
+      "reference_date": "2025-12-31",
+      "valid_from": "2025-01-01",
+      "valid_to": "2025-12-31",
+      "measurement_information": "Person-level register version for public metadata demonstration; no personal records are included.",
+      "tags": [
+        "population",
+        "register-version",
+        "reference-date-2025-12-31",
+        "demo"
+      ],
+      "subtypes": [
+        "RegisterVersion"
+      ],
+      "metadata": {
+        "record_level": "Person",
+        "reference_period_type": "End of year"
+      },
+      "embedding": null,
+      "created_at": "2026-06-22T16:59:16.928797+00:00",
+      "updated_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "population-registered-residents-sweden",
+      "type": "Population",
+      "name": "Registered resident population in Sweden",
+      "definition": "Persons recorded as resident in Sweden in the population register at the reference date.",
+      "description": "Public demo population for the register version used by population stock statistics. It captures the inclusion and exclusion criteria without exposing any individual records.",
+      "geographic_scope": "Sweden",
+      "inclusion_criteria": "Persons registered as resident in Sweden at the reference date.",
+      "exclusion_criteria": "Persons no longer registered as resident at the reference date and persons outside the register scope.",
+      "valid_from": "2025-01-01",
+      "valid_to": "2025-12-31",
+      "tags": [
+        "population",
+        "residents",
+        "sweden",
+        "demo"
+      ],
+      "subtypes": [
+        "TargetPopulation"
+      ],
+      "metadata": {
+        "reference_date": "2025-12-31",
+        "coverage_note": "Demo metadata only; excludes personal records."
+      },
+      "embedding": null,
+      "created_at": "2026-06-22T16:59:16.928797+00:00",
+      "updated_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
       "id": "77b95d00-4619-48bd-b2ed-4b23a09dd33f",
       "type": "DataSet",
       "name": "Population stock by region, sex, age and civil status",
@@ -32574,6 +32682,81 @@
       "label": "",
       "metadata": {},
       "created_at": "2026-05-19T09:27:33.065227"
+    },
+    {
+      "id": "edge-popstats-produces-total-population-register",
+      "source": "bf0d2ed9-851f-4351-b388-fd8a14db12a4",
+      "target": "register-total-population",
+      "type": "PRODUCES",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-total-population-register-has-resident-variant",
+      "source": "register-total-population",
+      "target": "register-variant-resident-persons",
+      "type": "HAS_VARIANT",
+      "label": "",
+      "metadata": {
+        "variant_role": "Resident person records"
+      },
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-resident-variant-has-2025-version",
+      "source": "register-variant-resident-persons",
+      "target": "register-version-resident-persons-2025",
+      "type": "HAS_VERSION",
+      "label": "",
+      "metadata": {
+        "version": "2025"
+      },
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-resident-version-has-population",
+      "source": "register-version-resident-persons-2025",
+      "target": "population-registered-residents-sweden",
+      "type": "HAS_POPULATION",
+      "label": "",
+      "metadata": {
+        "reference_date": "2025-12-31",
+        "coverage_basis": "Resident registration at reference date"
+      },
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-registered-residents-of-person",
+      "source": "population-registered-residents-sweden",
+      "target": "9a4aee96-ff85-4c21-8da2-460f165cc486",
+      "type": "OF_UNIT_TYPE",
+      "label": "",
+      "metadata": {},
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-resident-version-has-region-variable",
+      "source": "register-version-resident-persons-2025",
+      "target": "d26ea773-50c2-4eda-a2e0-eceed76550ae",
+      "type": "HAS_VARIABLE",
+      "label": "",
+      "metadata": {
+        "column_name": "region",
+        "role": "identifier"
+      },
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
+    },
+    {
+      "id": "edge-pop-region-uses-nuts",
+      "source": "d26ea773-50c2-4eda-a2e0-eceed76550ae",
+      "target": "cl-region",
+      "type": "USES_CLASSIFICATION",
+      "label": "",
+      "metadata": {
+        "question_hint": "Which territorial classification defines the region variable in the population register version?"
+      },
+      "created_at": "2026-06-22T16:59:16.928797+00:00"
     },
     {
       "id": "2c745b3d-a175-4dcb-a2bb-bb871906efe1",
