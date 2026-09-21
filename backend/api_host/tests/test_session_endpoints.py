@@ -393,7 +393,9 @@ class TestClearVisualization:
         """A connected op-stream client is enough; no legacy registry entry is required."""
         clear = test_app.app.state.tools_map["clear_visualization"]
         session_id = headless_session()
-        test_app.app.state.session_manager.presence.join(session_id, "client-1", "Tester")
+        test_app.app.state.session_manager.presence.join(
+            session_id, "client-1", "Tester"
+        )
 
         data = clear(visualization_session_id=session_id)
 
@@ -423,9 +425,10 @@ class TestClearVisualization:
         assert data["success"] is False
         assert data["error"] == "revision_conflict"
         assert data["expected_revision"] == 0
-        assert data["current_revision"] == test_app.app.state.session_manager.get_session(
-            session_id
-        ).seq
+        assert (
+            data["current_revision"]
+            == test_app.app.state.session_manager.get_session(session_id).seq
+        )
 
     def test_clear_accepts_matching_expected_revision(
         self, test_app: TestClient, headless_session
