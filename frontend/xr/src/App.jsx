@@ -505,7 +505,9 @@ function DomeNavigationControls({ view, zoom, onZoom, onReset }) {
       <button type="button" onClick={() => onZoom(1.2)} aria-label="Zoom in">
         +
       </button>
-      <button type="button" onClick={onReset}>Reset</button>
+      <button type="button" onClick={onReset}>
+        Reset
+      </button>
       {view.atTop ? <span>Top edge</span> : null}
       {view.atBottom ? <span>Bottom edge</span> : null}
     </div>

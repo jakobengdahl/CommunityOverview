@@ -247,11 +247,7 @@ export function domeAnglesFromRay(origin, direction, opts = {}) {
 export function layoutPositionFromRay(origin, direction, bounds, opts = {}) {
   const point = domePointFromRay(origin, direction, opts);
   if (!point) return null;
-  return layoutPositionFromDomePoint(
-    point,
-    bounds,
-    opts
-  );
+  return layoutPositionFromDomePoint(point, bounds, opts);
 }
 
 // Extent of a list of {x, y} layout positions. An empty layout — or one whose

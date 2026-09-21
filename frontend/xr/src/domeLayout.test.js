@@ -200,9 +200,7 @@ describe('domePosition', () => {
   it('spreads layout points across a wider angular span as density increases', () => {
     const neutral = domePosition(100, 50, bounds);
     const dense = domePosition(100, 50, bounds, { density: 2 });
-    expect(Math.atan2(dense.x, -dense.z)).toBeCloseTo(
-      Math.atan2(neutral.x, -neutral.z) * 2
-    );
+    expect(Math.atan2(dense.x, -dense.z)).toBeCloseTo(Math.atan2(neutral.x, -neutral.z) * 2);
   });
 
   it('uses the wrapped horizontal centre when panning', () => {
