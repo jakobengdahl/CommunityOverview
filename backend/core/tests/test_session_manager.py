@@ -37,6 +37,7 @@ from backend.core.session_manager import (
     SessionManager,
     SessionNotFound,
     UndoConflict,
+    _DEFAULT_IMAGE_BUCKET_CAPACITY,
     _TokenBucket,
     _UNDO_REPLAY_CLIENT_ID,
 )
@@ -3403,10 +3404,12 @@ class TestUpsertImageAnnotation:
             rate_limit_key="5.6.7.8",
         )
 
-    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_op_bucket(self):
-        """The MCP path passes no key and must keep drawing from the op bucket
-        under its own client id — dropping that fallback would leave it
-        unthrottled entirely."""
+    async def test_image_ingest_without_a_rate_limit_key_falls_back_to_mcp_bucket(
+        self,
+    ):
+        """The MCP path passes no key and must keep drawing from the dedicated
+        MCP bucket under its own client id — dropping that fallback would
+        leave it unthrottled entirely."""
         mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
         s = mgr.create_session()
 
@@ -3439,6 +3442,87 @@ class TestUpsertImageAnnotation:
         )
 
         assert res["annotation"]["id"] == "img-1"
+
+    async def test_default_image_bucket_uses_source_keyed_ceiling(self):
+        """The REST image-ingest path has its own collision-resistant keyspace,
+        but it must not create another full generic write bucket by default.
+        Its default burst follows the source-keyed ceiling instead."""
+        mgr = _manager()
+        s = mgr.create_session()
+
+        for index in range(int(_DEFAULT_IMAGE_BUCKET_CAPACITY)):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation(f"img-{index}", data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+
+        with pytest.raises(RateLimited):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation("img-over", data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+
+    async def test_image_budget_rejection_does_not_spend_source_quota(self):
+        """A request that is rejected before it can write should not consume
+        the source's one successful image-ingest slot."""
+        mgr = _manager(
+            image_bucket_capacity=1,
+            image_refill_per_sec=0,
+        )
+        s = mgr.create_session()
+
+        with pytest.raises(ImageBudgetExceeded):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation("too-big", data_bytes=200),
+                optimized_image_bytes=200,
+                max_session_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "human-image-ingest",
+            _image_annotation("ok", data_bytes=100),
+            optimized_image_bytes=100,
+            max_session_image_bytes=100,
+            rate_limit_key="1.2.3.4",
+        )
+
+        assert res["annotation"]["id"] == "ok"
+
+    async def test_revision_conflict_does_not_spend_mcp_image_quota(self):
+        """The no-rate-limit-key fallback should follow the same accepted-write
+        charging rule as source-keyed human image ingest."""
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "setup-client", {"type": "label", "text": "v1"})
+
+        with pytest.raises(RevisionConflict):
+            mgr.upsert_image_annotation(
+                s.id,
+                "mcp-agent",
+                _image_annotation("img-conflict", data_bytes=100),
+                optimized_image_bytes=100,
+                expected_revision=0,
+            )
+
+        res = mgr.upsert_image_annotation(
+            s.id,
+            "mcp-agent",
+            _image_annotation("img-ok", data_bytes=100),
+            optimized_image_bytes=100,
+            expected_revision=s.seq,
+        )
+
+        assert res["annotation"]["id"] == "img-ok"
 
     async def test_creates_and_broadcasts(self):
         mgr = _manager()

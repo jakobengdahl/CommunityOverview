@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { XR, createXRStore } from '@react-three/xr';
-import { domePosition, layoutBounds } from './domeLayout.js';
-import { renderableNodes } from './sceneModel.js';
+import * as THREE from 'three';
+import { DEFAULT_DOME, layoutBounds, layoutPositionFromRay } from './domeLayout.js';
+import { domeSceneData, selectionDetail } from './domeScene.js';
+import { EMPTY_SCENE } from './sceneModel.js';
 import { SceneSession, isValidSessionId } from './sceneSession.js';
 // The REST layer is reused from the 2D client as-is (ADR 0003 reuse map); see
 // sceneSession.js for why the cross-workspace import is deliberate for now.
@@ -10,16 +12,14 @@ import * as api from '../../web/src/services/api.js';
 
 // Shown until a session is connected, so the dome geometry is still walkable
 // on-device with no backend running. These carry the same 2D {x, y} positions
-// the session protocol uses; `color` is local to the placeholder.
+// the session protocol uses.
 const PLACEHOLDER_NODES = [
-  { id: 'a', x: 0, y: 0, color: '#6ee7b7' },
-  { id: 'b', x: 100, y: 20, color: '#60a5fa' },
-  { id: 'c', x: 40, y: 80, color: '#f472b6' },
-  { id: 'd', x: 90, y: 90, color: '#fbbf24' },
-  { id: 'e', x: 10, y: 60, color: '#a78bfa' },
+  { id: 'a', name: 'Alpha', type: 'Actor', x: 0, y: 0, hydrated: true },
+  { id: 'b', name: 'Beta', type: 'Initiative', x: 100, y: 20, hydrated: true },
+  { id: 'c', name: 'Gamma', type: 'Resource', x: 40, y: 80, hydrated: true },
+  { id: 'd', name: 'Delta', type: 'Goal', x: 90, y: 90, hydrated: true },
+  { id: 'e', name: 'Epsilon', type: 'Risk', x: 10, y: 60, hydrated: true },
 ];
-
-const SESSION_NODE_COLOR = '#93c5fd';
 
 const store = createXRStore();
 
@@ -43,10 +43,22 @@ function sessionIdFromUrl() {
 
 const IDLE_SESSION_STATE = { sessionId: null, scene: null, status: 'idle', error: null };
 
+const PLACEHOLDER_SCENE = {
+  ...EMPTY_SCENE,
+  nodes: Object.fromEntries(PLACEHOLDER_NODES.map((node) => [node.id, node])),
+  edges: {
+    ab: { id: 'ab', source: 'a', target: 'b', type: null },
+    ac: { id: 'ac', source: 'a', target: 'c', type: null },
+    bd: { id: 'bd', source: 'b', target: 'd', type: null },
+    ce: { id: 'ce', source: 'c', target: 'e', type: null },
+  },
+};
+
 // Own the SceneSession for the active session id: the SSE subscription, the
 // scene reduction and the teardown when the id changes or the app unmounts.
 function useSceneSession(sessionId) {
   const [state, setState] = useState(IDLE_SESSION_STATE);
+  const sessionRef = useRef(null);
 
   useEffect(() => {
     if (!sessionId) return undefined;
@@ -60,32 +72,354 @@ function useSceneSession(sessionId) {
       loadNodeDetails: api.getNodeDetails,
       onChange: setState,
     });
+    sessionRef.current = session;
     session.connect();
-    return () => session.close();
+    return () => {
+      session.close();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
   }, [sessionId]);
+
+  const setLocalSelection = useCallback((nodeId) => {
+    sessionRef.current?.setLocalSelection(nodeId);
+  }, []);
+
+  const moveNode = useCallback((nodeId, position, opts) => {
+    return sessionRef.current?.moveNode(nodeId, position, opts) ?? false;
+  }, []);
 
   // The session reports which id its state belongs to, so switching sessions
   // never renders the previous one's scene while the new stream is still
   // opening — and the effect needs no synchronous setState to reset it.
-  if (!sessionId) return IDLE_SESSION_STATE;
-  return state.sessionId === sessionId
-    ? state
-    : { ...IDLE_SESSION_STATE, sessionId, status: 'connecting' };
+  const visibleState =
+    state.sessionId === sessionId
+      ? state
+      : { ...IDLE_SESSION_STATE, sessionId, status: sessionId ? 'connecting' : 'idle' };
+  return { ...visibleState, setLocalSelection, moveNode };
 }
 
-function DomeNodes({ nodes }) {
-  const bounds = useMemo(() => layoutBounds(nodes), [nodes]);
+function makeTextTexture({
+  title,
+  subtitle,
+  footer,
+  color,
+  selected = false,
+  width = 512,
+  height = 224,
+}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(13, 17, 24, 0.94)';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = selected ? '#ffffff' : color;
+  ctx.lineWidth = selected ? 12 : 8;
+  ctx.strokeRect(6, 6, width - 12, height - 12);
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 16, height);
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 42px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.fillText(trimText(ctx, title, width - 70), 42, 32);
+
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = '600 24px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillText(trimText(ctx, subtitle, width - 70), 42, 92);
+
+  if (footer) {
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '500 20px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(trimText(ctx, footer, width - 70), 42, 144);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function trimText(ctx, value, maxWidth) {
+  const text = String(value || '');
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(`${text.slice(0, mid)}...`).width <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  return `${text.slice(0, lo)}...`;
+}
+
+function plural(count, singular, pluralForm = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
+function Billboard({ children, position }) {
+  const ref = useRef(null);
+  const { camera } = useThree();
+  useFrame(() => {
+    ref.current?.lookAt(camera.position);
+  });
+  return (
+    <group ref={ref} position={[position.x, position.y, position.z]}>
+      {children}
+    </group>
+  );
+}
+
+function NodeCard({ node, selected, onSelect }) {
+  const texture = useMemo(
+    () =>
+      makeTextTexture({
+        title: node.title,
+        subtitle: node.subtitle,
+        footer: node.id,
+        color: node.color,
+        selected,
+      }),
+    [node.color, node.id, node.subtitle, node.title, selected]
+  );
+
+  useEffect(() => () => texture.dispose(), [texture]);
+
+  return (
+    <Billboard position={node.position}>
+      <mesh
+        userData={{ xrNodeId: node.id }}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect(node.id);
+        }}
+      >
+        <planeGeometry args={[1.25, 0.55]} />
+        <meshBasicMaterial map={texture} transparent toneMapped={false} />
+      </mesh>
+      {node.claim ? (
+        <mesh position={[0, -0.38, 0.01]}>
+          <planeGeometry args={[0.84, 0.08]} />
+          <meshBasicMaterial color={node.claim.color || '#ffffff'} />
+        </mesh>
+      ) : null}
+    </Billboard>
+  );
+}
+
+function poseToRay(inputSource, frame, referenceSpace, target) {
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const origin = target.origin;
+  const direction = target.direction;
+  let pose = inputSource.targetRaySpace
+    ? frame.getPose(inputSource.targetRaySpace, referenceSpace)
+    : null;
+
+  if (!pose && inputSource.hand) {
+    const tip = inputSource.hand.get?.('index-finger-tip');
+    const wrist = inputSource.hand.get?.('wrist');
+    const tipPose = tip ? frame.getJointPose?.(tip, referenceSpace) : null;
+    const wristPose = wrist ? frame.getJointPose?.(wrist, referenceSpace) : null;
+    if (!tipPose || !wristPose) return false;
+    origin.set(
+      tipPose.transform.position.x,
+      tipPose.transform.position.y,
+      tipPose.transform.position.z
+    );
+    direction
+      .set(
+        tipPose.transform.position.x - wristPose.transform.position.x,
+        tipPose.transform.position.y - wristPose.transform.position.y,
+        tipPose.transform.position.z - wristPose.transform.position.z
+      )
+      .normalize();
+    return direction.lengthSq() > 0;
+  }
+
+  if (!pose) return false;
+  matrix.fromArray(pose.transform.matrix);
+  origin.setFromMatrixPosition(matrix);
+  quat.setFromRotationMatrix(matrix);
+  direction.set(0, 0, -1).applyQuaternion(quat).normalize();
+  return true;
+}
+
+function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveCommit }) {
+  const { gl, scene } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const raysRef = useRef(new Map());
+  const activeRef = useRef(new Map());
+  const listenersRef = useRef(null);
+  const latestRef = useRef({ enabled, hitNode: null, onMoveCommit, onSelect });
+
+  const rayForSource = useCallback((inputSource) => raysRef.current.get(inputSource) || null, []);
+
+  const hitNode = useCallback(
+    (ray) => {
+      if (!ray) return null;
+      const targets = [];
+      scene.traverse((object) => {
+        if (object.userData?.xrNodeId) targets.push(object);
+      });
+      raycaster.set(ray.origin, ray.direction);
+      return raycaster.intersectObjects(targets, false)[0]?.object.userData.xrNodeId || null;
+    },
+    [raycaster, scene]
+  );
+
+  const layoutPointForRay = useCallback(
+    (ray) =>
+      ray
+        ? layoutPositionFromRay(ray.origin, ray.direction, layoutBounds, {
+            radius: DEFAULT_DOME.baseRadius,
+            eyeHeight: EYE_HEIGHT,
+          })
+        : null,
+    [layoutBounds]
+  );
+
+  useEffect(() => {
+    latestRef.current = { enabled, hitNode, onMoveCommit, onSelect };
+  }, [enabled, hitNode, onMoveCommit, onSelect]);
+
+  const attachSessionListeners = useCallback(
+    (session) => {
+      if (listenersRef.current?.session === session) return;
+      if (listenersRef.current) {
+        const { session: previous, handleSelectStart, handleSelectEnd } = listenersRef.current;
+        previous.removeEventListener('selectstart', handleSelectStart);
+        previous.removeEventListener('selectend', handleSelectEnd);
+      }
+      if (!session) {
+        listenersRef.current = null;
+        return;
+      }
+
+      const handleSelectStart = (event) => {
+        const ray = rayForSource(event.inputSource);
+        const nodeId = latestRef.current.hitNode?.(ray);
+        if (!nodeId) return;
+        latestRef.current.onSelect(nodeId);
+        if (latestRef.current.enabled) {
+          activeRef.current.set(event.inputSource, { nodeId, lastPosition: null });
+        }
+      };
+
+      const handleSelectEnd = (event) => {
+        const active = activeRef.current.get(event.inputSource);
+        activeRef.current.delete(event.inputSource);
+        if (active?.lastPosition) {
+          latestRef.current.onMoveCommit(active.nodeId, active.lastPosition);
+        }
+      };
+
+      session.addEventListener('selectstart', handleSelectStart);
+      session.addEventListener('selectend', handleSelectEnd);
+      listenersRef.current = { session, handleSelectStart, handleSelectEnd };
+    },
+    [rayForSource]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (!listenersRef.current) return;
+      const { session, handleSelectStart, handleSelectEnd } = listenersRef.current;
+      session.removeEventListener('selectstart', handleSelectStart);
+      session.removeEventListener('selectend', handleSelectEnd);
+      listenersRef.current = null;
+    };
+  }, []);
+
+  useFrame((_state, _delta, frame) => {
+    const session = gl.xr.getSession?.();
+    attachSessionListeners(session || null);
+    const referenceSpace = gl.xr.getReferenceSpace?.();
+    if (!session || !referenceSpace || !frame) return;
+
+    const liveSources = new Set(session.inputSources || []);
+    for (const inputSource of liveSources) {
+      const ray = raysRef.current.get(inputSource) || {
+        origin: new THREE.Vector3(),
+        direction: new THREE.Vector3(0, 0, -1),
+      };
+      if (poseToRay(inputSource, frame, referenceSpace, ray)) {
+        raysRef.current.set(inputSource, ray);
+      }
+
+      const active = activeRef.current.get(inputSource);
+      if (!active) continue;
+      const position = layoutPointForRay(ray);
+      if (!position) continue;
+      active.lastPosition = position;
+      onMovePreview(active.nodeId, position);
+    }
+
+    for (const inputSource of raysRef.current.keys()) {
+      if (!liveSources.has(inputSource)) {
+        raysRef.current.delete(inputSource);
+        activeRef.current.delete(inputSource);
+      }
+    }
+  });
+
+  return null;
+}
+
+function EdgeLine({ edge }) {
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setFromPoints(edge.points.map((p) => new THREE.Vector3(p.x, p.y, p.z)));
+    return g;
+  }, [edge.points]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <line geometry={geometry}>
+      <lineBasicMaterial color="#64748b" transparent opacity={0.72} />
+    </line>
+  );
+}
+
+function InWorldHud({ detail }) {
+  const texture = useMemo(() => {
+    if (!detail) return null;
+    return makeTextTexture({
+      title: detail.name,
+      subtitle: detail.type,
+      footer: detail.summary || detail.id,
+      color: '#6ee7b7',
+      selected: true,
+      height: 256,
+    });
+  }, [detail]);
+  useEffect(() => () => texture?.dispose(), [texture]);
+  if (!detail || !texture) return null;
+  return (
+    <Billboard position={{ x: 0, y: EYE_HEIGHT - 0.75, z: -1.7 }}>
+      <mesh>
+        <planeGeometry args={[1.55, 0.78]} />
+        <meshBasicMaterial map={texture} transparent toneMapped={false} />
+      </mesh>
+    </Billboard>
+  );
+}
+
+function DomeGraph({ data, selectedNodeId, onSelect, selectedDetail }) {
   return (
     <group>
-      {nodes.map((n) => {
-        const p = domePosition(n.x, n.y, bounds);
-        return (
-          <mesh key={n.id} position={[p.x, p.y + EYE_HEIGHT, p.z]}>
-            <boxGeometry args={[0.3, 0.3, 0.3]} />
-            <meshStandardMaterial color={n.color} />
-          </mesh>
-        );
-      })}
+      {data.edges.map((edge) => (
+        <EdgeLine key={edge.id} edge={edge} />
+      ))}
+      {data.cards.map((node) => (
+        <NodeCard
+          key={node.id}
+          node={node}
+          selected={node.id === selectedNodeId}
+          onSelect={onSelect}
+        />
+      ))}
+      <InWorldHud detail={selectedDetail} />
     </group>
   );
 }
@@ -132,9 +466,16 @@ export default function App() {
   // message can be empty, so fall back rather than storing a blank error.
   const [error, setError] = useState(null);
   const [sessionId, setSessionId] = useState(sessionIdFromUrl);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(null);
-  const { scene, status, error: sessionError } = useSceneSession(sessionId);
+  const {
+    scene,
+    status,
+    error: sessionError,
+    setLocalSelection,
+    moveNode,
+  } = useSceneSession(sessionId);
   // Guards against a second create being started before the first resolves —
   // each one materialises a session server-side, so a double tap in a headset
   // must not leave an orphan behind.
@@ -169,17 +510,62 @@ export default function App() {
 
   const handleConnect = useCallback((id) => {
     setCreateError(null);
+    setSelectedNodeId(null);
     setSessionId(id);
   }, []);
 
-  const sceneNodes = useMemo(
-    () =>
-      scene
-        ? renderableNodes(scene).map((n) => ({ ...n, color: n.claim?.color || SESSION_NODE_COLOR }))
-        : [],
-    [scene]
+  const activeScene = sessionId ? scene || EMPTY_SCENE : PLACEHOLDER_SCENE;
+  const domeData = useMemo(
+    () => domeSceneData(activeScene, { eyeHeight: EYE_HEIGHT }),
+    [activeScene]
   );
-  const nodes = sessionId ? sceneNodes : PLACEHOLDER_NODES;
+  const activeLayoutBounds = useMemo(
+    () => layoutBounds(Object.values(activeScene.nodes)),
+    [activeScene]
+  );
+  const selectedDetail = useMemo(
+    () => selectionDetail(activeScene, selectedNodeId),
+    [activeScene, selectedNodeId]
+  );
+
+  useEffect(() => {
+    if (!selectedNodeId || selectedDetail) return;
+    if (sessionId && status === 'connected') setLocalSelection(null);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setSelectedNodeId(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDetail, selectedNodeId, sessionId, setLocalSelection, status]);
+
+  const handleSelectNode = useCallback(
+    (nodeId) => {
+      setSelectedNodeId(nodeId);
+      if (sessionId && status === 'connected') setLocalSelection(nodeId);
+    },
+    [sessionId, setLocalSelection, status]
+  );
+
+  const handleMovePreview = useCallback(
+    (nodeId, position) => {
+      if (sessionId && status === 'connected') moveNode(nodeId, position, { sync: false });
+    },
+    [moveNode, sessionId, status]
+  );
+
+  const handleMoveCommit = useCallback(
+    (nodeId, position) => {
+      if (sessionId && status === 'connected') moveNode(nodeId, position, { sync: true });
+    },
+    [moveNode, sessionId, status]
+  );
+
+  const connectedSummary =
+    status === 'connected'
+      ? `, ${plural(domeData.cards.length, 'node')}, ${plural(domeData.edges.length, 'edge')}, ${plural(activeScene.roster.length, 'client')}`
+      : null;
 
   return (
     <>
@@ -206,9 +592,7 @@ export default function App() {
         ) : sessionId ? (
           <>
             Session {sessionId} — {status}
-            {status === 'connected'
-              ? `, ${sceneNodes.length} node${sceneNodes.length === 1 ? '' : 's'}, ${scene.roster.length} client${scene.roster.length === 1 ? '' : 's'}`
-              : null}
+            {connectedSummary}
           </>
         ) : (
           <>
@@ -217,6 +601,14 @@ export default function App() {
           </>
         )}
       </div>
+      {selectedDetail ? (
+        <aside className="xr-detail" aria-label="Selected node detail">
+          <div className="xr-detail-kicker">{selectedDetail.type}</div>
+          <h2>{selectedDetail.name}</h2>
+          <p>{selectedDetail.summary || 'No additional details are loaded for this node.'}</p>
+          <code>{selectedDetail.id}</code>
+        </aside>
+      ) : null}
       {/*
         Flat-preview camera only — inside an XR session the runtime owns the
         camera pose and projection, so neither of these props applies there.
@@ -239,7 +631,19 @@ export default function App() {
         <XR store={store}>
           <ambientLight intensity={0.8} />
           <directionalLight position={[2, 4, 1]} intensity={1} />
-          <DomeNodes nodes={nodes} />
+          <DomeGraph
+            data={domeData}
+            selectedNodeId={selectedNodeId}
+            selectedDetail={selectedDetail}
+            onSelect={handleSelectNode}
+          />
+          <XrRayInput
+            enabled={Boolean(sessionId && status === 'connected')}
+            layoutBounds={activeLayoutBounds}
+            onSelect={handleSelectNode}
+            onMovePreview={handleMovePreview}
+            onMoveCommit={handleMoveCommit}
+          />
         </XR>
       </Canvas>
     </>

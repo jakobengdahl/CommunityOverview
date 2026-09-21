@@ -49,6 +49,34 @@ class TestSnapshotOnlyInMemoryBackendContract(PersistenceBackendContract):
         _fail_on_deepcopy(monkeypatch, call=2)
 
 
+class TestInMemoryBackendContractWithDeferredReports(PersistenceBackendContract):
+    """The same contract, with every entity write reporting itself via
+    `ExternalChange.entities_read_on_demand` instead of embedding its payload
+    eagerly - the shape PostgreSQL uses for a real cross-process transport.
+
+    PostgreSQL's own contract run (`TestPostgresBackendContract`) already
+    happens to exercise the deferred form, but only when a server is
+    reachable, and only through its specific SQL transport. This gives the
+    deferred path a DB-free run of its own, so a review or a future backend
+    cannot mistake "the contract passes" for "the eager form was tested" -
+    see `InMemoryGraphPersistenceBackend`'s docstring.
+    """
+
+    @pytest.fixture
+    def factory(self):
+        store = {}
+        return lambda: InMemoryGraphPersistenceBackend(store, deferred=True)
+
+    def interrupt_next_snapshot(self, backend, monkeypatch):
+        _fail_on_deepcopy(monkeypatch, call=2)
+
+    def interrupt_next_append(self, backend, monkeypatch):
+        _fail_on_deepcopy(monkeypatch, call=1)
+
+    def settle_notifications(self, backend):
+        backend.settle_notifications()
+
+
 def _fail_on_deepcopy(monkeypatch, call: int) -> None:
     """Make the Nth deepcopy after this call raise, then restore."""
     real_deepcopy = contract.copy.deepcopy

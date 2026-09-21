@@ -114,6 +114,11 @@ SCOPE_POLICY_SUFFIX = "_scope_policy"
 # the row-level layer underneath that, not a replacement for it.
 SCOPED_TABLES = ("graph_nodes", "graph_edges")
 
+# Stored inside graph_metadata.doc, and stripped back out on load. The visible
+# metadata keeps its file-backend shape, while the PostgreSQL schema still has
+# a single durable claim tying it to the graph identity that opened it.
+GRAPH_IDENTITY_KEY = "_postgres_graph_identity"
+
 # Connections are the resource that scales with instance count, and the
 # server's ceiling is shared by every instance at once: stock PostgreSQL
 # allows 100, three of them reserved for superusers. Ten instances at ten
@@ -258,6 +263,10 @@ class CrossScopeWriteRefused(RuntimeError):
     """
 
 
+class GraphIdentityCollision(RuntimeError):
+    """A PostgreSQL schema is already claimed by another graph identity."""
+
+
 class PostgresGraphPersistenceBackend:
     """The graph in PostgreSQL: nodes, edges and metadata as JSONB rows.
 
@@ -300,6 +309,7 @@ class PostgresGraphPersistenceBackend:
         self.schema = schema
         self._graph_name = graph_name
         self._scope = scope
+        self._graph_identity_checked = False
         # Settled by the migration, before any statement that would name the
         # column is built. False means the store has no scope column - an
         # older store, or one an operator provisioned without it - and every
@@ -543,7 +553,42 @@ class PostgresGraphPersistenceBackend:
             # the indexes are: it may legitimately fail, and a failure inside
             # that transaction would take the tables down with it.
             self._ensure_scope_isolation()
+            with self._pool.connection() as conn:
+                with conn.transaction():
+                    self._claim_or_check_graph_identity(conn)
             self._migrated = True
+
+    def _metadata_without_graph_identity(
+        self, metadata: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        metadata = dict(metadata)
+        metadata.pop(GRAPH_IDENTITY_KEY, None)
+        return metadata
+
+    def _claim_or_check_graph_identity(self, conn, *, force: bool = False) -> None:
+        if self._graph_identity_checked and not force:
+            return
+        row = conn.execute(
+            sql.SQL("SELECT doc FROM {} LIMIT 1").format(self._table("graph_metadata"))
+        ).fetchone()
+        if row is None:
+            return
+        metadata = dict(row[0] or {})
+        claimed = metadata.get(GRAPH_IDENTITY_KEY)
+        if claimed is None:
+            metadata[GRAPH_IDENTITY_KEY] = self._graph_name
+            conn.execute(
+                sql.SQL("UPDATE {} SET doc = %s").format(self._table("graph_metadata")),
+                (psycopg.types.json.Jsonb(metadata),),
+            )
+            self._graph_identity_checked = True
+            return
+        if claimed != self._graph_name:
+            raise GraphIdentityCollision(
+                f"PostgreSQL schema {self.schema!r} is already claimed by "
+                f"graph {claimed!r}, not {self._graph_name!r}"
+            )
+        self._graph_identity_checked = True
 
     _INDEX_STATE = (
         "SELECT i.indisvalid FROM pg_class c"
@@ -979,6 +1024,7 @@ class PostgresGraphPersistenceBackend:
             # After the isolation level, which must be the transaction's first
             # statement, and before anything that reads a scoped table.
             self._bind_scope(conn)
+            self._claim_or_check_graph_identity(conn)
             # The anchor has to exist, and an anchor that does not is not an
             # empty traversal but no traversal: the in-memory walk returns
             # nothing at all rather than a lone anchor. An anchor this instance
@@ -1040,11 +1086,13 @@ class PostgresGraphPersistenceBackend:
     def exists(self) -> bool:
         self._ensure_schema()
         with self._pool.connection() as conn:
-            row = conn.execute(
-                sql.SQL("SELECT 1 FROM {} LIMIT 1").format(
-                    self._table("graph_metadata")
-                )
-            ).fetchone()
+            with conn.transaction():
+                self._claim_or_check_graph_identity(conn)
+                row = conn.execute(
+                    sql.SQL("SELECT 1 FROM {} LIMIT 1").format(
+                        self._table("graph_metadata")
+                    )
+                ).fetchone()
         return row is not None
 
     def load_graph_data(self) -> Dict[str, Any]:
@@ -1076,6 +1124,7 @@ class PostgresGraphPersistenceBackend:
             with conn.transaction():
                 # Must be the transaction's first statement.
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                self._claim_or_check_graph_identity(conn)
                 self._bind_scope(conn)
                 where, scope_params = self._where_scope()
                 nodes = [
@@ -1107,7 +1156,7 @@ class PostgresGraphPersistenceBackend:
         return {
             "nodes": nodes,
             "edges": edges,
-            "metadata": dict(row[0]) if row else {},
+            "metadata": self._metadata_without_graph_identity(row[0]) if row else {},
         }
 
     def save_graph_data(self, data: Dict[str, Any]) -> None:
@@ -1121,7 +1170,8 @@ class PostgresGraphPersistenceBackend:
         self._ensure_schema()
         nodes = list(data.get("nodes") or [])
         edges = list(data.get("edges") or [])
-        metadata = dict(data.get("metadata") or {})
+        metadata = self._metadata_without_graph_identity(data.get("metadata") or {})
+        metadata[GRAPH_IDENTITY_KEY] = self._graph_name
         with self._pool.connection() as conn:
             with conn.transaction():
                 # Stated rather than inherited. The lock below only delivers
@@ -1145,6 +1195,7 @@ class PostgresGraphPersistenceBackend:
                     "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
+                self._claim_or_check_graph_identity(conn, force=True)
                 # Exactly the rows the load would have returned, which is what
                 # makes "replace the whole graph" mean the same thing here as
                 # it does everywhere else. Deleting less than that is the
@@ -1323,6 +1374,7 @@ class PostgresGraphPersistenceBackend:
                     "SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))",
                     (SAVE_LOCK_KEY, self.schema),
                 )
+                self._claim_or_check_graph_identity(conn)
                 for operation in operations:
                     self._apply_one(conn, operation)
                 # Inside the transaction, so the announcement is atomic with
@@ -1490,6 +1542,9 @@ class PostgresGraphPersistenceBackend:
                     else "change notification was not stopped cleanly"
                 )
             self._ensure_schema()
+            with self._pool.connection() as conn:
+                with conn.transaction():
+                    self._claim_or_check_graph_identity(conn)
             self._listener = listener
             self._listen_stop.clear()
             self._listen_error = None

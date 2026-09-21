@@ -1343,6 +1343,17 @@ export class SessionSyncClient {
     if (list.length) this._enqueue([{ op: 'edges_updated', edges: list }]);
   }
 
+  /**
+   * Queue already-formed session ops from a renderer that has no full canvas
+   * snapshot to diff. Intended for small, generic protocol ops such as a single
+   * `node_moved`; callers that own a complete mirror should keep using
+   * `syncState`.
+   */
+  sendOps(ops) {
+    const list = (ops || []).filter((op) => op && typeof op.op === 'string');
+    if (list.length) this._enqueue(list);
+  }
+
   _enqueue(ops) {
     for (const op of ops) this._queue.push(op);
     this._scheduleFlush();
@@ -1373,12 +1384,16 @@ export class SessionSyncClient {
       const pending = this._queue.splice(0);
       return (async () => {
         for (const op of pending) {
+          const batch = [op];
           try {
             // Bounded like every other ops POST (_postOps) so a hung request on
             // teardown cannot stall this drain loop indefinitely.
-            await this._postOps([op]);
+            this._inFlightOps = this._inFlightOps.concat(batch);
+            await this._postOps(batch);
           } catch {
             /* best-effort teardown flush */
+          } finally {
+            this._removeInFlight(batch);
           }
         }
       })();

@@ -213,6 +213,19 @@ def run_gate(workflow, job_id, detect, result, code, tmp_path):
     )
 
 
+def assert_gate_does_not_continue_on_error(workflow, job_id):
+    gate = workflow["jobs"][job_id]
+    assert not gate.get("continue-on-error", False), (
+        f"{job_id} is a required-check gate and must fail closed; "
+        "do not set job-level continue-on-error"
+    )
+    for step in gate["steps"]:
+        assert not step.get("continue-on-error", False), (
+            f"{job_id} step {step.get('name')!r} is the gate verdict; "
+            "do not set step-level continue-on-error"
+        )
+
+
 class TestTheGateSetIsDiscovered:
     """Without these, every parametrised test below can collapse to zero cases
     and still report green."""
@@ -333,6 +346,33 @@ class TestTheWorkerGateWiringItself:
         Named separately so that change fails here with an obvious message
         rather than scattering failures across the matrix."""
         assert len(workflow["jobs"][job_id]["steps"]) == 1
+
+    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
+    def test_gate_does_not_continue_on_error(self, workflow, job_id, flag):
+        """A failing gate must make the required check red.
+
+        `continue-on-error` would preserve every shell-level truth-table result
+        above while making GitHub report the gate job as successful.
+        """
+        assert_gate_does_not_continue_on_error(workflow, job_id)
+
+    @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
+    def test_gate_continue_on_error_true_is_rejected(self, workflow, job_id, flag):
+        """Pin the exact failure mode: the gate job itself must not be allowed
+        to report success after its verification step exits non-zero."""
+        mutated = {
+            **workflow,
+            "jobs": {
+                **workflow["jobs"],
+                job_id: {
+                    **workflow["jobs"][job_id],
+                    "continue-on-error": True,
+                },
+            },
+        }
+
+        with pytest.raises(AssertionError, match="job-level continue-on-error"):
+            assert_gate_does_not_continue_on_error(mutated, job_id)
 
     @pytest.mark.parametrize("job_id,flag", sorted(GATES.items()))
     def test_required_check_name_is_unchanged(self, workflow, job_id, flag):

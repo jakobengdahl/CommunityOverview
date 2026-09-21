@@ -243,6 +243,67 @@ function computeGroupPlacement(node, currentNodes, groupNodes) {
   return { parentId: node.parentId, position: { x: pos.x, y: pos.y } };
 }
 
+// Used by reactFlowArraysEqual below: two closures over the same callback are
+// never `===`, and every render of the `reactFlowNodes` memo mints fresh ones
+// (see its `onExpand`/`onEdit` wiring) even when nothing the closure depends
+// on actually changed. Treating "both functions" as equal is the deliberate
+// looseness that makes the comparison usable at all for that field; it never
+// masks a real content change because non-function fields are compared
+// exactly, and it never affects rendering — GraphCanvas always calls whatever
+// closure ReactFlow currently holds, this check just decides whether to hand
+// it a new one.
+function jsonReplacerIgnoringFunctions(_key, value) {
+  return typeof value === 'function' ? '\u0000fn' : value;
+}
+
+/**
+ * Value-equality for two ReactFlow node or edge arrays, used to decide
+ * whether a freshly-rebuilt array actually differs from what is already
+ * committed. Several effects below recompute a full replacement array on
+ * every run regardless of whether anything changed (a fresh `reactFlowNodes`/
+ * `reactFlowEdges` memo output, a `.map()` over the current nodes, …);
+ * calling `setNodes`/`setEdges` with a *reference-different-but-content-
+ * identical* array still commits a new render, and if the effect that
+ * produced it runs again on that very render (its own dependencies having
+ * changed identity for unrelated reasons — see the default prop values on
+ * `GraphCanvasInner`), the cycle never settles. Comparing structurally and
+ * returning the *previous* array reference when nothing meaningfully changed
+ * lets React's own `Object.is` bailout stop that cascade, without altering
+ * what ends up on screen.
+ */
+function reactFlowArraysEqual(a, b) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === b[i]) continue;
+    if (
+      JSON.stringify(a[i], jsonReplacerIgnoringFunctions) !==
+      JSON.stringify(b[i], jsonReplacerIgnoringFunctions)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Value-equality for a remote selection/edit-lease marker
+ * (`{clientId, color, displayName}` or `null`), used by the two mirror
+ * effects below instead of `===`. `sessionSyncClient.getRemoteSelections()`
+ * and `getRemoteLeases()` unconditionally build a fresh marker object for
+ * every entry on every call (see their doc comments in `sessionSyncClient.js`),
+ * so a reference comparison against the previous marker is always false even
+ * when the underlying claim/lease is unchanged — exactly the reference-vs-
+ * value gap `reactFlowArraysEqual` above exists to close for whole arrays.
+ * Comparing the three fields directly is cheaper than routing a single small
+ * object through JSON.stringify.
+ */
+function remoteMarkerEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.clientId === b.clientId && a.color === b.color && a.displayName === b.displayName;
+}
+
 /**
  * GraphCanvas - Main graph visualization component
  */
@@ -1395,7 +1456,19 @@ function GraphCanvasInner({
       // Groups must appear before their children in the array for ReactFlow
       // parent-child relationships to work. This also ensures groups render
       // behind custom nodes so clicks reach the nodes on top.
-      return reorderNodesForParentChild([...positioned, ...manualNodes]);
+      const next = reorderNodesForParentChild([...positioned, ...manualNodes]);
+      // This effect's own dependencies (reactFlowNodes/reactFlowEdges) can
+      // change identity on a render that changed nothing this reconciliation
+      // cares about (e.g. a caller-side default array prop recreated every
+      // render — see GraphCanvasInner's parameter defaults). Without this
+      // check the effect would then commit a content-identical-but-freshly-
+      // built array on every such render; with a real (non-mocked)
+      // useNodesState that commit is itself a state change, which re-renders
+      // the component, which recreates those same unstable defaults, which
+      // changes reactFlowNodes' identity again — an unbroken cycle. Returning
+      // the previous `nds` reference when nothing actually changed lets
+      // React's setState bailout end it.
+      return reactFlowArraysEqual(next, nds) ? nds : next;
     });
   }, [
     reactFlowNodes,
@@ -1464,7 +1537,11 @@ function GraphCanvasInner({
 
   // Update edges when input changes
   useEffect(() => {
-    setEdges(reactFlowEdges);
+    // Same unconditional-write hazard as the node-reconciliation effect above
+    // (see reactFlowArraysEqual's doc comment): `reactFlowEdges` can change
+    // identity on a render that changed nothing here, so writing it through
+    // directly would commit a content-identical array on every such render.
+    setEdges((eds) => (reactFlowArraysEqual(reactFlowEdges, eds) ? eds : reactFlowEdges));
   }, [reactFlowEdges, setEdges]);
 
   // Reset loaded count when visible nodes change significantly
@@ -4478,14 +4555,25 @@ function GraphCanvasInner({
   // Purely cosmetic (task-annotation-exclusive-edit-leases): selection never
   // blocks local dragging — see the remote-lease effect right below for that.
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((n) => {
+    setNodes((nds) => {
+      // `.map` always returns a fresh array, even when every branch below took
+      // the `return n` no-op — that alone is enough to commit a new (if
+      // content-identical) node array on every run of this effect. Tracking
+      // whether anything actually changed and returning `nds` itself when it
+      // didn't keeps a no-op run of this effect from being a state change at
+      // all, matching the idiom `useRemotePositions`'s second effect uses for
+      // the same reason.
+      let changed = false;
+      const next = nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteSelections?.[n.id] ?? null;
-        if (!marker && !n.data?.remoteSelection) return n;
+        const prevMarker = n.data?.remoteSelection ?? null;
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
+        changed = true;
         return { ...n, data: { ...n.data, remoteSelection: marker } };
-      })
-    );
+      });
+      return changed ? next : nds;
+    });
   }, [remoteSelections, setNodes]);
 
   // Mirror live remote *edit leases* onto annotation nodes
@@ -4497,11 +4585,21 @@ function GraphCanvasInner({
   // ReactFlow's own node state, not the host's `inputNodes` prop, so pushing
   // a live map onto them needs an effect rather than a render-time memo.
   useEffect(() => {
-    setNodes((nds) =>
-      nds.map((n) => {
+    setNodes((nds) => {
+      // Same no-op-map issue as the remote-selection effect above, and the
+      // same fix: track whether anything actually changed and return `nds`
+      // itself when it didn't, so a no-op run isn't a state change.
+      let changed = false;
+      const next = nds.map((n) => {
         if (!ANNOTATION_TYPES.has(n.type)) return n;
         const marker = remoteLeases?.[n.id] ?? null;
-        if (!marker && !n.data?.remoteLease) return n;
+        const prevMarker = n.data?.remoteLease ?? null;
+        // `draggable` and the rest of `nextData` are a pure function of `n`
+        // plus this one field, so an unchanged marker means an unchanged
+        // result — the cheap check that lets this stay a no-op run. Compared
+        // by value (see `remoteMarkerEqual`'s doc comment): `getRemoteLeases()`
+        // mints a fresh object per call, so `===` was always false here.
+        if (remoteMarkerEqual(marker, prevMarker)) return n;
         const nextData = { ...n.data, remoteLease: marker };
         const draggable = isAnnotationDraggable({ ...n, data: nextData });
         // A group that may be dragged resolves `draggable` to `undefined`, so
@@ -4511,13 +4609,15 @@ function GraphCanvasInner({
         // time a collaborator's lease on the group cleared, leaving it
         // draggable during a freehand stroke. Overlays keep the explicit
         // boolean they are hydrated with.
+        changed = true;
         return {
           ...n,
           data: nextData,
           draggable: n.type === 'group' && draggable ? undefined : draggable,
         };
-      })
-    );
+      });
+      return changed ? next : nds;
+    });
   }, [remoteLeases, setNodes]);
 
   // Apply node positions arriving from another client (design step 6), holding

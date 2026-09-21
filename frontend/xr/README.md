@@ -13,13 +13,25 @@ contracts, the session-sync protocol, or the existing 2D web client.
   `src/domeLayout.test.js`): it maps the graph's 2D `{x, y}` layout onto a
   curved dome around the viewer, with **zoom mapped to dome radius** and **no
   z-axis** — keeping positions compatible with the 2D protocol.
+- A **dome renderer** that derives readable billboard cards and curved edge
+  lines from the shared 2D layout. Cards use stable type colors when the type is
+  known and a neutral fallback otherwise. Edge lines render only when both
+  endpoints are visible and positioned.
+- A **selection HUD**: selecting a card highlights it and shows node id, name,
+  type, and any summary/description already available from the resolved session
+  or node-detail REST hydration.
+- **Controller and hand ray-select**: WebXR `selectstart`/`selectend` from
+  tracked controllers or hand input can select a node, advertise the generic
+  session selection claim, preview a drag on the dome, and commit it as a
+  `node_moved` op in the same 2D coordinate space as the desktop client.
 - **Shared-session sync**, reusing the existing protocol with no change to it:
   - `src/sceneSession.js` opens `GET /api/sessions/{id}/stream` through
     `frontend/web/src/services/sessionSyncClient.js` — imported across the
-    workspace boundary, unmodified — and reloads the authoritative session over
-    REST on connect and on every resync, exactly as the 2D client does.
+    workspace boundary — and reloads the authoritative session over REST on
+    connect and on every resync, exactly as the 2D client does.
   - `src/sceneModel.js` reduces the op stream (`nodes_added` / `nodes_removed`,
     `node_moved`, `layout_applied`, `nodes_hidden` / `nodes_shown`,
+    `edges_added` / `edges_removed`, `edges_hidden` / `edges_shown`,
     `session_renamed`) plus presence and remote selection claims into the flat
     scene the renderer draws. Pure and unit-tested in `src/sceneModel.test.js`.
 
@@ -35,18 +47,18 @@ headset straight into the same session — typing sixteen digits in VR is the
 worst part of the workflow.
 
 A node a collaborator adds arrives as an id only, so its name and type are
-fetched over REST; nodes render once a position op has placed them.
+fetched over REST; nodes render once a position op has placed them. If the REST
+payload does not include description/summary metadata, the selection HUD remains
+minimal rather than issuing extra reads.
 
 ### Not yet wired (next tasks)
 
-The client is **read-only on the protocol**: it renders the shared session but
-emits no ops of its own. Controller/hand ray-select (and with it the outgoing
-`selection_claimed` / `node_moved` ops), edges + SDF text labels, dome-radius
-zoom navigation, and the in-world node panel are still to come — as is lifting
+SDF text labels, dome-radius zoom navigation, controller comfort locomotion, and
+hardware performance work are still to come — as is lifting
 `sessionSyncClient.js` and the session helpers of `api.js` out of
-`frontend/web` into a shared package, now that a second consumer exists. Edge
-and annotation ops are therefore ignored by the scene model rather than reduced
-into state nothing draws. See ADR 0003 for the scope boundary.
+`frontend/web` into a shared package, now that a second consumer exists.
+Annotation and group ops are still ignored by the scene model rather than
+reduced into state nothing draws. See ADR 0003 for the scope boundary.
 
 ## Run
 
@@ -87,6 +99,6 @@ already set) behind an HTTPS tunnel, or serve with a locally-trusted certificate
 npm run test -w @community-graph/xr
 ```
 
-The tests cover the pure layers — dome geometry, the op-stream reduction, and
-the session wiring against a fake sync client. The R3F scene itself is validated
-on-device via the smoke test above.
+The tests cover the pure layers — dome geometry, dome scene derivation, the
+op-stream reduction, and the session wiring against a fake sync client. The R3F
+scene itself is validated on-device via the smoke test above.

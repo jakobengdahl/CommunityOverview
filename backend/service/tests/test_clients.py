@@ -380,6 +380,57 @@ class TestMCPClient:
         assert result["success"] is True
         assert result["node"]["description"] == "Updated via MCP"
 
+    def test_mcp_update_node_metadata_merges_by_default(self, populated_mcp_tools):
+        """A partial MCP metadata update preserves unspecified existing keys."""
+        tools_map, _ = populated_mcp_tools
+        seeded = tools_map["update_node"](
+            node_id="mcp-1",
+            updates={"metadata": {"owner": "team-a", "status": "planned"}},
+        )
+        assert seeded["success"] is True
+
+        result = tools_map["update_node"](
+            node_id="mcp-1",
+            updates={"metadata": {"status": "in_progress"}},
+        )
+
+        assert result["success"] is True
+        assert result["node"]["metadata"] == {
+            "owner": "team-a",
+            "status": "in_progress",
+        }
+
+    def test_mcp_update_node_metadata_can_replace_or_remove_intentionally(
+        self, populated_mcp_tools
+    ):
+        """MCP callers can still replace metadata or remove keys explicitly."""
+        tools_map, _ = populated_mcp_tools
+        tools_map["update_node"](
+            node_id="mcp-1",
+            updates={
+                "metadata": {
+                    "owner": "team-a",
+                    "status": "planned",
+                    "priority": "high",
+                }
+            },
+        )
+
+        replaced = tools_map["update_node"](
+            node_id="mcp-1",
+            updates={"metadata": {"status": "in_progress"}},
+            metadata_merge=False,
+        )
+        assert replaced["success"] is True
+        assert replaced["node"]["metadata"] == {"status": "in_progress"}
+
+        removed = tools_map["update_node"](
+            node_id="mcp-1",
+            updates={"metadata": {"status": None}},
+        )
+        assert removed["success"] is True
+        assert removed["node"]["metadata"] == {}
+
     def test_mcp_delete_nodes(self, populated_mcp_tools):
         """Test MCP delete_nodes tool."""
         tools_map, service = populated_mcp_tools

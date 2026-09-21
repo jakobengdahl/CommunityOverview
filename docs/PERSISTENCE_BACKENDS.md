@@ -212,8 +212,12 @@ passes against it.
 
 `backend/core/tests/test_persistence_contract_file.py` is the file backend
 against the contract, with every hook implemented;
-`test_persistence_contract_memory.py` runs the reference backend both as
-declared and as snapshot-only; `test_persistence_contract_postgres.py` is the
+`test_persistence_contract_memory.py` runs the reference backend as declared,
+as snapshot-only, and a third time reporting every entity write via
+`entities_read_on_demand` instead of `entities` — so the deferred form below
+is held to every notification clause by a backend that needs no server to
+run, not only by PostgreSQL's own transport for it.
+`test_persistence_contract_postgres.py` is the
 worked example of a backend built up one step at a time: it declares all
 four capabilities, having landed first as `SNAPSHOT_ONLY` with the entity
 clauses skipping, then with the entity contract, then with notification, then

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import httpx2 as httpx
 
 from .config import MCPIntegration, MCPTransport
-from backend.core.events.delivery import is_safe_url
+from backend.core.events.delivery import MAX_REDIRECTS, is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -769,16 +769,17 @@ class MCPLoader:
             try:
                 with httpx.Client(timeout=30, follow_redirects=False) as client:
                     current_url = url
-                    for _ in range(5):
+                    for _ in range(MAX_REDIRECTS):
                         response = client.get(current_url)
-                        if response.is_redirect:
-                            location = str(response.headers.get("location", ""))
-                            next_url = urllib.parse.urljoin(current_url, location)
-                            if not is_safe_url(next_url):
-                                return {"error": "Redirected to unsafe URL"}
-                            current_url = next_url
-                            continue
-                        break
+                        if not response.is_redirect:
+                            break
+                        location = str(response.headers.get("location", ""))
+                        next_url = urllib.parse.urljoin(current_url, location)
+                        if not is_safe_url(next_url):
+                            return {"error": "Redirected to unsafe URL"}
+                        current_url = next_url
+                    else:
+                        return {"error": f"Too many redirects (limit {MAX_REDIRECTS})"}
                     response.raise_for_status()
 
                 # Simple HTML to text conversion
@@ -806,15 +807,15 @@ class MCPLoader:
         # For PoC, implement basic file operations in /tmp/agent-workspace
         import os
 
-        base_path = "/tmp/agent-workspace"
+        base_path = os.path.realpath("/tmp/agent-workspace")
         os.makedirs(base_path, exist_ok=True)
 
         path = input_args.get("path", "")
         if not path:
             return {"error": "Path required"}
 
-        # Security: ensure path is within workspace
-        full_path = os.path.normpath(os.path.join(base_path, path))
+        # Security: ensure path is within workspace after resolving symlinks.
+        full_path = os.path.realpath(os.path.join(base_path, path))
         if os.path.commonpath([base_path, full_path]) != base_path:
             return {"error": "Path must be within agent workspace"}
 

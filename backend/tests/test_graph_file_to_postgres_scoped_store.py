@@ -17,12 +17,6 @@ import uuid
 
 import pytest
 
-from scripts.graph_file_to_postgres import (
-    GraphCounts,
-    PostgresTargetInspector,
-    main,
-)
-
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
     "1",
     "true",
@@ -30,9 +24,19 @@ REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
     "on",
 )
 if REQUIRE:
-    import psycopg
+    import psycopg  # noqa: F401  (a skip here would be the failure, not a pass)
 else:
     psycopg = pytest.importorskip("psycopg", reason="psycopg is optional")
+
+from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
+    PostgresGraphPersistenceBackend,
+)
+from backend.core.storage import GraphStorage  # noqa: E402  (after importorskip)
+from scripts.graph_file_to_postgres import (  # noqa: E402  (after importorskip)
+    GraphCounts,
+    PostgresTargetInspector,
+    main,
+)
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
@@ -247,8 +251,19 @@ def test_a_store_keeping_scopes_apart_without_a_policy_is_refused_too(
             "CREATE POLICY operator_named ON {table} AS RESTRICTIVE USING (true)",
             "a policy",
         ),
+        # A single-command policy, not FOR ALL: still a sign the server is
+        # asked to keep rows apart, whichever command it governs.
+        (
+            "CREATE POLICY operator_named ON {table} FOR SELECT USING (true)",
+            "a policy",
+        ),
     ],
-    ids=["rls-without-a-policy", "a-policy-without-rls", "a-restrictive-policy"],
+    ids=[
+        "rls-without-a-policy",
+        "a-policy-without-rls",
+        "a-restrictive-policy",
+        "a-select-only-policy",
+    ],
 )
 def test_each_sign_of_isolation_is_refused_alone_on_either_table(
     store, tmp_path, capsys, table, sign
@@ -307,9 +322,12 @@ def test_a_scope_in_its_own_started_schema_is_pointed_at_the_flag(
     started against the empty schema and saved an empty graph. That schema is
     the scope's own, so the refusal must leave the flag open, and it works."""
     dsn, schema = store
-    assert (
-        _convert(_graph_file(tmp_path, "started", []), dsn, schema, "--scope", "A") == 0
-    )
+    backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="A")
+    try:
+        storage = GraphStorage(persistence_backend=backend)
+        storage.shutdown_events()
+    finally:
+        backend.close()
 
     graph = _graph_file(tmp_path, "A", ["a1", "a2"])
     assert _convert(graph, dsn, schema, "--scope", "A") == 1
@@ -378,3 +396,93 @@ def test_rows_in_scope_counts_only_rows_carrying_that_scope(
     counted = PostgresTargetInspector(dsn, schema=schema).rows_in_scope("A")
 
     assert counted == GraphCounts(nodes=3, edges=2)
+
+
+def _insert_node(schema, row_id, scope):
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            psycopg.sql.SQL(
+                "INSERT INTO {}.graph_nodes (id, doc, scope_id) VALUES (%s, %s, %s)"
+            ).format(psycopg.sql.Identifier(schema)),
+            (row_id, json.dumps({"id": row_id, "type": "Thing"}), scope),
+        )
+
+
+def test_rows_in_scope_uses_exact_match_not_a_loosened_comparison(store, tmp_path):
+    """Server-side RLS is dropped first: it enforces its own exact match, so
+    with it in place a stray row is hidden before `rows_in_scope`'s own
+    comparison ever gets a say (see the "none" case of
+    `test_rows_in_scope_counts_only_rows_carrying_that_scope`). With nothing
+    else in the way, `=` must not be treated as `LIKE` (`_` and `%` are
+    wildcards), as a case-folded compare, or as a prefix check - each stray
+    row below matches the scope asked for under exactly one of those
+    loosened comparisons and must not be counted."""
+    dsn, schema = store
+    # Establishes the scope column that rows_in_scope's exact match then has
+    # to enforce alone, once the policy below is dropped.
+    assert (
+        _convert(_graph_file(tmp_path, "T", ["t1"]), dsn, schema, "--scope", "t_1") == 0
+    )
+    _drop_server_isolation(schema)
+    _insert_node(schema, "a-real", "A")
+    _insert_node(schema, "a-lower", "a")  # matches "A" under lower()=lower()
+    _insert_node(schema, "ab-prefix", "AB")  # matches "A" under starts_with()
+    _insert_node(schema, "tx1-like", "tx1")  # matches "t_1" under LIKE ('_' wildcard)
+
+    inspector = PostgresTargetInspector(dsn, schema=schema)
+    assert inspector.rows_in_scope("A") == GraphCounts(nodes=1, edges=0)
+    assert inspector.rows_in_scope("t_1") == GraphCounts(nodes=1, edges=0)
+
+
+def test_isolation_evidence_reaches_a_later_table_past_a_missing_one(store):
+    """SCOPED_TABLES is walked table by table; a table that does not exist
+    yet must not stop the walk before a later table's own RLS is reached -
+    continue past the missing one, not break out of the loop."""
+    dsn, schema = store
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        # graph_nodes (first in SCOPED_TABLES) is deliberately never created.
+        conn.execute(
+            psycopg.sql.SQL("CREATE TABLE {} (id text primary key)").format(
+                psycopg.sql.Identifier(schema, "graph_edges")
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(
+                psycopg.sql.Identifier(schema, "graph_edges")
+            )
+        )
+
+    evidence = PostgresTargetInspector(dsn, schema=schema).isolation_evidence()
+    assert evidence == ["graph_edges has row-level security enabled"]
+
+
+def test_isolation_evidence_is_raised_without_a_scope_column(store):
+    """RLS or a policy is itself the evidence, whether or not the scope
+    column exists yet - a table an operator locked down before any
+    conversion ran the migration that adds it."""
+    dsn, schema = store
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            psycopg.sql.SQL("CREATE TABLE {} (id text primary key)").format(
+                psycopg.sql.Identifier(schema, "graph_nodes")
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(
+                psycopg.sql.Identifier(schema, "graph_nodes")
+            )
+        )
+
+    evidence = PostgresTargetInspector(dsn, schema=schema).isolation_evidence()
+    assert evidence == ["graph_nodes has row-level security enabled"]
+
+
+def test_rows_in_scope_reports_zero_when_nothing_matches(store, tmp_path):
+    dsn, schema = store
+    assert (
+        _convert(_graph_file(tmp_path, "A", ["a1", "a2"]), dsn, schema, "--scope", "A")
+        == 0
+    )
+
+    counted = PostgresTargetInspector(dsn, schema=schema).rows_in_scope("no-such-scope")
+    assert counted == GraphCounts(nodes=0, edges=0)
