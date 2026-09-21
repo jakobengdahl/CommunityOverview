@@ -25,8 +25,10 @@ import { isRemoteLocked } from '../utils/annotations';
  * caller, since that is the part that actually differs between them.
  */
 export function useEditableText(id, data, { commitOnEnter = false } = {}) {
+  const persistedText = data.text || '';
   const [isEditing, setIsEditing] = useState(false);
-  const [text, setText] = useState(data.text || '');
+  const [text, setText] = useState(persistedText);
+  const [textWhenLastRendered, setTextWhenLastRendered] = useState(persistedText);
   const inputRef = useRef(null);
   const { setNodes } = useReactFlow();
   const { notifyChange, notifyRemoteLockedAttempt, beginEditing, endEditing } =
@@ -59,9 +61,10 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     if (releaseSignal > 0) releaseLease();
   }, [releaseSignal, releaseLease]);
 
-  useEffect(() => {
-    setText(data.text || '');
-  }, [data.text]);
+  if (persistedText !== textWhenLastRendered) {
+    setTextWhenLastRendered(persistedText);
+    setText(persistedText);
+  }
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -90,7 +93,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     if (locked && isEditing) {
       setReleaseSignal((s) => s + 1);
       setIsEditing(false);
-      setText(data.text || '');
+      setText(persistedText);
     }
   }
 
@@ -160,7 +163,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
       // already refused entry when remoteLocked was true from the start),
       // so there is no draft risk here — this is the pre-existing "refused
       // before it began" case, not the mid-edit interruption above.
-      setText(data.text || '');
+      setText(persistedText);
       notifyRemoteLockedAttempt();
       return;
     }
@@ -169,7 +172,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     // handleLabelBlur.
     if (locked) {
       releaseLease();
-      setText(data.text || '');
+      setText(persistedText);
       return;
     }
     releaseLease();
@@ -200,7 +203,7 @@ export function useEditableText(id, data, { commitOnEnter = false } = {}) {
     } else if (e.key === 'Escape') {
       e.preventDefault();
       releaseLease();
-      setText(data.text || '');
+      setText(persistedText);
       setIsEditing(false);
     }
   };
