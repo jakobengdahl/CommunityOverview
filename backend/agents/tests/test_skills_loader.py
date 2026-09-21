@@ -517,6 +517,25 @@ class TestValidateDomain:
 # ---------------------------------------------------------------------------
 
 
+def _addrinfo(*ips):
+    """getaddrinfo answers; defaults to a single public address.
+
+    Mirrors the helper in test_mcp_loader.py. The tests that keep the real
+    is_safe_url on trial still resolve a hostname for the STARTING url, so
+    without this they need live DNS -- and two of them would then satisfy
+    their `match="disallowed address"` from the initial guard rather than the
+    hop guard they exist to pin.
+    """
+    return [(None, None, None, None, (ip, 0)) for ip in (ips or ("93.184.216.34",))]
+
+
+def _public_dns():
+    return patch(
+        "backend.core.events.delivery.socket.getaddrinfo",
+        return_value=_addrinfo(),
+    )
+
+
 @contextlib.contextmanager
 def _mock_http(handler):
     """Give the loader's AsyncClient a MockTransport, keeping its own kwargs."""
@@ -588,7 +607,7 @@ class TestFetchTextRedirects:
             [_redirect_to("http://169.254.169.254/latest/meta-data/"), _ok()]
         )
 
-        with _mock_http(handler):
+        with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="disallowed address"):
                 await SkillsLoader(config)._fetch_text(
                     "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
@@ -728,7 +747,7 @@ class TestFetchTextRedirects:
             ]
         )
 
-        with _mock_http(handler):
+        with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="disallowed address"):
                 await SkillsLoader(config)._fetch_text(
                     "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
@@ -929,7 +948,15 @@ class TestFetchTextRedirects:
 
     @pytest.mark.asyncio
     async def test_a_relative_location_is_resolved_against_the_current_url(self):
-        handler, seen = _recording_handler([_redirect_to("/moved/SKILL.md"), _ok()])
+        """Two hops, because with one the current URL and the starting URL are
+        the same and the test cannot tell which one was used."""
+        handler, seen = _recording_handler(
+            [
+                _redirect_to("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"),
+                _redirect_to("/moved/SKILL.md"),
+                _ok(),
+            ]
+        )
 
         with (
             _mock_http(handler),
@@ -937,7 +964,8 @@ class TestFetchTextRedirects:
         ):
             await self._loader()._fetch_text("https://api.github.com/a/b/SKILL.md")
 
-        assert str(seen[1].url) == "https://api.github.com/moved/SKILL.md"
+        assert len(seen) == 3
+        assert str(seen[2].url) == "https://raw.githubusercontent.com/moved/SKILL.md"
 
     @pytest.mark.asyncio
     async def test_a_scheme_relative_location_cannot_leave_the_allowlist(self):
@@ -957,7 +985,7 @@ class TestFetchTextRedirects:
     async def test_a_non_http_location_with_no_host_is_refused_by_the_allowlist(self):
         handler, seen = _recording_handler([_redirect_to("file:///etc/passwd"), _ok()])
 
-        with _mock_http(handler):
+        with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="allowlist"):
                 await self._loader()._fetch_text(
                     "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
@@ -975,7 +1003,7 @@ class TestFetchTextRedirects:
             [_redirect_to("file://raw.githubusercontent.com/etc/passwd"), _ok()]
         )
 
-        with _mock_http(handler):
+        with _mock_http(handler), _public_dns():
             with pytest.raises(ValueError, match="disallowed address"):
                 await self._loader()._fetch_text(
                     "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
@@ -1106,6 +1134,11 @@ class TestLeavesOrigin:
             ("https://h.example:80/a", "http://h.example:443/b", True),
             # a bare port change
             ("https://h.example/a", "https://h.example:8443/b", True),
+            # a same-scheme port change that happens to end at 443: only an
+            # http -> https upgrade is the exception, not any move to 443
+            ("http://h.example/a", "http://h.example:443/b", True),
+            # ...and one that starts at 80 without the scheme being http
+            ("https://h.example:80/a", "https://h.example/b", True),
             # an explicit port 0 is not the scheme default
             ("https://h.example/a", "https://h.example:0/b", True),
             # a different host entirely, and a sibling subdomain
