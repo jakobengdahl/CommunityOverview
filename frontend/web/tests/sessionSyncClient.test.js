@@ -1051,6 +1051,37 @@ describe('SessionSyncClient', () => {
     ]);
   });
 
+  it('teardown force-single flush reports the current single-op POST as pending', async () => {
+    let releasePost;
+    const postGate = new Promise((resolve) => {
+      releasePost = resolve;
+    });
+    let call = 0;
+    const fetchImpl = vi.fn(async (url, opts) => {
+      fetchImpl.calls.push({ url, body: JSON.parse(opts.body) });
+      call += 1;
+      if (call === 1) return { ok: false, status: 400 };
+      if (call === 2) await postGate;
+      return { ok: true, status: 200, json: async () => ({ applied: [], seq: call }) };
+    });
+    fetchImpl.calls = [];
+    const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
+    client.connect();
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] });
+    await client.flush(); // batch rejected -> force-single, both ops requeued
+
+    const flushPromise = client.flush();
+    expect(fetchImpl.calls).toHaveLength(2);
+    expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+    expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+
+    releasePost();
+    await flushPromise;
+    expect(client.getPendingOps()).toEqual([]);
+    expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_hidden', node_ids: ['h'] }]);
+  });
+
   it('teardown flush drains the remainder even while a force-single op is in flight', async () => {
     let release;
     const gate = new Promise((r) => {
