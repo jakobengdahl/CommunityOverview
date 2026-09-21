@@ -17,14 +17,6 @@ import uuid
 
 import pytest
 
-from backend.core.postgres_backend import PostgresGraphPersistenceBackend
-from backend.core.storage import GraphStorage
-from scripts.graph_file_to_postgres import (
-    GraphCounts,
-    PostgresTargetInspector,
-    main,
-)
-
 REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
     "1",
     "true",
@@ -32,9 +24,19 @@ REQUIRE = os.environ.get("CO_REQUIRE_POSTGRES", "").strip().lower() in (
     "on",
 )
 if REQUIRE:
-    import psycopg
+    import psycopg  # noqa: F401  (a skip here would be the failure, not a pass)
 else:
     psycopg = pytest.importorskip("psycopg", reason="psycopg is optional")
+
+from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
+    PostgresGraphPersistenceBackend,
+)
+from backend.core.storage import GraphStorage  # noqa: E402  (after importorskip)
+from scripts.graph_file_to_postgres import (  # noqa: E402  (after importorskip)
+    GraphCounts,
+    PostgresTargetInspector,
+    main,
+)
 
 DSN = os.environ.get("CO_TEST_POSTGRES_DSN", "")
 
