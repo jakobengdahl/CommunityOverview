@@ -663,7 +663,7 @@ export default function App() {
   }, []);
 
   const handleZoom = useCallback((factor) => {
-    setDomeNav((nav) => ({ ...nav, zoom: zoomToDensity(nav.zoom * factor) }));
+    setDomeNav((nav) => ({ ...nav, zoom: nav.zoom * factor }));
   }, []);
 
   const handleResetView = useCallback(() => {
