@@ -1,15 +1,15 @@
 import useGraphStore, { isStaleSessionEpoch } from '../store/graphStore';
 
 /**
- * The two dialog-driven graph edits guarded against a mid-await session switch.
+ * Dialog-driven graph edits guard against stale post-await canvas writes.
  *
- * Both were written as "check the dialog is open, await the call, apply the
- * result". Closing the dialogs on a session switch does not save them: the
- * dialog check has already passed by the time the switch lands mid-await. Each
- * therefore captures the session epoch before awaiting and drops the effects
- * that belong to the originating session if it changed.
+ * These handlers were written as "check the dialog is open, await the call,
+ * apply the result". Closing the dialogs on a session switch or canvas clear
+ * does not save them: the dialog check has already passed by the time the
+ * invalidating event lands mid-await. Each therefore captures the relevant
+ * epoch before awaiting and drops effects that target stale canvas state.
  *
- * Both follow the same rule about what survives a stale request: the persisted
+ * They follow the same rule about what survives a stale request: the persisted
  * mutation is global and permanent, so the user is told it happened either way,
  * but nothing session-scoped is touched — no canvas edit, no sync fan-out, and
  * no dialog state, since by then those belong to the session the user moved to.
@@ -58,14 +58,18 @@ export async function applyEdgeUpdate({
   setEditingEdge,
   showNotification,
 }) {
-  const requestEpoch = useGraphStore.getState().sessionEpoch;
+  const { sessionEpoch: requestEpoch, canvasBaselineEpoch: requestBaselineEpoch } =
+    useGraphStore.getState();
   try {
     await updateEdge(editingEdge.id, updates);
     // Reported at the end of each branch rather than once above them: the
     // session-scoped work below is still inside this try, so announcing success
     // before it runs would let a throw there follow "Edge updated" with "Could
     // not update edge" for a PUT that did land.
-    if (isStaleSessionEpoch(requestEpoch)) {
+    if (
+      isStaleSessionEpoch(requestEpoch) ||
+      useGraphStore.getState().canvasBaselineEpoch !== requestBaselineEpoch
+    ) {
       showNotification('success', 'Edge updated');
       return false;
     }

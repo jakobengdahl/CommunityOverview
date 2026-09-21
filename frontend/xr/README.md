@@ -14,9 +14,12 @@ contracts, the session-sync protocol, or the existing 2D web client.
   curved dome around the viewer, with **zoom mapped to dome radius** and **no
   z-axis** — keeping positions compatible with the 2D protocol.
 - A **dome renderer** that derives readable billboard cards and curved edge
-  lines from the shared 2D layout. Cards use stable type colors when the type is
-  known and a neutral fallback otherwise. Edge lines render only when both
-  endpoints are visible and positioned.
+  lines from the shared 2D layout. Cards use shared public node-type colors when
+  the type is known and a neutral fallback otherwise. Edge lines render only
+  when both endpoints are visible and positioned. Card labels currently use a
+  high-resolution canvas backing texture; replacing that with true SDF/MSDF text
+  should be done with a vetted Three.js text dependency once it is available in
+  the workspace lockfile.
 - A **selection HUD**: selecting a card highlights it and shows node id, name,
   type, and any summary/description already available from the resolved session
   or node-detail REST hydration.
@@ -24,6 +27,10 @@ contracts, the session-sync protocol, or the existing 2D web client.
   tracked controllers or hand input can select a node, advertise the generic
   session selection claim, preview a drag on the dome, and commit it as a
   `node_moved` op in the same 2D coordinate space as the desktop client.
+- **Dome navigation**: zoom increases layout density while also bringing the
+  shell closer, horizontal pan wraps across the actual layout width, vertical
+  pan clamps at the layout edges with indicators, and empty-background ray
+  grabs pan the dome separately from node ray selection.
 - **Shared-session sync**, reusing the existing protocol with no change to it:
   - `src/sceneSession.js` opens `GET /api/sessions/{id}/stream` through
     `frontend/web/src/services/sessionSyncClient.js` — imported across the
@@ -53,10 +60,10 @@ minimal rather than issuing extra reads.
 
 ### Not yet wired (next tasks)
 
-SDF text labels, dome-radius zoom navigation, controller comfort locomotion, and
-hardware performance work are still to come — as is lifting
-`sessionSyncClient.js` and the session helpers of `api.js` out of
-`frontend/web` into a shared package, now that a second consumer exists.
+SDF text labels, controller comfort locomotion, and hardware performance work
+are still to come — as is lifting `sessionSyncClient.js` and the session helpers
+of `api.js` out of `frontend/web` into a shared package, now that a second
+consumer exists.
 Annotation and group ops are still ignored by the scene model rather than
 reduced into state nothing draws. See ADR 0003 for the scope boundary.
 

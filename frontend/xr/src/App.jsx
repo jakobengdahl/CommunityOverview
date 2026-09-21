@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { XR, createXRStore } from '@react-three/xr';
 import * as THREE from 'three';
-import { DEFAULT_DOME, layoutBounds, layoutPositionFromRay } from './domeLayout.js';
+import {
+  domeAnglesFromRay,
+  domeView,
+  layoutBounds,
+  layoutPositionFromRay,
+  panDomeView,
+  zoomToDensity,
+  zoomToRadius,
+} from './domeLayout.js';
 import { domeSceneData, selectionDetail } from './domeScene.js';
 import { EMPTY_SCENE } from './sceneModel.js';
 import { SceneSession, isValidSessionId } from './sceneSession.js';
@@ -107,10 +115,12 @@ function makeTextTexture({
   width = 512,
   height = 224,
 }) {
+  const scale = 2;
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
   const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
   ctx.fillStyle = 'rgba(13, 17, 24, 0.94)';
   ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = selected ? '#ffffff' : color;
@@ -136,6 +146,9 @@ function makeTextTexture({
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.needsUpdate = true;
   return texture;
 }
@@ -176,11 +189,11 @@ function NodeCard({ node, selected, onSelect }) {
       makeTextTexture({
         title: node.title,
         subtitle: node.subtitle,
-        footer: node.id,
+        footer: node.footer,
         color: node.color,
         selected,
       }),
-    [node.color, node.id, node.subtitle, node.title, selected]
+    [node.color, node.footer, node.subtitle, node.title, selected]
   );
 
   useEffect(() => () => texture.dispose(), [texture]);
@@ -245,13 +258,29 @@ function poseToRay(inputSource, frame, referenceSpace, target) {
   return true;
 }
 
-function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveCommit }) {
+function XrRayInput({
+  enabled,
+  layoutBounds,
+  domeOptions,
+  onSelect,
+  onMovePreview,
+  onMoveCommit,
+  onPan,
+}) {
   const { gl, scene } = useThree();
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
   const raysRef = useRef(new Map());
   const activeRef = useRef(new Map());
   const listenersRef = useRef(null);
-  const latestRef = useRef({ enabled, hitNode: null, onMoveCommit, onSelect });
+  const latestRef = useRef({
+    anglesForRay: null,
+    domeOptions,
+    enabled,
+    hitNode: null,
+    onMoveCommit,
+    onPan,
+    onSelect,
+  });
 
   const rayForSource = useCallback((inputSource) => raysRef.current.get(inputSource) || null, []);
 
@@ -272,16 +301,35 @@ function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveComm
     (ray) =>
       ray
         ? layoutPositionFromRay(ray.origin, ray.direction, layoutBounds, {
-            radius: DEFAULT_DOME.baseRadius,
+            ...domeOptions,
             eyeHeight: EYE_HEIGHT,
           })
         : null,
-    [layoutBounds]
+    [domeOptions, layoutBounds]
+  );
+
+  const anglesForRay = useCallback(
+    (ray) =>
+      ray
+        ? domeAnglesFromRay(ray.origin, ray.direction, {
+            ...domeOptions,
+            eyeHeight: EYE_HEIGHT,
+          })
+        : null,
+    [domeOptions]
   );
 
   useEffect(() => {
-    latestRef.current = { enabled, hitNode, onMoveCommit, onSelect };
-  }, [enabled, hitNode, onMoveCommit, onSelect]);
+    latestRef.current = {
+      anglesForRay,
+      domeOptions,
+      enabled,
+      hitNode,
+      onMoveCommit,
+      onPan,
+      onSelect,
+    };
+  }, [anglesForRay, domeOptions, enabled, hitNode, onMoveCommit, onPan, onSelect]);
 
   const attachSessionListeners = useCallback(
     (session) => {
@@ -299,17 +347,29 @@ function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveComm
       const handleSelectStart = (event) => {
         const ray = rayForSource(event.inputSource);
         const nodeId = latestRef.current.hitNode?.(ray);
-        if (!nodeId) return;
-        latestRef.current.onSelect(nodeId);
+        if (nodeId) {
+          latestRef.current.onSelect(nodeId);
+          if (latestRef.current.enabled) {
+            activeRef.current.set(event.inputSource, { mode: 'move', nodeId, lastPosition: null });
+          }
+          return;
+        }
         if (latestRef.current.enabled) {
-          activeRef.current.set(event.inputSource, { nodeId, lastPosition: null });
+          const angles = latestRef.current.anglesForRay?.(ray);
+          if (angles) {
+            activeRef.current.set(event.inputSource, {
+              mode: 'pan',
+              lastAngles: angles,
+              view: latestRef.current.domeOptions,
+            });
+          }
         }
       };
 
       const handleSelectEnd = (event) => {
         const active = activeRef.current.get(event.inputSource);
         activeRef.current.delete(event.inputSource);
-        if (active?.lastPosition) {
+        if (active?.mode === 'move' && active.lastPosition) {
           latestRef.current.onMoveCommit(active.nodeId, active.lastPosition);
         }
       };
@@ -318,7 +378,7 @@ function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveComm
       session.addEventListener('selectend', handleSelectEnd);
       listenersRef.current = { session, handleSelectStart, handleSelectEnd };
     },
-    [rayForSource]
+    [anglesForRay, rayForSource]
   );
 
   useEffect(() => {
@@ -349,10 +409,26 @@ function XrRayInput({ enabled, layoutBounds, onSelect, onMovePreview, onMoveComm
 
       const active = activeRef.current.get(inputSource);
       if (!active) continue;
-      const position = layoutPointForRay(ray);
-      if (!position) continue;
-      active.lastPosition = position;
-      onMovePreview(active.nodeId, position);
+      if (active.mode === 'move') {
+        const position = layoutPointForRay(ray);
+        if (!position) continue;
+        active.lastPosition = position;
+        onMovePreview(active.nodeId, position);
+      } else if (active.mode === 'pan') {
+        const angles = anglesForRay(ray);
+        if (!angles) continue;
+        const nextView = panDomeView(
+          active.view,
+          {
+            azimuth: angles.azimuth - active.lastAngles.azimuth,
+            elevation: angles.elevation - active.lastAngles.elevation,
+          },
+          layoutBounds
+        );
+        active.lastAngles = angles;
+        active.view = nextView;
+        onPan(nextView);
+      }
     }
 
     for (const inputSource of raysRef.current.keys()) {
@@ -424,6 +500,25 @@ function DomeGraph({ data, selectedNodeId, onSelect, selectedDetail }) {
   );
 }
 
+function DomeNavigationControls({ view, zoom, onZoom, onReset }) {
+  return (
+    <div className="xr-nav" aria-label="Dome navigation">
+      <button type="button" onClick={() => onZoom(1 / 1.2)} aria-label="Zoom out">
+        -
+      </button>
+      <span>{Math.round(view.density * 100)}%</span>
+      <button type="button" onClick={() => onZoom(1.2)} aria-label="Zoom in">
+        +
+      </button>
+      <button type="button" onClick={onReset}>
+        Reset
+      </button>
+      {view.atTop ? <span>Top edge</span> : null}
+      {view.atBottom ? <span>Bottom edge</span> : null}
+    </div>
+  );
+}
+
 function SessionControls({ error, onCreate, onConnect, busy }) {
   const [draft, setDraft] = useState('');
   const invalid = draft.trim() !== '' && !isValidSessionId(draft);
@@ -467,6 +562,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [sessionId, setSessionId] = useState(sessionIdFromUrl);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [domeNav, setDomeNav] = useState({ zoom: 1, centerX: null, centerY: null });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(null);
   const {
@@ -515,13 +611,18 @@ export default function App() {
   }, []);
 
   const activeScene = sessionId ? scene || EMPTY_SCENE : PLACEHOLDER_SCENE;
-  const domeData = useMemo(
-    () => domeSceneData(activeScene, { eyeHeight: EYE_HEIGHT }),
-    [activeScene]
-  );
   const activeLayoutBounds = useMemo(
     () => layoutBounds(Object.values(activeScene.nodes)),
     [activeScene]
+  );
+  const domeOptions = useMemo(() => {
+    const density = zoomToDensity(domeNav.zoom);
+    const view = domeView(activeLayoutBounds, { ...domeNav, density });
+    return { ...view, radius: zoomToRadius(domeNav.zoom) };
+  }, [activeLayoutBounds, domeNav]);
+  const domeData = useMemo(
+    () => domeSceneData(activeScene, { eyeHeight: EYE_HEIGHT, ...domeOptions }),
+    [activeScene, domeOptions]
   );
   const selectedDetail = useMemo(
     () => selectionDetail(activeScene, selectedNodeId),
@@ -562,6 +663,18 @@ export default function App() {
     [moveNode, sessionId, status]
   );
 
+  const handlePan = useCallback((nextView) => {
+    setDomeNav((nav) => ({ ...nav, centerX: nextView.centerX, centerY: nextView.centerY }));
+  }, []);
+
+  const handleZoom = useCallback((factor) => {
+    setDomeNav((nav) => ({ ...nav, zoom: nav.zoom * factor }));
+  }, []);
+
+  const handleResetView = useCallback(() => {
+    setDomeNav({ zoom: 1, centerX: null, centerY: null });
+  }, []);
+
   const connectedSummary =
     status === 'connected'
       ? `, ${plural(domeData.cards.length, 'node')}, ${plural(domeData.edges.length, 'edge')}, ${plural(activeScene.roster.length, 'client')}`
@@ -585,6 +698,12 @@ export default function App() {
         onCreate={handleCreate}
         onConnect={handleConnect}
         busy={creating}
+      />
+      <DomeNavigationControls
+        view={domeOptions}
+        zoom={domeNav.zoom}
+        onZoom={handleZoom}
+        onReset={handleResetView}
       />
       <div className="xr-hint">
         {error !== null ? (
@@ -638,11 +757,13 @@ export default function App() {
             onSelect={handleSelectNode}
           />
           <XrRayInput
-            enabled={Boolean(sessionId && status === 'connected')}
+            enabled
             layoutBounds={activeLayoutBounds}
+            domeOptions={domeOptions}
             onSelect={handleSelectNode}
             onMovePreview={handleMovePreview}
             onMoveCommit={handleMoveCommit}
+            onPan={handlePan}
           />
         </XR>
       </Canvas>

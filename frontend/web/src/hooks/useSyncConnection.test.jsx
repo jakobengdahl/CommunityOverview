@@ -181,6 +181,25 @@ describe('useSyncConnection.ensureSyncConnected', () => {
     expect(appOnRemoteOps).not.toHaveBeenCalled();
   });
 
+  it('drops tagged remote ops for a different active session even when the client is still current', () => {
+    const { result } = renderHook(() => useSyncConnection('3333-4444'));
+    const appOnRemoteOps = vi.fn();
+    result.current.syncHandlersRef.current = { onRemoteOps: appOnRemoteOps };
+
+    let staleSessionClient;
+    act(() => {
+      staleSessionClient = result.current.ensureSyncConnected('1111-2222');
+    });
+    act(() => {
+      staleSessionClient.handlers.onRemoteOps([{ op: 'nodes_added', node_ids: ['stale-node'] }], {
+        clientId: 'client-other',
+        sessionId: '1111-2222',
+      });
+    });
+
+    expect(appOnRemoteOps).not.toHaveBeenCalled();
+  });
+
   it('ignores stale ready, presence, and selection callbacks after switching sessions', () => {
     const { result } = renderHook(() => useSyncConnection('1111-2222'));
     const appOnReady = vi.fn();

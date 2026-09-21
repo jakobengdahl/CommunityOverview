@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { domeSceneData, nodeColor, selectionDetail } from './domeScene.js';
+import { cardLabel, domeSceneData, nodeColor, selectionDetail } from './domeScene.js';
 import { applyOp, sceneFromSession, withClaims } from './sceneModel.js';
 
 const scene = sceneFromSession({
@@ -27,14 +27,44 @@ describe('nodeColor', () => {
     expect(nodeColor({ type: 'Unknown' })).toBe('#9CA3AF');
     expect(nodeColor({ type: 'Actor', claim: { color: '#abcdef' } })).toBe('#abcdef');
   });
+
+  it('uses the shared public color table for generic node types', () => {
+    expect(nodeColor({ type: 'Dataset' })).toBe('#06B6D4');
+    expect(nodeColor({ type: 'ActiveKnowledgeCollection' })).toBe('#F59E0B');
+  });
+});
+
+describe('cardLabel', () => {
+  it('derives stable card label text without renderer state', () => {
+    expect(cardLabel({ id: 'n1', name: 'Alpha', type: 'Actor' })).toEqual({
+      title: 'Alpha',
+      subtitle: 'Actor',
+      footer: 'n1',
+    });
+  });
+
+  it('falls back for anonymous or untyped nodes', () => {
+    expect(cardLabel({ id: 'n2' })).toEqual({
+      title: 'n2',
+      subtitle: 'Unknown type',
+      footer: 'n2',
+    });
+    expect(cardLabel(null)).toEqual({
+      title: 'Untitled node',
+      subtitle: 'Unknown type',
+      footer: '',
+    });
+  });
 });
 
 describe('domeSceneData', () => {
   it('derives readable cards and curved edge points from renderable scene data', () => {
     const data = domeSceneData(scene, { eyeHeight: 1.5 });
-    expect(data.cards.map((card) => [card.id, card.title, card.subtitle, card.color])).toEqual([
-      ['n1', 'Alpha', 'Actor', '#3B82F6'],
-      ['n2', 'Beta', 'Goal', '#6366F1'],
+    expect(
+      data.cards.map((card) => [card.id, card.title, card.subtitle, card.footer, card.color])
+    ).toEqual([
+      ['n1', 'Alpha', 'Actor', 'n1', '#3B82F6'],
+      ['n2', 'Beta', 'Goal', 'n2', '#6366F1'],
     ]);
     expect(data.cards[0].position.y).toBeGreaterThan(1.5);
     expect(data.edges).toHaveLength(1);

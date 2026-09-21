@@ -29,6 +29,7 @@ and [`../SMALL_FIXES.md`](../SMALL_FIXES.md).
 | [AGENT_SCHEDULING.md](AGENT_SCHEDULING.md) | Time-based agent schedule triggers |
 | [FEDERATED_GRAPH_DESIGN.md](FEDERATED_GRAPH_DESIGN.md) | Federation design and its implementation status |
 | [MULTI_USER_SESSIONS_DESIGN.md](MULTI_USER_SESSIONS_DESIGN.md) | Shared-session design and implementation record (implemented) |
+| [SESSION_OVERLAY_CONTRACT.md](SESSION_OVERLAY_CONTRACT.md) | Staged editing in a session: entity revisions, the layer, composed reads, merge (draft contract) |
 | [CAPACITY.md](CAPACITY.md) | What one instance holds and costs, measured — plus the multi-instance acceptance criteria |
 | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Provider-agnostic guide for deploying the app |
 | [DEPLOYMENT_CONTRACT.md](DEPLOYMENT_CONTRACT.md) | App-repo ↔ infra-repo artifact contract |
