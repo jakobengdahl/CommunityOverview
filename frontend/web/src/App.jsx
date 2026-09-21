@@ -325,7 +325,7 @@ function App() {
         case 'nodes_added': {
           const have = new Set(store.nodes.map((n) => n.id));
           const missing = (op.node_ids || []).filter((id) => !have.has(id));
-          if (!missing.length) break;
+          if (!missing.length) return false;
           // The only case here with an internal await, so the only one where
           // the active session can change out from under it (a session
           // switch mid-fetch, review round 5): capture which session this op
@@ -347,7 +347,7 @@ function App() {
               }
             })
           );
-          if (syncRef.current?.sessionId !== sessionAtStart) break; // switched away while fetching
+          if (syncRef.current?.sessionId !== sessionAtStart) return false; // switched away while fetching
           // Seed positions from the sync baseline: the originator emits nodes_added
           // then node_moved as separate ops, so by the time this async resolve
           // finishes the follow-up position is already folded into the baseline.
@@ -360,84 +360,119 @@ function App() {
               return pos ? { ...n, _savedPosition: pos } : n;
             });
             addNodesToVisualization(positioned, addEdges);
+            return true;
           }
-          break;
+          return false;
         }
-        case 'nodes_removed':
+        case 'nodes_removed': {
+          const removeIds = op.node_ids || [];
+          const existing = new Set(store.nodes.map((n) => n.id));
           (op.node_ids || []).forEach((id) => removeNode(id));
-          break;
-        case 'nodes_hidden':
-          setHiddenNodeIds(
-            Array.from(new Set([...(store.hiddenNodeIds || []), ...(op.node_ids || [])]))
-          );
-          break;
+          return removeIds.some((id) => existing.has(id));
+        }
+        case 'nodes_hidden': {
+          const current = store.hiddenNodeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.node_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setHiddenNodeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'nodes_shown': {
           const drop = new Set(op.node_ids || []);
+          if (!(store.hiddenNodeIds || []).some((id) => drop.has(id))) return false;
           setHiddenNodeIds((store.hiddenNodeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
         case 'edges_added': {
           // A collaborator drew an edge between nodes already present here. Its
           // endpoints are in the graph, so render it directly; addNodesToVisualization
           // dedupes by edge id, so a redraw after a later re-hydration is harmless.
           const list = (op.edges || []).filter((e) => e && e.id);
-          if (list.length) addNodesToVisualization([], list);
-          break;
+          const haveEdges = new Set(store.edges.map((e) => e.id));
+          const missingEdges = list.filter((e) => !haveEdges.has(e.id));
+          if (missingEdges.length) {
+            addNodesToVisualization([], missingEdges);
+            return true;
+          }
+          return false;
         }
-        case 'edges_removed':
-          // A collaborator deleted an edge. Remove it directly; if it isn't
-          // present here (this host never had those endpoints) removeEdge is a
-          // harmless no-op.
-          (op.edge_ids || []).forEach((id) => removeEdge(id));
-          break;
-        case 'edges_updated':
+        case 'edges_removed': {
+          const removeIds = op.edge_ids || [];
+          const existing = new Set(store.edges.map((e) => e.id));
+          removeIds.forEach((id) => removeEdge(id));
+          return removeIds.some((id) => existing.has(id));
+        }
+        case 'edges_updated': {
           // A collaborator changed an edge's attributes (e.g. its relationship
           // type). Merge them in place; if the edge isn't present here,
           // updateEdgeData is a harmless no-op and a later hydration recovers
           // the current value from the graph.
+          const existing = new Set(store.edges.map((e) => e.id));
+          let applied = false;
           (op.edges || []).forEach((e) => {
-            if (e && e.id) updateEdgeData(e.id, e);
+            if (e && e.id) {
+              if (existing.has(e.id)) applied = true;
+              updateEdgeData(e.id, e);
+            }
           });
-          break;
-        case 'edges_hidden':
-          setHiddenEdgeIds(
-            Array.from(new Set([...(store.hiddenEdgeIds || []), ...(op.edge_ids || [])]))
-          );
-          break;
+          return applied;
+        }
+        case 'edges_hidden': {
+          const current = store.hiddenEdgeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.edge_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setHiddenEdgeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'edges_shown': {
           const drop = new Set(op.edge_ids || []);
+          if (!(store.hiddenEdgeIds || []).some((id) => drop.has(id))) return false;
           setHiddenEdgeIds((store.hiddenEdgeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
-        case 'nodes_dimmed':
-          setDimmedNodeIds(
-            Array.from(new Set([...(store.dimmedNodeIds || []), ...(op.node_ids || [])]))
-          );
-          break;
+        case 'nodes_dimmed': {
+          const current = store.dimmedNodeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.node_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setDimmedNodeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'nodes_undimmed': {
           const drop = new Set(op.node_ids || []);
+          if (!(store.dimmedNodeIds || []).some((id) => drop.has(id))) return false;
           setDimmedNodeIds((store.dimmedNodeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
-        case 'edges_dimmed':
-          setDimmedEdgeIds(
-            Array.from(new Set([...(store.dimmedEdgeIds || []), ...(op.edge_ids || [])]))
-          );
-          break;
+        case 'edges_dimmed': {
+          const current = store.dimmedEdgeIds || [];
+          const currentSet = new Set(current);
+          const additions = (op.edge_ids || []).filter((id) => !currentSet.has(id));
+          if (!additions.length) return false;
+          setDimmedEdgeIds(Array.from(new Set([...current, ...additions])));
+          return true;
+        }
         case 'edges_undimmed': {
           const drop = new Set(op.edge_ids || []);
+          if (!(store.dimmedEdgeIds || []).some((id) => drop.has(id))) return false;
           setDimmedEdgeIds((store.dimmedEdgeIds || []).filter((id) => !drop.has(id)));
-          break;
+          return true;
         }
         case 'edge_intensity_set':
-          if (typeof op.value === 'number') setEdgeIntensity(op.value);
-          break;
+          if (typeof op.value !== 'number') return false;
+          if (store.edgeIntensity === op.value) return false;
+          setEdgeIntensity(op.value);
+          return true;
         case 'node_moved':
           // Merge, don't replace: a burst of moves in one tick must not lose all
           // but the last node's position.
-          if (op.node_id && op.position)
+          if (op.node_id && op.position) {
             setRemotePositions((prev) => ({ ...(prev || {}), [op.node_id]: op.position }));
-          break;
+            return true;
+          }
+          return false;
         case 'layout_applied':
           if (op.positions) {
             // An MCP agent's arrange carries an animation hint (contract §9–§10):
@@ -455,8 +490,9 @@ function App() {
             } else {
               setRemotePositions((prev) => ({ ...(prev || {}), ...op.positions }));
             }
+            return Object.keys(op.positions).length > 0;
           }
-          break;
+          return false;
         case 'annotation_created':
         case 'annotation_updated': {
           const ann = op.annotation;
@@ -495,20 +531,23 @@ function App() {
           return applyAnnotationUpsertToCanvas(ann);
         }
         case 'annotation_deleted':
-          if (op.annotation_id)
+          if (op.annotation_id) {
             setRemoteAnnotationOps((prev) => [
               ...(prev || []),
               { action: 'delete', id: op.annotation_id },
             ]);
-          break;
+            return true;
+          }
+          return false;
         case 'group_membership_changed':
+          if (!op.group_id) return false;
           setRemoteAnnotationOps((prev) => [
             ...(prev || []),
             { action: 'membership', groupId: op.group_id, members: op.member_node_ids || [] },
           ]);
-          break;
+          return true;
         default:
-          break; // session_renamed handled by its own event
+          return false; // session_renamed handled by its own event
       }
     },
     [
@@ -700,8 +739,7 @@ function App() {
         for (const op of pendingOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
           if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
-          await applyRemoteOp(op);
-          appliedCount += 1;
+          if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
         // switch mid-replay (the break above) can stop this short of the

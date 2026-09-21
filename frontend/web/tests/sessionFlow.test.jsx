@@ -788,6 +788,57 @@ describe('Server-backed session lifecycle', () => {
     getPendingOpsSpy.mockRestore();
   });
 
+  it('does not report a recovered count for a stale pending add already in the server snapshot', async () => {
+    const pendingOp = { op: 'nodes_added', node_ids: ['node-a'] };
+    const getPendingOpsSpy = vi
+      .spyOn(SessionSyncClient.prototype, 'getPendingOps')
+      .mockReturnValue([pendingOp]);
+
+    const { container } = renderApp();
+    act(() => {
+      useGraphStore.getState().updateVisualization([NODE_A], []);
+    });
+    const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+    fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+    await waitFor(() => screen.getByText('Save View'));
+
+    const sessionSource = await waitFor(() => {
+      const found = FakeEventSource.instances.find(
+        (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+      );
+      expect(found).toBeTruthy();
+      return found;
+    });
+
+    api.getSession.mockImplementationOnce(async (id) => ({
+      id,
+      state: { node_refs: ['node-a'], positions: {}, annotations: [] },
+      resolved: { nodes: [NODE_A], edges: [] },
+      roster: [],
+    }));
+
+    act(() => {
+      sessionSource.onmessage({
+        data: JSON.stringify({
+          type: 'catch_up',
+          seq: 5,
+          ops: [{ op: 'nodes_hidden', node_ids: [] }],
+          roster: [],
+          claims: {},
+        }),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toContain('node-a');
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/Reconnected — restored/)).not.toBeInTheDocument();
+    expect(api.getNodeDetails).not.toHaveBeenCalledWith('node-a');
+
+    getPendingOpsSpy.mockRestore();
+  });
+
   it('switching session loads the target from the server, carrying its saved position', async () => {
     // Seed a previous session in the recents list so it shows in the drawer
     sessionStore.touchSession('5555-6666');

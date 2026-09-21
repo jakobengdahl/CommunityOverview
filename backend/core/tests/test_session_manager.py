@@ -3212,6 +3212,35 @@ class TestAddNodeRefs:
         events = await _drain(sub)
         assert events[0]["op"]["node_ids"] == ["a", "b"]
 
+    async def test_rate_limit_label_splits_mcp_marker_bucket(self):
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.add_node_refs(
+            s.id, "mcp-agent", ["a"], rate_limit_label="add_nodes_to_session"
+        )
+        with pytest.raises(RateLimited):
+            mgr.add_node_refs(
+                s.id, "mcp-agent", ["b"], rate_limit_label="add_nodes_to_session"
+            )
+
+        res = mgr.apply_layout(
+            s.id,
+            "mcp-agent",
+            positions={"a": {"x": 1, "y": 2}},
+            rate_limit_label="apply_visualization_layout",
+        )
+        assert res["moved"] == 1
+
+    async def test_unlabelled_mcp_writes_keep_the_legacy_bucket_key(self):
+        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        s = mgr.create_session()
+
+        mgr.add_node_refs(s.id, "mcp-agent", ["a"])
+
+        with pytest.raises(RateLimited):
+            mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 2}})
+
 
 class TestUpsertAnnotation:
     """The synchronous MCP annotation-create/upsert write path (``upsert_annotation``)."""
