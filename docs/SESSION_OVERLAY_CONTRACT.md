@@ -15,7 +15,9 @@ until someone explicitly merges them.
   [`PERSISTENCE_BACKENDS.md`](PERSISTENCE_BACKENDS.md) (the storage seam this
   adds capabilities to),
   [`ANNOTATION_CONTRACT.md`](ANNOTATION_CONTRACT.md) (the field-versioning
-  pattern §11 follows).
+  pattern §11 follows),
+  [`DATA_MANAGEMENT.md`](DATA_MANAGEMENT.md) (owns the restore procedure whose
+  requirement §4.2 states).
 
 ---
 
@@ -162,10 +164,18 @@ concurrency too, and a merge cannot be safe without them.
     load, the counter starts at the reservation. A crash therefore skips values
     but never repeats one.
   - **A restore from backup** must raise the restored store's counter past
-    every value handed out before the restore. The restore procedure records
-    the live counter first, and sets the restored counter above it. A restore
-    that copies files without doing that is outside I6, like a downgrade
-    (§4.6).
+    every value handed out before the restore, or I6 does not hold for
+    entities written after it. This contract does not define how a restore is
+    carried out — that is `DATA_MANAGEMENT.md`'s operational concern, out of
+    scope here (§19) — but it does fix what any restore procedure must do to
+    keep I6: read the live counter before taking the restore point, and set
+    the restored counter above the value read, not above whatever the
+    restored data happens to contain (a lower ceiling than what was live when
+    the backup was taken). A restore that copies files without doing that is
+    outside I6, like a downgrade (§4.6). Making `DATA_MANAGEMENT.md`'s restore
+    guidance state this explicitly is a follow-up, not a slice of §21: it is
+    an operational procedure common to every backend, not an implementation
+    slice of the session-overlay feature.
 - **Legacy entities.** An entity loaded without the field reads as revision
   **0**, a value no write ever assigns. Its first applied write stamps it, so no
   migration pass is needed. `0` therefore means "present, never written under
@@ -224,18 +234,34 @@ with or without an expectation, and merges.
   - **The evidence.** Every write in a shared store carries a unique **write
     token**, stored with each entity it writes. The token is server-internal
     and never returned to clients. A merge's evidence is its merge record,
-    which exists if and only if the merge unit committed (§7).
+    which exists if and only if the merge unit committed (§7). A delete
+    leaves no entity behind to carry a token, so a delete's own success is
+    never confirmed by the token check below — only ruled out by it. That is
+    inherent to deleting the evidence along with the row, not a gap to close.
   - **Resolving it.** Before it returns, still holding the lock, the instance
-    re-reads from the store:
-    - **Landed.** The merge record exists, or every entity written carries
-      this write's token. The call completes as a committed write: memory,
-      event, success.
-    - **Did not land.** There is no merge record, or every touched entity is
-      unchanged: the same revision it had before the write, or still absent
-      for a create. Memory is made to match the store, no event fires, and the
-      call fails with `write_failed`.
-    - **Anything else**, including a store that cannot be read, a delete whose
-      entity is now absent, or an entity changed by someone else since. The
+    re-reads from the store. A dropped connection is not proof that nothing
+    happened: the server may already have accepted the write and still be
+    completing it — flushing the commit to durable storage — at the moment the
+    connection drops, and land it a short time later. A single read taken
+    immediately afterwards cannot tell a write that will never land apart from
+    one that is still in flight, so before concluding anything negative the
+    instance re-reads a second time, after a short bounded delay chosen to
+    exceed how long the store's own commit path can take:
+    - **Landed**, on either read. The merge record exists, or every entity
+      written carries this write's token. The call completes as a committed
+      write: memory, event, success.
+    - **Did not land**, on both reads. Neither finds a merge record, and every
+      touched entity is unchanged on both: the same revision it had before the
+      write, or still absent for a create. Two reads agreeing across the delay
+      is what rules out a commit that was merely still landing. Memory is made
+      to match the store, no event fires, and the call fails with
+      `write_failed`.
+    - **Anything else**, including the two reads disagreeing, a store that
+      cannot be read, or an entity changed by someone else since. This is also
+      where a delete's own success lands: the entity being absent on both
+      reads is consistent with this write having landed, but is exactly as
+      consistent with someone else's delete or archive landing in the same
+      window, and no token survives on a deleted row to tell those apart. The
       call fails with `write_outcome_unknown`, and no event fires. Before it
       serves another request, the instance reloads the touched entities from
       the store, or the whole graph if the store could not be read.
@@ -255,11 +281,17 @@ with or without an expectation, and merges.
 
 **A single-writer store keeps today's path for writes without an expectation.**
 
-- The instance is the only writer, so it keeps the revision counter itself. It
-  stores the counter in the graph's metadata, persisted in the same journal
-  line or save as the write that advanced it.
+- The instance is the only writer, so it keeps the revision counter itself, in
+  memory, and hands a write its next value synchronously — before that
+  write's journal line exists, exactly as §4.2 describes. Durability comes
+  from §4.2's reservation, not from persisting the counter with each write:
+  the graph's metadata holds the reservation, raised in its own durable,
+  journaled step whenever the in-memory counter is about to reach it, never
+  the exact value the instance last handed out.
 - Its fire-and-forget writes, and the whole-graph resync that heals a failed
-  one, stay as they are.
+  one, stay as they are: a crash before a write's journal line lands costs
+  only the revision value that write used, which the next reservation skips
+  past (§4.2) — it does not reuse it.
 - A write with an expectation, and every merge, is submitted to the same queue.
   The instance checks the expectation under the storage lock and waits for the
   write to land before it returns.
@@ -336,11 +368,16 @@ rewritten entities.
 - **Mirrored in the session document**, next to `name`, as `write_mode` and
   `write_mode_source`, for display. These are neither graph content nor layout,
   so D4's rule about the document still holds.
-- **Caching.** An instance may cache a record's status only when it is
-  `active` or `retired`: a record never leaves those states. A status of
-  `none` may change at any moment, when another instance switches the session
-  to staged. So it is re-read from the backend before every write, and before
-  every composing read, that names the session.
+- **Caching.** Only `retired` is safe to cache without ever rechecking: once a
+  record reaches it, it never leaves (below), and a retired id is never
+  recreated. `active` is not terminal the same way — deleting a staged session
+  retires its record (below) — so an instance may cache `active` only while it
+  is on the session's event bus and has not yet seen that session's delete
+  notification; seeing one drops the cached status for that session. An
+  instance not on that bus, and a status of `none` (which may change at any
+  moment, when another instance switches the session to staged), are both
+  re-read from the backend before every write, and before every composing
+  read, that names the session. This mirrors the layer-caching rule of §8.3.
 - **Retirement.** When a staged session is deleted, its record stays, marked
   retired.
   - A retired id is never created again, explicitly or implicitly. Today a
@@ -981,7 +1018,11 @@ Otherwise:
 - time travel or history browsing of layers;
 - per-field access control;
 - read-only sharing of a session. When sharing exists, a shared session shows
-  its composed view, and a shared graph shows the main graph.
+  its composed view, and a shared graph shows the main graph;
+- defining or changing the operational restore-from-backup procedure itself.
+  This contract only states the requirement such a procedure must satisfy to
+  keep I6 (§4.2); `DATA_MANAGEMENT.md` owns the procedure, and updating it to
+  say so is a follow-up this contract does not schedule as a slice.
 
 ## 20. Open questions
 
