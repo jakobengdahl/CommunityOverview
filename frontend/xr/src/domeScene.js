@@ -59,11 +59,11 @@ function curvePoints(a, b, lift = 0.18) {
   return points;
 }
 
-export function domeSceneData(scene, { eyeHeight = 0 } = {}) {
+export function domeSceneData(scene, { eyeHeight = 0, ...domeOptions } = {}) {
   const nodes = renderableNodes(scene);
   const bounds = layoutBounds(nodes);
   const cards = nodes.map((node) => {
-    const position = withEyeHeight(domePosition(node.x, node.y, bounds), eyeHeight);
+    const position = withEyeHeight(domePosition(node.x, node.y, bounds, domeOptions), eyeHeight);
     return {
       ...node,
       position,

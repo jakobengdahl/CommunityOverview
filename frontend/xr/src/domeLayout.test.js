@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_DOME,
+  domeAnglesFromRay,
+  domeView,
   zoomToRadius,
+  zoomToDensity,
   sphericalToCartesian,
   domePosition,
   layoutPositionFromDomePoint,
   layoutPositionFromRay,
   layoutBounds,
+  panDomeView,
 } from './domeLayout.js';
 
 describe('zoomToRadius', () => {
@@ -52,6 +56,57 @@ describe('zoomToRadius', () => {
   it('keeps the non-positive-zoom fallback inside the configured range', () => {
     expect(zoomToRadius(0, { minRadius: 8 })).toBe(8);
     expect(zoomToRadius(-1, { maxRadius: 4 })).toBe(4);
+  });
+});
+
+describe('zoomToDensity', () => {
+  it('uses neutral density at neutral zoom', () => {
+    expect(zoomToDensity(1)).toBe(1);
+  });
+
+  it('increases density when zooming in', () => {
+    expect(zoomToDensity(2)).toBe(2);
+  });
+
+  it('clamps density to the configured range', () => {
+    expect(zoomToDensity(1000)).toBe(DEFAULT_DOME.maxDensity);
+    expect(zoomToDensity(0.01)).toBe(DEFAULT_DOME.minDensity);
+  });
+
+  it('falls back to neutral density for malformed zoom', () => {
+    expect(zoomToDensity(NaN)).toBe(1);
+    expect(zoomToDensity(undefined)).toBe(1);
+  });
+});
+
+describe('domeView', () => {
+  const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 80 };
+
+  it('shrinks the visible layout window as density increases', () => {
+    expect(domeView(bounds, { density: 2 })).toMatchObject({
+      density: 2,
+      centerX: 50,
+      centerY: 40,
+      visibleWidth: 50,
+      visibleHeight: 40,
+    });
+  });
+
+  it('wraps the horizontal centre by the actual layout width', () => {
+    expect(domeView(bounds, { centerX: 125 }).centerX).toBe(25);
+    expect(domeView(bounds, { centerX: -25 }).centerX).toBe(75);
+  });
+
+  it('clamps the vertical centre and reports edge indicators', () => {
+    const top = domeView(bounds, { density: 2, centerY: -100 });
+    expect(top.centerY).toBe(20);
+    expect(top.atTop).toBe(true);
+    expect(top.atBottom).toBe(false);
+
+    const bottom = domeView(bounds, { density: 2, centerY: 100 });
+    expect(bottom.centerY).toBe(60);
+    expect(bottom.atTop).toBe(false);
+    expect(bottom.atBottom).toBe(true);
   });
 });
 
@@ -142,6 +197,17 @@ describe('domePosition', () => {
     expect(Math.asin(tall.y / DEFAULT_DOME.baseRadius)).toBeCloseTo(Math.PI / 6);
   });
 
+  it('spreads layout points across a wider angular span as density increases', () => {
+    const neutral = domePosition(100, 50, bounds);
+    const dense = domePosition(100, 50, bounds, { density: 2 });
+    expect(Math.atan2(dense.x, -dense.z)).toBeCloseTo(Math.atan2(neutral.x, -neutral.z) * 2);
+  });
+
+  it('uses the wrapped horizontal centre when panning', () => {
+    const centred = domePosition(75, 50, bounds, { centerX: -25 });
+    expect(Math.atan2(centred.x, -centred.z)).toBeCloseTo(0);
+  });
+
   // A single-node graph gives minX === maxX. Without the normalize guard this
   // divides by zero and feeds NaN into the three.js matrices.
   it('centres a degenerate single-point layout instead of producing NaN', () => {
@@ -228,10 +294,19 @@ describe('layoutPositionFromDomePoint', () => {
     expect(layout.y).toBeCloseTo(source.y);
   });
 
-  it('clamps rays outside the comfortable wrap to the layout extent', () => {
+  it('wraps azimuth outside the comfortable view back onto the layout width', () => {
     const layout = layoutPositionFromDomePoint({ x: 100, y: 100, z: 0 }, bounds);
-    expect(layout.x).toBe(100);
+    expect(layout.x).toBeCloseTo(25);
     expect(layout.y).toBeCloseTo(0, 2);
+  });
+
+  it('round-trips through a dense panned view', () => {
+    const source = { x: 10, y: 25 };
+    const opts = { density: 2, centerX: 90, centerY: 35 };
+    const point = domePosition(source.x, source.y, bounds, opts);
+    const layout = layoutPositionFromDomePoint(point, bounds, opts);
+    expect(layout.x).toBeCloseTo(source.x);
+    expect(layout.y).toBeCloseTo(source.y);
   });
 
   it('uses the degenerate coordinate for a single-node extent', () => {
@@ -258,11 +333,57 @@ describe('layoutPositionFromRay', () => {
     expect(layout.y).toBeCloseTo(40);
   });
 
+  it('returns dome angles for empty-background pan gestures', () => {
+    const target = domePosition(75, 40, bounds);
+    const angles = domeAnglesFromRay(
+      { x: 0, y: 1.5, z: 0 },
+      { x: target.x, y: target.y, z: target.z },
+      { eyeHeight: 1.5 }
+    );
+    expect(angles.azimuth).toBeCloseTo(DEFAULT_DOME.hFovRad / 4);
+    expect(angles.elevation).toBeCloseTo(DEFAULT_DOME.vFovRad / 10);
+  });
+
+  it('projects rays through density and pan before returning session coordinates', () => {
+    const opts = { density: 2, centerX: 75, centerY: 60, eyeHeight: 1.5 };
+    const target = domePosition(10, 70, bounds, opts);
+    const layout = layoutPositionFromRay(
+      { x: 0, y: 1.5, z: 0 },
+      { x: target.x, y: target.y, z: target.z },
+      bounds,
+      opts
+    );
+    expect(layout.x).toBeCloseTo(10);
+    expect(layout.y).toBeCloseTo(70);
+  });
+
   it('returns null for a zero-length ray direction', () => {
     expect(
       layoutPositionFromRay({ x: 0, y: 1.5, z: 0 }, { x: 0, y: 0, z: 0 }, bounds, {
         eyeHeight: 1.5,
       })
     ).toBeNull();
+  });
+});
+
+describe('panDomeView', () => {
+  const bounds = { minX: 0, maxX: 100, minY: 0, maxY: 100 };
+
+  it('converts two-axis angular grab movement into wrapped layout pan', () => {
+    const view = domeView(bounds, { density: 2, centerX: 95, centerY: 50 });
+    const next = panDomeView(
+      view,
+      { azimuth: -DEFAULT_DOME.hFovRad / 5, elevation: DEFAULT_DOME.vFovRad / 5 },
+      bounds
+    );
+    expect(next.centerX).toBeCloseTo(5);
+    expect(next.centerY).toBeCloseTo(60);
+  });
+
+  it('clamps vertical pan at the layout edge', () => {
+    const view = domeView(bounds, { density: 2 });
+    const next = panDomeView(view, { elevation: -DEFAULT_DOME.vFovRad * 10 }, bounds);
+    expect(next.centerY).toBe(25);
+    expect(next.atTop).toBe(true);
   });
 });
