@@ -115,10 +115,12 @@ function makeTextTexture({
   width = 512,
   height = 224,
 }) {
+  const scale = 2;
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
   const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
   ctx.fillStyle = 'rgba(13, 17, 24, 0.94)';
   ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = selected ? '#ffffff' : color;
@@ -144,6 +146,9 @@ function makeTextTexture({
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.needsUpdate = true;
   return texture;
 }
@@ -184,11 +189,11 @@ function NodeCard({ node, selected, onSelect }) {
       makeTextTexture({
         title: node.title,
         subtitle: node.subtitle,
-        footer: node.id,
+        footer: node.footer,
         color: node.color,
         selected,
       }),
-    [node.color, node.id, node.subtitle, node.title, selected]
+    [node.color, node.footer, node.subtitle, node.title, selected]
   );
 
   useEffect(() => () => texture.dispose(), [texture]);

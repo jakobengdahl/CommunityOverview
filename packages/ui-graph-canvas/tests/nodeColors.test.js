@@ -6,6 +6,12 @@ describe('getNodeColor', () => {
     expect(getNodeColor('Actor')).toBe('#3B82F6');
   });
 
+  it('keeps generic renderer node types in the shared table', () => {
+    expect(getNodeColor('Dataset')).toBe('#06B6D4');
+    expect(getNodeColor('ActiveKnowledgeCollection')).toBe('#F59E0B');
+    expect(getNodeColor('Group')).toBe('#646cff');
+  });
+
   it('returns the neutral default for an unregistered node type', () => {
     expect(getNodeColor('Questionnaire')).toBe('#9CA3AF');
   });

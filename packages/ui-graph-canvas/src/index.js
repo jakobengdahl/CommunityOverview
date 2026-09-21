@@ -56,6 +56,7 @@ export { createFreehandStrokeCapture } from './utils/freehandStroke';
 // Constants
 export {
   NODE_COLORS,
+  DEFAULT_NODE_COLOR,
   DEFAULT_EDGE_STYLE,
   LAZY_LOAD_THRESHOLD,
   INITIAL_LOAD_COUNT,
