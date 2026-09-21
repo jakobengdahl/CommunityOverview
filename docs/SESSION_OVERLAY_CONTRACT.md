@@ -168,10 +168,13 @@ concurrency too, and a merge cannot be safe without them.
     entities written after it. This contract does not define how a restore is
     carried out — that is `DATA_MANAGEMENT.md`'s operational concern, out of
     scope here (§19) — but it does fix what any restore procedure must do to
-    keep I6: read the live counter before taking the restore point, and set
-    the restored counter above the value read, not above whatever the
-    restored data happens to contain (a lower ceiling than what was live when
-    the backup was taken). A restore that copies files without doing that is
+    keep I6: immediately before applying the backup — not when the backup was
+    taken — read the counter that is live at that moment, and set the
+    restored counter above the value just read. Writes made between the
+    backup and the restore raise the live counter past whatever the restored
+    data itself contains, so the value to beat is the one live at restore
+    time; the restored data's own ceiling is always at least as low and is
+    not enough on its own. A restore that copies files without doing that is
     outside I6, like a downgrade (§4.6). Making `DATA_MANAGEMENT.md`'s restore
     guidance state this explicitly is a follow-up, not a slice of §21: it is
     an operational procedure common to every backend, not an implementation
@@ -968,7 +971,7 @@ session-tool code `revision_conflict` is unchanged (§9.2).
 | `session_not_supported` | 400 | a session on a route or tool that neither composes nor stages (§16.1) |
 | `session_mismatch` | 400 | two different sessions named in one request (§16.1) |
 | `write_failed` | 502 | a shared-store write that did not land (§4.4) |
-| `write_outcome_unknown` | 503 | a shared-store write whose outcome could not be read back (§4.4) |
+| `write_outcome_unknown` | 503 | a shared-store write whose landing could not be confirmed or ruled out (§4.4) |
 
 ## 17. Frontend obligations
 
