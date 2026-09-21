@@ -904,8 +904,9 @@ class TestFetchTextRedirects:
     async def test_every_redirect_status_is_walked_not_returned_as_content(
         self, status
     ):
-        """A status that is not walked falls through and its stub body is
-        returned as skill content."""
+        """A status that is not walked falls through to raise_for_status(),
+        which raises on any 3xx -- so the redirect is never followed and the
+        skill never loads."""
         handler, seen = _recording_handler(
             [
                 loader_module.httpx.Response(
@@ -953,16 +954,63 @@ class TestFetchTextRedirects:
         assert len(seen) == 1
 
     @pytest.mark.asyncio
-    async def test_a_non_http_location_is_refused(self):
+    async def test_a_non_http_location_with_no_host_is_refused_by_the_allowlist(self):
         handler, seen = _recording_handler([_redirect_to("file:///etc/passwd"), _ok()])
 
         with _mock_http(handler):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="allowlist"):
                 await self._loader()._fetch_text(
                     "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
                 )
 
         assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_non_http_scheme_on_an_allowlisted_host_is_refused_by_is_safe_url(
+        self,
+    ):
+        """file://<trusted-host>/... passes _validate_domain, so only the
+        address guard's scheme check can refuse it."""
+        handler, seen = _recording_handler(
+            [_redirect_to("file://raw.githubusercontent.com/etc/passwd"), _ok()]
+        )
+
+        with _mock_http(handler):
+            with pytest.raises(ValueError, match="disallowed address"):
+                await self._loader()._fetch_text(
+                    "https://raw.githubusercontent.com/o/r/HEAD/SKILL.md"
+                )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_default_port_is_the_same_origin(self):
+        """Over-dropping would break an ordinary redirect that spells the port."""
+        config = SkillsConfig(
+            allow_external_skills=True, trusted_domains=["github.com"]
+        )
+        handler, seen = _recording_handler(
+            [_redirect_to("https://api.github.com:443/same"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await SkillsLoader(config)._fetch_text(
+                "https://api.github.com/start",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        assert seen[1].headers.get("authorization") == "Bearer secret-token"
+
+    def test_an_explicit_port_zero_is_not_the_scheme_default(self):
+        """`parsed.port or default` would call these the same origin; httpx
+        compares port 0 as 0 and drops the credential."""
+        assert loader_module._origin("https://a.example:0/x")[2] == 0
+        assert loader_module._leaves_origin(
+            "https://a.example/x", "https://a.example:0/y"
+        )
 
     @pytest.mark.asyncio
     async def test_the_size_guards_apply_to_a_response_reached_through_a_redirect(self):
@@ -1026,3 +1074,252 @@ class TestFetchTextRedirects:
 
         assert first == second == "# once"
         assert len(seen) == 2, "the second call must be served from the cache"
+
+
+class TestLeavesOrigin:
+    """_leaves_origin's keep-case is a five-way conjunction.
+
+    End-to-end tests reach it only through a redirect, and a negative case
+    that starts from https short-circuits on the scheme before the host or
+    either port is read — so four of the five conjuncts can be deleted with
+    every _fetch_text test still green, each one a credential leak. This
+    table drives the function directly so every conjunct is load-bearing.
+    """
+
+    @pytest.mark.parametrize(
+        "current,following,leaves",
+        [
+            # the one keep: a plain upgrade on the same host
+            ("http://h.example/a", "https://h.example/b", False),
+            ("http://h.example:80/a", "https://h.example:443/b", False),
+            # same origin, spelled differently
+            ("https://h.example/a", "https://h.example:443/b", False),
+            ("https://h.example/a", "https://h.example/b", False),
+            # an upgrade that also changes host is still a departure
+            ("http://h.example/a", "https://other.example/b", True),
+            # an upgrade to a non-default port is not the exception
+            ("http://h.example/a", "https://h.example:9443/b", True),
+            # ...nor is one from a non-default port
+            ("http://h.example:8080/a", "https://h.example/b", True),
+            # the downgrade, which would put the credential in cleartext
+            ("https://h.example/a", "http://h.example/b", True),
+            ("https://h.example:80/a", "http://h.example:443/b", True),
+            # a bare port change
+            ("https://h.example/a", "https://h.example:8443/b", True),
+            # an explicit port 0 is not the scheme default
+            ("https://h.example/a", "https://h.example:0/b", True),
+            # a different host entirely, and a sibling subdomain
+            ("https://a.example/a", "https://b.example/b", True),
+            ("https://api.github.com/a", "https://gist.github.com/b", True),
+        ],
+    )
+    def test_only_a_same_host_scheme_upgrade_keeps_the_credential(
+        self, current, following, leaves
+    ):
+        assert loader_module._leaves_origin(current, following) is leaves
+
+
+class TestFetchTextCredentialHandling:
+    """The credential rules that end-to-end coverage left unpinned."""
+
+    def _loader(self):
+        return SkillsLoader(
+            SkillsConfig(
+                allow_external_skills=True,
+                trusted_domains=[
+                    "github.com",
+                    "raw.githubusercontent.com",
+                    "api.github.com",
+                ],
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_credential_is_dropped_when_it_is_not_the_first_header(self):
+        """_github_headers() builds Accept first, then Authorization, so a
+        rule that inspects only the first key leaks on the real caller."""
+        handler, seen = _recording_handler(
+            [_redirect_to("https://raw.githubusercontent.com/x"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await self._loader()._fetch_text(
+                "https://api.github.com/start",
+                headers={
+                    "Accept": "application/vnd.github.v3+json",
+                    "Authorization": "Bearer secret-token",
+                },
+            )
+
+        assert "authorization" not in seen[1].headers
+        assert seen[1].headers.get("accept") == "application/vnd.github.v3+json"
+
+    @pytest.mark.asyncio
+    async def test_both_casings_of_the_credential_are_dropped(self):
+        handler, seen = _recording_handler(
+            [_redirect_to("https://raw.githubusercontent.com/x"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await self._loader()._fetch_text(
+                "https://api.github.com/start",
+                headers={"Authorization": "Bearer one", "authorization": "Bearer two"},
+            )
+
+        assert not [k for k in seen[1].headers if k.lower() == "authorization"]
+
+    @pytest.mark.asyncio
+    async def test_an_upgrade_does_not_license_a_later_downgrade(self):
+        """Each hop is compared with the one before it, not with the start."""
+        config = SkillsConfig(
+            allow_external_skills=True, trusted_domains=["github.com"]
+        )
+        handler, seen = _recording_handler(
+            [
+                _redirect_to("https://api.github.com/up"),
+                _redirect_to("http://api.github.com/cleartext"),
+                _ok(),
+            ]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            await SkillsLoader(config)._fetch_text(
+                "http://api.github.com/start",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+        assert len(seen) == 3
+        assert seen[1].headers.get("authorization") == "Bearer secret-token"
+        assert "authorization" not in seen[2].headers
+
+
+class TestFetchTextRemainingGuards:
+    def _loader(self, **kwargs):
+        return SkillsLoader(
+            SkillsConfig(
+                allow_external_skills=True,
+                trusted_domains=["api.github.com"],
+                **kwargs,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_same_host_hop_is_still_address_checked(self):
+        """DNS rebinding: the name does not change, what it resolves to does."""
+        # one call for the initial URL, one for the hop: same name, new answer
+        verdicts = iter([True, False])
+        handler, seen = _recording_handler(
+            [_redirect_to("https://api.github.com/second"), _ok()]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: next(verdicts)),
+        ):
+            with pytest.raises(ValueError, match="disallowed address"):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_body_larger_than_its_advertised_length_is_still_refused(self):
+        """The Content-Length guard cannot be the only one that ever fires."""
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200, headers={"content-length": "5"}, text="x" * 50
+                )
+            ]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_skill_content_bytes=10)._fetch_text(
+                    "https://api.github.com/start"
+                )
+
+    @pytest.mark.asyncio
+    async def test_the_body_guard_counts_bytes_not_characters(self):
+        """9 multibyte characters are 18 bytes; a cap of 10 must refuse them.
+
+        The advertised length is set to the CHARACTER count so the
+        Content-Length guard passes and the body guard is the one on trial.
+        """
+        handler, _seen = _recording_handler(
+            [
+                loader_module.httpx.Response(
+                    200, headers={"content-length": "9"}, text="å" * 9
+                )
+            ]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(ValueError, match="exceeds max size"):
+                await self._loader(max_skill_content_bytes=10)._fetch_text(
+                    "https://api.github.com/start"
+                )
+
+    @pytest.mark.asyncio
+    async def test_an_error_status_is_raised_not_returned_as_skill_content(self):
+        handler, _seen = _recording_handler(
+            [loader_module.httpx.Response(404, text="<html>not found</html>")]
+        )
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            with pytest.raises(loader_module.httpx.HTTPStatusError):
+                await self._loader()._fetch_text("https://api.github.com/start")
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_that_carries_headers_is_cached_too(self):
+        """The GitHub API path always sends headers, and the cache is what
+        lets Stage 2 re-parse without a second request."""
+        handler, seen = _recording_handler([_ok("# once")])
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: True),
+        ):
+            loader = self._loader()
+            await loader._fetch_text(
+                "https://api.github.com/start", headers={"Accept": "application/json"}
+            )
+            await loader._fetch_text(
+                "https://api.github.com/start", headers={"Accept": "application/json"}
+            )
+
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_cache_hit_is_still_address_checked(self):
+        """The guards sit above the cache lookup on purpose."""
+        verdicts = iter([True, False])
+        handler, seen = _recording_handler([_ok("# once")])
+
+        with (
+            _mock_http(handler),
+            patch.object(loader_module, "is_safe_url", lambda _url: next(verdicts)),
+        ):
+            loader = self._loader()
+            await loader._fetch_text("https://api.github.com/start")
+            with pytest.raises(ValueError, match="disallowed address"):
+                await loader._fetch_text("https://api.github.com/start")
+
+        assert len(seen) == 1

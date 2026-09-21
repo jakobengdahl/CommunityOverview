@@ -75,7 +75,13 @@ DEFAULT_MAX_BODY_CHARS = 8_000
 def _origin(url: str) -> tuple:
     """(scheme, host, port) with the default port made explicit."""
     parsed = urlparse(url)
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    # `or` would collapse an explicitly written port 0 to the scheme default
+    # and call it the same origin; httpx compares it as 0 and drops.
+    port = (
+        parsed.port
+        if parsed.port is not None
+        else (443 if parsed.scheme == "https" else 80)
+    )
     return (parsed.scheme, parsed.hostname, port)
 
 
