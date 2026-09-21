@@ -1582,6 +1582,7 @@ def register_mcp_tools(
                 deltas=deltas,
                 expected_revision=expected_revision,
                 animation=animation,
+                rate_limit_label="apply_visualization_layout",
             )
         except RevisionConflict as exc:
             return {
@@ -1758,6 +1759,7 @@ def register_mcp_tools(
                 _MCP_SESSION_CLIENT_ID,
                 resolvable,
                 expected_revision=expected_revision,
+                rate_limit_label="add_nodes_to_session",
             )
         except RevisionConflict as exc:
             return {
@@ -2232,6 +2234,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 annotation,
                 expected_revision=expected_revision,
+                rate_limit_label="create_sticky_note",
             )
         except RevisionConflict as exc:
             return {
@@ -2428,6 +2431,7 @@ def register_mcp_tools(
                 patch,
                 expected_revision=expected_revision,
                 base_version=base_version,
+                rate_limit_label="update_sticky_note",
             )
         except RevisionConflict as exc:
             return {
@@ -2557,6 +2561,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 annotation_id,
                 expected_revision=expected_revision,
+                rate_limit_label="delete_sticky_note",
             )
         except RevisionConflict as exc:
             return {
@@ -2973,6 +2978,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 annotation,
                 expected_revision=expected_revision,
+                rate_limit_label="create_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -3222,6 +3228,7 @@ def register_mcp_tools(
                 annotation,
                 optimized_image_bytes=len(optimized.data),
                 expected_revision=expected_revision,
+                rate_limit_label="create_image_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -3425,6 +3432,7 @@ def register_mcp_tools(
                 patch,
                 expected_revision=expected_revision,
                 base_version=base_version,
+                rate_limit_label="update_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -3558,6 +3566,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 patch,
                 expected_revision=expected_revision,
+                rate_limit_label="reorder_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -3696,6 +3705,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 patch,
                 expected_revision=expected_revision,
+                rate_limit_label="set_annotation_lock",
             )
         except RevisionConflict as exc:
             return {
@@ -3859,6 +3869,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 copy,
                 expected_revision=expected_revision,
+                rate_limit_label="duplicate_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -3985,6 +3996,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 annotation_id,
                 expected_revision=expected_revision,
+                rate_limit_label="delete_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -4166,6 +4178,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 annotation,
                 expected_revision=expected_revision,
+                rate_limit_label="create_group_annotation",
             )
         except RevisionConflict as exc:
             return {
@@ -4346,6 +4359,7 @@ def register_mcp_tools(
                 group_id,
                 current,
                 expected_revision=expected_revision,
+                rate_limit_label="update_group_members",
             )
         except RevisionConflict as exc:
             return {
@@ -4479,6 +4493,7 @@ def register_mcp_tools(
                 _MCP_LAYOUT_CLIENT_ID,
                 group_id,
                 expected_revision=expected_revision,
+                rate_limit_label="delete_group_annotation",
             )
         except RevisionConflict as exc:
             return {

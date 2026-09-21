@@ -521,11 +521,10 @@ class SessionManager:
         # image ingest becomes an additional full write lane for the same
         # source-keyed actor.
         self._image_bucket = _TokenBucket(image_bucket_capacity, image_refill_per_sec)
-        # Separate keyspace again, same sizing. Every synchronous MCP write
-        # method below (apply_layout, add_node_refs, upsert_annotation,
-        # update_annotation, delete_annotation, set_group_members, and
-        # upsert_image_annotation's no-``rate_limit_key`` fallback) attributes
-        # its op to the fixed ``_MCP_LAYOUT_CLIENT_ID`` marker
+        # Separate keyspace again, same sizing. Synchronous MCP write methods
+        # can attribute their broadcasts to one visible agent marker while
+        # passing a tool label so unrelated tools do not spend the same key.
+        # Callers that omit a label keep the historical client-id key.
         # (``mcp_tools.py``). ``POST /api/sessions/{id}/ops`` takes an
         # unauthenticated, caller-chosen ``client_id`` and consumes from
         # ``_bucket`` under that exact string — so keeping the MCP marker in
@@ -534,12 +533,18 @@ class SessionManager:
         # (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). Routing
         # every MCP-marker consume through this dedicated bucket instead makes
         # it unreachable from ``/ops`` or any other browser-facing endpoint,
-        # regardless of what ``client_id`` a browser declares. This does not
-        # change whether MCP callers should share one bucket key among
-        # themselves — that is a separate, broader question
-        # (smallfix-mcp-agent-marker-shared-rate-limit-bucket).
+        # regardless of what ``client_id`` a browser declares. Tool labels split
+        # this keyspace inside the MCP path without changing unlabelled callers.
         self._mcp_bucket = _TokenBucket(bucket_capacity, bucket_refill_per_sec)
         self._locks: Dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _mcp_rate_limit_key(client_id: str, rate_limit_label: Optional[str]) -> str:
+        if rate_limit_label is None:
+            return client_id
+        if not isinstance(rate_limit_label, str) or not rate_limit_label:
+            raise OpError("'rate_limit_label' must be a non-empty string")
+        return f"{client_id}:{rate_limit_label}"
 
     def check_lookup_rate(self, client_key: str) -> None:
         """Throttle unauthenticated session-id lookups by source.
@@ -1064,6 +1069,7 @@ class SessionManager:
         deltas: Optional[Dict[str, Any]] = None,
         expected_revision: Optional[int] = None,
         animation: Optional[Dict[str, Any]] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Apply one ``layout_applied`` op **synchronously** (the MCP write path).
 
@@ -1097,7 +1103,9 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(moves)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(client_id, max(1, len(moves))):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), max(1, len(moves))
+        ):
             raise RateLimited()
 
         # A held lock means an apply_ops batch is mid-flight for this session
@@ -1147,6 +1155,7 @@ class SessionManager:
         node_ids: List[str],
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add node references to a session **synchronously** (the MCP write path).
 
@@ -1175,7 +1184,10 @@ class SessionManager:
             raise OpBatchTooLarge()
         if len(json.dumps(node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(client_id, max(1, len(node_ids))):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label),
+            max(1, len(node_ids)),
+        ):
             raise RateLimited()
 
         # A held lock means an apply_ops batch is mid-flight for this session
@@ -1230,6 +1242,7 @@ class SessionManager:
         expected_revision: Optional[int] = None,
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one annotation **synchronously** (MCP write path).
 
@@ -1265,7 +1278,9 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation, dict):
             raise OpError("'annotation' must be an object")
-        if not self._mcp_bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         # A held lock means an apply_ops batch is mid-flight for this session
@@ -1333,6 +1348,7 @@ class SessionManager:
         max_session_image_bytes: int = DEFAULT_MAX_SESSION_IMAGE_BYTES,
         max_session_document_bytes: int = DEFAULT_MAX_SESSION_DOCUMENT_BYTES,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create, or replace by id, one `image` annotation (MCP write path).
 
@@ -1453,7 +1469,9 @@ class SessionManager:
         if rate_limit_key is not None:
             if not self._image_bucket.consume(rate_limit_key, 1):
                 raise RateLimited()
-        elif not self._mcp_bucket.consume(client_id, 1):
+        elif not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         applied = self._apply_op_sync(session, session_id, client_id, op)
@@ -1473,6 +1491,7 @@ class SessionManager:
         *,
         expected_revision: Optional[int] = None,
         base_version: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Patch one existing annotation **synchronously** (MCP write path).
 
@@ -1507,7 +1526,9 @@ class SessionManager:
             raise OpError("'patch' must be an object with a string 'id'")
         if len(json.dumps(patch)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1543,6 +1564,7 @@ class SessionManager:
         annotation_id: str,
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delete one annotation by id **synchronously** (MCP write path).
 
@@ -1561,7 +1583,9 @@ class SessionManager:
             raise OpError("'client_id' is required")
         if not isinstance(annotation_id, str) or not annotation_id:
             raise OpError("'annotation_id' is required")
-        if not self._mcp_bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
@@ -1601,6 +1625,7 @@ class SessionManager:
         member_node_ids: List[str],
         *,
         expected_revision: Optional[int] = None,
+        rate_limit_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Replace a ``group`` annotation's ``member_node_ids`` **synchronously**
         (the MCP write path for group membership).
@@ -1635,7 +1660,9 @@ class SessionManager:
             raise OpError("'member_node_ids' must be a list of strings")
         if len(json.dumps(member_node_ids)) > self._max_op_batch_bytes:
             raise OpBatchTooLarge()
-        if not self._mcp_bucket.consume(client_id, 1):
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(client_id, rate_limit_label), 1
+        ):
             raise RateLimited()
 
         if self._lock(session_id).locked():
