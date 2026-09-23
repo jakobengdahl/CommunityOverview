@@ -86,11 +86,14 @@ before the exception propagates — the on-disk file is never at risk either way
 this in-memory restore is what keeps the LIVE graph consistent with what is
 durably on disk. The swap itself is a handful of single-statement pointer
 reassignments (`self.nodes = new_nodes`, etc.), built off to the side and
-published only once everything is ready, so a read that takes no lock — every
-read path in `GraphStorage` except the writers — always sees either the fully
-old graph or the fully new one, never a window with, say, nodes cleared but
-edges not yet rebuilt. Restoring on failure is then just putting the old
-references back, not rebuilding them.
+published only once everything is ready, so a read that takes no lock of
+`self.nodes` / `self.edges` / `self.graph` / the searchable-text cache —
+every such read path in `GraphStorage` except the writers — always sees
+either the fully old graph or the fully new one for those containers, never a
+window with, say, nodes cleared but edges not yet rebuilt. Restoring on
+failure is then just putting the old references back, not rebuilding them.
+The vector index swap below is a separate step with its own, weaker
+guarantee — see the note after it.
 
 `GraphStorage.generation` is a counter bumped once, atomically, in the same
 swap: a caller that starts slow work against "the graph as it stands now" (the
@@ -98,7 +101,12 @@ embedding job below) captures it first and checks it again — via
 `commit_generation_embeddings`, under the same lock the swap itself uses —
 before writing its result back, so a job whose graph a later import has
 already superseded is detected and discarded rather than silently overwriting
-that later import's content.
+that later import's content. The counter is stamped into `graph_metadata` as
+`graph_generation` on every replace and read back on `load()`, so it survives
+a process restart: without that, a crash-recovered job (`recover_import_jobs`)
+carrying a real, pre-crash generation would be compared against an in-memory
+counter that forgot everything on restart, and wrongly treated as superseded
+even when no later import ever happened.
 
 Existing vectors are dropped unconditionally on replace
 (`vector_store.load_vectors({})`) rather than pruned to the surviving ids. A
@@ -106,6 +114,14 @@ node whose id happens to match one in the old dataset would otherwise inherit
 that old dataset's vector for what may be entirely different text — exactly
 the footgun `docs/DATA_MANAGEMENT.md` already calls out for `start-dev.sh
 --data`, which deletes the sidecar whenever it swaps in a different graph.
+This clear is not covered by the atomic-pointer-swap guarantee above:
+`VectorStore.load_vectors` (pre-existing code, not introduced by this ADR)
+makes two separate assignments with no lock of its own, and
+`find_similar_nodes` (unlike its `_batch` sibling) reads the vector store
+without `GraphStorage._lock` either. Clearing to `{}` specifically cannot
+produce a wrong answer through that window — both sides of it mean "no
+results" — so this is a documentation-precision note about a pre-existing
+read pattern, not a bug this ADR introduces or needs to fix.
 
 ### 4. A pre-import backup file, in addition to in-memory rollback
 
