@@ -5,6 +5,7 @@ docs/adr/0006-graph-import-replace-mode.md).
 """
 
 import json
+import threading
 
 import pytest
 
@@ -178,3 +179,138 @@ class TestReplaceRollsBackOnSaveFailure:
         # failed replace must not have landed a further one.
         assert backend.saves == saves_before
         assert {n["id"] for n in backend.data["nodes"]} == {"old-1"}
+
+    def test_failed_save_rolls_back_the_generation_counter(
+        self, storage: GraphStorage, backend: _SnapshotBackend
+    ):
+        """`generation` is part of the swap `_restore()` must undo along with
+        nodes/edges/graph/vectors — see `commit_generation_embeddings`. If it
+        were left bumped after a failed replace, a job stamped against the
+        generation BEFORE this failed attempt would be wrongly treated as
+        superseded, even though the graph the failed replace never actually
+        committed is exactly what is still live."""
+        storage.add_nodes([_old_node()], [])
+        storage.flush()
+        generation_before = storage.generation
+        backend.fail_next_save = True
+
+        with pytest.raises(OSError):
+            storage.replace_all_nodes_and_edges([_new_node()], [])
+
+        assert storage.generation == generation_before
+
+        # And a SUBSEQUENT successful replace still advances it normally —
+        # the failed attempt is not silently "used up".
+        storage.replace_all_nodes_and_edges([_new_node()], [])
+        assert storage.generation == generation_before + 1
+
+
+class TestReplaceBumpsGeneration:
+    def test_generation_starts_at_zero_and_increments_once_per_successful_replace(
+        self, storage: GraphStorage
+    ):
+        assert storage.generation == 0
+
+        storage.replace_all_nodes_and_edges([_old_node()], [])
+        assert storage.generation == 1
+
+        storage.replace_all_nodes_and_edges([_new_node()], [])
+        assert storage.generation == 2
+
+    def test_ordinary_incremental_writes_do_not_move_the_generation(
+        self, storage: GraphStorage
+    ):
+        storage.replace_all_nodes_and_edges([_old_node()], [])
+        generation = storage.generation
+
+        storage.add_nodes([_new_node()], [])
+        storage.update_node("old-1", {"name": "Renamed"})
+
+        assert storage.generation == generation
+
+
+class TestReplaceIsAtomicUnderConcurrentUnlockedReads:
+    """Every OTHER read path on GraphStorage (get_node, get_all_nodes,
+    get_all_edges, get_stats, ...) reads ``self.nodes`` / ``self.edges`` /
+    ``self.graph`` WITHOUT taking ``_lock`` — safe only as long as a writer
+    never leaves those containers in a partially-rebuilt state that such an
+    unlocked reader could observe. The original implementation cleared
+    ``self.nodes`` / ``self.edges`` / ``self.graph`` in place and refilled
+    them in a loop — a window, linear in graph size, in which an unlocked
+    reader could see an empty node set or a nodes/edges count mismatch. This
+    pins the fix: build the new containers off to the side and publish each
+    with a single pointer reassignment, so a concurrent reader only ever sees
+    the fully-old graph or the fully-new one."""
+
+    def test_a_concurrent_unlocked_reader_never_observes_a_torn_swap(
+        self, storage: GraphStorage
+    ):
+        import sys
+
+        # Forces the GIL to switch between threads far more often than the
+        # 5ms default. Without this, the whole swap — a handful of statements
+        # under this fix, but also the FEW MILLISECONDS an in-place
+        # clear-then-repopulate of a few thousand nodes took under the bug
+        # this guards against — can complete inside a single scheduling slice
+        # and never actually hand control to the reader thread at all, which
+        # would make this test pass for the wrong reason (no samples taken
+        # during the swap) rather than the right one (samples taken, and
+        # every one consistent).
+        original_interval = sys.getswitchinterval()
+        sys.setswitchinterval(0.00005)
+
+        old_ids = {f"old-{i}" for i in range(3000)}
+        old_nodes = [Node(id=nid, type=NodeType.ACTOR, name=nid) for nid in old_ids]
+        storage.replace_all_nodes_and_edges(old_nodes, [])
+
+        new_ids = {f"new-{i}" for i in range(3000)}
+        new_nodes = [Node(id=nid, type=NodeType.ACTOR, name=nid) for nid in new_ids]
+
+        mismatches = []
+        samples = [0]
+        stop = threading.Event()
+
+        def reader() -> None:
+            while not stop.is_set():
+                nodes = storage.get_all_nodes()
+                edges = storage.get_all_edges()
+                # `self.graph` is a separate object from `self.nodes`; the
+                # original bug rebuilt it with a `.clear()` + a Python-level
+                # `for` loop AFTER `self.nodes`/`self.edges` were already
+                # fully updated to the new content, so the node COUNT and the
+                # graph's own node count could disagree for as long as that
+                # loop took — the graph momentarily behind, or momentarily
+                # ahead of where the dicts already were, without ever tearing
+                # the dicts themselves. Comparing them is what actually
+                # exercises that window; comparing `nodes`/`edges` alone would
+                # not, since those two were already swapped via a single bulk
+                # `dict.update()` each.
+                graph_node_count = storage.graph.number_of_nodes()
+                samples[0] += 1
+                ids = {n.id for n in nodes}
+                is_fully_old = (
+                    ids == old_ids and len(edges) == 0 and graph_node_count == 3000
+                )
+                is_fully_new = (
+                    ids == new_ids and len(edges) == 0 and graph_node_count == 3000
+                )
+                if not (is_fully_old or is_fully_new):
+                    mismatches.append((len(nodes), len(edges), graph_node_count))
+                    if len(mismatches) > 20:
+                        stop.set()
+
+        reader_thread = threading.Thread(target=reader)
+        reader_thread.start()
+        try:
+            storage.replace_all_nodes_and_edges(new_nodes, [])
+        finally:
+            stop.set()
+            reader_thread.join(timeout=5)
+            sys.setswitchinterval(original_interval)
+
+        assert samples[0] > 0, "the reader thread never ran during the replace"
+        assert mismatches == [], (
+            f"a concurrent unlocked read observed a torn swap "
+            f"(node_count, edge_count, graph_node_count): {mismatches[:5]}"
+        )
+        assert {n.id for n in storage.get_all_nodes()} == new_ids

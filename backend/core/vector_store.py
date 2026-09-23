@@ -296,14 +296,31 @@ class VectorStore:
 
     def update_nodes_embeddings(self, nodes: List[Node]):
         """Update embeddings for multiple nodes in batch"""
-        if not nodes:
-            return
+        self._absorb(self.compute_node_embeddings(nodes))
 
+    def compute_node_embeddings(self, nodes: List[Node]) -> Dict[str, Any]:
+        """Encode ``nodes`` and return their vectors WITHOUT touching the index.
+
+        Split out of ``update_nodes_embeddings`` so a caller can run the slow
+        encode step, check some precondition that may have changed while it
+        ran, and only then decide whether to commit the result — see the
+        import worker's generation-staleness guard
+        (``GraphStorage.commit_generation_embeddings``), which computes here
+        and absorbs (via ``absorb_embeddings``) only if nothing superseded the
+        graph these vectors were computed against in the meantime.
+        """
+        if not nodes:
+            return {}
         self._load_model()
         texts = [self._get_text_representation(node) for node in nodes]
         embeddings = self.model.encode(texts)
+        return {node.id: embedding for node, embedding in zip(nodes, embeddings)}
 
-        self._absorb({node.id: embedding for node, embedding in zip(nodes, embeddings)})
+    def absorb_embeddings(self, vectors: Dict[str, Any]) -> None:
+        """Merge freshly computed vectors (e.g. from ``compute_node_embeddings``)
+        into the live index. Public counterpart to ``_absorb`` for callers
+        outside this module that computed the vectors themselves."""
+        self._absorb(vectors)
 
     def remove_node_embedding(self, node_id: str):
         """Remove embedding for a node"""
