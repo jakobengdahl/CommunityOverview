@@ -3932,6 +3932,74 @@ class TestUndoLastAction:
         restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
         assert restored["text"] == "before"
 
+    async def test_undo_of_sparse_update_that_added_a_field_removes_it_entirely(self):
+        """Regression for smallfix-undo-of-a-field-adding-update-leaves-the-field.
+
+        The MCP patch path (``update_annotation``) sends a sparse patch — only
+        the fields actually being changed (``build_annotation_patch`` in
+        ``session_annotations.py``). Undoing an update that ADDED a field the
+        annotation never had must remove that field entirely: the pre-update
+        snapshot this undo replays has no key for it at all, so a plain merge
+        of that snapshot could restore/overwrite existing keys but could never
+        delete one the update introduced.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(s.id, "mcp-agent", {"id": "note-1", "type": "note"})
+        before = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert "text" not in before
+
+        mgr.update_annotation(
+            s.id, "mcp-agent", {"id": "note-1", "type": "note", "text": "hi"}
+        )
+        updated = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert updated["text"] == "hi"
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert "text" not in restored
+
+    async def test_undo_of_full_payload_update_still_restores_prior_values(self):
+        """A browser client always resends the whole annotation on every write
+        (``computeOps`` in ``sessionSyncClient.js``), so the pre-update
+        snapshot an undo replays already carries every key the post-update
+        annotation has — the undo-replay's full-replace (see
+        smallfix-undo-of-a-field-adding-update-leaves-the-field) is then
+        equivalent to the old plain merge. Pins that this remains true rather
+        than relying on it by accident: an untouched field survives the undo
+        and a changed one reverts, exactly as before the fix.
+        """
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.upsert_annotation(
+            s.id,
+            "mcp-agent",
+            {
+                "id": "note-1",
+                "type": "note",
+                "text": "before",
+                "position": {"x": 1, "y": 2},
+            },
+        )
+        # Full-payload update: every key resent, only 'text' actually changes.
+        mgr.update_annotation(
+            s.id,
+            "mcp-agent",
+            {
+                "id": "note-1",
+                "type": "note",
+                "text": "after",
+                "position": {"x": 1, "y": 2},
+            },
+        )
+
+        mgr.undo_last_action(s.id, "mcp-agent")
+
+        restored = next(a for a in s.state["annotations"] if a["id"] == "note-1")
+        assert restored["text"] == "before"
+        assert restored["position"] == {"x": 1, "y": 2}
+
     async def test_undo_delete_restores_the_annotation(self):
         mgr = _manager()
         s = mgr.create_session()
