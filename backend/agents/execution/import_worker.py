@@ -35,19 +35,66 @@ logger = logging.getLogger(__name__)
 # let a second worker reclaim and re-run work still legitimately in flight.
 DEFAULT_LEASE_SECONDS = 300.0
 
+_SUPERSEDED_MESSAGE = (
+    "a later graph import replaced the graph before this job's embeddings "
+    "could be committed; the graph's own content is unaffected, and the "
+    "later import's own job (re)generates embeddings for the content that "
+    "is actually live"
+)
+
+
+def _mark_superseded(store: ExecutionStore, job: "ExecutionJob") -> None:
+    """Cancel a job whose embeddings a later import has made stale.
+
+    Distinct from both ``succeeded`` (nothing was actually committed) and a
+    genuine ``failed`` (nothing went wrong; the job is simply obsolete, so it
+    must not be retried). ``cancel`` is the one terminal state that already
+    means neither of those, and ``result`` carries why, the same way
+    ``complete``'s does — see ``docs/DATA_MANAGEMENT.md``, "Importing a
+    graph".
+    """
+    store.cancel(
+        job.id,
+        result={
+            "embeddings_status": "superseded",
+            "message": _SUPERSEDED_MESSAGE,
+        },
+    )
+
 
 def _run_one_import_job(
     store: ExecutionStore, storage: "GraphStorage", job: "ExecutionJob"
 ) -> None:
+    # The generation the graph was at right after THIS job's import replaced
+    # it (see backend/service/import_service.py). A job enqueued before this
+    # field existed carries None, which always commits — nothing to compare
+    # against for a job from an older build. Checked here, BEFORE reading
+    # `storage.nodes` at all: once the graph has already moved on, that
+    # attribute is a DIFFERENT (newer) graph's nodes, not the ones this job
+    # was ever about, and no work should be attempted against them under this
+    # job's identity.
+    job_generation = job.payload.get("graph_generation")
+    if job_generation is not None and storage.generation != job_generation:
+        _mark_superseded(store, job)
+        return
+
     nodes = [
         node
         for node in storage.nodes.values()
         if not storage.vector_store.has_embedding(node.id)
     ]
     try:
-        if nodes:
-            storage.vector_store.update_nodes_embeddings(nodes)
-            storage.save().result()
+        # Encode off to the side — `compute_node_embeddings` never touches the
+        # live index — so a replace landing during this (potentially
+        # minutes-long) step cannot yet be corrupted by it. The result is only
+        # ever written back through `commit_generation_embeddings`, which
+        # re-checks the generation and does the check-and-write as one atomic
+        # step under GraphStorage's own lock, closing the window a bare
+        # check-then-act here would leave open.
+        vectors = storage.vector_store.compute_node_embeddings(nodes) if nodes else {}
+        if not storage.commit_generation_embeddings(job_generation, vectors):
+            _mark_superseded(store, job)
+            return
         store.complete(
             job.id,
             result={
