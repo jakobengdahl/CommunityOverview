@@ -372,12 +372,15 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
 
-    it('does not read the browser filling in a default size as a resize', () => {
-      // label/line/freehand carry no size through the overlay translators, so
-      // normalizeGeometry fills 160x96 over the server's 0.
+    it('no longer materializes a default size on an unsized label (smallfix-browser-clobbers-unsized-annotation-geometry)', () => {
+      // label/line/freehand used to carry no size through the overlay
+      // translators, so normalizeGeometry filled 160x96 over the server's 0
+      // on the very first browser touch. The translators now carry
+      // geometry.w/h through unconditionally (including an explicit 0), so
+      // this write-back changes nothing about the size.
       const r = browserMove(serverAnnotation('label', { text: 'hi' }));
       expect(r.before.geometry.w).toBe(0);
-      expect(r.after.geometry.w).toBeGreaterThan(0);
+      expect(r.after.geometry.w).toBe(0);
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_moved');
     });
 
@@ -500,17 +503,33 @@ describe('describeActivity', () => {
       ).toBe('history.desc.annotation_updated_moved');
     });
 
-    it('does not claim a move when only the size was materialised', () => {
-      // A recolour of an agent-created label: geometry differs only by the
-      // default size the browser filled in, so the recolour is what happened.
+    it('does not claim a resize when only the style changed on an unsized label', () => {
+      // A recolour of an agent-created label whose geometry the browser never
+      // touches (smallfix-browser-clobbers-unsized-annotation-geometry: the
+      // translators now carry the server's w/h=0 through faithfully instead
+      // of materializing 160x96) must report as the recolour it is, not a
+      // resize.
       const before = serverAnnotation('label', { text: 'hi' });
       const after = {
         ...before,
-        geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 },
         style: { color: 'crimson' },
       };
       expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
         'history.desc.annotation_updated_style'
+      );
+    });
+
+    it('now reports a genuine resize to exactly 160x96 on a previously-unsized label', () => {
+      // Before the geometry fix, the browser's own no-op write-back produced
+      // 160x96 for an unsized label, so this exact transition was
+      // indistinguishable from that artifact and had to be suppressed (the
+      // test above, before this fix, asserted the opposite of this). Now
+      // that the write-back carries the server's real 0 through, this is a
+      // real, reportable resize.
+      const before = serverAnnotation('label', { text: 'hi' });
+      const after = { ...before, geometry: { x: 10, y: 20, w: 160, h: 96, rotation: 0 } };
+      expect(describeActivity(record({ op: 'annotation_updated', before, after })).key).toBe(
+        'history.desc.annotation_updated_resized'
       );
     });
   });
