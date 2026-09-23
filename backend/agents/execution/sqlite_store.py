@@ -350,19 +350,26 @@ class SqliteExecutionStore:
             self._conn.commit()
             return self._get_by_id(job_id)
 
-    def cancel(self, job_id: str, *, now: Optional[datetime] = None) -> bool:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        result: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
         now = now or utcnow()
         now_ts = _to_epoch(now)
         with self._lock:
             cur = self._conn.execute(
                 """
                 UPDATE execution_jobs SET
-                    state = ?, lease_owner = NULL, lease_expiry = NULL,
+                    state = ?, result = ?, lease_owner = NULL, lease_expiry = NULL,
                     finished_at = ?, updated_at = ?
                 WHERE id = ? AND state NOT IN (?,?,?)
                 """,
                 (
                     ExecutionState.CANCELLED.value,
+                    json.dumps(result) if result is not None else None,
                     now_ts,
                     now_ts,
                     job_id,

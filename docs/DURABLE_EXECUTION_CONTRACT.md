@@ -176,7 +176,7 @@ is required.
 | `renew_lease(job_id, worker_id, now, lease_seconds)` | Extend a lease held by `worker_id`; `False` otherwise. |
 | `complete(job_id, result, now)` | → `SUCCEEDED`; no-op if already terminal. |
 | `fail(job_id, error, now)` | Retry with backoff or dead-letter; no-op if already terminal. |
-| `cancel(job_id, now)` | → `CANCELLED` if non-terminal; `True`/`False`. |
+| `cancel(job_id, result, now)` | → `CANCELLED` if non-terminal; `True`/`False`. `result` is stored like `complete`'s, for a caller that can explain the cancellation. |
 | `recover_stale(now)` | Reset expired-lease `RUNNING` jobs to `PENDING`; return them. |
 | `get(job_id)` | Fetch by id, or `None`. |
 | `list_jobs(states, agent_id, kind, limit)` | Inspection surface, newest-first; the basis for durable run history. |

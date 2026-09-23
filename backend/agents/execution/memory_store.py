@@ -146,13 +146,14 @@ class InMemoryExecutionStore:
                 )
             return job.copy()
 
-    def cancel(self, job_id: str, *, now=None) -> bool:
+    def cancel(self, job_id: str, *, result=None, now=None) -> bool:
         now = now or utcnow()
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.is_terminal:
                 return False
             job.state = ExecutionState.CANCELLED
+            job.result = dict(result) if result is not None else None
             job.lease_owner = None
             job.lease_expiry = None
             job.finished_at = now

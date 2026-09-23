@@ -114,10 +114,20 @@ class ExecutionStore(Protocol):
         """
         ...
 
-    def cancel(self, job_id: str, *, now: Optional[datetime] = None) -> bool:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        result: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
         """
         Cancel a non-terminal job. Returns True if it was cancelled, False if it
         was already terminal or unknown. Cancellation is sticky.
+
+        ``result`` is stored on the job exactly like ``complete``'s, for a
+        caller cancelling a job it can explain (e.g. "superseded by a later
+        import") rather than plain external cancellation.
         """
         ...
 
