@@ -24,6 +24,7 @@ Usage:
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +49,8 @@ from backend.service import GraphService, create_rest_router, register_mcp_tools
 from backend.service.mcp_tools import _push_to_session
 from backend.ui import ChatService, DocumentService, create_ui_router
 from backend.agents import AgentRegistry, AgentsSettings
+from backend.agents.execution import SqliteExecutionStore
+from backend.agents.execution.import_worker import recover_import_jobs
 from backend.federation import (
     FederationManager,
     load_federation_config,
@@ -217,8 +220,32 @@ def create_app(
     app.state.session_store = session_store
     app.state.session_manager = session_manager
 
+    # Durable store backing graph.json import's background embedding jobs.
+    # Recovery (reclaiming a job left RUNNING by a crashed process, per
+    # backend/service/import_service.py and
+    # docs/adr/0006-graph-import-replace-mode.md) runs in a background thread
+    # so a large re-embedding pass never delays startup, matching the "import
+    # never blocks on embeddings" guarantee the feature makes for a live
+    # request.
+    import_job_store = SqliteExecutionStore(config.get_import_jobs_db_path())
+    app.state.import_job_store = import_job_store
+
+    def _recover_import_jobs() -> None:
+        try:
+            recover_import_jobs(import_job_store, graph_storage)
+        except Exception:
+            logger.exception("Import job recovery at startup failed (non-fatal)")
+
+    threading.Thread(
+        target=_recover_import_jobs, name="import-startup-recovery", daemon=True
+    ).start()
+
     # Create and mount REST API router
-    rest_router = create_rest_router(graph_service, session_manager=session_manager)
+    rest_router = create_rest_router(
+        graph_service,
+        session_manager=session_manager,
+        import_job_store=import_job_store,
+    )
     app.include_router(rest_router, prefix=config.api_prefix)
 
     # Create UI Backend services (ChatService and DocumentService)

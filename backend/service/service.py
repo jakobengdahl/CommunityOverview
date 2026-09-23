@@ -11,7 +11,7 @@ Callers (rest_api.py, mcp_tools.py, …) continue to use this class unchanged;
 public method signatures are preserved exactly.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional, Dict, Any
 
 from backend.core import GraphStorage
 from backend.core.storage_search import MATCH_MODE_SUBSTRING
@@ -22,9 +22,12 @@ from backend.runtime.authorization import (
 )
 from backend.federation import FederationManager
 
-from . import queries, mutations, views
+from . import queries, mutations, views, import_service
 
 import logging
+
+if TYPE_CHECKING:
+    from backend.agents.execution import ExecutionStore
 
 logger = logging.getLogger(__name__)
 
@@ -561,3 +564,43 @@ class GraphService:
 
     def export_graph(self) -> Dict[str, Any]:
         return views.export_graph(self._storage, self._authorization_hook)
+
+    # ==================== Import ====================
+
+    def import_graph(
+        self,
+        document: Any,
+        execution_store: "ExecutionStore",
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Whole-graph REPLACE import. See ``backend.service.import_service`` for
+        the full validate -> backup -> replace -> enqueue-embeddings sequence.
+
+        ``execution_store`` is passed explicitly rather than owned by
+        ``GraphService`` — the durable job queue backing import embeddings is
+        wired up by the host application (see ``backend/api_host/server.py``),
+        the same way ``session_manager`` is passed to ``create_rest_router``
+        rather than constructed here.
+        """
+        return import_service.import_graph(
+            self._storage,
+            self._authorization_hook,
+            execution_store,
+            document,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def get_import_job(
+        self, execution_store: "ExecutionStore", job_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return import_service.get_import_job(execution_store, job_id)
+
+    def list_import_jobs(
+        self, execution_store: "ExecutionStore", limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        return import_service.list_import_jobs(execution_store, limit=limit)

@@ -199,6 +199,80 @@ What this means in practice:
   points (see *Graph Journal* below). Do the same when replacing a graph file
   by hand.
 
+## Importing a graph
+
+`POST /api/import` (see [ADR 0006](adr/0006-graph-import-replace-mode.md) for
+the full design) replaces the ENTIRE active graph with a posted document in
+the same shape `GET /api/export` returns — a `nodes` list and an `edges` list.
+This is a **REPLACE, not a merge**: every id in the document becomes the live
+graph's content exactly, and any node or edge from the previous graph that
+does not also appear in the document is gone. There is no per-id
+merge/collision policy in this version (tracked as a follow-up).
+
+What happens, in order:
+
+1. **Validate.** The whole document is checked before anything is written:
+   every node/edge type must be one this instance's schema configures, no two
+   nodes (or two edges) in the document may share an id, and every edge's
+   source/target must reference a node id present in the SAME document (there
+   is no old graph left for a dangling reference to resolve against, since
+   this is a replace). Any problem: the graph is left completely untouched,
+   and every problem found is reported, not just the first.
+2. **Back up.** The current graph is snapshotted to
+   `<graph dir>/import-backups/import-backup-<timestamp>-<id>.json`, in the
+   same nodes/edges shape, before anything changes. If this backup cannot be
+   written, the import is refused rather than proceeding unprotected.
+3. **Replace.** The graph is swapped in atomically and saved through the same
+   whole-graph, atomic (temp file + rename) write a checkpoint already uses.
+   Like any whole-graph save, this folds the journal into the new snapshot and
+   empties it — but, because the import replaces the graph in place within the
+   same running process rather than swapping in a different file from outside
+   it, the file's `journal_id` is **preserved**, not re-minted (see *Graph
+   Journal* below, "The file keeps its identity across whole-graph saves"). If
+   the write fails partway, the live graph is restored to what it was before
+   the import; the file on disk was never at risk either way.
+4. **Embeddings, asynchronously.** Existing vectors are dropped (a replaced
+   graph is a new dataset — see *Embedding Sidecar* above for why keeping a
+   reused id's old vector would be wrong), and a durable background job
+   regenerates them. The request returns as soon as step 3 lands — it does
+   NOT wait for embeddings, which can be the slowest part of an import by a
+   wide margin. Poll `GET /api/import/{job_id}` for progress; its `status` is
+   `queued` / `running` / `succeeded` / `failed` / `cancelled`, and a
+   terminal job additionally reports `embeddings_status`:
+   - `succeeded` — vectors were generated.
+   - `unavailable` — the optional ML extras
+     (`backend/requirements-ml.txt`) are not installed. The graph itself
+     imported successfully and is complete data; semantic search degrades to
+     name-based matching until embeddings are generated, e.g. with
+     `scripts/generate_embeddings.py`.
+   - `superseded` (job `status` is `cancelled`, never `succeeded` or
+     `failed`) — a second `POST /import` replaced the graph again before this
+     job could commit its embeddings, whether because its own encode ran
+     longer than the gap between the two imports or because it was a
+     crash-recovered job resumed after the fact. Nothing was written back for
+     it; the newer import's own job (re)generates embeddings for the content
+     that is actually live.
+
+   A `failed` job means embedding generation itself failed after retries —
+   the graph replace is **not** rolled back for this, since it already
+   committed and is valid on its own.
+
+   Rarely, the graph replace succeeds but the embedding job cannot even be
+   started (e.g. the durable job store is unreachable). `POST /import` still
+   reports `success: true` and `graph_replaced: true` — the graph really was
+   replaced — but with `job_id: null` and `embeddings_status: "not_started"`
+   plus an explanatory `embeddings_message`; re-run
+   `scripts/generate_embeddings.py`, or import again later, rather than
+   retrying immediately (a retry would only repeat the same replace).
+
+The background job is durable: it is backed by a SQLite store
+(`import_jobs.db` next to the graph file by default, overridable with
+`IMPORT_JOBS_DB`) and is resumed automatically if the process restarts while a
+job is still running.
+
+To undo an import, re-run `POST /api/import` with the content of the backup
+file it wrote.
+
 ## Graph Journal
 
 `graph.json` is the graph, and it is still written whole and atomically (a temp

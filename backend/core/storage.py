@@ -335,6 +335,16 @@ class GraphStorage:
         self.nodes: Dict[str, Node] = {}  # node_id -> Node
         self.edges: Dict[str, Edge] = {}  # edge_id -> Edge
 
+        # Bumped once, atomically, every time `replace_all_nodes_and_edges`
+        # swaps in a whole new graph. A caller that kicks off slow background
+        # work against "the graph as it stood when I started" (the import
+        # worker's embedding generation) captures this value first and
+        # compares it again before writing anything back, so work computed
+        # against a graph a later replace has already superseded is detected
+        # and discarded rather than silently corrupting the live index. See
+        # `generation` and `commit_generation_embeddings` below.
+        self._generation: int = 0
+
         # Cache for searchable text to speed up search_nodes
         # Keyed by node id; the value is everything matching and ranking read
         # off that node, lowered once. It was the flat searchable string alone
@@ -801,6 +811,26 @@ class GraphStorage:
                 # place, so anything holding a reference to one still sees the
                 # graph this instance serves.
                 self.graph_metadata = graph_metadata
+                # `graph_generation` is this instance's only durable record of
+                # `_generation` (see the property below): it rides in
+                # `graph_metadata` exactly like every other extra key here -
+                # written by `replace_all_nodes_and_edges`, preserved
+                # unchanged by every other save via `_snapshot_data`'s
+                # `**self.graph_metadata` spread, and read back here on every
+                # load, including a real process restart. A file with no such
+                # key predates this field or was never imported into, and
+                # both mean the same thing: no import job anywhere could be
+                # carrying a generation to collide with, so 0 is the correct
+                # default rather than a guess.
+                raw_generation = graph_metadata.get("graph_generation", 0)
+                try:
+                    self._generation = int(raw_generation)
+                except (TypeError, ValueError):
+                    print(
+                        f"Warning: ignoring non-integer graph_generation "
+                        f"{raw_generation!r} in metadata; defaulting to 0"
+                    )
+                    self._generation = 0
                 # Order matters three ways here, and two of them fight.
                 #
                 # The index must never be MISSING an id `nodes` holds, or the
@@ -2430,6 +2460,184 @@ class GraphStorage:
                     success=False,
                     message=f"Error during add: {str(e)}",
                 )
+
+    @property
+    def generation(self) -> int:
+        """Monotonic counter bumped once, atomically, on every whole-graph
+        replace (see ``replace_all_nodes_and_edges``).
+
+        A caller that starts slow background work against "the graph as it
+        stands right now" — the import worker's embedding generation is the
+        one caller today — reads this first and passes it to
+        ``commit_generation_embeddings`` afterwards, so a replace that lands
+        while that work is in flight is detected before its result is written
+        back, rather than silently overwriting a newer graph's content.
+
+        Persisted as ``graph_generation`` in ``graph_metadata`` (written by
+        ``replace_all_nodes_and_edges``, read back by ``load()``), so this
+        value survives a process restart rather than resetting to 0 — a
+        crash-recovered import job (``recover_import_jobs``) is stamped with
+        a real generation from before the crash, and comparing it against an
+        in-memory counter that forgot everything on restart would make every
+        such job look superseded even when no later import ever happened.
+        """
+        with self._lock:
+            return self._generation
+
+    def replace_all_nodes_and_edges(self, nodes: List[Node], edges: List[Edge]) -> None:
+        """
+        Atomically replace the ENTIRE graph with ``nodes``/``edges``.
+
+        This is the commit step of a whole-graph import (see
+        ``backend/service/graph_import.py``): the caller has already validated
+        the document (types, duplicate ids, dangling references) before this is
+        ever invoked, so this method assumes ``nodes``/``edges`` are internally
+        consistent and only does the swap-and-persist. It does NOT merge into
+        the existing graph and does not resolve names to ids the way
+        ``add_nodes`` does — every id here becomes the id in the live graph.
+
+        Thread-safe and, on a persistence failure, self-healing: the in-memory
+        image is snapshotted before the swap and restored if the durable write
+        fails partway, so a failed import never leaves the live graph pointing
+        at content that was never made durable. The on-disk file itself is
+        never at risk either way — ``save()`` writes it atomically (temp file +
+        rename), so a write that fails leaves the previous file untouched.
+
+        The swap itself is a handful of single-statement pointer reassignments
+        (``self.nodes = new_nodes`` etc.), never an in-place clear-then-refill
+        of the live containers. Every OTHER read path in this class (get_node,
+        get_all_nodes, get_all_edges, get_stats, ...) reads ``self.nodes`` /
+        ``self.edges`` / ``self.graph`` without taking ``_lock`` — safe only
+        because every other writer mutates a single dict key at a time, which
+        is atomic under the GIL. A multi-statement clear-then-repopulate of a
+        live, readable container is not: it lets a concurrent unlocked reader
+        observe an empty node set, a nodes/edges count mismatch, or nodes
+        without their vectors, for as long as the rebuild takes. Building the
+        new nodes/edges/graph/search-index off to the side FIRST and then
+        publishing each as one attribute assignment means an unlocked reader
+        of THOSE containers only ever sees the fully-old graph or the
+        fully-new one, never a window in between — and it is what lets a
+        failed save simply put the old references back (see ``_restore``
+        below) instead of having to rebuild them.
+
+        Stale vectors are dropped rather than carried over: a replaced graph is
+        a new dataset, and keeping an old vector under a reused id would hand a
+        new node someone else's embedding (see docs/DATA_MANAGEMENT.md,
+        "Replacing the graph"). The caller is expected to enqueue a background
+        job that regenerates them; this method never blocks on embeddings, and
+        bumps ``generation`` (persisted into ``graph_metadata`` — see the
+        property below and ``load()`` — so it survives this process
+        restarting) so that job can later tell whether it is still working
+        against the graph this call committed.
+
+        The vector-store clear (``self.vector_store.load_vectors({})`` below)
+        is NOT part of the same atomic-pointer-swap guarantee: ``load_vectors``
+        is pre-existing ``VectorStore`` code that makes two separate
+        assignments (the embeddings dict, then the search matrix) with no lock
+        of its own, and ``find_similar_nodes`` (unlike ``find_similar_nodes_batch``)
+        reads it without ``GraphStorage._lock`` either. For this specific call
+        — clearing to ``{}`` — that window can only ever be observed as "no
+        results" on both sides of it, so it cannot produce a wrong answer here;
+        it just means the vector clear does not carry the same hard real-time
+        guarantee as the nodes/edges/graph/search-index swap above.
+        """
+        with self._lock:
+            previous_nodes = self.nodes
+            previous_edges = self.edges
+            previous_graph = self.graph
+            previous_searchable = self._searchable_text_cache
+            previous_embeddings = dict(self.vector_store.embeddings)
+            previous_metadata = self.graph_metadata
+            previous_generation = self._generation
+
+            def _restore() -> None:
+                # Each of these is the same kind of single-statement pointer
+                # reassignment as the swap below, so a concurrent unlocked
+                # reader sees either the fully-new graph (if it read before
+                # this ran) or the fully-restored-old one — never a mix. None
+                # of the old objects were ever mutated in place, so putting
+                # the references back is enough; nothing needs rebuilding.
+                self.nodes = previous_nodes
+                self.edges = previous_edges
+                self.graph = previous_graph
+                self._searchable_text_cache = previous_searchable
+                self.vector_store.load_vectors(previous_embeddings)
+                self.graph_metadata = previous_metadata
+                self._generation = previous_generation
+
+            new_nodes = {node.id: node for node in nodes}
+            new_edges = {edge.id: edge for edge in edges}
+
+            new_graph = nx.MultiDiGraph()
+            for node in new_nodes.values():
+                new_graph.add_node(node.id, data=node)
+            for edge in new_edges.values():
+                new_graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+            new_searchable = storage_search.LexicalIndex()
+            new_searchable.update(
+                {node.id: self._build_match_fields(node) for node in new_nodes.values()}
+            )
+            # Stamped into metadata so it survives this process exiting - see
+            # `generation` and `load()`. Without this, a process restart reads
+            # `_generation` back as 0 even though the graph on disk really is
+            # at this generation, and a crash-recovered job legitimately
+            # stamped with it is wrongly treated as superseded.
+            new_metadata = {
+                **previous_metadata,
+                "graph_generation": previous_generation + 1,
+            }
+
+            # From here on every assignment is a single atomic pointer swap —
+            # see the docstring above and `_restore` for why that matters.
+            self.nodes = new_nodes
+            self.edges = new_edges
+            self.graph = new_graph
+            self._searchable_text_cache = new_searchable
+            self.graph_metadata = new_metadata
+
+            # Drop every existing vector. The background embedding job (kind
+            # IMPORT) regenerates them against the new content; nothing here
+            # regenerates them synchronously.
+            self.vector_store.load_vectors({})
+            self._generation += 1
+
+            try:
+                self.save().result()
+            except Exception:
+                _restore()
+                raise
+
+    def commit_generation_embeddings(
+        self, generation: Optional[int], vectors: Dict[str, Any]
+    ) -> bool:
+        """Absorb freshly computed embeddings and persist them, but only if
+        the graph is still at ``generation`` — the generation the caller
+        captured before starting the (slow) work that produced ``vectors``.
+
+        This is the second half of the staleness guard ``generation``
+        documents: the import worker computes embeddings off to the side
+        (``VectorStore.compute_node_embeddings``, which does not touch the
+        index) and then calls this, inside the SAME lock
+        ``replace_all_nodes_and_edges`` holds for its whole body, to check and
+        commit as one atomic step. That is what closes the race a check-then-
+        act without a shared lock would leave open: a replace landing between
+        the check and the write.
+
+        Returns whether the vectors were committed. False means a later
+        ``replace_all_nodes_and_edges`` has already superseded ``generation``
+        — the caller's job is stale, its vectors describe content that is no
+        longer live, and it must report itself as superseded rather than
+        succeeded. ``generation`` of ``None`` always commits (an older/foreign
+        caller that never captured a generation to check against).
+        """
+        with self._lock:
+            if generation is not None and self._generation != generation:
+                return False
+            if vectors:
+                self.vector_store.absorb_embeddings(vectors)
+                self.save().result()
+            return True
 
     def update_node(
         self,

@@ -55,6 +55,15 @@ class AppConfig:
         default_factory=lambda: os.getenv("SESSIONS_DIR")
     )
 
+    # Durable store backing graph.json import's background embedding jobs
+    # (see backend/service/import_service.py). Defaults to an
+    # "import_jobs.db" SQLite file next to the graph file, so import jobs are
+    # durable (survive a restart) out of the box, the same way the graph file
+    # itself is.
+    import_jobs_db: Optional[str] = field(
+        default_factory=lambda: os.getenv("IMPORT_JOBS_DB")
+    )
+
     # Which persistence backend holds the graph. "file" is the default and is
     # what every deployment has run so far: the JSON file at GRAPH_FILE.
     # "postgres" selects the shared store that lets several instances write one
@@ -228,6 +237,20 @@ class AppConfig:
         if self.sessions_dir:
             return Path(self.sessions_dir)
         return self.get_graph_path().parent / "sessions"
+
+    def get_import_jobs_db_path(self) -> Path:
+        """Resolved path to the import-jobs SQLite database.
+
+        ``IMPORT_JOBS_DB`` when set (relative paths resolve against the graph
+        file's directory, like ``EMBEDDINGS_FILE``); otherwise "import_jobs.db"
+        beside the graph file.
+        """
+        if self.import_jobs_db:
+            path = Path(self.import_jobs_db)
+            if path.is_absolute():
+                return path
+            return self.get_graph_path().parent / path
+        return self.get_graph_path().parent / "import_jobs.db"
 
     def get_embeddings_path(self) -> Optional[Path]:
         """Resolved path to the embedding sidecar, or None to derive it.

@@ -198,6 +198,13 @@ class ExecutionStoreContractTests:
         after = store.fail(j.id, error="boom", now=T0)
         assert after.state == ExecutionState.CANCELLED
 
+    def test_cancel_can_carry_a_result(self, store):
+        """A caller cancelling a job it can explain (e.g. "superseded by a
+        later import") attaches a result the same way `complete` does."""
+        j = store.enqueue(_job())
+        store.cancel(j.id, result={"reason": "superseded"}, now=T0)
+        assert store.get(j.id).result == {"reason": "superseded"}
+
     # -- restart recovery ---------------------------------------------------
 
     def test_recover_stale_resets_expired_leases(self, store):
