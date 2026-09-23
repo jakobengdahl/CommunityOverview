@@ -70,16 +70,35 @@ journals each entity individually), `GraphStorage.replace_all_nodes_and_edges`
 swaps the entire in-memory graph the same way `load()` does when reading a
 file from disk, then persists it through the **existing** `save()` path — the
 same whole-graph, atomic (temp file + rename) write every checkpoint already
-uses, which also resets the graph journal and mints a fresh `journal_id` for
-the new lineage (see `docs/DATA_MANAGEMENT.md`, "Replacing the graph"). No new
-persistence mechanism was added; import reuses the one that already existed
-for exactly this shape of write.
+uses, which also folds the graph journal into the new snapshot and empties it,
+exactly as an ordinary checkpoint does. Unlike replacing `graph.json` from
+outside the running process, this does **not** mint a fresh `journal_id`: the
+import replaces the graph in place within the same `GraphStorage` instance, so
+the file's lineage identity is preserved across it, the same way it survives
+any other whole-graph save (see `docs/DATA_MANAGEMENT.md`, "Graph Journal",
+"The file keeps its identity across whole-graph saves"). No new persistence
+mechanism was added; import reuses the one that already existed for exactly
+this shape of write.
 
 On a save failure, the in-memory graph is restored to its pre-import snapshot
 before the exception propagates — the on-disk file is never at risk either way
 (the failed write's temp file is simply discarded by the atomic rename), so
 this in-memory restore is what keeps the LIVE graph consistent with what is
-durably on disk.
+durably on disk. The swap itself is a handful of single-statement pointer
+reassignments (`self.nodes = new_nodes`, etc.), built off to the side and
+published only once everything is ready, so a read that takes no lock — every
+read path in `GraphStorage` except the writers — always sees either the fully
+old graph or the fully new one, never a window with, say, nodes cleared but
+edges not yet rebuilt. Restoring on failure is then just putting the old
+references back, not rebuilding them.
+
+`GraphStorage.generation` is a counter bumped once, atomically, in the same
+swap: a caller that starts slow work against "the graph as it stands now" (the
+embedding job below) captures it first and checks it again — via
+`commit_generation_embeddings`, under the same lock the swap itself uses —
+before writing its result back, so a job whose graph a later import has
+already superseded is detected and discarded rather than silently overwriting
+that later import's content.
 
 Existing vectors are dropped unconditionally on replace
 (`vector_store.load_vectors({})`) rather than pruned to the surviving ids. A
@@ -126,7 +145,7 @@ record.
 
 ### 6. A degraded outcome is still a successful import
 
-Three distinct outcomes are represented on the job, all under the terminal
+Four distinct outcomes are represented on the job, all under the terminal
 states the execution contract already defines:
 
 | Case | Job terminal state | `embeddings_status` |
@@ -134,6 +153,7 @@ states the execution contract already defines:
 | Embeddings generated | `SUCCEEDED` | `succeeded` |
 | ML extras not installed (`ImportError` from `sentence-transformers`) | `SUCCEEDED` | `unavailable` |
 | A real failure (retried, then exhausted) | `DEAD_LETTER` (surfaced as `failed`) | — (`error` carries the reason) |
+| A later import replaced the graph before this job could commit (see below) | `CANCELLED` (surfaced as `cancelled`) | `superseded` |
 
 The middle row is deliberate: an environment without the optional ML extras —
 which is what this repo's own CI runs against — must not report a successful
@@ -144,9 +164,35 @@ job (with a message pointing at `scripts/generate_embeddings.py`), while any
 other exception goes through `fail()` — real retryable failure, not a permanent
 environment fact.
 
+The last row is not a failure either: a job that has fallen behind a later
+import — its own (potentially minutes-long) encode outlasted by a second
+`POST /import`, or a crash-recovered job resumed after one — must not write
+stale embeddings over the newer graph's content, nor report itself as
+`succeeded` for work it never actually committed, nor be retried as `failed`
+(there is nothing wrong to retry; it is simply obsolete). `cancel` is the one
+terminal state that already means neither of those, so the worker uses it, with
+`result.message` explaining why. `ExecutionStore.cancel` was extended to accept
+an optional `result`, exactly like `complete`'s, to carry that explanation. See
+`backend/agents/execution/import_worker.py`'s generation guard and
+`GraphStorage.commit_generation_embeddings`.
+
 The graph replace itself is **never** rolled back because of an embeddings
-failure of either kind: by the time embeddings run, the graph has already been
-durably committed and independently valid data.
+outcome of any kind: by the time embeddings run, the graph has already been
+durably committed and is independently valid data.
+
+### 7. A degraded outcome when embeddings never even start
+
+Enqueuing the embedding job and starting its drain thread happen right after
+`replace_all_nodes_and_edges` has already succeeded. If either of those two
+steps itself fails (e.g. the durable job store cannot be reached), the import
+is still reported as `success: true` / `graph_replaced: true` — the graph
+genuinely was replaced — but with `job_id: null` and
+`embeddings_status: "not_started"`, plus an `embeddings_message` explaining
+what to do (re-run `scripts/generate_embeddings.py`, or import again once the
+job store is reachable). Raising instead would read to a caller as the import
+itself having failed, and the natural response — retrying the import — would
+perform another full graph replace to fix a problem that has nothing to do
+with the graph.
 
 ## Consequences
 
