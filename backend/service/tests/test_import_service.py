@@ -176,6 +176,56 @@ class TestImportReplaceFailure:
         assert store.list_jobs() == []
 
 
+class TestEnqueueOrDrainStartFailureIsNotFatalToTheReplace:
+    def test_a_failure_to_start_embeddings_still_reports_the_replace_as_successful(
+        self, empty_storage: GraphStorage, monkeypatch
+    ):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("job store unreachable")
+
+        monkeypatch.setattr(import_service, "_enqueue_embedding_job", _boom)
+        store = InMemoryExecutionStore()
+
+        result = import_service.import_graph(
+            empty_storage, DefaultGraphAuthorizationHook(), store, _valid_document()
+        )
+
+        # The graph WAS replaced — that must never be reported as a failure,
+        # since retrying would perform another full replace to fix a problem
+        # that has nothing to do with the graph itself.
+        assert result["success"] is True
+        assert result["graph_replaced"] is True
+        assert result["node_count"] == 2
+        assert result["edge_count"] == 1
+        assert empty_storage.get_node("n1") is not None
+        assert empty_storage.get_node("n2") is not None
+        # But the caller must be able to tell embeddings never started, with
+        # a status distinct from every other embeddings_status.
+        assert result["job_id"] is None
+        assert result["embeddings_status"] == "not_started"
+        assert "embeddings_message" in result
+        assert store.list_jobs() == []
+
+    def test_a_failure_to_start_the_drain_thread_still_reports_the_replace_as_successful(
+        self, empty_storage: GraphStorage, monkeypatch
+    ):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("could not start worker thread")
+
+        monkeypatch.setattr(import_service, "_start_embedding_drain", _boom)
+        store = InMemoryExecutionStore()
+
+        result = import_service.import_graph(
+            empty_storage, DefaultGraphAuthorizationHook(), store, _valid_document()
+        )
+
+        assert result["success"] is True
+        assert result["graph_replaced"] is True
+        assert result["job_id"] is None
+        assert result["embeddings_status"] == "not_started"
+        assert empty_storage.get_node("n1") is not None
+
+
 class TestImportJobLookup:
     def test_get_import_job_returns_none_for_unknown_id(self):
         store = InMemoryExecutionStore()

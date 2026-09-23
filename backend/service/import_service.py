@@ -97,6 +97,7 @@ def _enqueue_embedding_job(
     *,
     node_count: int,
     backup_path: Optional[str],
+    graph_generation: int,
     correlation_id: Optional[str],
     session_id: Optional[str],
     origin: Optional[str],
@@ -111,6 +112,13 @@ def _enqueue_embedding_job(
             "phase": "embeddings",
             "node_count": node_count,
             "backup_path": backup_path,
+            # The graph's generation right after THIS import's replace
+            # landed. The worker re-checks this against the live graph
+            # before writing any embedding back, so a job left running past a
+            # later import (a slow encode, or a crash-recovered job) never
+            # overwrites that later import's content — see
+            # GraphStorage.commit_generation_embeddings.
+            "graph_generation": graph_generation,
         },
         correlation_id=correlation_id,
         session_id=session_id,
@@ -204,15 +212,51 @@ def import_graph(
             "backup_path": backup_path,
         }
 
-    job = _enqueue_embedding_job(
-        execution_store,
-        node_count=len(validation.nodes),
-        backup_path=backup_path,
-        correlation_id=event_correlation_id,
-        session_id=event_session_id,
-        origin=event_origin,
-    )
-    _start_embedding_drain(execution_store, storage)
+    # Captured right after the replace: this is the generation the background
+    # embedding job must still see live when it goes to commit its result.
+    graph_generation = storage.generation
+
+    try:
+        job = _enqueue_embedding_job(
+            execution_store,
+            node_count=len(validation.nodes),
+            backup_path=backup_path,
+            graph_generation=graph_generation,
+            correlation_id=event_correlation_id,
+            session_id=event_session_id,
+            origin=event_origin,
+        )
+        _start_embedding_drain(execution_store, storage)
+    except Exception as exc:
+        # The graph itself already replaced durably and successfully — only
+        # starting the embedding side of the import failed. Reporting this as
+        # a failure would invite a retry, and a retry means ANOTHER full
+        # replace, which is unnecessary (the graph is already correct) and
+        # briefly disruptive. Report success instead, with a status distinct
+        # from every other embeddings_status so the caller can tell embedding
+        # generation never even started and act on it (re-run
+        # scripts/generate_embeddings.py, or import again later) without
+        # re-replacing the graph for no reason.
+        logger.error(
+            "Import: graph replaced successfully but background embedding "
+            "generation could not be started: %s",
+            exc,
+        )
+        return {
+            "success": True,
+            "graph_replaced": True,
+            "node_count": len(validation.nodes),
+            "edge_count": len(validation.edges),
+            "job_id": None,
+            "embeddings_status": "not_started",
+            "embeddings_message": (
+                "The graph was replaced successfully, but background "
+                f"embedding generation could not be started: {exc}. Run "
+                "scripts/generate_embeddings.py, or POST the import again "
+                "later, to generate embeddings for it."
+            ),
+            "backup_path": backup_path,
+        }
 
     return {
         "success": True,

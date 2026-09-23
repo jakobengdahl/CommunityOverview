@@ -108,3 +108,57 @@ class TestImportEndpoint:
         assert response.status_code == 200
         jobs = response.json()
         assert any(job["id"] == job_id for job in jobs)
+
+
+class TestImportReturnsBeforeEmbeddingsComplete:
+    def test_the_response_returns_well_before_slow_embedding_generation_finishes(
+        self,
+        temp_dir,
+        import_job_store: InMemoryExecutionStore,
+        monkeypatch,
+    ):
+        """POST /import must not block on embedding generation (ADR 0006,
+        section 2: "commit is synchronous; embeddings are not"). Proven here
+        with a deliberately slow (mocked) encode step: the HTTP response must
+        come back long before that delay elapses, and the job only reaches a
+        terminal state afterwards."""
+        json_path = os.path.join(temp_dir, "test.json")
+        storage = GraphStorage(json_path=json_path)
+        service = GraphService(storage)
+        router = create_rest_router(service, import_job_store=import_job_store)
+        app = FastAPI()
+        app.include_router(router, prefix="/api/graph")
+        client = TestClient(app)
+
+        delay_seconds = 2.0
+
+        def _slow_compute(nodes):
+            time.sleep(delay_seconds)
+            return {node.id: [0.1, 0.2, 0.3] for node in nodes}
+
+        monkeypatch.setattr(
+            storage.vector_store, "compute_node_embeddings", _slow_compute
+        )
+
+        start = time.monotonic()
+        response = client.post("/api/graph/import", json=_valid_document())
+        elapsed = time.monotonic() - start
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["embeddings_status"] == "queued"
+        assert elapsed < delay_seconds / 2, (
+            f"POST /import took {elapsed:.3f}s against a {delay_seconds}s "
+            "embedding delay — it must return well before embeddings finish, "
+            "not block on them"
+        )
+
+        # Immediately after the (fast) response, the job must still be
+        # non-terminal — the slow step genuinely has not run yet.
+        immediate = client.get(f"/api/graph/import/{body['job_id']}").json()
+        assert immediate["status"] in ("queued", "running")
+
+        job = _wait_for_terminal(client, body["job_id"], timeout=delay_seconds + 5.0)
+        assert job["status"] == "succeeded"
+        assert job["embeddings_status"] == "succeeded"
