@@ -236,6 +236,139 @@ class TestCorruptOrTamperedArchiveRejectedBeforeAnyWrite:
         assert store.list_jobs() == []
 
 
+class TestPartiallyCompatibleArchiveRestoresCoveredSubsetAndScopesRegeneration:
+    """The archive is model-compatible, but ``embeddings.bin`` covers only
+    SOME of the imported graph's node ids — e.g. the exporting instance had
+    its own never-embedded nodes (``add_nodes``'s embedding step
+    warns-and-skips on failure rather than retrying). Reporting plain
+    ``"restored"`` success here would silently leave the uncovered nodes with
+    no vector and no job ever queued to fill the gap."""
+
+    def test_covered_nodes_restored_and_only_the_missing_node_is_regenerated(
+        self, temp_dir, tmp_path, monkeypatch
+    ):
+        source = _populated_storage_with_vectors(f"{temp_dir}/source.json")
+        target = GraphStorage(json_path=str(tmp_path / "target.json"))
+        store = InMemoryExecutionStore()
+
+        # The imported graph has THREE nodes; the archive's embeddings.bin
+        # (built from `source`, which only ever had two) covers just two of
+        # them.
+        document = {
+            "nodes": [
+                {"id": "n1", "type": "Actor", "name": "Alice"},
+                {"id": "n2", "type": "Actor", "name": "Bob"},
+                {"id": "n3", "type": "Actor", "name": "Carol"},
+            ],
+            "edges": [],
+        }
+        archive_bytes = graph_archive.build_archive_bytes(
+            document,
+            embedding_vectors=source.vector_store.export_vectors(),
+            embedding_model=target.vector_store.model_name,
+        )
+
+        seen_node_ids = []
+        original_compute = target.vector_store.compute_node_embeddings
+
+        def _tracking_compute(nodes):
+            seen_node_ids.extend(n.id for n in nodes)
+            return original_compute(nodes)
+
+        monkeypatch.setattr(
+            target.vector_store, "compute_node_embeddings", _tracking_compute
+        )
+
+        result = import_service.import_graph_archive(
+            target, DefaultGraphAuthorizationHook(), store, archive_bytes
+        )
+
+        # (c) distinguishable from a fully-restored success.
+        assert result["success"] is True
+        assert result["graph_replaced"] is True
+        assert result["node_count"] == 3
+        assert result["archive_compatible"] is True
+        assert result["embeddings_status"] == "restored_partial"
+        assert result["embeddings_status"] != "restored"
+        assert result["embedded_count"] == 2
+        assert result["pending_node_ids"] == ["n3"]
+        assert result["pending_count"] == 1
+        assert result["job_id"] is not None
+
+        # (a) the covered nodes are restored bit-identical. This happens
+        # synchronously inside the call above (`commit_generation_embeddings`,
+        # before the regeneration job is even enqueued) — the response's own
+        # `embedded_count`/`pending_node_ids` above already prove that
+        # ordering; the background job may since have raced ahead and
+        # completed by the time this runs, which is fine.
+        for node_id in ("n1", "n2"):
+            np.testing.assert_array_equal(
+                target.vector_store.get_vector_list(node_id),
+                source.vector_store.get_vector_list(node_id),
+            )
+
+        # (b) a regeneration job was created and is scoped to ONLY the
+        # missing node — it must not re-process the nodes already restored
+        # directly from the archive.
+        job = _wait_for_terminal(store, result["job_id"])
+        assert job.kind == ExecutionKind.IMPORT
+        assert job.state.value == "succeeded"
+        assert seen_node_ids == ["n3"]
+
+        # (d) once that job completes, every node ends up with a vector, and
+        # the directly-restored ones were not overwritten in the process.
+        assert target.vector_store.get_embedding_count() == 3
+        assert target.vector_store.has_embedding("n3") is True
+        for node_id in ("n1", "n2"):
+            np.testing.assert_array_equal(
+                target.vector_store.get_vector_list(node_id),
+                source.vector_store.get_vector_list(node_id),
+            )
+
+    def test_a_fully_covered_archive_is_unaffected_no_job_is_ever_enqueued(
+        self, temp_dir, tmp_path
+    ):
+        """Regression guard for the common case: when embeddings.bin DOES
+        cover every live node, behaviour must stay exactly what it was
+        before this partial-coverage handling existed."""
+        source = _populated_storage_with_vectors(f"{temp_dir}/source.json")
+        archive_bytes = _export_archive_bytes(source)
+
+        target = GraphStorage(json_path=str(tmp_path / "target.json"))
+        store = InMemoryExecutionStore()
+
+        result = import_service.import_graph_archive(
+            target, DefaultGraphAuthorizationHook(), store, archive_bytes
+        )
+
+        assert result["embeddings_status"] == "restored"
+        assert result["job_id"] is None
+        assert "pending_node_ids" not in result
+        assert store.list_jobs() == []
+
+
+class TestArchiveImportWritesAPreImportBackupOfThePreviousGraph:
+    def test_backup_reproduces_the_graph_the_archive_replaced(self, temp_dir, tmp_path):
+        source = _populated_storage_with_vectors(f"{temp_dir}/source.json")
+        archive_bytes = _export_archive_bytes(source)
+
+        target = GraphStorage(json_path=str(tmp_path / "target.json"))
+        target.add_nodes(
+            [Node(id="old-1", type=NodeType.ACTOR, name="Pre-existing")], []
+        )
+        store = InMemoryExecutionStore()
+
+        result = import_service.import_graph_archive(
+            target, DefaultGraphAuthorizationHook(), store, archive_bytes
+        )
+
+        backup_path = result["backup_path"]
+        assert backup_path is not None
+        with open(backup_path) as fh:
+            backup = json.load(fh)
+        assert {n["id"] for n in backup["nodes"]} == {"old-1"}
+
+
 class TestArchiveImportRequiresFullGraphAccessLikePlainImport:
     def test_narrowed_access_is_refused_without_touching_the_graph(
         self, temp_dir, tmp_path

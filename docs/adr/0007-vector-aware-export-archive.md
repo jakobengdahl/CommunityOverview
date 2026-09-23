@@ -149,6 +149,53 @@ incompatible archive — fall back to async regeneration against the graph as
 it now actually stands — rather than silently dropping the vectors or
 reporting a failure for a graph that, in fact, imported successfully.
 
+### 6a. A compatible archive that does not cover every node — the reverse mismatch from §5's
+
+§5 already covers a sidecar entry for a node id that is *not* in the imported
+`graph.json` (dropped silently — the exporting side's own `export_vectors()`
+would never produce one, but a hand-crafted archive could). The other
+direction — a node id *in* the imported `graph.json` that `embeddings.bin`
+has **no** vector for — is not hypothetical: `views.export_graph_archive`
+exports whatever `vector_store.export_vectors()` currently holds, and a real
+exporting graph can have some nodes with no embedding at all
+(`GraphStorage.add_nodes`'s embedding step warns-and-skips on any exception
+rather than retrying, and `import_worker.py`'s own `has_embedding` filter
+exists precisely because this is an anticipated steady state, not a
+corruption case).
+
+Restoring only the covered subset and still reporting plain
+`embeddings_status: "restored"` — as an earlier version of this ADR's
+implementation did — would be the *worst*-served of every outcome this ADR
+describes: it is indistinguishable from full success, no job is ever queued
+for the gap, and the uncovered nodes stay permanently unembedded until an
+operator happens to notice and re-runs `scripts/generate_embeddings.py` by
+hand. Unlike a fully incompatible archive (which regenerates everything) or a
+fully compatible one (which restores everything), a *partially* compatible
+archive was actually the one case where nothing ever closed the gap.
+
+The fix keeps both halves: the covered subset is still restored directly and
+synchronously (`commit_generation_embeddings`, exactly as in the fully
+covered case), **and** the same async regeneration job the incompatible path
+already uses is enqueued for the difference (`live_node_ids -
+vectors.keys()`), with a distinct status —
+`embeddings_status: "restored_partial"`, never bare `"restored"` — plus
+`embedded_count` (how many were restored directly), `pending_node_ids` and
+`pending_count` (what the job still owes). A fully covered archive is
+unaffected: the difference is empty, so the existing `job_id: null` /
+`"restored"` response is returned exactly as before — see
+`TestPartiallyCompatibleArchiveRestoresCoveredSubsetAndScopesRegeneration.test_a_fully_covered_archive_is_unaffected_no_job_is_ever_enqueued`
+in `test_import_service_archive.py`.
+
+The regeneration job needs **no** node-id list in its payload to be scoped
+correctly. `import_worker._run_one_import_job` already narrows its candidate
+nodes to `not vector_store.has_embedding(node.id)`, and by the time this job
+is enqueued the covered node ids already have their vectors committed — so
+the existing filter alone lands the job on exactly the still-missing nodes,
+without reprocessing the ones the archive already restored. This is verified,
+not assumed: the test above tracks exactly which node ids
+`compute_node_embeddings` is called with and asserts it is only the missing
+one.
+
 ### 7. Multipart upload, size-capped like the JSON path
 
 `POST /import/archive` takes the ZIP as a standard FastAPI

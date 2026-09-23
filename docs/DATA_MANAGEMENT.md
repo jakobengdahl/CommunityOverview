@@ -331,12 +331,24 @@ below. `checksums` only lists the members actually present.
    `POST /api/import` uses (see *Importing a graph* above) — the same
    validation errors, the same pre-import backup, the same atomic replace.
 3. **Restore or regenerate embeddings**, depending on what the manifest said:
-   - **Compatible** (a readable manifest, every declared checksum verified,
-     `embeddings.bin` present and non-empty, and its `embedding_model`
-     matches this instance's live model) — vectors are restored directly
-     from `embeddings.bin` into the live vector store, synchronously, with no
-     background job: `embeddings_status: "restored"`, `job_id: null`,
-     `archive_compatible: true`.
+   - **Compatible and fully covered** (a readable manifest, every declared
+     checksum verified, `embeddings.bin` present and non-empty, its
+     `embedding_model` matches this instance's live model, and it has a
+     vector for every node id in the imported graph) — vectors are restored
+     directly from `embeddings.bin` into the live vector store,
+     synchronously, with no background job: `embeddings_status: "restored"`,
+     `job_id: null`, `archive_compatible: true`.
+   - **Compatible but only partially covered** (same as above, but
+     `embeddings.bin` has a vector for only SOME of the imported graph's node
+     ids — e.g. the exporting instance itself had some never-embedded nodes)
+     — the covered subset is restored the same way, synchronously, **and** a
+     background job is enqueued to (re)generate embeddings for the rest, so
+     the gap is never silently left open: `embeddings_status:
+     "restored_partial"`, `job_id` set, `archive_compatible: true`,
+     `embedded_count` (how many were restored directly), `pending_node_ids`
+     and `pending_count` (what the job still owes). The job needs no explicit
+     node-id scoping — the background worker already skips any node that
+     already has a vector, which is exactly the subset just restored.
    - **Incompatible or absent** (a different `embedding_model`, no
      `embeddings.bin` in the archive at all, or a manifest that is missing or
      unreadable — including the "someone zipped a plain `graph.json` export

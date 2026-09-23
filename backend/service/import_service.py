@@ -270,17 +270,41 @@ def _enqueue_and_start_regeneration(
     event_correlation_id: Optional[str],
     regeneration_reason: Optional[str] = None,
     archive_compatible: Optional[bool] = None,
+    embeddings_status: str = "queued",
+    extra_result_fields: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Enqueue and start the async embedding-regeneration job, and build the
     success response for it. Shared by ``import_graph`` (which always takes
-    this path) and ``import_graph_archive`` (which takes it whenever the
-    archive's vectors cannot be used directly) — see the ADR.
+    this path), ``import_graph_archive``'s fully-incompatible fallback, and
+    ``import_graph_archive``'s *partially*-compatible case (see
+    docs/adr/0007-vector-aware-export-archive.md, "A compatible archive that
+    does not cover every node").
 
     ``regeneration_reason``, when given, explains WHY embeddings are being
     regenerated rather than restored (an archive-only concept; plain
     ``import_graph`` never sets it). ``archive_compatible`` is included in the
     result only when the caller is the archive path, so a plain
     ``POST /import`` response keeps its exact pre-existing shape.
+
+    ``embeddings_status`` overrides the default ``"queued"`` label — the
+    partially-compatible archive case uses ``"restored_partial"`` so the
+    caller can tell it apart from a fully-incompatible archive's plain
+    ``"queued"``, since here SOME vectors were already restored directly.
+    ``extra_result_fields`` (e.g. ``embedded_count``, ``pending_node_ids``)
+    is merged into whichever result dict below actually gets returned,
+    including the "job could not even be started" fallback — those vectors
+    were already committed to the live graph regardless of whether the
+    follow-up regeneration job could be started, and the caller should not
+    lose sight of that.
+
+    The regeneration job is deliberately NOT given an explicit list of node
+    ids to scope itself to. ``import_worker._run_one_import_job`` already
+    filters candidate nodes with ``vector_store.has_embedding(node.id)``, and
+    by the time this is called for the partial-restore case, the covered
+    node ids already have their vectors committed
+    (``commit_generation_embeddings`` above) — so that filter alone lands the
+    job on exactly the still-missing node ids, with no worker-side change
+    needed.
     """
     try:
         job = _enqueue_embedding_job(
@@ -325,6 +349,8 @@ def _enqueue_and_start_regeneration(
         }
         if archive_compatible is not None:
             result["archive_compatible"] = archive_compatible
+        if extra_result_fields:
+            result.update(extra_result_fields)
         return result
 
     result = {
@@ -333,13 +359,15 @@ def _enqueue_and_start_regeneration(
         "node_count": outcome.node_count,
         "edge_count": outcome.edge_count,
         "job_id": job.id,
-        "embeddings_status": "queued",
+        "embeddings_status": embeddings_status,
         "backup_path": outcome.backup_path,
     }
     if regeneration_reason is not None:
         result["embeddings_message"] = f"Regenerating embeddings: {regeneration_reason}"
     if archive_compatible is not None:
         result["archive_compatible"] = archive_compatible
+    if extra_result_fields:
+        result.update(extra_result_fields)
     return result
 
 
@@ -386,7 +414,13 @@ def import_graph_archive(
 
       * a compatible archive (checksums verified, ``embedding_model`` matches
         this instance's live model, ``embeddings.bin`` present and non-empty)
-        has its vectors restored directly and synchronously — no async job;
+        has its vectors restored directly and synchronously — no async job —
+        PROVIDED ``embeddings.bin`` covers every node id in the imported
+        graph. When it covers only some of them (the exporting instance had
+        its own never-embedded nodes), the covered subset is still restored
+        synchronously, but a scoped async job is also enqueued for the rest:
+        ``embeddings_status: "restored_partial"``, not the same success as a
+        full restore;
       * anything else (mismatch, missing/unreadable manifest, no
         ``embeddings.bin`` at all) still imports the graph, and falls back to
         the same async regeneration job ``import_graph`` always uses, with a
@@ -424,17 +458,58 @@ def import_graph_archive(
         if vectors and storage.commit_generation_embeddings(
             outcome.graph_generation, vectors
         ):
-            return {
-                "success": True,
-                "graph_replaced": True,
-                "node_count": outcome.node_count,
-                "edge_count": outcome.edge_count,
-                "job_id": None,
-                "embeddings_status": "restored",
-                "embedded_count": len(vectors),
-                "backup_path": outcome.backup_path,
-                "archive_compatible": True,
-            }
+            missing_node_ids = sorted(live_node_ids - vectors.keys())
+            if not missing_node_ids:
+                return {
+                    "success": True,
+                    "graph_replaced": True,
+                    "node_count": outcome.node_count,
+                    "edge_count": outcome.edge_count,
+                    "job_id": None,
+                    "embeddings_status": "restored",
+                    "embedded_count": len(vectors),
+                    "backup_path": outcome.backup_path,
+                    "archive_compatible": True,
+                }
+            # The archive is model-compatible and its embeddings.bin was
+            # restored for every node id it actually covered, but that is
+            # not every node in the imported graph — e.g. the exporting
+            # instance itself had some nodes that were never embedded
+            # (add_nodes's embedding step warns-and-skips on failure rather
+            # than retrying; see backend/agents/execution/import_worker.py's
+            # own has_embedding filter, which already anticipates a graph
+            # with a partially-embedded node set as a normal steady state).
+            # Reporting this as plain "restored" success, with no job ever
+            # queued to fill the gap, would be the worst-served of the three
+            # outcomes: it looks identical to full success while leaving
+            # some nodes permanently unembedded until an operator happens to
+            # notice. Report a status that says so, and enqueue a
+            # regeneration job for the remainder — see
+            # _enqueue_and_start_regeneration's docstring for why that job
+            # needs no explicit node-id scoping: the worker's
+            # has_embedding filter already skips the node ids this call
+            # just committed, so it only ever processes the rest.
+            return _enqueue_and_start_regeneration(
+                storage,
+                execution_store,
+                outcome,
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+                regeneration_reason=(
+                    f"the archive's {graph_archive.EMBEDDINGS_MEMBER} covered "
+                    f"{len(vectors)} of {outcome.node_count} node(s) in the "
+                    f"imported graph; regenerating the remaining "
+                    f"{len(missing_node_ids)}"
+                ),
+                archive_compatible=True,
+                embeddings_status="restored_partial",
+                extra_result_fields={
+                    "embedded_count": len(vectors),
+                    "pending_node_ids": missing_node_ids,
+                    "pending_count": len(missing_node_ids),
+                },
+            )
         # Either nothing in the archive's vectors actually matched a node id
         # this import just committed, or (far more rarely — the two calls
         # below are not atomic with each other) a concurrent import replaced
