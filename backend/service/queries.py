@@ -211,6 +211,22 @@ def search_graph(
     all_nodes = visible_local_results + federated_nodes
     all_edges = connecting_edges + federated_edges
 
+    # A federated node adopted via adopt_federated_node gets a local reference
+    # stub keyed by the same id it has in the federation cache (see
+    # mutations.adopt_federated_node), so the id can legitimately appear in
+    # both visible_local_results and federated_nodes. Dedup here — before the
+    # limit trim and the federated/total counts below — the same way edges are
+    # deduped further down; local results come first in the list above, so the
+    # local copy wins.
+    deduped_all_nodes = []
+    seen_node_ids: set = set()
+    for node in all_nodes:
+        if node.id in seen_node_ids:
+            continue
+        seen_node_ids.add(node.id)
+        deduped_all_nodes.append(node)
+    all_nodes = deduped_all_nodes
+
     visible_nodes, visible_edges = access.filter_nodes_and_edges(
         nodes=all_nodes,
         edges=all_edges,

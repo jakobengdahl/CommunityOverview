@@ -61,6 +61,54 @@ def test_adopt_federated_node_creates_local_clone(tmp_path):
     assert len(result["added_edge_ids"]) == 1
 
 
+def test_adopted_node_appears_once_in_search_graph_with_correct_federated_count(
+    tmp_path,
+):
+    """Regression test for task-smallfix-search-graph-node-dedup.
+
+    adopt_federated_node adds a local reference stub keyed by the same id the
+    node has in the federation cache, so that id is visible from both local
+    storage and the federation cache. search_graph must dedup it (G1) rather
+    than returning it twice and inflating `total`. The freshly adopted local
+    node is a full local copy the user now owns, so it must not count as
+    federated (G2) -- but the reference stub kept for lineage still legitimately
+    represents a node living in the origin graph, so it should (G3).
+    """
+    service = _service_with_cached_federated_node(tmp_path)
+
+    adopt_result = service.adopt_federated_node(
+        "federated::esam-main::remote-1", local_name="Local clone"
+    )
+    assert adopt_result["success"] is True
+    local_node_id = adopt_result["adopted_node"]["id"]
+    stub_node_id = adopt_result["source_node"]["id"]
+    assert stub_node_id == "federated::esam-main::remote-1"
+
+    search_result = service.search_graph(query="")
+    node_ids = [node["id"] for node in search_result["nodes"]]
+
+    # G1: the id shared between local storage and the federation cache appears once.
+    assert node_ids.count(stub_node_id) == 1
+    assert node_ids.count(local_node_id) == 1
+    assert len(node_ids) == 2
+    assert search_result["total"] == 2
+
+    # G2: the adopted local node's own metadata no longer carries the
+    # federation-cache bookkeeping that would make it match as federated.
+    local_node_metadata = next(
+        node["metadata"]
+        for node in search_result["nodes"]
+        if node["id"] == local_node_id
+    )
+    assert not local_node_metadata.get("origin_graph_id")
+    assert not local_node_metadata.get("is_federated")
+    # Lineage is preserved, just not at the top level.
+    assert local_node_metadata["adopted_from"]["origin_graph_id"] == "esam-main"
+
+    # G3: only the origin reference stub counts as federated.
+    assert search_result["federation"]["federated_nodes"] == 1
+
+
 def test_adopt_federated_node_requires_existing_cached_node(tmp_path):
     service = _service_with_cached_federated_node(tmp_path)
 

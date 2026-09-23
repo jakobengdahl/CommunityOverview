@@ -551,6 +551,25 @@ def set_edges_archived(
 # Federation adoption
 # ---------------------------------------------------------------------------
 
+# Bookkeeping keys FederationManager._build_cache stamps onto a cached
+# federated node's metadata (see backend/federation/manager.py). adopt_federated_node
+# starts the new local node's metadata as a copy of the cached node's metadata, so
+# these must be stripped: left in place, they make the freshly adopted node -- a
+# full local copy the user now owns -- keep matching access.node_graph_id and
+# reporting as federated (e.g. inflating search_graph's federated_nodes count),
+# and could make graph-scope narrowing hide it as if it still lived in the
+# origin graph. The node's federation lineage is preserved separately, nested
+# under metadata["adopted_from"].
+_FEDERATION_BOOKKEEPING_METADATA_KEYS = (
+    "origin_graph_id",
+    "origin_graph_name",
+    "origin_node_id",
+    "federation_distance",
+    "federation_path",
+    "sync_state",
+    "is_federated",
+)
+
 
 def adopt_federated_node(
     storage: "GraphStorage",
@@ -635,6 +654,8 @@ def adopt_federated_node(
                 }
 
     metadata = dict(source_node.metadata or {})
+    for key in _FEDERATION_BOOKKEEPING_METADATA_KEYS:
+        metadata.pop(key, None)
     metadata.update(
         {
             "is_adopted": True,
