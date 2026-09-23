@@ -229,6 +229,54 @@ class TestReplaceBumpsGeneration:
         assert storage.generation == generation
 
 
+class TestGenerationSurvivesAProcessRestart:
+    """`_generation` is a plain in-memory int and resets to 0 whenever a new
+    `GraphStorage` object is constructed. A real process restart is exactly
+    that: a fresh object reading a persisted store, not the same object
+    continuing to run. Without persisting the counter, a crash-recovered
+    import job stamped with a real, pre-crash generation would be compared
+    against a freshly-reset 0 and wrongly treated as superseded even though no
+    later import ever happened — see `backend/agents/tests/test_import_worker.py`
+    for that failure mode end-to-end against the real embedding worker."""
+
+    def test_generation_is_zero_for_a_graph_that_was_never_imported_into(
+        self, backend: _SnapshotBackend
+    ):
+        storage = GraphStorage(persistence_backend=backend)
+        storage.add_nodes([_old_node()], [])
+        storage.flush()
+
+        restarted = GraphStorage(persistence_backend=backend)
+
+        assert restarted.generation == 0
+
+    def test_generation_round_trips_through_a_fresh_instance_of_the_same_store(
+        self, storage: GraphStorage, backend: _SnapshotBackend
+    ):
+        storage.replace_all_nodes_and_edges([_old_node()], [])
+        storage.replace_all_nodes_and_edges([_new_node()], [])
+        generation_before_restart = storage.generation
+        assert generation_before_restart == 2
+
+        # A NEW GraphStorage object reading the same persisted store — the
+        # actual shape of a process restart, as opposed to reusing `storage`,
+        # which would tell us nothing about persistence at all.
+        restarted = GraphStorage(persistence_backend=backend)
+
+        assert restarted.generation == generation_before_restart
+
+    def test_a_further_replace_after_restart_continues_the_count_rather_than_resetting_it(
+        self, storage: GraphStorage, backend: _SnapshotBackend
+    ):
+        storage.replace_all_nodes_and_edges([_old_node()], [])
+        restarted = GraphStorage(persistence_backend=backend)
+        assert restarted.generation == 1
+
+        restarted.replace_all_nodes_and_edges([_new_node()], [])
+
+        assert restarted.generation == 2
+
+
 class TestReplaceIsAtomicUnderConcurrentUnlockedReads:
     """Every OTHER read path on GraphStorage (get_node, get_all_nodes,
     get_all_edges, get_stats, ...) reads ``self.nodes`` / ``self.edges`` /

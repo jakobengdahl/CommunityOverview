@@ -167,6 +167,81 @@ class TestStartupRecovery:
         stored = store.get(claimed.id)
         assert stored.state == ExecutionState.SUCCEEDED
 
+    def test_a_recovered_job_survives_a_real_process_restart_with_no_intervening_import(
+        self, store: InMemoryExecutionStore, storage: GraphStorage, tmp_path
+    ):
+        """The `storage` fixture reused across "crash" and "recovery" in the
+        test above never exercises what a real restart does: `_generation`
+        resets to 0 on a brand-new `GraphStorage` object, and only a
+        PERSISTED generation survives that. Here recovery runs against a
+        second, freshly-constructed `GraphStorage` reading the same on-disk
+        graph.json — a real restart — with no second import in between, so
+        the job's stamped generation must still match and the job must
+        complete normally rather than being wrongly marked superseded."""
+        storage.replace_all_nodes_and_edges(
+            [Node(id="n1", type=NodeType.ACTOR, name="Alice")], []
+        )
+        job = store.enqueue(
+            _import_job(payload={"graph_generation": storage.generation})
+        )
+        claimed = store.claim_next("crashed-worker", lease_seconds=0.01)
+        assert claimed is not None
+        time.sleep(0.05)
+
+        restarted = GraphStorage(
+            json_path=str(tmp_path / "graph.json"),
+            embeddings_path=str(tmp_path / "graph.embeddings.bin"),
+        )
+        # Sanity check on the fix itself: the persisted generation must have
+        # survived the restart before we can say anything about the job.
+        assert restarted.generation == storage.generation
+
+        processed = recover_import_jobs(store, restarted)
+
+        assert processed == 1
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.SUCCEEDED
+        # Not superseded: the ML extras are absent in this test environment
+        # (see module docstring), so "succeeded" degrades to "unavailable",
+        # but either is the real outcome — "superseded" would mean the bug
+        # this test exists to catch is back.
+        assert stored.result["embeddings_status"] in ("succeeded", "unavailable")
+
+    def test_a_recovered_job_is_still_superseded_across_a_real_process_restart(
+        self, store: InMemoryExecutionStore, storage: GraphStorage, tmp_path
+    ):
+        """Same restart shape as above, but a second import genuinely lands
+        (on the restarted instance) before the recovered job runs. The
+        persisted-generation fix must not make the guard blind to a REAL
+        supersession — it only has to stop reporting a FALSE one."""
+        storage.replace_all_nodes_and_edges(
+            [Node(id="n1", type=NodeType.ACTOR, name="First content")], []
+        )
+        stale_generation = storage.generation
+        job = store.enqueue(_import_job(payload={"graph_generation": stale_generation}))
+        claimed = store.claim_next("crashed-worker", lease_seconds=0.01)
+        assert claimed is not None
+        time.sleep(0.05)
+
+        restarted = GraphStorage(
+            json_path=str(tmp_path / "graph.json"),
+            embeddings_path=str(tmp_path / "graph.embeddings.bin"),
+        )
+        assert restarted.generation == stale_generation
+        # A second import lands on the restarted instance before the
+        # recovered job ever runs — the genuine "later import happened" case.
+        restarted.replace_all_nodes_and_edges(
+            [Node(id="n2", type=NodeType.ACTOR, name="Second content")], []
+        )
+
+        processed = recover_import_jobs(store, restarted)
+
+        assert processed == 1
+        stored = store.get(job.id)
+        assert stored.state == ExecutionState.CANCELLED
+        assert stored.result["embeddings_status"] == "superseded"
+        assert not restarted.vector_store.has_embedding("n2")
+
 
 class TestGenerationStalenessGuard:
     """A job's embeddings must never be written back once a later import has

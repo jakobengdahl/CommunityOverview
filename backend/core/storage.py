@@ -811,6 +811,26 @@ class GraphStorage:
                 # place, so anything holding a reference to one still sees the
                 # graph this instance serves.
                 self.graph_metadata = graph_metadata
+                # `graph_generation` is this instance's only durable record of
+                # `_generation` (see the property below): it rides in
+                # `graph_metadata` exactly like every other extra key here -
+                # written by `replace_all_nodes_and_edges`, preserved
+                # unchanged by every other save via `_snapshot_data`'s
+                # `**self.graph_metadata` spread, and read back here on every
+                # load, including a real process restart. A file with no such
+                # key predates this field or was never imported into, and
+                # both mean the same thing: no import job anywhere could be
+                # carrying a generation to collide with, so 0 is the correct
+                # default rather than a guess.
+                raw_generation = graph_metadata.get("graph_generation", 0)
+                try:
+                    self._generation = int(raw_generation)
+                except (TypeError, ValueError):
+                    print(
+                        f"Warning: ignoring non-integer graph_generation "
+                        f"{raw_generation!r} in metadata; defaulting to 0"
+                    )
+                    self._generation = 0
                 # Order matters three ways here, and two of them fight.
                 #
                 # The index must never be MISSING an id `nodes` holds, or the
@@ -2452,6 +2472,14 @@ class GraphStorage:
         ``commit_generation_embeddings`` afterwards, so a replace that lands
         while that work is in flight is detected before its result is written
         back, rather than silently overwriting a newer graph's content.
+
+        Persisted as ``graph_generation`` in ``graph_metadata`` (written by
+        ``replace_all_nodes_and_edges``, read back by ``load()``), so this
+        value survives a process restart rather than resetting to 0 — a
+        crash-recovered import job (``recover_import_jobs``) is stamped with
+        a real generation from before the crash, and comparing it against an
+        in-memory counter that forgot everything on restart would make every
+        such job look superseded even when no later import ever happened.
         """
         with self._lock:
             return self._generation
@@ -2487,18 +2515,31 @@ class GraphStorage:
         without their vectors, for as long as the rebuild takes. Building the
         new nodes/edges/graph/search-index off to the side FIRST and then
         publishing each as one attribute assignment means an unlocked reader
-        only ever sees the fully-old graph or the fully-new one, never a
-        window in between — and it is what lets a failed save simply put the
-        old references back (see ``_restore`` below) instead of having to
-        rebuild them.
+        of THOSE containers only ever sees the fully-old graph or the
+        fully-new one, never a window in between — and it is what lets a
+        failed save simply put the old references back (see ``_restore``
+        below) instead of having to rebuild them.
 
         Stale vectors are dropped rather than carried over: a replaced graph is
         a new dataset, and keeping an old vector under a reused id would hand a
         new node someone else's embedding (see docs/DATA_MANAGEMENT.md,
         "Replacing the graph"). The caller is expected to enqueue a background
         job that regenerates them; this method never blocks on embeddings, and
-        bumps ``generation`` so that job can later tell whether it is still
-        working against the graph this call committed.
+        bumps ``generation`` (persisted into ``graph_metadata`` — see the
+        property below and ``load()`` — so it survives this process
+        restarting) so that job can later tell whether it is still working
+        against the graph this call committed.
+
+        The vector-store clear (``self.vector_store.load_vectors({})`` below)
+        is NOT part of the same atomic-pointer-swap guarantee: ``load_vectors``
+        is pre-existing ``VectorStore`` code that makes two separate
+        assignments (the embeddings dict, then the search matrix) with no lock
+        of its own, and ``find_similar_nodes`` (unlike ``find_similar_nodes_batch``)
+        reads it without ``GraphStorage._lock`` either. For this specific call
+        — clearing to ``{}`` — that window can only ever be observed as "no
+        results" on both sides of it, so it cannot produce a wrong answer here;
+        it just means the vector clear does not carry the same hard real-time
+        guarantee as the nodes/edges/graph/search-index swap above.
         """
         with self._lock:
             previous_nodes = self.nodes
@@ -2537,6 +2578,15 @@ class GraphStorage:
             new_searchable.update(
                 {node.id: self._build_match_fields(node) for node in new_nodes.values()}
             )
+            # Stamped into metadata so it survives this process exiting - see
+            # `generation` and `load()`. Without this, a process restart reads
+            # `_generation` back as 0 even though the graph on disk really is
+            # at this generation, and a crash-recovered job legitimately
+            # stamped with it is wrongly treated as superseded.
+            new_metadata = {
+                **previous_metadata,
+                "graph_generation": previous_generation + 1,
+            }
 
             # From here on every assignment is a single atomic pointer swap —
             # see the docstring above and `_restore` for why that matters.
@@ -2544,6 +2594,7 @@ class GraphStorage:
             self.edges = new_edges
             self.graph = new_graph
             self._searchable_text_cache = new_searchable
+            self.graph_metadata = new_metadata
 
             # Drop every existing vector. The background embedding job (kind
             # IMPORT) regenerates them against the new content; nothing here
