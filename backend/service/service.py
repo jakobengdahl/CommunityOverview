@@ -565,6 +565,12 @@ class GraphService:
     def export_graph(self) -> Dict[str, Any]:
         return views.export_graph(self._storage, self._authorization_hook)
 
+    def export_graph_archive(self) -> Dict[str, Any]:
+        """Build the vector-aware export archive (ZIP). See
+        ``backend.service.graph_archive`` and
+        docs/adr/0007-vector-aware-export-archive.md."""
+        return views.export_graph_archive(self._storage, self._authorization_hook)
+
     # ==================== Import ====================
 
     def import_graph(
@@ -590,6 +596,29 @@ class GraphService:
             self._authorization_hook,
             execution_store,
             document,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+        )
+
+    def import_graph_archive(
+        self,
+        archive_bytes: bytes,
+        execution_store: "ExecutionStore",
+        event_origin: Optional[str] = None,
+        event_session_id: Optional[str] = None,
+        event_correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Whole-graph REPLACE import from a vector-aware export archive (ZIP).
+        See ``backend.service.import_service.import_graph_archive`` and
+        docs/adr/0007-vector-aware-export-archive.md.
+        """
+        return import_service.import_graph_archive(
+            self._storage,
+            self._authorization_hook,
+            execution_store,
+            archive_bytes,
             event_origin=event_origin,
             event_session_id=event_session_id,
             event_correlation_id=event_correlation_id,
