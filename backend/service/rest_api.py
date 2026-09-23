@@ -20,7 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
-from typing import List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body, Request, Path
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
@@ -48,6 +48,9 @@ from backend.core.storage_search import MATCH_MODE_SUBSTRING, validate_match_mod
 from backend.runtime.authorization import use_request_authorization
 
 from .service import GraphService
+
+if TYPE_CHECKING:
+    from backend.agents.execution import ExecutionStore
 
 logger = logging.getLogger(__name__)
 
@@ -1433,6 +1436,67 @@ def _register_export_endpoints(router: APIRouter, service: GraphService) -> None
         return result
 
 
+_IMPORT_ERROR_STATUS = {
+    "validation_failed": 422,
+    "import_requires_full_graph_access": 409,
+    "backup_failed": 503,
+    "replace_failed": 502,
+}
+
+
+def _register_import_endpoints(
+    router: APIRouter,
+    service: GraphService,
+    import_job_store: "ExecutionStore",
+) -> None:
+    @router.post("/import")
+    async def import_graph(
+        request: Request, document: Dict[str, Any] = Body(...)
+    ) -> Dict[str, Any]:
+        """
+        Replace the ENTIRE active graph with ``document`` (same shape as
+        ``GET /export``: a ``nodes`` list and an ``edges`` list).
+
+        The document is fully validated (types, duplicate ids, dangling
+        references) before anything is written; a validation failure leaves
+        the graph untouched. On success the graph has already been replaced
+        and a durable background job (``job_id``) is (re)generating search
+        embeddings — poll ``GET /import/{job_id}`` for its status. This is a
+        REPLACE, not a merge: every node/edge id in ``document`` becomes the
+        live graph exactly, and nothing from the previous graph survives
+        unless it also appears in ``document``.
+        """
+        with use_request_authorization(headers=request.headers):
+            result = service.import_graph(
+                document,
+                import_job_store,
+                event_origin=request.headers.get("x-event-origin"),
+                event_correlation_id=request.headers.get("x-correlation-id"),
+            )
+        _raise_for_access_denied(result)
+        if not result.get("success", True):
+            status_code = _IMPORT_ERROR_STATUS.get(result.get("error_code"), 400)
+            raise HTTPException(status_code=status_code, detail=result)
+        return result
+
+    @router.get("/import/{job_id}")
+    async def get_import_job(job_id: str) -> Dict[str, Any]:
+        """Get the status of one import's background embedding job."""
+        job = service.get_import_job(import_job_store, job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404, detail=f"Import job '{job_id}' not found"
+            )
+        return job
+
+    @router.get("/import")
+    async def list_import_jobs(
+        limit: int = Query(100, ge=1, le=500),
+    ) -> List[Dict[str, Any]]:
+        """List import jobs, newest first."""
+        return service.list_import_jobs(import_job_store, limit=limit)
+
+
 def _register_custom_interface_endpoints(
     router: APIRouter,
     service: GraphService,
@@ -1536,6 +1600,7 @@ def create_rest_router(
     prefix: str = "",
     session_manager=None,
     rest_interfaces: Optional[List[RestInterfaceConfig]] = None,
+    import_job_store: Optional["ExecutionStore"] = None,
 ) -> APIRouter:
     """
     Create a FastAPI router with all graph operation endpoints.
@@ -1549,11 +1614,21 @@ def create_rest_router(
         rest_interfaces: Optional explicit list of config-driven dedicated REST
             interfaces. When None, they are read from the loaded schema config
             (``config_loader.get_rest_interfaces()``).
+        import_job_store: Durable store backing ``/import``'s background
+            embedding jobs. When None, an ``InMemoryExecutionStore`` is used —
+            fine for tests and standalone runs, but import jobs then do NOT
+            survive a restart; production wiring (``backend/api_host/server.py``)
+            passes a durable ``SqliteExecutionStore``.
 
     Returns:
         Configured APIRouter
     """
     router = APIRouter(prefix=prefix, tags=["graph"])
+
+    if import_job_store is None:
+        from backend.agents.execution import InMemoryExecutionStore
+
+        import_job_store = InMemoryExecutionStore()
 
     _register_search_endpoints(router, service)
     _register_similarity_endpoints(router, service)
@@ -1563,6 +1638,7 @@ def create_rest_router(
     _register_metadata_endpoints(router, service)
     _register_views_endpoints(router, service)
     _register_export_endpoints(router, service)
+    _register_import_endpoints(router, service, import_job_store)
     if session_manager is not None:
         _register_session_endpoints(router, service, session_manager)
 

@@ -2431,6 +2431,84 @@ class GraphStorage:
                     message=f"Error during add: {str(e)}",
                 )
 
+    def replace_all_nodes_and_edges(self, nodes: List[Node], edges: List[Edge]) -> None:
+        """
+        Atomically replace the ENTIRE graph with ``nodes``/``edges``.
+
+        This is the commit step of a whole-graph import (see
+        ``backend/service/graph_import.py``): the caller has already validated
+        the document (types, duplicate ids, dangling references) before this is
+        ever invoked, so this method assumes ``nodes``/``edges`` are internally
+        consistent and only does the swap-and-persist. It does NOT merge into
+        the existing graph and does not resolve names to ids the way
+        ``add_nodes`` does — every id here becomes the id in the live graph.
+
+        Thread-safe and, on a persistence failure, self-healing: the in-memory
+        image is snapshotted before the swap and restored if the durable write
+        fails partway, so a failed import never leaves the live graph pointing
+        at content that was never made durable. The on-disk file itself is
+        never at risk either way — ``save()`` writes it atomically (temp file +
+        rename), so a write that fails leaves the previous file untouched.
+
+        Stale vectors are dropped rather than carried over: a replaced graph is
+        a new dataset, and keeping an old vector under a reused id would hand a
+        new node someone else's embedding (see docs/DATA_MANAGEMENT.md,
+        "Replacing the graph"). The caller is expected to enqueue a background
+        job that regenerates them; this method never blocks on embeddings.
+        """
+        with self._lock:
+            previous_nodes = dict(self.nodes)
+            previous_edges = dict(self.edges)
+            previous_graph = self.graph.copy()
+            previous_embeddings = dict(self.vector_store.embeddings)
+            previous_metadata = dict(self.graph_metadata or {})
+
+            def _restore() -> None:
+                self.nodes.clear()
+                self.nodes.update(previous_nodes)
+                self.edges.clear()
+                self.edges.update(previous_edges)
+                # Rebuilt from the restored nodes (like load()) rather than
+                # snapshotted: LexicalIndex caches a derived corpus internally,
+                # so restoring it correctly means restoring the same nodes it
+                # was built from, not swapping in a saved reference.
+                self._searchable_text_cache.clear()
+                for node in previous_nodes.values():
+                    self._searchable_text_cache[node.id] = self._build_match_fields(
+                        node
+                    )
+                self.graph = previous_graph
+                self.vector_store.load_vectors(previous_embeddings)
+                self.graph_metadata = previous_metadata
+
+            new_nodes = {node.id: node for node in nodes}
+            new_edges = {edge.id: edge for edge in edges}
+
+            self._searchable_text_cache.clear()
+            self.nodes.clear()
+            self.nodes.update(new_nodes)
+            self.edges.clear()
+            self.edges.update(new_edges)
+            for node in new_nodes.values():
+                self._searchable_text_cache[node.id] = self._build_match_fields(node)
+
+            self.graph.clear()
+            for node in new_nodes.values():
+                self.graph.add_node(node.id, data=node)
+            for edge in new_edges.values():
+                self.graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+
+            # Drop every existing vector. The background embedding job (kind
+            # IMPORT) regenerates them against the new content; nothing here
+            # regenerates them synchronously.
+            self.vector_store.load_vectors({})
+
+            try:
+                self.save().result()
+            except Exception:
+                _restore()
+                raise
+
     def update_node(
         self,
         node_id: str,

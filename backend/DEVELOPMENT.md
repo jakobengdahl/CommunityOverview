@@ -454,6 +454,9 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | GET | `/api/presentation` | Get presentation config |
 | GET | `/api/capabilities` | Get service capabilities |
 | GET | `/api/export` | Export graph data |
+| POST | `/api/import` | Replace the ENTIRE active graph with the posted document (same shape as `/api/export`). Validates fully before writing; on success returns a `job_id` for the background embedding job. See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-graph) and [ADR 0006](../docs/adr/0006-graph-import-replace-mode.md) |
+| GET | `/api/import/{job_id}` | Status of one import's background embedding job (`queued`/`running`/`succeeded`/`failed`/`cancelled`, plus `embeddings_status`) |
+| GET | `/api/import` | List import jobs, newest first |
 | GET | `/api/{custom-path}` | Config-driven dedicated interface for one node/edge type (see Custom REST Interfaces below). Registered only for configured types. |
 | POST | `/api/views/save` | Save a named graph view |
 | GET | `/api/views/{name}` | Get a saved view |

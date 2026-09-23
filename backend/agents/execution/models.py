@@ -29,6 +29,7 @@ class ExecutionKind(str, Enum):
 
     SCHEDULED = "scheduled"  # time-based trigger (AgentScheduler)
     EVENT = "event"  # graph-mutation / subscription trigger
+    IMPORT = "import"  # background embedding generation after a graph.json import
 
 
 class ExecutionState(str, Enum):
