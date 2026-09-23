@@ -992,6 +992,27 @@ class SessionStore:
                 for k in incoming
                 if k not in _ANNOTATION_META_FIELDS and incoming[k] != target.get(k)
             ]
+            # An undo replay carries the pre-update annotation *wholesale*
+            # (only ``undo_last_action`` ever sets trusted_replay=True — see
+            # apply_state_op's docstring): a sparse update (e.g. the MCP patch
+            # path) that ADDED a content field has no counterpart key in that
+            # prior snapshot, so a plain merge could restore/overwrite keys
+            # the snapshot has but could never remove one it lacks — undoing
+            # such an update would leave the added field in place
+            # (smallfix-undo-of-a-field-adding-update-leaves-the-field).
+            # Only the trusted undo-replay path replaces content wholesale; a
+            # normal client update stays a merge, since a browser client
+            # already sends the full annotation on every write (see
+            # ``sessionSyncClient.js``'s ``computeOps``) and so never depended
+            # on the merge to add a key back.
+            removed_fields: List[str] = []
+            if trusted_replay:
+                removed_fields = [
+                    k
+                    for k in target
+                    if k not in _ANNOTATION_META_FIELDS and k not in incoming
+                ]
+                changed_fields = list(changed_fields) + removed_fields
             base_version = op.get("base_version")
             if not trusted_replay and base_version is not None:
                 if not isinstance(base_version, int) or isinstance(base_version, bool):
@@ -1009,6 +1030,8 @@ class SessionStore:
                     )
 
             prior = copy.deepcopy(target)
+            for key in removed_fields:
+                del target[key]
             target.update(incoming)
             new_version = int(prior.get("version") or _INITIAL_ANNOTATION_VERSION) + 1
             target["version"] = new_version

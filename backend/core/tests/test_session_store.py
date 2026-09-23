@@ -7,6 +7,7 @@ per-op state transforms (union/removal/LWW), annotation id assignment and the
 dropped-update rule, and the ring buffer catch-up continuity check.
 """
 
+import copy
 import json
 
 import pytest
@@ -330,6 +331,88 @@ class TestStateOps:
         )
         assert result is None
         assert s.seq == seq_before  # dropped op must not advance seq
+
+    def test_annotation_updated_trusted_replay_removes_field_a_sparse_update_added(
+        self, tmp_path
+    ):
+        """Regression for smallfix-undo-of-a-field-adding-update-leaves-the-field.
+
+        A sparse ``annotation_updated`` (the MCP patch path — only the
+        touched fields are sent) that ADDS a field the annotation never had
+        cannot be undone by a plain merge: undo replays the pre-update
+        snapshot, which simply lacks that key, so ``target.update(prior)``
+        can restore/overwrite keys the snapshot has but can never remove one
+        it does not. ``trusted_replay=True`` (set only by the undo path —
+        see ``apply_state_op``'s docstring) must make the replay a full
+        replace instead, so the added field is gone afterwards, not merely
+        reverted to some other value.
+        """
+        store = _store(tmp_path)
+        s = store.create()
+        created = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "kind": "note"},
+            },
+        )
+        assert "text" not in created["annotation"]
+        prior_snapshot = copy.deepcopy(created["annotation"])
+
+        updated = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "kind": "note", "text": "hi"},
+            },
+        )
+        assert updated["annotation"]["text"] == "hi"
+
+        # Simulate undo_last_action's replay of the stored inverse op: the
+        # exact pre-update snapshot, applied with trusted_replay=True.
+        replayed = store.apply_state_op(
+            s,
+            {"op": "annotation_updated", "annotation": prior_snapshot},
+            record_activity=False,
+            trusted_replay=True,
+        )
+
+        restored = replayed["annotation"]
+        assert "text" not in restored, (
+            "undo of a sparse update that ADDED 'text' must remove the field "
+            "entirely, not merely leave it in place"
+        )
+
+    def test_annotation_updated_non_replay_merge_is_unaffected(self, tmp_path):
+        """A normal (non-undo) ``annotation_updated`` — trusted_replay=False —
+        must keep its existing shallow-merge semantics: untouched fields
+        survive, exactly as before this fix. Only the undo-replay path
+        (trusted_replay=True) was changed."""
+        store = _store(tmp_path)
+        s = store.create()
+        self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "kind": "note", "color": "red"},
+            },
+        )
+
+        applied = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "kind": "note", "text": "hi"},
+            },
+        )
+
+        restored = applied["annotation"]
+        assert restored["text"] == "hi"
+        assert restored["color"] == "red"  # untouched field survives the merge
 
     def test_annotation_created_upsert_rejects_type_change(self, tmp_path):
         """A create-op that upserts by id (existing id, new content) must not
