@@ -45,6 +45,127 @@ def _ensure_numpy():
     return np
 
 
+def parse_sidecar_bytes(raw: bytes, label: str) -> Dict[str, Any]:
+    """Parse raw sidecar bytes into ``{node_id: float32 vector}``.
+
+    Pulled out of ``FileEmbeddingSidecar._read`` as a pure function so a
+    caller that already holds the bytes — the vector-aware export archive in
+    ``backend/service/graph_archive.py`` reads an ``embeddings.bin`` member
+    straight out of a ZIP — can parse them without a round trip through a
+    temp file. ``label`` names the source in error messages (a path for the
+    sidecar file, an archive member name for the archive reader); every check
+    and every error message below is otherwise identical to what
+    ``FileEmbeddingSidecar.load`` has always raised.
+
+    Raises:
+        EmbeddingSidecarError: ``raw`` is not a well-formed sidecar. Never any
+            other exception type — see the module's callers, which treat this
+            as "no vectors" and nothing else.
+    """
+    np = _ensure_numpy()
+
+    prefix = len(MAGIC) + _HEADER_LEN_STRUCT.size
+    if len(raw) < prefix or raw[: len(MAGIC)] != MAGIC:
+        raise EmbeddingSidecarError(f"{label} is not an embedding sidecar")
+
+    (header_len,) = _HEADER_LEN_STRUCT.unpack_from(raw, len(MAGIC))
+    if header_len > MAX_HEADER_BYTES or prefix + header_len > len(raw):
+        raise EmbeddingSidecarError(f"{label} has a truncated header")
+
+    try:
+        header = json.loads(raw[prefix : prefix + header_len].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EmbeddingSidecarError(f"{label} has an unreadable header: {exc}") from exc
+
+    if not isinstance(header, dict):
+        raise EmbeddingSidecarError(f"{label} header is not an object")
+
+    ids = header.get("ids")
+    rows = header.get("rows")
+    dim = header.get("dim")
+    # bool is a subclass of int, and True == 1, so a header carrying
+    # `true` for rows and dim satisfies every check below — including the
+    # exact payload length, since True * True * 4 is 4. It then reaches
+    # reshape(), which raises TypeError rather than anything this module
+    # declares, and a caller that only catches EmbeddingSidecarError loses
+    # the whole graph load to a damaged derived file.
+    if (
+        not isinstance(ids, list)
+        or isinstance(rows, bool)
+        or isinstance(dim, bool)
+        or not isinstance(rows, int)
+        or not isinstance(dim, int)
+        or rows < 0
+        or dim < 0
+        or len(ids) != rows
+    ):
+        raise EmbeddingSidecarError(f"{label} has an inconsistent header")
+    if not all(isinstance(node_id, str) for node_id in ids):
+        raise EmbeddingSidecarError(f"{label} has a non-string node id")
+    if header.get("dtype") != "float32":
+        raise EmbeddingSidecarError(
+            f"{label} has unsupported dtype {header.get('dtype')!r}"
+        )
+
+    payload = raw[prefix + header_len :]
+    expected = rows * dim * 4
+    if len(payload) != expected:
+        raise EmbeddingSidecarError(
+            f"{label} payload is {len(payload)} bytes, expected {expected}"
+        )
+
+    if rows == 0 or dim == 0:
+        return {}
+
+    matrix = np.frombuffer(payload, dtype="<f4").reshape(rows, dim)
+    # frombuffer views the bytes object, so rows would stay read-only and
+    # pinned to the whole file. Copy each row out instead.
+    return {node_id: matrix[i].astype(np.float32) for i, node_id in enumerate(ids)}
+
+
+def serialize_sidecar_bytes(vectors: Dict[str, Any]) -> bytes:
+    """Serialize ``{node_id: vector}`` into the sidecar's exact on-disk byte
+    layout (see module docstring), without touching any file.
+
+    Pulled out of ``FileEmbeddingSidecar.save`` so a caller building bytes for
+    something other than the sidecar file itself — the export archive in
+    ``backend/service/graph_archive.py`` — gets byte-for-byte the same format
+    the sidecar reads back, rather than a second serializer to keep in sync
+    with it.
+
+    Raises:
+        EmbeddingSidecarError: the vectors are not a uniform 2-D matrix.
+    """
+    np = _ensure_numpy()
+
+    ids: List[str] = list(vectors.keys())
+    if ids:
+        rows_list = [np.asarray(vectors[i], dtype=np.float32).ravel() for i in ids]
+        dims = {row.shape[0] for row in rows_list}
+        if len(dims) > 1:
+            raise EmbeddingSidecarError(
+                f"embeddings have mixed dimensions {sorted(dims)}"
+            )
+        matrix = np.vstack(rows_list).astype("<f4", copy=False)
+        dim = int(matrix.shape[1])
+    else:
+        matrix = None
+        dim = 0
+
+    header = json.dumps(
+        {"dtype": "float32", "rows": len(ids), "dim": dim, "ids": ids},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    body = bytearray()
+    body += MAGIC
+    body += _HEADER_LEN_STRUCT.pack(len(header))
+    body += header
+    if matrix is not None:
+        body += matrix.tobytes(order="C")
+    return bytes(body)
+
+
 def resolve_sidecar_path(
     graph_path: str | Path, embeddings_file: str | None = None
 ) -> Path | None:
@@ -115,72 +236,11 @@ class FileEmbeddingSidecar:
             ) from exc
 
     def _read(self) -> Dict[str, Any]:
-        np = _ensure_numpy()
-
         try:
             raw = self.path.read_bytes()
         except OSError as exc:
             raise EmbeddingSidecarError(f"cannot read {self.path}: {exc}") from exc
-
-        prefix = len(MAGIC) + _HEADER_LEN_STRUCT.size
-        if len(raw) < prefix or raw[: len(MAGIC)] != MAGIC:
-            raise EmbeddingSidecarError(f"{self.path} is not an embedding sidecar")
-
-        (header_len,) = _HEADER_LEN_STRUCT.unpack_from(raw, len(MAGIC))
-        if header_len > MAX_HEADER_BYTES or prefix + header_len > len(raw):
-            raise EmbeddingSidecarError(f"{self.path} has a truncated header")
-
-        try:
-            header = json.loads(raw[prefix : prefix + header_len].decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise EmbeddingSidecarError(
-                f"{self.path} has an unreadable header: {exc}"
-            ) from exc
-
-        if not isinstance(header, dict):
-            raise EmbeddingSidecarError(f"{self.path} header is not an object")
-
-        ids = header.get("ids")
-        rows = header.get("rows")
-        dim = header.get("dim")
-        # bool is a subclass of int, and True == 1, so a header carrying
-        # `true` for rows and dim satisfies every check below — including the
-        # exact payload length, since True * True * 4 is 4. It then reaches
-        # reshape(), which raises TypeError rather than anything this module
-        # declares, and a caller that only catches EmbeddingSidecarError loses
-        # the whole graph load to a damaged derived file.
-        if (
-            not isinstance(ids, list)
-            or isinstance(rows, bool)
-            or isinstance(dim, bool)
-            or not isinstance(rows, int)
-            or not isinstance(dim, int)
-            or rows < 0
-            or dim < 0
-            or len(ids) != rows
-        ):
-            raise EmbeddingSidecarError(f"{self.path} has an inconsistent header")
-        if not all(isinstance(node_id, str) for node_id in ids):
-            raise EmbeddingSidecarError(f"{self.path} has a non-string node id")
-        if header.get("dtype") != "float32":
-            raise EmbeddingSidecarError(
-                f"{self.path} has unsupported dtype {header.get('dtype')!r}"
-            )
-
-        payload = raw[prefix + header_len :]
-        expected = rows * dim * 4
-        if len(payload) != expected:
-            raise EmbeddingSidecarError(
-                f"{self.path} payload is {len(payload)} bytes, expected {expected}"
-            )
-
-        if rows == 0 or dim == 0:
-            return {}
-
-        matrix = np.frombuffer(payload, dtype="<f4").reshape(rows, dim)
-        # frombuffer views the bytes object, so rows would stay read-only and
-        # pinned to the whole file. Copy each row out instead.
-        return {node_id: matrix[i].astype(np.float32) for i, node_id in enumerate(ids)}
+        return parse_sidecar_bytes(raw, str(self.path))
 
     def save(self, vectors: Dict[str, Any]) -> None:
         """Write ``{node_id: vector}`` atomically.
@@ -188,8 +248,6 @@ class FileEmbeddingSidecar:
         Raises:
             EmbeddingSidecarError: the vectors are not a uniform 2-D matrix.
         """
-        np = _ensure_numpy()
-
         # Never destroy a file that holds something else. EMBEDDINGS_FILE was
         # inert before this format existed and the old .env.example named a
         # legacy embeddings.pkl for it, so an upgraded deployment can point
@@ -228,24 +286,7 @@ class FileEmbeddingSidecar:
                     f"to {spoiled} and rebuilding it"
                 )
 
-        ids: List[str] = list(vectors.keys())
-        if ids:
-            rows_list = [np.asarray(vectors[i], dtype=np.float32).ravel() for i in ids]
-            dims = {row.shape[0] for row in rows_list}
-            if len(dims) > 1:
-                raise EmbeddingSidecarError(
-                    f"embeddings have mixed dimensions {sorted(dims)}"
-                )
-            matrix = np.vstack(rows_list).astype("<f4", copy=False)
-            dim = int(matrix.shape[1])
-        else:
-            matrix = None
-            dim = 0
-
-        header = json.dumps(
-            {"dtype": "float32", "rows": len(ids), "dim": dim, "ids": ids},
-            ensure_ascii=False,
-        ).encode("utf-8")
+        data = serialize_sidecar_bytes(vectors)
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_fd, temp_path = tempfile.mkstemp(
@@ -253,11 +294,7 @@ class FileEmbeddingSidecar:
         )
         try:
             with os.fdopen(temp_fd, "wb") as f:
-                f.write(MAGIC)
-                f.write(_HEADER_LEN_STRUCT.pack(len(header)))
-                f.write(header)
-                if matrix is not None:
-                    f.write(matrix.tobytes(order="C"))
+                f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp_path, self.path)

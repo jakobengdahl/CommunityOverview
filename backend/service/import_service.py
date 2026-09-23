@@ -38,12 +38,13 @@ import logging
 import os
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from backend.runtime.authorization import GRAPH_ACTION_MUTATE
 
-from . import access
+from . import access, graph_archive
 from .graph_import import validate_import_document
 from .serializers import serialize_edges, serialize_nodes
 
@@ -143,85 +144,174 @@ def _start_embedding_drain(
     threading.Thread(target=_run, name="import-embeddings-worker", daemon=True).start()
 
 
-def import_graph(
+@dataclass(frozen=True)
+class _ReplaceOutcome:
+    """What survived a successful validate -> backup -> replace, carried
+    forward to whichever embeddings path the caller takes next."""
+
+    node_count: int
+    edge_count: int
+    backup_path: str
+    graph_generation: int
+
+
+def _validate_backup_replace(
     storage: "GraphStorage",
     hook: "GraphAuthorizationHook",
-    execution_store: "ExecutionStore",
     document: Any,
-    *,
-    event_origin: Optional[str] = None,
-    event_session_id: Optional[str] = None,
-    event_correlation_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[_ReplaceOutcome]]:
+    """The validate -> backup -> replace half of a whole-graph import.
+
+    Shared by ``import_graph`` (plain ``graph.json``) and
+    ``import_graph_archive`` (the archive's ``graph.json`` member) — see
+    docs/adr/0007-vector-aware-export-archive.md, "Reusing the PR #664
+    pipeline". Only what happens to embeddings afterward differs between the
+    two callers, which is why this stops right after the replace and leaves
+    that decision to them.
+
+    Returns ``(error_result, None)`` on any failure (nothing was written to
+    the live graph in that case, exactly as ``import_graph`` has always
+    guaranteed), or ``(None, outcome)`` once the graph has been durably
+    replaced.
+    """
     decision = access.evaluate_graph_access(
         hook, action=GRAPH_ACTION_MUTATE, target="import_graph"
     )
     if not decision.allowed:
-        return access.build_access_denied_result(
-            action=GRAPH_ACTION_MUTATE, target="import_graph", decision=decision
+        return (
+            access.build_access_denied_result(
+                action=GRAPH_ACTION_MUTATE, target="import_graph", decision=decision
+            ),
+            None,
         )
     if decision.graph_access.enabled:
-        return {
-            "success": False,
-            "error_code": "import_requires_full_graph_access",
-            "message": (
-                "Whole-graph import replaces the entire active graph and is "
-                "refused while the caller's access is narrowed to a subset of "
-                "it — a full replace could remove content the caller cannot "
-                "even see."
-            ),
-            "graph_replaced": False,
-        }
+        return (
+            {
+                "success": False,
+                "error_code": "import_requires_full_graph_access",
+                "message": (
+                    "Whole-graph import replaces the entire active graph and is "
+                    "refused while the caller's access is narrowed to a subset of "
+                    "it — a full replace could remove content the caller cannot "
+                    "even see."
+                ),
+                "graph_replaced": False,
+            },
+            None,
+        )
 
     validation = validate_import_document(document)
     if not validation.valid:
-        return {
-            "success": False,
-            "error_code": "validation_failed",
-            "message": (
-                f"{len(validation.errors)} problem(s) found in the import "
-                f"document; the graph was not changed."
-            ),
-            "errors": [issue.to_dict() for issue in validation.errors],
-            "graph_replaced": False,
-        }
+        return (
+            {
+                "success": False,
+                "error_code": "validation_failed",
+                "message": (
+                    f"{len(validation.errors)} problem(s) found in the import "
+                    f"document; the graph was not changed."
+                ),
+                "errors": [issue.to_dict() for issue in validation.errors],
+                "graph_replaced": False,
+            },
+            None,
+        )
 
     backup_path = _write_backup(storage)
     if backup_path is None:
-        return {
-            "success": False,
-            "error_code": "backup_failed",
-            "message": (
-                "Could not write a pre-import backup of the current graph; "
-                "the import was refused and the graph was not changed."
-            ),
-            "graph_replaced": False,
-        }
+        return (
+            {
+                "success": False,
+                "error_code": "backup_failed",
+                "message": (
+                    "Could not write a pre-import backup of the current graph; "
+                    "the import was refused and the graph was not changed."
+                ),
+                "graph_replaced": False,
+            },
+            None,
+        )
 
     try:
         storage.replace_all_nodes_and_edges(validation.nodes, validation.edges)
     except Exception as exc:
-        return {
-            "success": False,
-            "error_code": "replace_failed",
-            "message": (
-                "Import failed while committing the new graph; the previous "
-                f"graph is unchanged: {exc}"
-            ),
-            "graph_replaced": False,
-            "backup_path": backup_path,
-        }
+        return (
+            {
+                "success": False,
+                "error_code": "replace_failed",
+                "message": (
+                    "Import failed while committing the new graph; the previous "
+                    f"graph is unchanged: {exc}"
+                ),
+                "graph_replaced": False,
+                "backup_path": backup_path,
+            },
+            None,
+        )
 
-    # Captured right after the replace: this is the generation the background
-    # embedding job must still see live when it goes to commit its result.
+    # Captured right after the replace: this is the generation whatever
+    # happens to embeddings next must still see live when it goes to commit.
     graph_generation = storage.generation
 
+    return None, _ReplaceOutcome(
+        node_count=len(validation.nodes),
+        edge_count=len(validation.edges),
+        backup_path=backup_path,
+        graph_generation=graph_generation,
+    )
+
+
+def _enqueue_and_start_regeneration(
+    storage: "GraphStorage",
+    execution_store: "ExecutionStore",
+    outcome: _ReplaceOutcome,
+    *,
+    event_origin: Optional[str],
+    event_session_id: Optional[str],
+    event_correlation_id: Optional[str],
+    regeneration_reason: Optional[str] = None,
+    archive_compatible: Optional[bool] = None,
+    embeddings_status: str = "queued",
+    extra_result_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Enqueue and start the async embedding-regeneration job, and build the
+    success response for it. Shared by ``import_graph`` (which always takes
+    this path), ``import_graph_archive``'s fully-incompatible fallback, and
+    ``import_graph_archive``'s *partially*-compatible case (see
+    docs/adr/0007-vector-aware-export-archive.md, "A compatible archive that
+    does not cover every node").
+
+    ``regeneration_reason``, when given, explains WHY embeddings are being
+    regenerated rather than restored (an archive-only concept; plain
+    ``import_graph`` never sets it). ``archive_compatible`` is included in the
+    result only when the caller is the archive path, so a plain
+    ``POST /import`` response keeps its exact pre-existing shape.
+
+    ``embeddings_status`` overrides the default ``"queued"`` label — the
+    partially-compatible archive case uses ``"restored_partial"`` so the
+    caller can tell it apart from a fully-incompatible archive's plain
+    ``"queued"``, since here SOME vectors were already restored directly.
+    ``extra_result_fields`` (e.g. ``embedded_count``, ``pending_node_ids``)
+    is merged into whichever result dict below actually gets returned,
+    including the "job could not even be started" fallback — those vectors
+    were already committed to the live graph regardless of whether the
+    follow-up regeneration job could be started, and the caller should not
+    lose sight of that.
+
+    The regeneration job is deliberately NOT given an explicit list of node
+    ids to scope itself to. ``import_worker._run_one_import_job`` already
+    filters candidate nodes with ``vector_store.has_embedding(node.id)``, and
+    by the time this is called for the partial-restore case, the covered
+    node ids already have their vectors committed
+    (``commit_generation_embeddings`` above) — so that filter alone lands the
+    job on exactly the still-missing node ids, with no worker-side change
+    needed.
+    """
     try:
         job = _enqueue_embedding_job(
             execution_store,
-            node_count=len(validation.nodes),
-            backup_path=backup_path,
-            graph_generation=graph_generation,
+            node_count=outcome.node_count,
+            backup_path=outcome.backup_path,
+            graph_generation=outcome.graph_generation,
             correlation_id=event_correlation_id,
             session_id=event_session_id,
             origin=event_origin,
@@ -242,11 +332,11 @@ def import_graph(
             "generation could not be started: %s",
             exc,
         )
-        return {
+        result = {
             "success": True,
             "graph_replaced": True,
-            "node_count": len(validation.nodes),
-            "edge_count": len(validation.edges),
+            "node_count": outcome.node_count,
+            "edge_count": outcome.edge_count,
             "job_id": None,
             "embeddings_status": "not_started",
             "embeddings_message": (
@@ -255,18 +345,208 @@ def import_graph(
                 "scripts/generate_embeddings.py, or POST the import again "
                 "later, to generate embeddings for it."
             ),
-            "backup_path": backup_path,
+            "backup_path": outcome.backup_path,
         }
+        if archive_compatible is not None:
+            result["archive_compatible"] = archive_compatible
+        if extra_result_fields:
+            result.update(extra_result_fields)
+        return result
 
-    return {
+    result = {
         "success": True,
         "graph_replaced": True,
-        "node_count": len(validation.nodes),
-        "edge_count": len(validation.edges),
+        "node_count": outcome.node_count,
+        "edge_count": outcome.edge_count,
         "job_id": job.id,
-        "embeddings_status": "queued",
-        "backup_path": backup_path,
+        "embeddings_status": embeddings_status,
+        "backup_path": outcome.backup_path,
     }
+    if regeneration_reason is not None:
+        result["embeddings_message"] = f"Regenerating embeddings: {regeneration_reason}"
+    if archive_compatible is not None:
+        result["archive_compatible"] = archive_compatible
+    if extra_result_fields:
+        result.update(extra_result_fields)
+    return result
+
+
+def import_graph(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    document: Any,
+    *,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    error, outcome = _validate_backup_replace(storage, hook, document)
+    if error is not None:
+        return error
+    assert outcome is not None  # for type checkers: exactly one of the pair is set
+
+    return _enqueue_and_start_regeneration(
+        storage,
+        execution_store,
+        outcome,
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+    )
+
+
+def import_graph_archive(
+    storage: "GraphStorage",
+    hook: "GraphAuthorizationHook",
+    execution_store: "ExecutionStore",
+    archive_bytes: bytes,
+    *,
+    event_origin: Optional[str] = None,
+    event_session_id: Optional[str] = None,
+    event_correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Whole-graph REPLACE import from a vector-aware export archive.
+
+    Runs the exact same ``_validate_backup_replace`` pipeline as
+    ``import_graph`` for the archive's ``graph.json`` member. What differs is
+    what happens to embeddings afterward:
+
+      * a compatible archive (checksums verified, ``embedding_model`` matches
+        this instance's live model, ``embeddings.bin`` present and non-empty)
+        has its vectors restored directly and synchronously — no async job —
+        PROVIDED ``embeddings.bin`` covers every node id in the imported
+        graph. When it covers only some of them (the exporting instance had
+        its own never-embedded nodes), the covered subset is still restored
+        synchronously, but a scoped async job is also enqueued for the rest:
+        ``embeddings_status: "restored_partial"``, not the same success as a
+        full restore;
+      * anything else (mismatch, missing/unreadable manifest, no
+        ``embeddings.bin`` at all) still imports the graph, and falls back to
+        the same async regeneration job ``import_graph`` always uses, with a
+        message explaining why.
+
+    A corrupt ZIP or a checksum failure on any member the manifest names is
+    caught by ``graph_archive.extract_archive`` and returned as a failure
+    BEFORE ``_validate_backup_replace`` — and therefore before any write to
+    the live graph — ever runs. See docs/adr/0007-vector-aware-export-archive.md.
+    """
+    try:
+        extracted = graph_archive.extract_archive(
+            archive_bytes, live_model_name=storage.vector_store.model_name
+        )
+    except graph_archive.ArchiveIntegrityError as exc:
+        return {
+            "success": False,
+            "error_code": "archive_integrity_failed",
+            "message": str(exc),
+            "graph_replaced": False,
+        }
+
+    error, outcome = _validate_backup_replace(storage, hook, extracted.graph_document)
+    if error is not None:
+        return error
+    assert outcome is not None
+
+    if extracted.compatible and extracted.embedding_vectors:
+        live_node_ids = {node.id for node in storage.get_all_nodes()}
+        vectors = {
+            node_id: vector
+            for node_id, vector in extracted.embedding_vectors.items()
+            if node_id in live_node_ids
+        }
+        if vectors and storage.commit_generation_embeddings(
+            outcome.graph_generation, vectors
+        ):
+            missing_node_ids = sorted(live_node_ids - vectors.keys())
+            if not missing_node_ids:
+                return {
+                    "success": True,
+                    "graph_replaced": True,
+                    "node_count": outcome.node_count,
+                    "edge_count": outcome.edge_count,
+                    "job_id": None,
+                    "embeddings_status": "restored",
+                    "embedded_count": len(vectors),
+                    "backup_path": outcome.backup_path,
+                    "archive_compatible": True,
+                }
+            # The archive is model-compatible and its embeddings.bin was
+            # restored for every node id it actually covered, but that is
+            # not every node in the imported graph — e.g. the exporting
+            # instance itself had some nodes that were never embedded
+            # (add_nodes's embedding step warns-and-skips on failure rather
+            # than retrying; see backend/agents/execution/import_worker.py's
+            # own has_embedding filter, which already anticipates a graph
+            # with a partially-embedded node set as a normal steady state).
+            # Reporting this as plain "restored" success, with no job ever
+            # queued to fill the gap, would be the worst-served of the three
+            # outcomes: it looks identical to full success while leaving
+            # some nodes permanently unembedded until an operator happens to
+            # notice. Report a status that says so, and enqueue a
+            # regeneration job for the remainder — see
+            # _enqueue_and_start_regeneration's docstring for why that job
+            # needs no explicit node-id scoping: the worker's
+            # has_embedding filter already skips the node ids this call
+            # just committed, so it only ever processes the rest.
+            return _enqueue_and_start_regeneration(
+                storage,
+                execution_store,
+                outcome,
+                event_origin=event_origin,
+                event_session_id=event_session_id,
+                event_correlation_id=event_correlation_id,
+                regeneration_reason=(
+                    f"the archive's {graph_archive.EMBEDDINGS_MEMBER} covered "
+                    f"{len(vectors)} of {outcome.node_count} node(s) in the "
+                    f"imported graph; regenerating the remaining "
+                    f"{len(missing_node_ids)}"
+                ),
+                archive_compatible=True,
+                embeddings_status="restored_partial",
+                extra_result_fields={
+                    "embedded_count": len(vectors),
+                    "pending_node_ids": missing_node_ids,
+                    "pending_count": len(missing_node_ids),
+                },
+            )
+        # Either nothing in the archive's vectors actually matched a node id
+        # this import just committed, or (far more rarely — the two calls
+        # below are not atomic with each other) a concurrent import replaced
+        # the graph again in the narrow window between the replace above and
+        # this commit, so `commit_generation_embeddings` refused it as stale.
+        # Either way, fall back the same way an incompatible archive would,
+        # against the graph as it now actually stands.
+        reason = (
+            "the archive's vectors did not match any node in the imported graph"
+            if not vectors
+            else (
+                "a concurrent import replaced the graph again before the "
+                "archive's vectors could be committed"
+            )
+        )
+        return _enqueue_and_start_regeneration(
+            storage,
+            execution_store,
+            outcome,
+            event_origin=event_origin,
+            event_session_id=event_session_id,
+            event_correlation_id=event_correlation_id,
+            regeneration_reason=reason,
+            archive_compatible=False,
+        )
+
+    return _enqueue_and_start_regeneration(
+        storage,
+        execution_store,
+        outcome,
+        event_origin=event_origin,
+        event_session_id=event_session_id,
+        event_correlation_id=event_correlation_id,
+        regeneration_reason=extracted.regeneration_reason
+        or "the archive's embeddings could not be used",
+        archive_compatible=False,
+    )
 
 
 _STATUS_LABELS = None  # populated lazily to avoid importing execution eagerly

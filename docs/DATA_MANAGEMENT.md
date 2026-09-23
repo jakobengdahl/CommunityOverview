@@ -273,6 +273,115 @@ job is still running.
 To undo an import, re-run `POST /api/import` with the content of the backup
 file it wrote.
 
+## Importing a vector-aware archive
+
+`GET /api/export/archive` and `POST /api/import/archive` (see
+[ADR 0007](adr/0007-vector-aware-export-archive.md)) extend the plain
+`graph.json` export/import above with an optional ZIP archive that also
+carries the embedding sidecar, so a restore does not have to fall back to
+regenerating every vector from scratch. **The plain `GET /api/export` and
+`POST /api/import` are unchanged** — the archive is a second, additive pair of
+endpoints, kept for the "lightweight interchange" case the plain endpoints
+already serve well.
+
+### Archive layout
+
+A ZIP with up to three members:
+
+| Member | Always present? | Content |
+|---|---|---|
+| `graph.json` | Always | The same `nodes`/`edges` document `GET /api/export` returns |
+| `embeddings.bin` | Only when the live graph has vectors | The embedding sidecar's own binary format (see *Embedding Sidecar* above), byte-for-byte — not a second format |
+| `manifest.json` | Always (written by `GET /api/export/archive`; a hand-made archive may omit it) | Schema version, export date, embedding model/dimension, per-member SHA-256 checksums, node/edge counts |
+
+`manifest.json` shape:
+
+```json
+{
+  "schema_version": "1.0",
+  "export_date": "2026-09-23T12:00:00+00:00",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "node_count": 42,
+  "edge_count": 17,
+  "checksums": {
+    "graph.json": "sha256:<hex>",
+    "embeddings.bin": "sha256:<hex>"
+  }
+}
+```
+
+`embedding_model`/`embedding_dimension` are `null` and `embeddings.bin` is
+omitted entirely when the exporting instance had no vectors loaded — there is
+nothing to restore, and the archive degrades to the plain-`graph.json` shape
+below. `checksums` only lists the members actually present.
+
+### What happens on import, in order
+
+1. **Open and checksum-verify.** The ZIP is opened and every checksum
+   `manifest.json` declares is verified against the member's actual bytes —
+   **before** anything is decoded for use. A ZIP that cannot be opened, an
+   archive with no `graph.json` at all, or any member whose bytes disagree
+   with the checksum declared for it, is rejected with
+   `archive_integrity_failed` and **nothing is written to the live graph**
+   — the same "touch nothing on failure" guarantee `POST /api/import`'s own
+   validation already gives.
+2. **Import the graph content.** The archive's `graph.json` member goes
+   through the exact same validate → backup → replace pipeline
+   `POST /api/import` uses (see *Importing a graph* above) — the same
+   validation errors, the same pre-import backup, the same atomic replace.
+3. **Restore or regenerate embeddings**, depending on what the manifest said:
+   - **Compatible and fully covered** (a readable manifest, every declared
+     checksum verified, `embeddings.bin` present and non-empty, its
+     `embedding_model` matches this instance's live model, and it has a
+     vector for every node id in the imported graph) — vectors are restored
+     directly from `embeddings.bin` into the live vector store,
+     synchronously, with no background job: `embeddings_status: "restored"`,
+     `job_id: null`, `archive_compatible: true`.
+   - **Compatible but only partially covered** (same as above, but
+     `embeddings.bin` has a vector for only SOME of the imported graph's node
+     ids — e.g. the exporting instance itself had some never-embedded nodes)
+     — the covered subset is restored the same way, synchronously, **and** a
+     background job is enqueued to (re)generate embeddings for the rest, so
+     the gap is never silently left open: `embeddings_status:
+     "restored_partial"`, `job_id` set, `archive_compatible: true`,
+     `embedded_count` (how many were restored directly), `pending_node_ids`
+     and `pending_count` (what the job still owes). The job needs no explicit
+     node-id scoping — the background worker already skips any node that
+     already has a vector, which is exactly the subset just restored.
+   - **Incompatible or absent** (a different `embedding_model`, no
+     `embeddings.bin` in the archive at all, or a manifest that is missing or
+     unreadable — including the "someone zipped a plain `graph.json` export
+     themselves, with no `manifest.json` or `embeddings.bin`" case, which is
+     legitimate, not an error) — the graph still imports successfully, and
+     the same background regeneration job `POST /api/import` always uses is
+     enqueued: `embeddings_status: "queued"`, `job_id` set,
+     `archive_compatible: false`, and `embeddings_message` states plainly
+     *why* it is regenerating (e.g. "archive embedding_model 'x' does not
+     match this instance's model 'y'"), not just a bare "queued".
+
+Compatibility is judged on `embedding_model` name equality against this
+instance's live `VectorStore.model_name` — dimension is not compared
+separately, since a fixed model name determines its output width
+deterministically; `embedding_dimension` in the manifest is informational
+(and, incidentally, cross-checked implicitly: an `embeddings.bin` whose actual
+row width disagrees with what its own bytes claim fails to parse as a sidecar
+at all).
+
+A checksum is only enforced for a member the manifest actually names — an
+archive with no manifest, or one that does not cover a given member, has made
+no promise about that member's bytes and so cannot have broken one; whether
+its embeddings can still be read is instead judged when they are opened,
+same as `embeddings.bin` always has been (a damaged sidecar degrades to "no
+vectors" rather than failing).
+
+### Undoing an archive import
+
+Exactly like a plain import: `POST /api/import` (or `/api/import/archive`)
+with the pre-import backup written under `import-backups/` — the archive
+import writes the same backup the plain path does, of the graph the archive
+replaced.
+
 ## Graph Journal
 
 `graph.json` is the graph, and it is still written whole and atomically (a temp
