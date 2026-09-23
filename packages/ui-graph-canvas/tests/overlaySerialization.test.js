@@ -807,6 +807,61 @@ describe('generic annotation overlay serialization', () => {
     }
   );
 
+  // smallfix-browser-clobbers-unsized-annotation-geometry: label and arrow
+  // are not GENERIC_OVERLAY_TYPES members (they have their own dedicated
+  // branches above) and never got the `data.size` treatment the fix just
+  // above gave text/icon/vote_dot, even though neither has a `style` box
+  // either — a label draws at its own text size, an arrow's shape is
+  // entirely dx/dy. Same fix, same reasoning, extended to these two kinds.
+  it('round-trips geometry.w/h for a label through a data-only slot, not a style box', () => {
+    const overlay = {
+      id: 'label-sized',
+      kind: 'label',
+      position: { x: 1, y: 1 },
+      text: 'hi',
+      color: '#fff',
+      size: { w: 220, h: 60 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.size).toEqual({ w: 220, h: 60 });
+    expect(node.style).toBeUndefined();
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('round-trips geometry.w/h for an arrow through a data-only slot, not a style box', () => {
+    const overlay = {
+      id: 'arrow-sized',
+      kind: 'arrow',
+      position: { x: 0, y: 0 },
+      dx: 160,
+      dy: 0,
+      color: '#fff',
+      startArrow: false,
+      endArrow: true,
+      size: { w: 0, h: 0 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.size).toEqual({ w: 0, h: 0 });
+    expect(node.style).toBeUndefined();
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
+  it('carries no size on a freshly hydrated label/arrow overlay with no size given', () => {
+    const labelNode = overlayToFlowNode({ id: 'l', kind: 'label', position: { x: 0, y: 0 } });
+    expect(labelNode.data.size).toBeUndefined();
+    expect(flowNodeToOverlay(labelNode).size).toBeUndefined();
+
+    const arrowNode = overlayToFlowNode({ id: 'a', kind: 'arrow', position: { x: 0, y: 0 } });
+    expect(arrowNode.data.size).toBeUndefined();
+    expect(flowNodeToOverlay(arrowNode).size).toBeUndefined();
+  });
+
   it('drops a stale style box on a non-sized kind rather than treating it as geometry', () => {
     // A node that somehow carries both a `style` box (e.g. leftover from a
     // prior render) and a `data.size` must still read geometry from

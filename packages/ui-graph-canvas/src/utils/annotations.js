@@ -473,22 +473,24 @@ export function overlayToFlowNode(overlay) {
     };
   }
   if (overlay.kind === 'label') {
-    return {
-      ...base,
-      data: {
-        text: overlay.text || '',
-        color: overlay.color,
-        fontSize: overlay.fontSize,
-        attachment: overlay.attachment,
-        opacity: overlay.opacity,
-        locked,
-        rotation,
-        version,
-        field_versions: fieldVersions,
-      },
-      draggable: !locked,
-      zIndex,
+    const data = {
+      text: overlay.text || '',
+      color: overlay.color,
+      fontSize: overlay.fontSize,
+      attachment: overlay.attachment,
+      opacity: overlay.opacity,
+      locked,
+      rotation,
+      version,
+      field_versions: fieldVersions,
     };
+    // geometry.w/h passthrough only — same `data.size` slot and same reason
+    // as the unsized GENERIC_OVERLAY_TYPES kinds below
+    // (smallfix-annotation-unsized-generic-geometry-clobber): a label has no
+    // `style` box or resize handles (it draws at its own text size), but the
+    // stored value must still survive a hydrate -> autosave round trip.
+    if (overlay.size) data.size = overlay.size;
+    return { ...base, data, draggable: !locked, zIndex };
   }
   if (GENERIC_OVERLAY_TYPES.has(overlay.kind)) {
     const data = { locked, rotation, version, field_versions: fieldVersions };
@@ -541,6 +543,10 @@ export function overlayToFlowNode(overlay) {
   // spurious `start`/`end` field.
   if (overlay.start?.attachment) data.start = overlay.start;
   if (overlay.end?.attachment) data.end = overlay.end;
+  // geometry.w/h passthrough only — same reasoning as label's `data.size`
+  // above: an arrow/line's shape is entirely dx/dy, never this field, but
+  // the stored value must still survive the hydrate -> autosave round trip.
+  if (overlay.size) data.size = overlay.size;
   return { ...base, data, draggable: !locked && !isArrowAnchored(data), zIndex };
 }
 
@@ -575,7 +581,7 @@ export function flowNodeToOverlay(node) {
     };
   }
   if (node.type === 'label') {
-    return {
+    const out = {
       ...base,
       text: node.data?.text || '',
       color: node.data?.color,
@@ -588,6 +594,9 @@ export function flowNodeToOverlay(node) {
       version,
       field_versions: fieldVersions,
     };
+    // Mirrors overlayToFlowNode's `data.size` slot for label above.
+    if (node.data?.size) out.size = node.data.size;
+    return out;
   }
   if (GENERIC_OVERLAY_TYPES.has(node.type)) {
     const out = { ...base, z, locked, rotation, version, field_versions: fieldVersions };
@@ -621,6 +630,8 @@ export function flowNodeToOverlay(node) {
   // Mirrors overlayToFlowNode's start/end passthrough above; see its comment.
   if (node.data?.start?.attachment) out.start = node.data.start;
   if (node.data?.end?.attachment) out.end = node.data.end;
+  // Mirrors overlayToFlowNode's `data.size` slot for arrow/line above.
+  if (node.data?.size) out.size = node.data.size;
   return out;
 }
 

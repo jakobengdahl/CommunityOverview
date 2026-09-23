@@ -305,6 +305,130 @@ describe('geometry w/h round-trip for generic overlay kinds', () => {
   );
 });
 
+// smallfix-browser-clobbers-unsized-annotation-geometry: build_annotation
+// defaults geometry.w/h to 0 for an agent-created label/line/freehand, but
+// these three translator branches (unlike GENERIC_OVERLAY_TYPES above) never
+// carried geometry.w/h through at all — so the very first browser round trip
+// (no user resize) silently rewrote the stored 0 into createAnnotation's
+// 160x96 default, and rewrote an agent-set, non-default size the same way.
+describe('geometry w/h round-trip for label/line/freehand', () => {
+  const serverAnnotationFor = (type, w, h, extra) => ({
+    id: `${type}-1`,
+    type,
+    kind: type,
+    position: { x: 0, y: 0 },
+    geometry: { x: 0, y: 0, w, h, rotation: 0 },
+    ...extra,
+  });
+
+  const CASES = [
+    ['label', { text: 'hi' }],
+    ['line', { from: { x: 0, y: 0 }, to: { x: 160, y: 0 } }],
+    [
+      'freehand',
+      {
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 10 },
+        ],
+      },
+    ],
+  ];
+
+  it.each(CASES)(
+    'does not clobber an unsized %s annotation (geometry w/h 0) into the 160x96 default on a browser touch',
+    (type, extra) => {
+      const server = [serverAnnotationFor(type, 0, 0, extra)];
+      const overlays = annotationsToOverlays(server);
+      // A browser that only loads and re-serializes (no user resize) must not
+      // change the stored geometry at all.
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.w).toBe(0);
+      expect(roundTripped[0].geometry.h).toBe(0);
+    }
+  );
+
+  it.each(CASES)(
+    'preserves an agent-set, non-default %s size (200x100) across a browser touch',
+    (type, extra) => {
+      const server = [serverAnnotationFor(type, 200, 100, extra)];
+      const overlays = annotationsToOverlays(server);
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.w).toBe(200);
+      expect(roundTripped[0].geometry.h).toBe(100);
+    }
+  );
+
+  it.each(CASES)(
+    'rotation and other envelope fields are unaffected by the %s geometry fix',
+    (type, extra) => {
+      const server = [{ ...serverAnnotationFor(type, 0, 0, extra), z: 3, locked: true }];
+      server[0].geometry.rotation = 45;
+      const overlays = annotationsToOverlays(server);
+      expect(overlays[0].rotation).toBe(45);
+      expect(overlays[0].z).toBe(3);
+      expect(overlays[0].locked).toBe(true);
+      const roundTripped = overlaysToAnnotations(overlays);
+      expect(roundTripped[0].geometry.rotation).toBe(45);
+      expect(roundTripped[0].z).toBe(3);
+      expect(roundTripped[0].locked).toBe(true);
+    }
+  );
+
+  // The saved-view path (App.jsx's handleConfirmSaveView) builds
+  // annotation_document via legacyMetadataToAnnotationDocument from canvas
+  // overlays, then annotationDocumentToLegacyMetadata for the legacy mirror —
+  // both built on overlaysToAnnotations/annotationsToOverlays, so this pins
+  // the same guarantee through that entry point, mirroring the generic-kind
+  // coverage above.
+  const overlayFor = (kind) => {
+    if (kind === 'label') {
+      return {
+        id: 'label-sized',
+        kind: 'label',
+        position: { x: 0, y: 0 },
+        text: 'hi',
+        size: { w: 220, h: 60 },
+      };
+    }
+    if (kind === 'arrow') {
+      return {
+        id: 'arrow-sized',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 160,
+        dy: 0,
+        size: { w: 0, h: 0 },
+      };
+    }
+    return {
+      id: 'freehand-sized',
+      kind: 'freehand',
+      position: { x: 0, y: 0 },
+      points: [
+        { x: 0, y: 0 },
+        { x: 10, y: 10 },
+      ],
+      size: { w: 32, h: 41 },
+    };
+  };
+
+  it.each(['label', 'arrow', 'freehand'])(
+    'preserves an explicit non-default size for %s through the saved-view legacy metadata path',
+    (kind) => {
+      const overlay = overlayFor(kind);
+      const document = legacyMetadataToAnnotationDocument({ annotations: [overlay] });
+      const stored = document.annotations.find((a) => a.id === overlay.id);
+      expect(stored.geometry.w).toBe(overlay.size.w);
+      expect(stored.geometry.h).toBe(overlay.size.h);
+
+      const metadata = annotationDocumentToLegacyMetadata(document);
+      const roundTripped = metadata.annotations.find((a) => a.id === overlay.id);
+      expect(roundTripped.size).toEqual(overlay.size);
+    }
+  );
+});
+
 // A group has always been lockable over MCP (create_group_annotation takes
 // `locked`), but both group translators dropped the flag, so it never reached
 // the canvas and the browser's next autosave diffed it back to its default —

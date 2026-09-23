@@ -328,6 +328,11 @@ function freehandAnnotationToOverlay(a) {
     opacity: a.style?.opacity,
     pointerType: a.pointerType,
     pressureSource: a.pressureSource,
+    // geometry.w/h — a stroke's visual extent comes entirely from `points`,
+    // never this field, but it is still stored data (same reasoning as
+    // label/line above; freehand's own translator branch, unlike
+    // GENERIC_OVERLAY_TYPES', had never carried it at all).
+    size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
     z: a.z ?? 0,
     locked: Boolean(a.locked),
     rotation: a.geometry?.rotation ?? 0,
@@ -344,7 +349,7 @@ function freehandOverlayToAnnotation(o) {
     if (p.pressure != null) point.pressure = p.pressure;
     return point;
   });
-  return createAnnotation({
+  const input = {
     id: o.id,
     type: 'freehand',
     position: { x: anchor.x, y: anchor.y },
@@ -359,7 +364,11 @@ function freehandOverlayToAnnotation(o) {
     rotation: o.rotation ?? 0,
     version: o.version,
     field_versions: o.field_versions,
-  });
+  };
+  // Same geometry.w/h carry-through as label/line above — a stroke's shape
+  // is `points`, not this field, but the stored value must still survive.
+  if (o.size) input.size = o.size;
+  return createAnnotation(input);
 }
 
 // Note/label/arrow annotations round-trip between the server annotation model
@@ -402,6 +411,15 @@ export function annotationsToOverlays(annotations) {
         fontSize: a.style?.fontSize,
         opacity: a.style?.opacity,
         attachment: a.attachment,
+        // geometry.w/h (task smallfix-browser-clobbers-unsized-annotation-
+        // geometry): a label has no rendered box — its size is decided by
+        // its text content, never by this field — but the value is still
+        // stored data, and 0/absent is as real a value as any other. Carried
+        // unconditionally like every GENERIC_OVERLAY_TYPES kind's `size`
+        // above, or the browser's first save after loading this annotation
+        // rewrites the stored geometry from 0 to createAnnotation's 160x96
+        // default with no user resize involved.
+        size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
@@ -421,6 +439,10 @@ export function annotationsToOverlays(annotations) {
         opacity: a.style?.opacity,
         startArrow: a.startArrow ?? false,
         endArrow: a.endArrow ?? true,
+        // geometry.w/h — a line's visual shape is entirely from/to (dx/dy),
+        // never this field, but it is still stored data. Same reasoning and
+        // same clobber this carries the label's size above to avoid.
+        size: { w: a.geometry?.w ?? 0, h: a.geometry?.h ?? 0 },
         z: a.z ?? 0,
         locked: Boolean(a.locked),
         rotation: a.geometry?.rotation ?? 0,
@@ -478,21 +500,28 @@ export function overlaysToAnnotations(overlays) {
         continue;
       }
       if (o.kind === 'label') {
-        annotations.push(
-          createAnnotation({
-            id: o.id,
-            type: 'label',
-            position: o.position || { x: 0, y: 0 },
-            text: o.text || '',
-            style: { color: o.color, fontSize: o.fontSize, opacity: o.opacity },
-            attachment: o.attachment,
-            z: o.z ?? 0,
-            locked: Boolean(o.locked),
-            rotation: o.rotation ?? 0,
-            version: o.version,
-            field_versions: o.field_versions,
-          })
-        );
+        const input = {
+          id: o.id,
+          type: 'label',
+          position: o.position || { x: 0, y: 0 },
+          text: o.text || '',
+          style: { color: o.color, fontSize: o.fontSize, opacity: o.opacity },
+          attachment: o.attachment,
+          z: o.z ?? 0,
+          locked: Boolean(o.locked),
+          rotation: o.rotation ?? 0,
+          version: o.version,
+          field_versions: o.field_versions,
+        };
+        // Carry the overlay's geometry.w/h through (mirrors
+        // genericOverlayToAnnotation's `if (o.size) input.size = o.size`) —
+        // an overlay that never carried a `size` at all (a brand-new,
+        // never-persisted label) still gets createAnnotation's normal
+        // creation-time default, which is correct; one that did (from
+        // annotationsToOverlays above, or an agent-set value) must not be
+        // silently replaced by that default on this leg.
+        if (o.size) input.size = o.size;
+        annotations.push(createAnnotation(input));
         continue;
       }
       if (o.kind === 'freehand') {
@@ -533,6 +562,9 @@ export function overlaysToAnnotations(overlays) {
       // rebuilt as a bare point by annotationModel.js's normalizeEndpoint.
       if (o.start) ann.start = o.start;
       if (o.end) ann.end = o.end;
+      // Same geometry.w/h carry-through as label above — a line's shape is
+      // from/to, not this field, but the stored value must still survive.
+      if (o.size) ann.size = o.size;
       annotations.push(createAnnotation(ann));
     } catch (error) {
       skippedOverlay(o, error);
