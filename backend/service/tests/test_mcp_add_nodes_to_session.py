@@ -69,11 +69,15 @@ class _HashableDict(dict):
         return 1
 
 
+class _NoStringForm(Exception):
+    pass
+
+
 class _Unprintable:
     __hash__ = None
 
     def __str__(self):
-        raise RuntimeError("no string form")
+        raise _NoStringForm()
 
 
 class TestAddNodesToSession:
@@ -535,9 +539,16 @@ class TestAddNodesToSession:
     def test_the_byte_cap_measures_the_ids_as_one_json_list(
         self, tmp_path, slack, succeeds
     ):
-        """Brackets, separators and every id's encoding, unhashable ones and a
-        hashable dict with keys that do not sort included, count exactly."""
-        node_ids = ["alpha", {"id": "b", "x": [1, 2]}, _HashableDict({1: "a", "b": 2})]
+        """Brackets, separators and every id's encoding count exactly: escaped
+        non-ASCII, an unhashable id, one encoded through ``default=str`` and a
+        hashable dict whose keys do not sort included."""
+        node_ids = [
+            "alpha",
+            {"id": "b", "x": [1, 2]},
+            "é",
+            {1},
+            _HashableDict({1: "a", "b": 2}),
+        ]
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
         service = GraphService(storage)
         tools_map, manager = _wire(
