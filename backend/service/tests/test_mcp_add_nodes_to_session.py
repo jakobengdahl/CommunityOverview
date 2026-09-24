@@ -422,6 +422,45 @@ class TestAddNodesToSession:
         assert result["success"] is True
         assert result["skipped"] == [{"id": "b", "x": 1}, [1]]
 
+    def test_an_id_with_no_canonical_json_is_skipped_not_an_exception(self, tools):
+        """An in-process caller can pass a value ``json.dumps`` rejects; the
+        dedupe keys unhashable ids by their JSON, so it must not raise."""
+        tools_map, manager = tools
+        sid = _session(manager)
+        cyclic = []
+        cyclic.append(cyclic)
+        mixed_keys = {1: "a", "b": 2}
+        deep = []
+        for _ in range(5000):
+            deep = [deep]
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid,
+            node_ids=["alpha", cyclic, mixed_keys, cyclic, deep, "beta"],
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha", "beta"]
+        assert len(result["skipped"]) == 3
+        assert result["skipped"][0] is cyclic
+        assert result["skipped"][1] is mixed_keys
+        assert result["skipped"][2] is deep
+        assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
+
+    def test_only_ids_with_no_canonical_json_is_no_resolvable_nodes(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        cyclic = {}
+        cyclic["self"] = cyclic
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=[cyclic])
+
+        assert result["success"] is False
+        assert result["error"] == "no_resolvable_nodes"
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0] is cyclic
+        assert manager.get_session(sid).state["node_refs"] == []
+
     def test_an_oversized_byte_payload_is_rejected_before_any_node_is_resolved(
         self, tmp_path
     ):
@@ -646,6 +685,21 @@ class TestAuthorization:
         result = tools_map["add_nodes_to_session"](
             session_id=sid, node_ids=["a", "b", "c"]
         )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+
+    def test_read_only_mode_is_denied_before_the_byte_cap(self, tmp_path, monkeypatch):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_op_batch_bytes=50)
+        sid = _session(manager)
+        node_ids = ["x" * 30, "y" * 30]
+        assert len(node_ids) <= manager.max_ops_per_batch
+        assert len(json.dumps(node_ids)) > manager.max_op_batch_bytes
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
 
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"

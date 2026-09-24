@@ -1760,15 +1760,26 @@ def register_mcp_tools(
         # below count it. This runs on the uncapped list, so it must stay
         # linear — an unhashable value (a dict or list arriving unvalidated
         # through POST /execute_tool) is keyed by its canonical JSON instead of
-        # being compared pairwise.
+        # being compared pairwise. A value with no canonical JSON (a cycle,
+        # mixed-type dict keys, nesting past the recursion limit) can only come
+        # from an in-process caller; it could never resolve, and the byte cap
+        # below could not measure it either, so it is skipped before both.
         unique_ids: List[Any] = []
+        unencodable: List[Any] = []
         seen: set = set()
         for node_id in node_ids:
             try:
                 key = ("h", node_id)
                 hash(key)
             except TypeError:
-                key = ("u", json.dumps(node_id, sort_keys=True, default=str))
+                try:
+                    key = ("u", json.dumps(node_id, sort_keys=True, default=str))
+                except (TypeError, ValueError, RecursionError):
+                    key = ("i", id(node_id))
+                    if key not in seen:
+                        seen.add(key)
+                        unencodable.append(node_id)
+                    continue
             if key not in seen:
                 seen.add(key)
                 unique_ids.append(node_id)
@@ -1823,7 +1834,7 @@ def register_mcp_tools(
             node_id
             for node_id in unique_ids
             if not (isinstance(node_id, str) and node_id in known)
-        ]
+        ] + unencodable
         if not resolvable:
             return {
                 "success": False,
