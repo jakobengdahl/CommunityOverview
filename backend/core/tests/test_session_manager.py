@@ -2906,6 +2906,51 @@ class TestRenameSessionSync:
             )
         assert s.name == "Committed-c21e"
 
+    async def test_apply_op_sync_restores_the_activity_log_on_failure(self):
+        """``session_renamed`` is not undoable, so a rename never writes an
+        activity record and cannot show whether the rollback restores the log.
+        An undoable op does."""
+        mgr = _manager()
+        s = mgr.create_session()
+
+        def move(x):
+            return {
+                "op": "node_moved",
+                "node_id": "a",
+                "position": {"x": x, "y": 0},
+                "client_id": "mcp",
+            }
+
+        mgr._apply_op_sync(s, s.id, "mcp", move(1))
+        log_before = copy.deepcopy(s.activity_log)
+        assert len(log_before) == 1
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr._apply_op_sync(s, s.id, "mcp", move(2))
+        assert s.activity_log == log_before
+
+    def test_a_non_string_name_is_rejected_before_the_session_is_created(self):
+        """A rename materialises an unknown id — but not for a request that is
+        refused anyway, or a bad call leaves an empty session behind."""
+        mgr = _manager()
+        sid = "1234-5678-9012-3456"
+
+        with pytest.raises(OpError):
+            mgr.rename_session_sync(sid, 42)
+        assert mgr.get_session(sid) is None
+        assert mgr.store.session_count() == 0
+
+    def test_an_invalid_id_is_not_found(self):
+        mgr = _manager()
+
+        with pytest.raises(SessionNotFound):
+            mgr.rename_session_sync("nope", "Name")
+        assert mgr.store.session_count() == 0
+
     async def test_broadcast_carries_the_callers_actor(self):
         mgr = _manager()
         s = mgr.create_session()
