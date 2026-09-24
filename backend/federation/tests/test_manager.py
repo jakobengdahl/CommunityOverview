@@ -276,14 +276,16 @@ def test_type_label_match_outranks_a_description_match():
     assert _origin_ids(result["nodes"]) == ["label", "desc"]
 
 
+@pytest.mark.parametrize("archived_first", [True, False])
 @pytest.mark.parametrize("query", ["", "office"])
-def test_archived_nodes_do_not_take_limit_slots(query):
-    manager = _manager_with_cached_nodes(
-        [
-            {"id": "old", "type": "Actor", "name": "Office old", "archived": True},
-            {"id": "new", "type": "Actor", "name": "Office new"},
-        ]
-    )
+def test_archived_nodes_do_not_take_limit_slots(query, archived_first):
+    # Both nodes tie, so cache order decides which one a missing filter would
+    # let into the single slot; each order takes a turn.
+    nodes = [
+        {"id": "old", "type": "Actor", "name": "Office old", "archived": True},
+        {"id": "new", "type": "Actor", "name": "Office new"},
+    ]
+    manager = _manager_with_cached_nodes(nodes if archived_first else nodes[::-1])
 
     hidden = manager.search_nodes(query=query, node_types=None, limit=1)
     shown = manager.search_nodes(

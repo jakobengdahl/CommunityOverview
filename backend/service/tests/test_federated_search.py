@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from backend.core import GraphStorage, Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
@@ -415,19 +417,24 @@ def test_localized_type_label_finds_federated_nodes_like_local_ones(tmp_path):
     ]
 
 
-def test_archived_federated_nodes_do_not_leave_the_window_short(tmp_path):
+@pytest.mark.parametrize("archived_first", [True, False])
+def test_archived_federated_nodes_do_not_leave_the_window_short(
+    tmp_path, archived_first
+):
     """Without a filter the federated fetch asks only for the free slots, so an
     archived node counted in that window and dropped afterwards left a visible
-    node out even though the limit had room for it."""
+    node out even though the limit had room for it. The two remotes tie, so
+    each cache order takes a turn."""
     storage = _empty_storage(tmp_path)
     storage.add_nodes(
         [Node(id="local-a", type=NodeType.ACTOR, name="Local remote")], []
     )
+    remotes = [
+        {"id": "old", "type": "Actor", "name": "Remote old", "archived": True},
+        {"id": "new", "type": "Actor", "name": "Remote new"},
+    ]
     manager = _manager_with_federated_nodes(
-        [
-            {"id": "old", "type": "Actor", "name": "Remote old", "archived": True},
-            {"id": "new", "type": "Actor", "name": "Remote new"},
-        ]
+        remotes if archived_first else remotes[::-1]
     )
     service = GraphService(storage, federation_manager=manager)
 
