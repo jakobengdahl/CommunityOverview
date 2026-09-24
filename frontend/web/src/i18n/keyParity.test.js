@@ -13,12 +13,24 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Arrays are leaves: their elements are translated content, not keys. Empty
-// objects are leaves too, so a `{}` present in only one file still counts.
+function isContainer(value) {
+  return value !== null && typeof value === 'object';
+}
+
+// An array of plain values is a leaf: its elements are translated content, and
+// a translation may list a different number of them. An array holding an
+// object or array is walked by index instead, because t() reaches into it with
+// paths like `list.0.title`. Empty objects are leaves too, so a `{}` present in
+// only one file still counts.
+function isBranch(value) {
+  if (Array.isArray(value)) return value.some(isContainer);
+  return isPlainObject(value) && Object.keys(value).length > 0;
+}
+
 function leafEntries(obj, prefix = '', out = new Map()) {
   for (const [key, value] of Object.entries(obj)) {
     const path = prefix ? `${prefix}.${key}` : key;
-    if (isPlainObject(value) && Object.keys(value).length > 0) {
+    if (isBranch(value)) {
       leafEntries(value, path, out);
     } else {
       out.set(path, value);
@@ -44,7 +56,7 @@ function dottedKeys(obj, prefix = '', out = []) {
   for (const [key, value] of Object.entries(obj)) {
     const path = prefix ? `${prefix}.${key}` : key;
     if (key.includes('.')) out.push(path);
-    if (isPlainObject(value)) dottedKeys(value, path, out);
+    if (isContainer(value)) dottedKeys(value, path, out);
   }
   return out;
 }
@@ -58,6 +70,32 @@ function leafKind(value) {
 function missingFrom(source, target) {
   return [...source.keys()].filter((path) => !target.has(path)).sort();
 }
+
+describe('key parity helpers', () => {
+  it('walk into objects held in arrays, with index-qualified paths', () => {
+    const seededEn = { list: [{ title: 'A', body: 'B' }], plain: ['x', 'y'] };
+    const seededSv = { list: [{ title: 'A' }], plain: ['x'] };
+    const enSeeded = leafEntries(seededEn);
+    const svSeeded = leafEntries(seededSv);
+    expect([...enSeeded.keys()].sort()).toEqual(['list.0.body', 'list.0.title', 'plain']);
+    expect(missingFrom(enSeeded, svSeeded)).toEqual(['list.0.body']);
+    expect(missingFrom(svSeeded, enSeeded)).toEqual([]);
+  });
+
+  it('report a kind mismatch nested in an array', () => {
+    const enSeeded = leafEntries({ list: [{ title: 'A' }] });
+    const svSeeded = leafEntries({ list: [{ title: ['A'] }] });
+    expect(leafKind(enSeeded.get('list.0.title'))).toBe('string');
+    expect(leafKind(svSeeded.get('list.0.title'))).toBe('array');
+  });
+
+  it('find dotted key names inside objects held in arrays', () => {
+    expect(dottedKeys({ list: ['a.b', { 'c.d': 'x' }, [{ 'e.f': 'y' }]] })).toEqual([
+      'list.1.c.d',
+      'list.2.0.e.f',
+    ]);
+  });
+});
 
 const enLeaves = leafEntries(en);
 const svLeaves = leafEntries(sv);
