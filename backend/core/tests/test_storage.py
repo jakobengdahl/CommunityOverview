@@ -677,6 +677,26 @@ class TestSearchRanking:
         ids = [n.id for n in results]
         assert ids.index("type-match") < ids.index("desc-match")
 
+    def test_localized_type_label_ranks_between_name_and_description(
+        self, temp_storage
+    ):
+        """The Swedish label of a legacy enum type is a type-tier signal: it
+        must surface the node, above a description-only mention but below a
+        name match on another type."""
+        nodes = [
+            Node(id="type-label", type=NodeType.ACTOR, name="Unrelated"),
+            Node(id="name-match", type=NodeType.THEME, name="Aktör"),
+            Node(
+                id="desc-match",
+                type=NodeType.THEME,
+                name="Other",
+                description="en aktör i nätverket",
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        ids = [n.id for n in temp_storage.search_nodes("aktör")]
+        assert ids == ["name-match", "type-label", "desc-match"]
+
     def test_ranking_respects_limit(self, ranking_storage):
         """Ranked results still respect the limit parameter."""
         results = ranking_storage.search_nodes("esam", limit=2)
