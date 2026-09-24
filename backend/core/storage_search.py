@@ -384,7 +384,7 @@ def build_match_fields(node: Node, type_searchable_text: Dict[str, str]) -> Matc
     tags = tuple(node.tags) if getattr(node, "tags", None) else ()
     subtypes = tuple(node.subtypes) if getattr(node, "subtypes", None) else ()
     aliases = tuple(node.aliases) if getattr(node, "aliases", None) else ()
-    type_key = str(node.type)
+    type_key = node.type_str
     type_name = type_key.lower()
     type_text = type_searchable_text.get(type_key, type_name)
     tags_text = " ".join(tags)
