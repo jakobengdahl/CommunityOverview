@@ -41,6 +41,11 @@ def _apply_formatter(logger: logging.Logger, formatter: logging.Formatter) -> No
 def configure_root_logging(log_format: str) -> None:
     """Configure the app and Uvicorn loggers according to the requested format."""
     if log_format != "structured_json":
+        # Without a root handler, app warnings fall through to logging's
+        # last-resort handler, which prints the bare message with no level or
+        # logger name. The level stays WARNING, so what reaches the console is
+        # unchanged - only labelled.
+        logging.basicConfig()
         return
 
     formatter = StructuredJsonFormatter()

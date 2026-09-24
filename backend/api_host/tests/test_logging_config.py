@@ -67,3 +67,35 @@ def test_structured_json_formatter_emits_json_log_line():
     assert payload["level"] == "INFO"
     assert payload["timestamp"]
     assert "RuntimeError: boom" in payload["exception"]
+
+
+def test_text_format_labels_app_warnings_with_level_and_logger():
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+
+        configure_root_logging("text")
+
+        assert len(logging.root.handlers) == 1
+        record = logging.LogRecord(
+            name="backend.core.postgres_backend",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="graph checkpoint failed, will retry: disk full",
+            args=(),
+            exc_info=None,
+        )
+        line = logging.root.handlers[0].format(record)
+        assert line == (
+            "WARNING:backend.core.postgres_backend:"
+            "graph checkpoint failed, will retry: disk full"
+        )
+        assert logging.root.level == logging.WARNING
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)

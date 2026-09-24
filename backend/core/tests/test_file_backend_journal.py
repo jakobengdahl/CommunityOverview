@@ -98,7 +98,7 @@ def reported(caplog, capsys):
         messages = [
             record.getMessage()
             for record in caplog.records
-            if record.name == _BACKEND_LOGGER and record.levelno >= logging.WARNING
+            if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
         caplog.clear()
         out = capsys.readouterr().out
