@@ -326,14 +326,17 @@ class TestTypeLabelsReachEveryType:
     LABELLED = {
         "Actor": "actor aktör",
         "CustomerSegment": "customersegment kundsegment",
+        "Market": "market marknad",
     }
 
     @pytest.mark.parametrize(
         "node_type,label",
         [
             (NodeType.ACTOR, "aktör"),
-            ("Actor", "aktör"),
+            # Schema-only types stay plain strings; "Actor" would be coerced to
+            # the enum and repeat the case above.
             ("CustomerSegment", "kundsegment"),
+            ("Market", "marknad"),
         ],
     )
     def test_the_localized_label_is_searchable(self, node_type, label):
@@ -342,6 +345,10 @@ class TestTypeLabelsReachEveryType:
         )
         assert label in fields.text
         assert fields.type_text == self.LABELLED[fields.type_key]
+
+    @pytest.mark.parametrize("node_type", ["CustomerSegment", "Market"])
+    def test_the_schema_only_cases_really_are_strings(self, node_type):
+        assert not isinstance(Node(id="a", type=node_type, name="x").type, NodeType)
 
     def test_an_enum_type_does_not_match_its_python_repr(self):
         fields = build_match_fields(

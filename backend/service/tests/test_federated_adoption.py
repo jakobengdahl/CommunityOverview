@@ -256,29 +256,139 @@ def test_search_graph_dedups_before_the_limit_trim_on_the_widened_path(
     assert result["total"] == len(node_ids) == len(eligible_ids)
 
 
+@pytest.mark.parametrize("adopted_remote", ["remote-1", "remote-2", "remote-3"])
+# A text query must refill the slots as well as match-all does: the stub-overlap
+# widening is not specific to either.
+@pytest.mark.parametrize("query", ["", "external"])
 def test_search_graph_federated_window_refills_slots_taken_by_local_stub_ids(
-    tmp_path,
+    tmp_path, query, adopted_remote
 ):
     """Without a filter the federated fetch is not widened to the whole cache.
-    After adopting remote-1 the window repeats the stub's id, which the dedup
-    pass drops; the window must be sized so remote-3 still fills the last slot,
-    while the local nodes keep their places ahead of every federated one."""
+    After an adoption the window can repeat the stub's id, which the dedup pass
+    drops; the window must be sized so the remaining remotes still fill the
+    free slots, while the local nodes keep their places ahead of every
+    federated one. Each remote takes a turn as the adopted one, so the repeat
+    falls inside an un-widened two-node window in at least one case."""
     service = _service_with_cached_federated_node(
         tmp_path, source_nodes=_TAGGED_REMOTE_NODES
     )
-    adopted = service.adopt_federated_node("federated::esam-main::remote-1")
+    stub_id = f"federated::esam-main::{adopted_remote}"
+    adopted = service.adopt_federated_node(stub_id)
     assert adopted["success"] is True
-    local_ids = [adopted["adopted_node"]["id"], "federated::esam-main::remote-1"]
+    local_ids = [adopted["adopted_node"]["id"], stub_id]
 
-    result = service.search_graph(query="", limit=4)
+    result = service.search_graph(query=query, limit=4)
     node_ids = [node["id"] for node in result["nodes"]]
 
     assert sorted(node_ids[:2]) == sorted(local_ids)
     assert set(node_ids[2:]) == {
-        "federated::esam-main::remote-2",
-        "federated::esam-main::remote-3",
-    }
+        f"federated::esam-main::remote-{i}" for i in (1, 2, 3)
+    } - {stub_id}
     assert result["total"] == 4
+
+
+@pytest.mark.parametrize("adopted_remote", ["remote-1", "remote-2", "remote-3"])
+def test_search_graph_trims_a_federated_window_that_overflows_the_free_slots(
+    tmp_path, adopted_remote
+):
+    """The stub-overlap widening asks for one extra federated node per local
+    stub. When the stub's own id is not in the window that extra node is not
+    absorbed by the dedup pass, so the result overflows by one and the final
+    limit trim must cut it, keeping the local nodes."""
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    stub_id = f"federated::esam-main::{adopted_remote}"
+    adopted = service.adopt_federated_node(stub_id)
+    assert adopted["success"] is True
+    local_ids = [adopted["adopted_node"]["id"], stub_id]
+
+    result = service.search_graph(query="", limit=3)
+    node_ids = [node["id"] for node in result["nodes"]]
+
+    assert len(node_ids) == len(set(node_ids)) == 3
+    assert result["total"] == 3
+    assert sorted(node_ids[:2]) == sorted(local_ids)
+    assert node_ids[2] != stub_id
+    assert result["federation"]["federated_nodes"] == 2
+
+
+def _record_federated_fetch_limits(service, monkeypatch):
+    manager = service._federation_manager
+    requested = []
+    real_search = manager.search_nodes
+
+    def _record(**kwargs):
+        requested.append(kwargs["limit"])
+        return real_search(**kwargs)
+
+    monkeypatch.setattr(manager, "search_nodes", _record)
+    return requested
+
+
+@pytest.mark.parametrize(
+    "query,semantic",
+    [
+        # Explicit semantic ranking of the local results.
+        ("external", True),
+        # Auto-fallback: nothing matches lexically, so semantic ranking is
+        # retried and supplies the local results.
+        ("no-lexical-hit", False),
+    ],
+)
+def test_search_graph_widens_the_federated_window_for_stubs_found_semantically(
+    tmp_path, monkeypatch, query, semantic
+):
+    """A stub that reached the local results through semantic ranking repeats
+    its id in the federated window just as a lexically found one does, so the
+    window is widened by it on both semantic paths."""
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    stub_id = "federated::esam-main::remote-1"
+    adopted = service.adopt_federated_node(stub_id)
+    assert adopted["success"] is True
+    local_nodes = [
+        service.storage.get_node(adopted["adopted_node"]["id"]),
+        service.storage.get_node(stub_id),
+    ]
+    # The ML-free install has no embeddings; stand in a ranking that returns
+    # both local nodes.
+    monkeypatch.setattr(
+        service.storage, "semantic_search_nodes", lambda **kwargs: local_nodes
+    )
+    requested = _record_federated_fetch_limits(service, monkeypatch)
+
+    result = service.search_graph(query=query, limit=4, semantic=semantic)
+
+    assert result["semantic"] is True
+    # Two free slots plus one for the stub whose id the window repeats.
+    assert requested == [3]
+    if semantic:
+        assert {node["id"] for node in result["nodes"]} == {
+            node.id for node in local_nodes
+        } | {"federated::esam-main::remote-2", "federated::esam-main::remote-3"}
+
+
+def test_search_graph_federated_window_is_widened_to_the_cache_by_a_tag_filter(
+    tmp_path, monkeypatch
+):
+    """A tag filter is applied after the fetch, so the federated window must
+    cover the whole cache rather than only the free slots."""
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    service.storage.add_nodes(
+        [Node(id="local-a", type=NodeType.ACTOR, name="Local A", tags=["t"])], []
+    )
+    requested = _record_federated_fetch_limits(service, monkeypatch)
+
+    result = service.search_graph(query="", limit=2, tags_any=["t"])
+
+    # One free slot, widened to the three cached remotes.
+    assert requested == [3]
+    assert [node["id"] for node in result["nodes"]][0] == "local-a"
+    assert result["total"] == 2
 
 
 def test_search_graph_federated_window_is_not_widened_without_local_stubs(
