@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
 
@@ -6,8 +7,7 @@ import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
  *
  * Two browser contexts (two "users") join the *same* session by URL and drive
  * the real collaboration surface: presence, node add/move fan-out, annotation
- * create, delete-with-warning, and reconnect catch-up (currently test.fixme, see
- * that test). The deterministic
+ * create, delete-with-warning, and reconnect catch-up. The deterministic
  * core of these scenarios is also covered headlessly in
  * backend/core/tests/test_session_multiuser.py; this spec proves they hold
  * through the actual UI + SSE transport.
@@ -19,7 +19,7 @@ import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
 
 const SESSION_URL = (id) => `/?session=${id}`;
 const randomSessionId = () => {
-  const d4 = () => String(Math.floor(1000 + Math.random() * 9000));
+  const d4 = () => String(randomInt(1000, 10000));
   return `${d4()}-${d4()}`;
 };
 
@@ -153,15 +153,61 @@ test.describe('shared session — two users, one session', () => {
     await ctxB.close();
   });
 
-  // Intermittently red on a real race, not on the spec: ops that land between
-  // B's initial session GET and its stream subscribe are never applied, so B
-  // can stay empty until a reload. Tracked as
-  // smallfix-late-joiner-misses-ops-before-stream-20260924; drop the fixme
-  // with that fix and confirm with --repeat-each.
-  test.fixme('reconnecting client catches up on the session state', async ({
+  test('a client whose stream subscribes after ops landed still shows them', async ({
     browser,
     request,
   }) => {
+    const sessionId = randomSessionId();
+    const ctxA = await browser.newContext();
+    const a = await ctxA.newPage();
+    await a.goto(SESSION_URL(sessionId));
+    await seedNodes(a, request);
+
+    // Hold B's first stream request so its initial session GET completes
+    // before A's next op lands, and its stream subscribes only afterwards.
+    const ctxB = await browser.newContext();
+    const b = await ctxB.newPage();
+    let releaseStream;
+    const streamHeld = new Promise((resolve) => {
+      releaseStream = resolve;
+    });
+    let held = false;
+    await b.route('**/api/sessions/*/stream*', async (route) => {
+      if (!held) {
+        held = true;
+        await streamHeld;
+      }
+      await route.continue();
+    });
+    const loaded = b.waitForResponse(
+      (r) => r.url().includes(`/api/sessions/${sessionId}?`) && r.request().method() === 'GET'
+    );
+    await b.goto(SESSION_URL(sessionId));
+    await loaded;
+    await expect.poll(() => held, { timeout: 15000 }).toBe(true);
+
+    // Match the nodes_added POST itself, not an unrelated claim or move, so
+    // B's stream is released only once the new node is on the server.
+    const opLanded = a.waitForResponse(
+      (r) =>
+        r.url().includes(`/api/sessions/${sessionId}/ops`) &&
+        r.request().method() === 'POST' &&
+        (r.request().postData() || '').includes('"nodes_added"')
+    );
+    const count = await seedNodes(a, request);
+    expect((await opLanded).ok()).toBe(true);
+
+    releaseStream();
+    await expect.poll(() => nodeCount(b), { timeout: 15000 }).toBe(count);
+
+    await ctxA.close();
+    await ctxB.close();
+  });
+
+  // Also covers the late-joiner race: A's ops can land between B's initial
+  // session GET and its stream subscribe, which the first snapshot's seq
+  // must then trigger a resync for.
+  test('reconnecting client catches up on the session state', async ({ browser, request }) => {
     const sessionId = randomSessionId();
     const ctxA = await browser.newContext();
     const a = await ctxA.newPage();
