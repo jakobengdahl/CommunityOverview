@@ -291,6 +291,31 @@ async def test_a_bare_registry_entry_alone_is_never_delivery(wired):
 
 
 @pytest.mark.asyncio
+async def test_an_undelivered_push_to_a_bare_entry_reaches_a_browser_opened_later(
+    wired,
+):
+    """Undelivered is not discarded: the entry's queue replays to the next consumer.
+
+    The docs and the warning say so rather than claiming the push left no trace,
+    so this pins the behaviour they describe: the command reported undelivered is
+    the one a browser opening the session afterwards receives.
+    """
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+    registry.get_or_create(session_id)
+
+    delivery = _delivery(tools, session_id)
+    assert delivery["delivered"] is False
+    assert "may still apply it" in delivery["warning"]
+    assert "left no trace" not in delivery["warning"]
+
+    async with _legacy_consumer(registry, session_id) as received:
+        assert await _settle(lambda: len(received) == 1)
+    assert received[0]["type"] == "tool_result"
+    assert [n["id"] for n in received[0]["result"]["nodes"]] == ["alpha"]
+
+
+@pytest.mark.asyncio
 async def test_a_session_auto_add_agent_does_not_make_a_push_delivered(tmp_path):
     """Configuring an auto-add agent materialises a registry entry, not a canvas."""
     from backend.core.session_auto_add import SessionAutoAddRegistry
@@ -685,6 +710,36 @@ def test_a_bare_entry_with_no_stored_state_resolves_as_not_found(wired, leave_en
     refused = tools["clear_visualization"](visualization_session_id=UNKNOWN_SESSION_ID)
     assert refused["success"] is False
     assert "not found" in refused["error"]
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["never_stored", "deleted"])
+def test_op_stream_presence_without_stored_state_resolves_as_not_found(wired, deleted):
+    """Presence alone is not existence, so a deleted session is not resurrected.
+
+    Deleting a session leaves an attached client's presence in place, and
+    ``SessionManager.connect`` registers presence for an id the store does not
+    hold. Either way a client is counted on the op stream while nothing is
+    stored, and the read tools must still report the id as not found.
+    """
+    tools, _registry, manager = wired
+    session_id = _new_session(tools) if deleted else UNKNOWN_SESSION_ID
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        if deleted:
+            assert tools["delete_visualization_session"](
+                session_id=session_id, confirm=True
+            )["success"]
+        assert manager.get_session(session_id) is None
+        assert manager.connected_count(session_id) == 1
+
+        connect = tools["connect_to_visualization_session"](session_id=session_id)
+        assert connect["connected"] is False
+        assert "not found" in connect["message"]
+
+        state = tools["get_visualization_session_state"](session_id=session_id)
+        assert "not found" in state["error"]
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
 
 
 @pytest.mark.asyncio

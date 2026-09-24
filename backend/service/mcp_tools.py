@@ -100,13 +100,13 @@ _INVALID_SESSION_ID_ERROR = (
 # (contract §4: names are non-unique and the server fills a default).
 _DEFAULT_SESSION_NAME = "Untitled session"
 
-# Appended to every undelivered-push warning: a push writes nothing, so an
-# agent that simply retries it gets the same silence. It deliberately names
+# Appended to every undelivered-push warning: a push writes no session state, so
+# an agent that simply retries it gets the same silence. It deliberately names
 # this report, not connect_to_visualization_session, as the verdict: that tool
 # is read before the push, and a consumer present then can be gone by the time
 # the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
-    " A push is not stored, so this left no trace — use add_nodes_to_session to "
+    " A push is not stored in the session's state — use add_nodes_to_session to "
     "change what the session holds. Trust this report rather than a "
     "reachability check made before the push (connect_to_visualization_session): "
     "a client present then may have left by the time the push was sent."
@@ -147,7 +147,8 @@ def _undelivered_push_warning(
         legacy_reason = (
             "the session's legacy push channel has a registry entry but nothing "
             "draining it (an entry outlives the browser that created it, and is "
-            "also created without one)"
+            "also created without one), so the command waits in its queue and a "
+            "browser that opens the session later may still apply it"
         )
     else:
         legacy_reason = "no browser is holding the session's legacy push channel"
@@ -401,13 +402,16 @@ def register_mcp_tools(
                 ``semantic=True``. Applies to the local graph; federated search
                 stays substring-matched.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE. The
+                is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not discarded: a legacy registry entry
+                with nothing draining it keeps the command queued, and a browser
+                that opens the session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -463,13 +467,16 @@ def register_mcp_tools(
             include_archived: When False (default) archived edges are not traversed
                 and archived neighbour nodes are excluded. Set True to include them.
             visualization_session_id: Optional browser session ID — when provided, the result
-                is pushed live to the connected browser window via SSE. The
+                is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not discarded: a legacy registry entry
+                with nothing draining it keeps the command queued, and a browser
+                that opens the session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -964,13 +971,16 @@ def register_mcp_tools(
         Args:
             name: Name of the saved view
             visualization_session_id: Optional browser session ID — when provided, the view
-                is loaded live in the connected browser window via SSE. The
+                is loaded in that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
                 whether anything actually received it (``delivered``,
                 ``status``, ``live_consumers``, and a ``warning`` naming the
-                state when nothing did). A push writes no session state, so an
-                undelivered one leaves no trace to read back — check this field
-                rather than assuming the canvas changed.
+                state when nothing did). A push writes no session state when it
+                is sent, so reading the session back cannot show whether it
+                landed — check this field rather than assuming the canvas
+                changed. Undelivered is not discarded: a legacy registry entry
+                with nothing draining it keeps the command queued, and a browser
+                that opens the session later may still apply it.
 
         Returns:
             The nodes and edges to display in the visualization, with position
@@ -4661,9 +4671,12 @@ def _push_to_session(
     - ``warning`` — present only when undelivered, naming the state that made it
       so.
 
-    A push leaves no trace in the session's stored state (only
+    A push writes nothing to the session's stored state when it is sent (only
     ``add_nodes_to_session`` writes ``node_refs``), so a caller that ignores this
-    report cannot tell afterwards whether anything received the push.
+    report cannot tell afterwards whether anything received the push. An
+    undelivered push is not necessarily discarded: a legacy registry entry with
+    nothing draining it keeps the command queued, and a browser that opens the
+    session later may still apply it.
     ``delivered`` means a consumer was attached when the command was enqueued,
     not that the canvas has finished applying it.
     """
