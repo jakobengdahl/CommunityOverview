@@ -401,6 +401,8 @@ describe('SessionSyncClient', () => {
     FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
     expect(onReady).toHaveBeenCalledWith(5);
     expect(onResync).toHaveBeenCalledTimes(1);
+    // Its own session, not whatever the host's handler is still bound to.
+    expect(onResync).toHaveBeenCalledWith('1234-5678');
   });
 
   it('does not resync on a first snapshot at the seq the load already reflected', () => {
@@ -425,12 +427,23 @@ describe('SessionSyncClient', () => {
     const onResync = vi.fn();
     const { client } = makeClient({ handlers: { onResync } });
     client.connect();
-    client.setBaseline({ node_refs: ['a'] }, { seq: 1 });
+    client.setBaseline({ node_refs: ['a'] }, { seq: 5 });
     const es = FakeEventSource.instances[0];
-    es.emit({ type: 'snapshot', seq: 3, session: { state: {} } });
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+    // A later snapshot resyncs as it always did, even at or below the load seq.
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
     expect(onResync).toHaveBeenCalledTimes(1);
-    es.emit({ type: 'snapshot', seq: 4, session: { state: {} } });
-    expect(onResync).toHaveBeenCalledTimes(2); // the ordinary later-snapshot resync
+  });
+
+  it('keeps the load seq when a later setBaseline carries none', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 2 });
+    client.setBaseline({ node_refs: ['a', 'b'] });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).toHaveBeenCalledTimes(1);
   });
 
   it('forwards command events (MCP pushes broadcast via the hub, design R5)', async () => {

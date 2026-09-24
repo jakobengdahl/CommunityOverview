@@ -267,6 +267,22 @@ describe('useSharedSession.loadSessionFromServer', () => {
     expect(setBaseline).toHaveBeenCalledWith({}, { seq: 0 });
   });
 
+  it('reseeds an already-connected client on a non-eager 404 without a load seq', async () => {
+    const setBaseline = vi.fn();
+    const deps = makeDeps({ syncRef: { current: { sessionId: '1234-5678', setBaseline } } });
+    const err = new Error('not found');
+    err.status = 404;
+    api.getSession.mockRejectedValueOnce(err);
+    const { result } = renderHook(() => useSharedSession(deps));
+
+    await act(async () => {
+      await result.current.loadSessionFromServer('1234-5678');
+    });
+
+    expect(deps.ensureSyncConnected).not.toHaveBeenCalled();
+    expect(setBaseline.mock.calls).toEqual([[{}]]);
+  });
+
   it('does not call onMissing when the session loads successfully', async () => {
     const setBaseline = vi.fn();
     const deps = makeDeps({ ensureSyncConnected: vi.fn(() => ({ setBaseline, sessionId: null })) });

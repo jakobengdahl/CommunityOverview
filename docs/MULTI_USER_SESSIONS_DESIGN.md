@@ -664,7 +664,8 @@ steps 6–8.
 >   join through the real UI + SSE transport (run locally, outside the core pytest
 >   CI). A joining client's first stream event is a snapshot the client does not
 >   apply; the client compares its seq with the seq the initial session GET
->   returned, and resyncs from the server when the snapshot is newer. Without
+>   returned (0 when the GET found no session yet, since the stream creates it),
+>   and resyncs from the server when the snapshot is newer. Without
 >   that, ops that land between the load and the stream subscribe would be lost.
 
 ## 6. Decisions

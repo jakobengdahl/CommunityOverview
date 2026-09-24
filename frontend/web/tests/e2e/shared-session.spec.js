@@ -186,8 +186,13 @@ test.describe('shared session — two users, one session', () => {
     await loaded;
     await expect.poll(() => held, { timeout: 15000 }).toBe(true);
 
+    // Match the nodes_added POST itself, not an unrelated claim or move, so
+    // B's stream is released only once the new node is on the server.
     const opLanded = a.waitForResponse(
-      (r) => r.url().includes(`/api/sessions/${sessionId}/ops`) && r.request().method() === 'POST'
+      (r) =>
+        r.url().includes(`/api/sessions/${sessionId}/ops`) &&
+        r.request().method() === 'POST' &&
+        (r.request().postData() || '').includes('"nodes_added"')
     );
     const count = await seedNodes(a, request);
     expect((await opLanded).ok()).toBe(true);
