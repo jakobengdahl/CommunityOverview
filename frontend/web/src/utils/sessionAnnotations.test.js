@@ -537,3 +537,52 @@ describe('opacity round-trip through the server annotation document', () => {
     expect(note.style.opacity).toBeUndefined();
   });
 });
+
+// smallfix-label-overlay-drops-nonvisual-style-keys: label and line listed
+// their style keys explicitly, so any other key an agent stored in `style`
+// was gone after the browser's first write-back.
+describe('label/line style keys the canvas has no control for', () => {
+  const label = {
+    id: 'l1',
+    type: 'label',
+    position: { x: 0, y: 0 },
+    text: 'x',
+    style: { color: 'red', fontSize: 18, opacity: 0.5, dash: 'dotted', weight: 700 },
+  };
+  const line = {
+    id: 'a1',
+    type: 'line',
+    from: { x: 0, y: 0 },
+    to: { x: 160, y: 0 },
+    style: { color: 'red', opacity: 0.5, dash: 'dotted', strokeWidth: 3 },
+  };
+
+  it('survive an untouched label/line round trip', () => {
+    const [labelBack, lineBack] = overlaysToAnnotations(annotationsToOverlays([label, line]));
+    expect(labelBack.style).toEqual(label.style);
+    expect(lineBack.style).toEqual(line.style);
+  });
+
+  it('survive a GUI edit of a named style key, which still wins', () => {
+    const overlays = annotationsToOverlays([label, line]).map((o) => ({ ...o, color: 'blue' }));
+    const [labelBack, lineBack] = overlaysToAnnotations(overlays);
+    expect(labelBack.style).toEqual({ ...label.style, color: 'blue' });
+    expect(lineBack.style).toEqual({ ...line.style, color: 'blue' });
+  });
+
+  it('are not duplicated as the named overlay fields', () => {
+    const [labelOverlay, lineOverlay] = annotationsToOverlays([label, line]);
+    expect(labelOverlay.extraStyle).toEqual({ dash: 'dotted', weight: 700 });
+    expect(lineOverlay.extraStyle).toEqual({ dash: 'dotted', strokeWidth: 3 });
+  });
+
+  it('add no extraStyle field when there is nothing beyond the named keys', () => {
+    const overlays = annotationsToOverlays([
+      { ...label, style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      { ...line, style: { color: 'red', opacity: 0.5 } },
+    ]);
+    for (const overlay of overlays) {
+      expect(Object.prototype.hasOwnProperty.call(overlay, 'extraStyle')).toBe(false);
+    }
+  });
+});
