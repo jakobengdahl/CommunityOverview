@@ -64,6 +64,13 @@ def _session(manager):
     return manager.create_session().id
 
 
+class _Unprintable:
+    __hash__ = None
+
+    def __str__(self):
+        raise RuntimeError("no string form")
+
+
 class TestAddNodesToSession:
     def test_named_nodes_become_the_sessions_nodes(self, tools):
         tools_map, manager = tools
@@ -431,21 +438,55 @@ class TestAddNodesToSession:
         cyclic.append(cyclic)
         mixed_keys = {1: "a", "b": 2}
         deep = []
+        deep_hashable = ()
         for _ in range(5000):
             deep = [deep]
+            deep_hashable = (deep_hashable,)
+        unprintable = _Unprintable()
+        unusual = [cyclic, mixed_keys, deep, deep_hashable, unprintable]
 
         result = tools_map["add_nodes_to_session"](
             session_id=sid,
-            node_ids=["alpha", cyclic, mixed_keys, cyclic, deep, "beta"],
+            node_ids=["alpha", *unusual, cyclic, deep_hashable, "beta"],
         )
 
         assert result["success"] is True
         assert result["added"] == ["alpha", "beta"]
-        assert len(result["skipped"]) == 3
-        assert result["skipped"][0] is cyclic
-        assert result["skipped"][1] is mixed_keys
-        assert result["skipped"][2] is deep
+        assert len(result["skipped"]) == len(unusual)
+        assert all(a is b for a, b in zip(result["skipped"], unusual))
         assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
+
+    def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
+        self, tmp_path
+    ):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage, service, max_ops_per_batch=1, max_op_batch_bytes=9
+        )
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+        assert len(json.dumps(["alpha"])) == manager.max_op_batch_bytes
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", cyclic]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert resolved_with == [["alpha"]]
 
     def test_only_ids_with_no_canonical_json_is_no_resolvable_nodes(self, tools):
         tools_map, manager = tools
