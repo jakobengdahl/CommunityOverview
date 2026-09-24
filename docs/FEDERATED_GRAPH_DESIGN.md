@@ -245,6 +245,9 @@ Even though federation is transparent, users must see provenance:
 - Read-only connector for remote `graph.json` fetch
 - Local cache store for external snapshots
 - Search/traversal merges local + cached results with depth budget enforcement
+- Cached nodes keep their remote `aliases` and `subtypes`, so federated search
+  matches and ranks them with the same scorer as local search (name, alias, type
+  label, tags, subtypes, description)
 - Provenance metadata in REST and MCP responses
 - UI depth selector and source-graph badges
 - Startup and scheduled sync with configurable interval
