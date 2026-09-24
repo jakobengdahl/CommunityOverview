@@ -114,8 +114,25 @@ async def test_sync_degrades_when_unreachable_url():
     assert status["graphs"][0]["status"] == "degraded"
 
 
-def test_score_node_match_alias_beats_description():
+def _ranked_ids(nodes, query):
+    """Ids in federated search order, with nodes placed in the cache directly
+    (_build_cache does not carry aliases over) in the order given."""
+    manager = _manager_with_cached_nodes([])
+    manager._cache["g"].nodes = {
+        n.id: n.model_copy(update={"metadata": {"origin_graph_id": "g"}}) for n in nodes
+    }
+    result = manager.search_nodes(query=query, node_types=None, limit=10)
+    return [n.id for n in result["nodes"]]
+
+
+def test_alias_match_outranks_a_description_match():
     """A federated node matched only via an alias must outrank a description-only match."""
+    desc_node = Node(
+        id="d",
+        type=NodeType.ACTOR,
+        name="Another",
+        description="part of the esam network",
+    )
     alias_node = Node(
         id="a",
         type=NodeType.ACTOR,
@@ -123,31 +140,21 @@ def test_score_node_match_alias_beats_description():
         description="unrelated",
         aliases=["esam"],
     )
-    desc_node = Node(
-        id="d",
-        type=NodeType.ACTOR,
-        name="Another",
-        description="part of the esam network",
-    )
-    alias_score = FederationManager._score_node_match(alias_node, "esam")
-    desc_score = FederationManager._score_node_match(desc_node, "esam")
-    assert alias_score > desc_score
+    assert _ranked_ids([desc_node, alias_node], "esam") == ["a", "d"]
 
 
-def test_score_node_match_real_name_beats_alias():
+def test_real_name_match_outranks_an_alias_match():
     """A real-name match must outrank an alias-only match in federated search too."""
-    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
     alias_node = Node(
         id="a", type=NodeType.ACTOR, name="Unrelated", description="x", aliases=["esam"]
     )
-    assert FederationManager._score_node_match(
-        name_node, "esam"
-    ) > FederationManager._score_node_match(alias_node, "esam")
+    name_node = Node(id="n", type=NodeType.ACTOR, name="Nordic esam", description="x")
+    assert _ranked_ids([alias_node, name_node], "esam") == ["n", "a"]
 
 
-def test_score_node_match_alias_does_not_lift_above_stronger_name():
+def test_alias_does_not_lift_a_node_above_a_stronger_name_match():
     """A federated node matching on both name (contains) and an exact alias must not
-    outscore a node whose name is an exact match — name and alias combine with max()."""
+    outrank a node whose name is an exact match — name and alias combine with max()."""
     name_plus_alias = Node(
         id="x",
         type=NodeType.ACTOR,
@@ -156,9 +163,7 @@ def test_score_node_match_alias_does_not_lift_above_stronger_name():
         aliases=["esam"],
     )
     exact_name = Node(id="y", type=NodeType.ACTOR, name="esam", description="x")
-    assert FederationManager._score_node_match(
-        exact_name, "esam"
-    ) > FederationManager._score_node_match(name_plus_alias, "esam")
+    assert _ranked_ids([name_plus_alias, exact_name], "esam") == ["y", "x"]
 
 
 _TYPE_TEXT = {"Actor": "actor aktör", "Initiative": "initiative initiativ"}

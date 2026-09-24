@@ -228,22 +228,6 @@ class FederationManager:
             return min(global_depth, graph_cfg.max_depth_override)
         return global_depth
 
-    @staticmethod
-    def _score_node_match(
-        node: Node,
-        query_lower: str,
-        type_searchable_text: Optional[Dict[str, str]] = None,
-    ) -> int:
-        """Score how well a federated node matches a query. Higher = better match.
-
-        Delegates to the local ranking so a federated node and a local node with
-        the same fields score the same, including the type tier's localized
-        labels from ``type_searchable_text``.
-        """
-        return storage_search.score_node_match(
-            node, query_lower, type_searchable_text or {}
-        )
-
     def search_nodes(
         self,
         query: str,
