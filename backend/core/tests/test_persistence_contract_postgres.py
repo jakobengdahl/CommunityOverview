@@ -393,10 +393,10 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
     this is what reaches it, and proves the sentinel is recorded rather than
     the branch being dead code.
 
-    Deliberately not run through `_sequential_scans`: that helper is used
-    elsewhere only around a single narrow entity write (`WHERE id = %s`
-    against the primary key), where a scan is a regression. A whole-graph
-    `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
+    Deliberately not run through `_sequential_scans`: where that helper
+    backs a "no scan" assertion, it wraps only narrow entity writes (`WHERE
+    id = %s` against the primary key), where a scan is a regression. A
+    whole-graph `save_graph_data` issues an unfiltered `DELETE FROM <table>` to replace
     the previous graph - by design, since "replace the whole graph" means
     every existing row is gone - and an unfiltered delete has no index to
     seek with, so it correctly plans as a sequential scan regardless of how
