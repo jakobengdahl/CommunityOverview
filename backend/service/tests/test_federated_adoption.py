@@ -2,13 +2,16 @@
 
 import json
 
-from backend.core import GraphStorage
+import pytest
+
+from backend.core import GraphStorage, Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 from backend.service import GraphService
+from backend.service.mutations import _FEDERATION_BOOKKEEPING_METADATA_KEYS
 
 
-def _service_with_cached_federated_node(tmp_path, source_node=None):
+def _service_with_cached_federated_node(tmp_path, source_node=None, source_nodes=None):
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
     storage = GraphStorage(str(graph_file))
@@ -35,12 +38,48 @@ def _service_with_cached_federated_node(tmp_path, source_node=None):
     manager = FederationManager(config)
     cache_nodes, _ = manager._build_cache(
         config.federation.graphs[0],
-        [source_node or {"id": "remote-1", "type": "Actor", "name": "External Node"}],
+        source_nodes
+        or [
+            source_node or {"id": "remote-1", "type": "Actor", "name": "External Node"}
+        ],
         [],
     )
     manager._cache["esam-main"].nodes = cache_nodes
 
     return GraphService(storage, federation_manager=manager)
+
+
+def _build_cache_stamped_metadata_keys():
+    """The metadata keys FederationManager._build_cache adds to a cached node."""
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "esam-main",
+                        "display_name": "eSam",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
+        }
+    )
+    cache_nodes, _ = FederationManager(config)._build_cache(
+        config.federation.graphs[0],
+        [{"id": "remote-1", "type": "Actor", "name": "External Node"}],
+        [],
+    )
+    return set(cache_nodes["federated::esam-main::remote-1"].metadata)
+
+
+_TAGGED_REMOTE_NODES = [
+    {"id": f"remote-{i}", "type": "Actor", "name": f"External {i}", "tags": ["t"]}
+    for i in (1, 2, 3)
+]
 
 
 def test_adopt_federated_node_creates_local_clone(tmp_path):
@@ -107,6 +146,113 @@ def test_adopted_node_appears_once_in_search_graph_with_correct_federated_count(
 
     # G3: only the origin reference stub counts as federated.
     assert search_result["federation"]["federated_nodes"] == 1
+
+
+def test_bookkeeping_keys_are_exactly_what_build_cache_stamps():
+    # A key _build_cache starts stamping must be stripped on adoption too; a
+    # key it stops stamping is dead weight. Either drift fails here.
+    assert (
+        set(_FEDERATION_BOOKKEEPING_METADATA_KEYS)
+        == _build_cache_stamped_metadata_keys()
+    )
+
+
+def test_adopted_node_carries_none_of_the_build_cache_bookkeeping_keys(tmp_path):
+    service = _service_with_cached_federated_node(
+        tmp_path,
+        source_node={
+            "id": "remote-1",
+            "type": "Actor",
+            "name": "External Node",
+            "metadata": {"owner": "remote team"},
+        },
+    )
+
+    result = service.adopt_federated_node("federated::esam-main::remote-1")
+    assert result["success"] is True
+
+    stamped_keys = _build_cache_stamped_metadata_keys()
+    stored_metadata = service.storage.get_node(result["adopted_node"]["id"]).metadata
+    for metadata in (result["adopted_node"]["metadata"], stored_metadata):
+        assert stamped_keys.isdisjoint(metadata)
+        # The origin graph's own metadata survives adoption.
+        assert metadata["owner"] == "remote team"
+
+
+@pytest.mark.parametrize(
+    "limit,tags_any",
+    # Match-all without filters: limits up to the four local nodes.
+    [(limit, None) for limit in range(1, 5)]
+    # Tag filter widens the federated fetch to the whole cache.
+    + [(limit, ["t"]) for limit in range(1, 7)],
+)
+def test_search_graph_dedups_multiple_adoptions_at_every_limit(
+    tmp_path, limit, tags_any
+):
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    local_ids = set()
+    for remote_id in ("remote-1", "remote-2"):
+        adopted = service.adopt_federated_node(f"federated::esam-main::{remote_id}")
+        assert adopted["success"] is True
+        local_ids.add(adopted["adopted_node"]["id"])
+    stub_ids = {"federated::esam-main::remote-1", "federated::esam-main::remote-2"}
+    # Two adopted copies, two reference stubs, and remote-3 which is only cached.
+    eligible_ids = local_ids | stub_ids | {"federated::esam-main::remote-3"}
+
+    result = service.search_graph(query="", limit=limit, tags_any=tags_any)
+    node_ids = [node["id"] for node in result["nodes"]]
+
+    assert len(node_ids) == len(set(node_ids))
+    assert set(node_ids) <= eligible_ids
+    assert result["total"] == len(node_ids) == min(limit, len(eligible_ids))
+    assert result["federation"]["federated_nodes"] == len(set(node_ids) - local_ids)
+
+
+def test_search_graph_dedups_before_the_limit_trim_on_the_widened_path(tmp_path):
+    """A duplicate id must not take a slot that a distinct node is eligible for.
+
+    Local results (adopted copy + reference stub) come first, then the widened
+    federated fetch returns the whole cache, including the stub's id again.
+    With limit equal to the number of distinct eligible nodes, every one of
+    them must come back; trimming before deduping spends a slot on the
+    duplicate and drops remote-3.
+    """
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    adopted = service.adopt_federated_node("federated::esam-main::remote-1")
+    assert adopted["success"] is True
+    eligible_ids = {
+        adopted["adopted_node"]["id"],
+        "federated::esam-main::remote-1",
+        "federated::esam-main::remote-2",
+        "federated::esam-main::remote-3",
+    }
+
+    result = service.search_graph(query="", limit=len(eligible_ids), tags_any=["t"])
+    node_ids = [node["id"] for node in result["nodes"]]
+
+    assert set(node_ids) == eligible_ids
+    assert result["total"] == len(node_ids) == len(eligible_ids)
+
+
+def test_search_graph_keeps_same_named_local_nodes_with_different_ids(tmp_path):
+    service = _service_with_cached_federated_node(tmp_path)
+    service.storage.add_nodes(
+        [
+            Node(id="local-a", type=NodeType.ACTOR, name="Shared Name"),
+            Node(id="local-b", type=NodeType.ACTOR, name="Shared Name"),
+        ],
+        [],
+    )
+
+    result = service.search_graph(query="Shared Name")
+    node_ids = [node["id"] for node in result["nodes"]]
+
+    assert sorted(node_ids) == ["local-a", "local-b"]
+    assert result["total"] == 2
 
 
 def test_adopt_federated_node_requires_existing_cached_node(tmp_path):
