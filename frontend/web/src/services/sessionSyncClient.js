@@ -1402,7 +1402,11 @@ export class SessionSyncClient {
   }
 
   _scheduleFlush() {
-    if (this._flushTimer || this._closed) return;
+    // While a retry is pending it owns the next send: a debounced flush ahead of
+    // it would re-hit a server that just failed (429/5xx/timeout) every
+    // flushIntervalMs and turn the backoff into a no-op. Ops enqueued meanwhile
+    // ride the retry.
+    if (this._flushTimer || this._retryTimer || this._closed) return;
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null;
       this._flush();
@@ -1641,7 +1645,14 @@ export class SessionSyncClient {
   }
 
   _scheduleRetry() {
-    if (this._retryTimer || this._closed) return;
+    if (this._closed) return;
+    // A flush debounced while this request was in flight would otherwise fire
+    // before the backoff.
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    if (this._retryTimer) return;
     this._retryTimer = setTimeout(
       () => {
         this._retryTimer = null;
