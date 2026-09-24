@@ -15,6 +15,7 @@ Usage:
     tools_map = register_mcp_tools(mcp, service)
 """
 
+import json
 import secrets
 from typing import List, Optional, Dict, Any, Callable
 
@@ -87,6 +88,13 @@ _MCP_LAYOUT_CLIENT_ID = "mcp-agent"
 # The same agent identity, used to attribute session lifecycle writes (rename,
 # delete) so an assistant's session management is auditable as one actor.
 _MCP_SESSION_CLIENT_ID = "mcp-agent"
+
+# SESSION_ID_RE also accepts the older two-group form, which is what the tools'
+# own docstring examples use, so the message must not name only the long one.
+_INVALID_SESSION_ID_ERROR = (
+    "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD "
+    "(the older DDDD-DDDD form is also accepted)"
+)
 
 # Server-assigned default when an assistant creates a session without a name
 # (contract §4: names are non-unique and the server fills a default).
@@ -1029,7 +1037,7 @@ def register_mcp_tools(
         if not is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         stored, clients, push_target = _session_facts(visualization_session_id)
         if not push_target and clients <= 0:
@@ -1123,7 +1131,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         try:
             rule = auto_add_registry.add_rule(
@@ -1157,7 +1165,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         agents = [
             r.to_dict() for r in auto_add_registry.list_rules(visualization_session_id)
@@ -1184,7 +1192,7 @@ def register_mcp_tools(
         if not session_registry.is_valid_session_id(visualization_session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         removed = auto_add_registry.remove_rule(visualization_session_id, agent_id)
         if not removed:
@@ -1239,7 +1247,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "connected": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         # Same read gate as get_visualization_session_state: this tool reports a
         # session's existence and node count, so a hook that narrows reads must
@@ -1351,7 +1359,7 @@ def register_mcp_tools(
         if session_registry is None and session_manager is None:
             return {"error": "Visualization sessions are not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(
             GRAPH_ACTION_READ, "get_visualization_session_state"
         )
@@ -1456,7 +1464,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_layout")
         if denied:
             return denied
@@ -1576,7 +1584,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "apply_visualization_layout")
         if denied:
@@ -1675,11 +1683,12 @@ def register_mcp_tools(
         legitimately report success with an empty ``added`` and still show
         nothing new on the canvas.
 
-        A batch is capped at 500 ids, and each call also draws from a per-client
-        rate budget sized to the number of ids — so a batch well below the hard
-        cap can still return ``rate_limited``. Split large sets across
-        successive calls, threading the returned ``revision`` into the next
-        ``expected_revision``.
+        A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
+        also draws from a per-client rate budget sized to the number of distinct
+        ids — so a batch well below the hard caps can still return
+        ``rate_limited``. A repeated id counts once against all three. Split
+        large sets across successive calls, threading the returned ``revision``
+        into the next ``expected_revision``.
 
         Args:
             session_id: The session ID shown in the browser header (e.g. "8244-1742")
@@ -1697,28 +1706,75 @@ def register_mcp_tools(
             concurrency clash returns success=false with the current revision so
             the caller can re-read and retry. Retryable errors:
             revision_conflict, busy, rate_limited; change the request for
-            too_large or a validation error.
+            too_large, no_resolvable_nodes (none of the ids resolve; the
+            response carries them in ``skipped``) or a validation error. An
+            unknown session is reported as not found whether or not any id
+            resolves.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "add_nodes_to_session")
         if denied:
             return denied
         if not isinstance(node_ids, list) or not node_ids:
             return {"success": False, "error": "'node_ids' must be a non-empty list"}
-        # Checked before the resolve below, which costs one node lookup per id:
-        # the write path enforces the same cap, but only after that work is
-        # already done.
-        if len(node_ids) > session_manager.max_ops_per_batch:
+        session_not_found = {
+            "success": False,
+            "error": (
+                f"Session '{session_id}' not found. "
+                "This tool acts on a session's stored state, which exists "
+                "once create_visualization_session created it or a browser "
+                "made its first change to it."
+            ),
+        }
+        # Before the resolve, so an unknown session is not masked by
+        # no_resolvable_nodes when none of the ids resolve either.
+        if session_manager.get_session(session_id) is None:
+            return session_not_found
+        # A repeated id is one id: dedupe before the caps and the rate budget
+        # below count it. This runs on the uncapped list, so it must stay
+        # linear — an unhashable value (a dict or list arriving unvalidated
+        # through POST /execute_tool) is keyed by its canonical JSON instead of
+        # being compared pairwise.
+        unique_ids: List[Any] = []
+        seen: set = set()
+        for node_id in node_ids:
+            try:
+                key = ("h", node_id)
+                hash(key)
+            except TypeError:
+                key = ("u", json.dumps(node_id, sort_keys=True, default=str))
+            if key not in seen:
+                seen.add(key)
+                unique_ids.append(node_id)
+        # Both caps are checked before the resolve below, which costs one node
+        # lookup per id: the write path enforces them too, but only after that
+        # work is already done.
+        if len(unique_ids) > session_manager.max_ops_per_batch:
             return {
                 "success": False,
                 "error": "too_large",
-                "message": "Too many nodes in one write; split into batches.",
+                "message": (
+                    f"Too many node ids in one write (the cap is "
+                    f"{session_manager.max_ops_per_batch}); split into batches."
+                ),
+            }
+        if len(json.dumps(unique_ids, default=str)) > (
+            session_manager.max_op_batch_bytes
+        ):
+            return {
+                "success": False,
+                "error": "too_large",
+                "message": (
+                    f"The node ids in one write exceed the "
+                    f"{session_manager.max_op_batch_bytes}-byte size cap; send "
+                    "fewer or shorter ids per call."
+                ),
             }
 
         # Resolve through the projection under the *mutate* decision, not a read
@@ -1730,28 +1786,24 @@ def register_mcp_tools(
         # above, so a target-aware hook is asked about this tool twice rather
         # than about a helper it has never heard of.
         resolved = service.resolve_session_node_semantics(
-            node_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
+            unique_ids, action=GRAPH_ACTION_MUTATE, target="add_nodes_to_session"
         )
         if not resolved.get("success"):
             return resolved
         known = resolved.get("nodes") or {}
-        resolvable = [
-            node_id
-            for node_id in node_ids
-            if isinstance(node_id, str) and node_id in known
-        ]
         # Anything not resolvable is skipped, including an id that is not a
         # string at all — `known` is keyed by string id, so testing membership
-        # for an unhashable value would raise instead. Deduplicated in order for
-        # the same reason `added` is: a repeated id is one id, whichever list it
-        # ends up in. Non-strings are compared by equality, since an unhashable
-        # one cannot go in a set.
-        skipped: List[Any] = []
-        for node_id in node_ids:
-            if isinstance(node_id, str) and node_id in known:
-                continue
-            if node_id not in skipped:
-                skipped.append(node_id)
+        # for an unhashable value would raise instead.
+        resolvable = [
+            node_id
+            for node_id in unique_ids
+            if isinstance(node_id, str) and node_id in known
+        ]
+        skipped = [
+            node_id
+            for node_id in unique_ids
+            if not (isinstance(node_id, str) and node_id in known)
+        ]
         if not resolvable:
             return {
                 "success": False,
@@ -1800,18 +1852,13 @@ def register_mcp_tools(
             return {
                 "success": False,
                 "error": "too_large",
-                "message": "Too many nodes in one write; split into batches.",
-            }
-        except SessionNotFound:
-            return {
-                "success": False,
-                "error": (
-                    f"Session '{session_id}' not found. "
-                    "This tool acts on a session's stored state, which exists "
-                    "once create_visualization_session created it or a browser "
-                    "made its first change to it."
+                "message": (
+                    "Too many node ids, or too many bytes of them, in one write; "
+                    "split into batches."
                 ),
             }
+        except SessionNotFound:
+            return session_not_found
         except OpError as exc:
             return {"success": False, "error": str(exc)}
         return {
@@ -1973,7 +2020,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_READ, "get_visualization_session")
         if denied:
@@ -2010,7 +2057,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "rename_visualization_session")
         if denied:
@@ -2065,7 +2112,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_visualization_session")
         if denied:
@@ -2134,7 +2181,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "list_sticky_notes")
         if denied:
             return denied
@@ -2215,7 +2262,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_sticky_note")
         if denied:
@@ -2396,7 +2443,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_sticky_note")
         if denied:
@@ -2552,7 +2599,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_sticky_note")
         if denied:
@@ -2732,7 +2779,7 @@ def register_mcp_tools(
         if session_manager is None:
             return {"error": "Session manager not available"}
         if not is_valid_session_id(session_id):
-            return {"error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD"}
+            return {"error": _INVALID_SESSION_ID_ERROR}
         denied = _authorize_session(GRAPH_ACTION_READ, "list_annotations")
         if denied:
             return denied
@@ -2890,7 +2937,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_annotation")
         if denied:
@@ -3153,7 +3200,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_image_annotation")
         if denied:
@@ -3386,7 +3433,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_annotation")
         if denied:
@@ -3555,7 +3602,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "reorder_annotation")
         if denied:
@@ -3690,7 +3737,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "set_annotation_lock")
         if denied:
@@ -3829,7 +3876,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "duplicate_annotation")
         if denied:
@@ -3987,7 +4034,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_annotation")
         if denied:
@@ -4154,7 +4201,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "create_group_annotation")
         if denied:
@@ -4316,7 +4363,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "update_group_members")
         if denied:
@@ -4483,7 +4530,7 @@ def register_mcp_tools(
         if not is_valid_session_id(session_id):
             return {
                 "success": False,
-                "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD",
+                "error": _INVALID_SESSION_ID_ERROR,
             }
         denied = _authorize_session(GRAPH_ACTION_MUTATE, "delete_group_annotation")
         if denied:
