@@ -22,7 +22,14 @@ When a planning MCP server *is* configured:
 1. Connect and read the current goals, initiatives, activities, decisions and
    dependencies before planning anything.
 2. Then look at this repo, its issues and open PRs.
-3. Create and update planning **in the graph**, not in repo files.
+3. Create and update planning **in the graph**, not in repo files. Connect every
+   item as you create it: a work item is attached to the capability or the body of
+   work it serves, and a capability is attached to the value it delivers, in the
+   same write. This binds every writer, a chat over the planning MCP included. An
+   unattached item is not merely untidy — it is invisible to anyone tracing from
+   intended value down to work, so the work reads as unfunded and the value as
+   unserved. The planning graph's own metamodel carries the normative wording and
+   the node types it uses; this repo does not restate them.
 4. Do the code work here through a branch and a PR.
 5. Write the PR, commit SHA, implementation evidence and verification results back
    onto the relevant graph nodes.
