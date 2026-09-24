@@ -128,6 +128,8 @@ class TestDocumentServiceUpload:
             "../../etc/notes.txt": "notes.txt",
             "no\ntes\x07.txt": "notes.txt",
             "notes.txt/": "notes.txt",
+            "notes.txt/.": "notes.txt",
+            "notes.txt/./": "notes.txt",
         }
         for sent, shown in cases.items():
             result = asyncio.run(document_service.process_upload(b"Some text.", sent))

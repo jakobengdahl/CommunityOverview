@@ -12,10 +12,9 @@ go through ChatService -> GraphService.
 
 import asyncio
 import os
-import re
 import tempfile
 from typing import Optional, Dict, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from backend.ui.document_processor import DocumentProcessor
 
@@ -189,7 +188,8 @@ class DocumentService:
     @staticmethod
     def _display_filename(filename: str) -> str:
         """The uploaded file's own name, without any client path or control characters."""
-        name = re.split(r"[\\/]", filename.rstrip("\\/"))[-1]
+        # Same basename rule as storage, with Windows separators treated as separators.
+        name = PurePosixPath(filename.replace("\\", "/")).name
         return "".join(ch for ch in name if ch.isprintable())
 
     def _sanitize_filename(self, filename: str) -> str:
