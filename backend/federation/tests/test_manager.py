@@ -175,8 +175,8 @@ def test_build_cache_carries_aliases_and_subtypes_over():
                 "description": "A description",
                 "summary": "A summary",
                 "tags": ["Tag"],
-                "aliases": ["eSam", "Second Alias"],
-                "subtypes": ["Agency", "Board"],
+                "aliases": ["eSam", "Second Alias", "eSam"],
+                "subtypes": ["Agency", "Board", "Agency"],
                 "archived": True,
             },
             {"id": "bare", "type": "Actor", "name": "Bare"},
@@ -184,6 +184,7 @@ def test_build_cache_carries_aliases_and_subtypes_over():
                 "id": "nulls",
                 "type": "Actor",
                 "name": "Nulls",
+                "tags": None,
                 "aliases": None,
                 "subtypes": None,
             },
@@ -201,12 +202,20 @@ def test_build_cache_carries_aliases_and_subtypes_over():
     )
     assert (full.tags, full.aliases, full.subtypes, full.archived) == (
         ["Tag"],
-        ["eSam", "Second Alias"],
-        ["Agency", "Board"],
+        ["eSam", "Second Alias", "eSam"],
+        ["Agency", "Board", "Agency"],
         True,
     )
     assert (cached["bare"].aliases, cached["bare"].subtypes) == ([], [])
-    assert (cached["nulls"].aliases, cached["nulls"].subtypes) == ([], [])
+    assert (
+        cached["nulls"].tags,
+        cached["nulls"].aliases,
+        cached["nulls"].subtypes,
+    ) == (
+        [],
+        [],
+        [],
+    )
 
 
 def test_subtype_match_outranks_a_description_match():
@@ -287,7 +296,7 @@ def test_search_matches_a_localized_type_label():
 
 
 @pytest.mark.parametrize(
-    "query", ["aktör", "act", "nordic", "network", "dokument", "x", "*"]
+    "query", ["aktör", "act", "nordic", " nordic ", "network", "dokument", "x", "*"]
 )
 def test_search_returns_what_local_search_returns_in_the_same_order(query):
     """Local and federated search must match and rank the same nodes the same
