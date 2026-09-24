@@ -189,7 +189,7 @@ class DocumentService:
     @staticmethod
     def _display_filename(filename: str) -> str:
         """The uploaded file's own name, without any client path or control characters."""
-        name = re.split(r"[\\/]", filename)[-1]
+        name = re.split(r"[\\/]", filename.rstrip("\\/"))[-1]
         return "".join(ch for ch in name if ch.isprintable())
 
     def _sanitize_filename(self, filename: str) -> str:
