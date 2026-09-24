@@ -267,9 +267,11 @@ and `easing` (default `"ease-in-out"`). These are a **hint** the canvas honors:
   `animated_layout` capability whose `enabled` says whether this instance's
   canvas tweens the hint. A deployment running a canvas that does not declares
   the same capability id in its presentation config, as
-  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — the
-  `name` is required, and an entry missing it invalidates the whole schema config
-  and falls back to defaults, reporting the capability as enabled. Reduced motion
+  `{"id": "animated_layout", "name": "Animated layout", "enabled": false}` — a
+  missing `name` defaults to the id. A capability entry that is otherwise invalid
+  is skipped on its own with a logged warning, leaving the rest of the config in
+  place; if it declared `animated_layout`, the capability is then reported
+  disabled rather than as the enabled default. Reduced motion
   stays out of that flag — it is per-viewer and client-side (see above), so no
   server-side manifest can report it.
 - **Cancellation / replacement.** A subsequent `layout_applied` op supersedes an
