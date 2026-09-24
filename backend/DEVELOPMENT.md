@@ -451,7 +451,7 @@ The default API prefix is `/api` (configurable via `API_PREFIX`).
 | POST | `/api/similar/batch` | Batch similarity search |
 | POST | `/api/federation/adopt` | Adopt a federated node into the local graph |
 | GET | `/api/schema` | Get schema config |
-| GET | `/api/presentation` | Get presentation config |
+| GET | `/api/presentation` | Get presentation config (its `capabilities` field is the `/api/capabilities` manifest) |
 | GET | `/api/capabilities` | Get service capabilities |
 | GET | `/api/export` | Export graph data |
 | GET | `/api/export/archive` | Export the graph as a ZIP archive: `graph.json` (same content as `/api/export`), `embeddings.bin` (the live vector store's embeddings in the sidecar's own binary format, omitted when there are no vectors), and `manifest.json` (schema version, embedding model/dimension, per-member SHA-256 checksums, node/edge counts). See [DATA_MANAGEMENT.md](../docs/DATA_MANAGEMENT.md#importing-a-vector-aware-archive) and [ADR 0007](../docs/adr/0007-vector-aware-export-archive.md) |
@@ -991,7 +991,17 @@ missing `name` defaults to the id. Capability entries are validated one by one,
 like `rest_interfaces`: an invalid entry is skipped with a logged warning and the
 rest of the schema config still loads. If a skipped entry declared
 `animated_layout`, the capability is reported disabled, never as the enabled
-default.
+default. The same holds when some *other* part of the schema config is fatally
+invalid and the loader falls back to defaults: the validated capability entries
+are carried into the fallback config, so a valid `"enabled": false` override
+still wins. `get_presentation` / `GET /api/presentation` returns this same
+manifest as its `capabilities` field rather than a second, raw copy of the
+config. The capability summary in `/info` (`operability.capabilities`) and
+`/diagnostics/startup` (`capabilities`) counts `configured` (declared entries
+that passed validation) separately from `defaulted` (server-known capabilities
+the manifest adds because no valid entry declared them — reported disabled when
+the declaring entry failed validation); `enabled` and `disabled` cover the whole
+manifest.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas
