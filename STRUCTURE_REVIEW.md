@@ -7,7 +7,7 @@ supports continued AI-agent-driven development.
 **How to use this document:** each action item below is written to be executable
 as a standalone Claude session. Pick the highest-priority open item, start a
 session with the *Session brief* text, and follow the Standard Development
-Workflow in `CLAUDE.md` (branch → PR → review loop → merge to `dev`). When an
+Workflow in `CLAUDE.md` (branch → PR → review loop → merge to `main`). When an
 item is completed, move it to the *Completed* section at the bottom with the PR
 number. Items are intentionally sliced so no single session needs more context
 than its own brief.
@@ -672,10 +672,10 @@ in PR #239; row 13 fully done.)*
 
 1. Pick the first `open` item (top to bottom) whose dependencies are `done`,
    skipping *(owner action)* rows. Before starting, check
-   `git log --oneline origin/dev -20` to confirm the item hasn't already been
+   `git log --oneline origin/main -20` to confirm the item hasn't already been
    addressed.
 2. Implement it per its *Session brief*, following the Standard Development
-   Workflow in `CLAUDE.md` (branch → tests → PR to `dev` → review loop → merge).
+   Workflow in `CLAUDE.md` (branch → tests → PR to `main` → review loop → merge).
 3. In the same PR, update this file: set the Status cell, and on completion
    move a one-line summary (date, PR number, what changed) to *Completed*
    below.
