@@ -852,6 +852,24 @@ describe('generic annotation overlay serialization', () => {
     expect(flowNodeToOverlay(node)).toEqual(overlay);
   });
 
+  it('round-trips a zero-size (unresized) label through a data-only slot, not a style box', () => {
+    const overlay = {
+      id: 'label-unsized',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      text: 'hi',
+      color: '#fff',
+      size: { w: 0, h: 0 },
+      z: 0,
+      locked: false,
+      rotation: 0,
+    };
+    const node = overlayToFlowNode(overlay);
+    expect(node.data.size).toEqual({ w: 0, h: 0 });
+    expect(node.style).toBeUndefined();
+    expect(flowNodeToOverlay(node)).toEqual(overlay);
+  });
+
   it('carries no size on a freshly hydrated label/arrow overlay with no size given', () => {
     const labelNode = overlayToFlowNode({ id: 'l', kind: 'label', position: { x: 0, y: 0 } });
     expect(labelNode.data.size).toBeUndefined();
