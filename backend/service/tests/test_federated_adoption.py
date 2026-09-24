@@ -179,28 +179,43 @@ def test_adopted_node_carries_none_of_the_build_cache_bookkeeping_keys(tmp_path)
         assert metadata["owner"] == "remote team"
 
 
+# The federated window's order is the cache's order, which match-all does not
+# rank. Varying which remotes are adopted puts a repeated stub id ahead of the
+# never-adopted remote under any such order in at least one case, so a
+# trim-before-dedup regression cannot pass by the order happening to put the
+# duplicate last.
+_ADOPTION_CHOICES = [
+    ("remote-1", "remote-2"),
+    ("remote-1", "remote-3"),
+    ("remote-2", "remote-3"),
+]
+
+
+@pytest.mark.parametrize("adopted_remotes", _ADOPTION_CHOICES)
 @pytest.mark.parametrize(
     "limit,tags_any",
+    # The four local nodes (two copies, two stubs) fill limits 1-4 on their own,
+    # so those cases pin only the local window; the federated window and the
+    # dedup of its repeated stub ids are reached at limits 5 and 6.
     # Match-all without filters: the federated window must refill the slots its
-    # repeated stub ids take, so remote-3 still arrives at limit 5 and 6.
+    # repeated stub ids take, so the cached-only remote still arrives there.
     [(limit, None) for limit in range(1, 7)]
     # Tag filter widens the federated fetch to the whole cache.
     + [(limit, ["t"]) for limit in range(1, 7)],
 )
 def test_search_graph_dedups_multiple_adoptions_at_every_limit(
-    tmp_path, limit, tags_any
+    tmp_path, limit, tags_any, adopted_remotes
 ):
     service = _service_with_cached_federated_node(
         tmp_path, source_nodes=_TAGGED_REMOTE_NODES
     )
     local_ids = set()
-    for remote_id in ("remote-1", "remote-2"):
+    for remote_id in adopted_remotes:
         adopted = service.adopt_federated_node(f"federated::esam-main::{remote_id}")
         assert adopted["success"] is True
         local_ids.add(adopted["adopted_node"]["id"])
-    stub_ids = {"federated::esam-main::remote-1", "federated::esam-main::remote-2"}
-    # Two adopted copies, two reference stubs, and remote-3 which is only cached.
-    eligible_ids = local_ids | stub_ids | {"federated::esam-main::remote-3"}
+    # Two adopted copies, two reference stubs, and the remote that is only cached.
+    eligible_ids = local_ids | {f"federated::esam-main::remote-{i}" for i in (1, 2, 3)}
 
     result = service.search_graph(query="", limit=limit, tags_any=tags_any)
     node_ids = [node["id"] for node in result["nodes"]]
@@ -211,25 +226,27 @@ def test_search_graph_dedups_multiple_adoptions_at_every_limit(
     assert result["federation"]["federated_nodes"] == len(set(node_ids) - local_ids)
 
 
-def test_search_graph_dedups_before_the_limit_trim_on_the_widened_path(tmp_path):
+@pytest.mark.parametrize("adopted_remote", ["remote-1", "remote-2", "remote-3"])
+def test_search_graph_dedups_before_the_limit_trim_on_the_widened_path(
+    tmp_path, adopted_remote
+):
     """A duplicate id must not take a slot that a distinct node is eligible for.
 
     Local results (adopted copy + reference stub) come first, then the widened
     federated fetch returns the whole cache, including the stub's id again.
     With limit equal to the number of distinct eligible nodes, every one of
     them must come back; trimming before deduping spends a slot on the
-    duplicate and drops remote-3.
+    duplicate and drops the last federated node. That only shows while the
+    duplicate is not the window's last entry, and the window's order is the
+    cache's, so each remote takes a turn as the adopted one.
     """
     service = _service_with_cached_federated_node(
         tmp_path, source_nodes=_TAGGED_REMOTE_NODES
     )
-    adopted = service.adopt_federated_node("federated::esam-main::remote-1")
+    adopted = service.adopt_federated_node(f"federated::esam-main::{adopted_remote}")
     assert adopted["success"] is True
-    eligible_ids = {
-        adopted["adopted_node"]["id"],
-        "federated::esam-main::remote-1",
-        "federated::esam-main::remote-2",
-        "federated::esam-main::remote-3",
+    eligible_ids = {adopted["adopted_node"]["id"]} | {
+        f"federated::esam-main::remote-{i}" for i in (1, 2, 3)
     }
 
     result = service.search_graph(query="", limit=len(eligible_ids), tags_any=["t"])

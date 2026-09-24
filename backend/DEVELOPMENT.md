@@ -545,7 +545,11 @@ requested mode, and the mode decides whether the fallback fires at all, since it
 only fires when that attempt matched nothing. A non-empty lexical result is never
 discarded. `match_mode` is still echoed in that case while `result["semantic"]`
 flips to true. Federated search stays substring-matched — the same boundary
-semantic ranking has.
+semantic ranking has. Within that, the federation cache is matched and ranked by
+the same code as local search, over the fields the cache holds — including the
+node type and its localized schema labels, so a query such as `aktör` reaches
+federated Actor nodes as well as local ones. Aliases and subtypes are not carried
+into the cache on sync, so they match local nodes only.
 
 The in-app chat agent's `search_graph` tool exposes `match_mode` and `semantic`
 with the same values and defaults, so the chat and MCP search surfaces offer the
@@ -616,7 +620,9 @@ this node's id over a live session op, e.g. `nodes_added` from an MCP
 `add_nodes_to_session`, can hydrate its edges to already-visible nodes) does apply
 the default-exclude: an archived edge, or one with an archived endpoint, is
 omitted. Federated nodes/edges preserve the origin graph's `archived` flag, so a
-node archived upstream stays hidden downstream.
+node archived upstream stays hidden downstream. Unless `include_archived` is set,
+the federation cache search drops archived federated nodes before its `limit`, as
+local search does, so they never take a result slot.
 
 **Mutations.** Archiving goes through dedicated operations rather than a generic
 field update (a generic `update_node` cannot set `archived`):
