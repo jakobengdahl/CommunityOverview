@@ -417,6 +417,61 @@ def test_localized_type_label_finds_federated_nodes_like_local_ones(tmp_path):
     ]
 
 
+def test_localized_type_label_ranks_federated_nodes_above_description_matches(
+    tmp_path,
+):
+    """The label map must reach the federated scorer, not only its matcher: a
+    node of the labelled type outranks one that only mentions the label."""
+    manager = _manager_with_federated_nodes(
+        [
+            {
+                "id": "remote-desc",
+                "type": "Actor",
+                "name": "Office",
+                "description": "förmåga",
+            },
+            {"id": "remote-cap", "type": "Capability", "name": "Analytics"},
+        ]
+    )
+
+    service = GraphService(_empty_storage(tmp_path), federation_manager=manager)
+    result = service.search_graph(query="förmåga")
+
+    assert [n["id"] for n in result["nodes"]] == [
+        "federated::esam-main::remote-cap",
+        "federated::esam-main::remote-desc",
+    ]
+
+
+def test_alias_and_subtype_find_federated_nodes_like_local_ones(tmp_path):
+    """An alias-only or subtype-only match must find a remote node the way it
+    finds a local one; the federation cache used to drop both fields."""
+    storage = _empty_storage(tmp_path)
+    storage.add_nodes(
+        [
+            Node(id="local-alias", type=NodeType.ACTOR, name="A", aliases=["esam"]),
+            Node(id="local-sub", type=NodeType.ACTOR, name="B", subtypes=["esam"]),
+        ],
+        [],
+    )
+    manager = _manager_with_federated_nodes(
+        [
+            {"id": "remote-alias", "type": "Actor", "name": "C", "aliases": ["esam"]},
+            {"id": "remote-sub", "type": "Actor", "name": "D", "subtypes": ["esam"]},
+        ]
+    )
+
+    service = GraphService(storage, federation_manager=manager)
+    result = service.search_graph(query="esam")
+
+    assert [n["id"] for n in result["nodes"]] == [
+        "local-alias",
+        "local-sub",
+        "federated::esam-main::remote-alias",
+        "federated::esam-main::remote-sub",
+    ]
+
+
 @pytest.mark.parametrize("archived_first", [True, False])
 def test_archived_federated_nodes_do_not_leave_the_window_short(
     tmp_path, archived_first
