@@ -1607,8 +1607,10 @@ class TestPostgresIndexWorkIsDoneOnce:
     # Both kinds, because the `except` around the ANALYZE is deliberately
     # broad. A psycopg error alone lets it be narrowed to `psycopg.Error`
     # with the suite still green, and then a failure that is not the
-    # driver's - a pool blip, modelled here the way the catalog test above
-    # models it - escapes and fails a save that had already committed.
+    # driver's - a bug in the notice-handler plumbing or in the logging it
+    # does - escapes and fails a save that had already committed. Not a pool
+    # failure: psycopg_pool's errors are `psycopg.Error` subclasses, so the
+    # narrowed form would still catch those.
     @pytest.mark.parametrize(
         "failure",
         [

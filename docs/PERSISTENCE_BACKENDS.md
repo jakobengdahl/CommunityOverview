@@ -849,7 +849,7 @@ writing a backend of your own against a shared server:
   of transferring the documents themselves. A separate prepared-statement run at
   `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
   no cliff, dominated by transferring 20 000 jsonb documents rather than by
-  planning. The two scales are not in conflict: the millisecond figures above
+  planning. The two scales are not in conflict: the `_resolve` figures above
   are server-side execution times as `EXPLAIN ANALYZE` reports them, which
   never send a row to the client, while the per-call figure includes
   transferring and decoding every one of those 20 000 documents. The level
