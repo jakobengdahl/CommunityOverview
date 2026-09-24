@@ -538,6 +538,73 @@ async def test_clear_visualization_result_shape_is_unchanged(wired):
     assert "visualization_delivery" not in cleared
 
 
+@pytest.mark.asyncio
+async def test_clear_visualization_sends_the_clear_to_the_attached_canvas(wired):
+    """A reported clear must reach the canvas, on either channel it holds.
+
+    The tool returns success from its gate alone, so a clear that was never
+    pushed would still say the canvas was cleared.
+    """
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+    subscription, _member = manager.connect(session_id, "client-1", "Tester")
+    try:
+        async with _legacy_consumer(registry, session_id) as received:
+            cleared = tools["clear_visualization"](visualization_session_id=session_id)
+            assert cleared["success"] is True
+            assert await _settle(lambda: len(received) == 1)
+
+        assert received[0]["tool"] == "clear_visualization"
+        assert received[0]["result"]["action"] == "clear_visualization"
+        commands = [e for e in _drain_hub(subscription) if e["type"] == "command"]
+        assert [c["command"]["result"]["action"] for c in commands] == [
+            "clear_visualization"
+        ]
+    finally:
+        manager.disconnect(session_id, "client-1", subscription)
+
+
+@pytest.mark.asyncio
+async def test_one_browser_during_page_load_handover_counts_as_two(wired):
+    """One browser holds both channels while the op stream comes up.
+
+    The frontend keeps the legacy ``EventSource`` open until the op stream is
+    ready, so for that window a single tab is two consumer connections and
+    ``live_consumers`` sums them. Both receive the same push under one
+    ``command_id``, which is what lets the browser apply it once. After the
+    legacy channel is released the op stream alone still delivers.
+    """
+    tools, registry, manager = wired
+    session_id = _new_session(tools)
+
+    subscription = None
+    try:
+        async with _legacy_consumer(registry, session_id) as legacy_received:
+            before = _delivery(tools, session_id)
+            assert before["live_consumers"] == 1
+            assert await _settle(lambda: len(legacy_received) == 1)
+
+            subscription, _member = manager.connect(session_id, "browser-1", "Tester")
+            during = _delivery(tools, session_id)
+            assert during["delivered"] is True
+            assert during["live_consumers"] == 2
+            assert await _settle(lambda: len(legacy_received) == 2)
+            hub_commands = [
+                e for e in _drain_hub(subscription) if e["type"] == "command"
+            ]
+            assert [c["command"]["command_id"] for c in hub_commands] == [
+                legacy_received[1]["command_id"]
+            ]
+
+        assert registry.has_consumer(session_id) is False
+        after = _delivery(tools, session_id)
+        assert after["delivered"] is True
+        assert after["live_consumers"] == 1
+    finally:
+        if subscription is not None:
+            manager.disconnect(session_id, "browser-1", subscription)
+
+
 # ---------------------------------------------------------------------------
 # The pre-push reachability check agrees with the delivery report
 # ---------------------------------------------------------------------------

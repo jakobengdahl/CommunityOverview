@@ -405,3 +405,51 @@ class TestConsumerRefCount:
         assert reg.has_consumer("1234-5678") is True
         await self._detach(gen, task)
         assert reg.has_consumer("1234-5678") is False
+
+    @pytest.mark.asyncio
+    async def test_idle_keepalive_ping_keeps_the_consumer_counted(self, monkeypatch):
+        """An idle tab is still an attached tab.
+
+        With nothing pushed, ``stream()`` times out every 25 s and yields a ping.
+        That branch sits beside the ref-count, and releasing the count there
+        would make every push to a quiet but genuinely open canvas report
+        not delivered. The timeout is shortened so the branch runs here.
+        """
+        real_wait_for = asyncio.wait_for
+
+        async def fast_wait_for(awaitable, timeout):
+            return await real_wait_for(
+                awaitable, timeout=0.01 if timeout == 25.0 else timeout
+            )
+
+        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+        reg = SessionRegistry()
+        items = []
+        gen = reg.stream("1234-5678")
+
+        async def drain():
+            async for item in gen:
+                items.append(item)
+
+        def ping_count():
+            return items.count({"type": "ping"})
+
+        task = asyncio.create_task(drain())
+        for _ in range(200):
+            if ping_count() >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert ping_count() >= 2, "the keepalive branch never ran"
+        assert reg.consumer_count("1234-5678") == 1
+        assert reg.has_consumer("1234-5678") is True
+
+        assert reg.push_command_sync("1234-5678", {"type": "tool_result"}) is True
+        for _ in range(200):
+            if {"type": "tool_result"} in items:
+                break
+            await asyncio.sleep(0.01)
+        assert {"type": "tool_result"} in items
+
+        await self._detach(gen, task)
+        assert reg.consumer_count("1234-5678") == 0
