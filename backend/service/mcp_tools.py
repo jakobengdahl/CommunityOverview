@@ -1775,8 +1775,10 @@ def register_mcp_tools(
                 key = ("h", node_id)
                 hash(key)
                 hashable = True
-            except TypeError:
+            except Exception:
                 hashable = False
+            if hashable and key in seen:
+                continue
             # Only an unhashable id needs the sorted form, as its dedupe key;
             # sorting a hashable one could refuse keys the unsorted form takes.
             try:

@@ -64,6 +64,25 @@ def _session(manager):
     return manager.create_session().id
 
 
+class _EqualToAlpha:
+    def __eq__(self, other):
+        return other == "alpha" or isinstance(other, _EqualToAlpha)
+
+    def __hash__(self):
+        return hash("alpha")
+
+    def __str__(self):
+        raise _NoStringForm()
+
+
+class _UnhashingUnprintable:
+    def __hash__(self):
+        raise ValueError("no hash")
+
+    def __str__(self):
+        raise _NoStringForm()
+
+
 class _HashableDict(dict):
     def __hash__(self):
         return 1
@@ -464,6 +483,34 @@ class TestAddNodesToSession:
         assert len(result["skipped"]) == len(unusual)
         assert all(a is b for a, b in zip(result["skipped"], unusual))
         assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
+
+    def test_a_repeat_of_a_hashable_id_is_dropped_before_it_is_encoded(self, tools):
+        """Equal to an id already seen, it is the same id, as on main, even if
+        it has no JSON form of its own."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", _EqualToAlpha()]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert result["skipped"] == []
+
+    def test_an_id_whose_hash_raises_is_skipped_not_an_exception(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        unhashing = _UnhashingUnprintable()
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", unhashing]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0] is unhashing
 
     def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
         self, tmp_path
