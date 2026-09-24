@@ -102,6 +102,51 @@ class TestDocumentServiceUpload:
         assert "test content" in result["text"].lower()
         # Temp file should be cleaned up (can't easily verify, but no error is good)
 
+    def test_process_upload_reports_the_uploaded_name_not_the_storage_name(
+        self, document_service
+    ):
+        """The chat shows this name and sends it to the LLM, so it must not carry
+        the timestamp prefix or the character replacements of the storage name."""
+        import asyncio
+
+        result = asyncio.run(
+            document_service.process_upload(
+                b"Some text.", "Mötes anteckningar (v2).txt"
+            )
+        )
+
+        assert result["success"]
+        assert result["filename"] == "Mötes anteckningar (v2).txt"
+
+    def test_process_upload_strips_client_path_and_control_characters(
+        self, document_service
+    ):
+        import asyncio
+
+        cases = {
+            "C:\\Users\\me\\notes.txt": "notes.txt",
+            "../../etc/notes.txt": "notes.txt",
+            "no\ntes\x07.txt": "notes.txt",
+        }
+        for sent, shown in cases.items():
+            result = asyncio.run(document_service.process_upload(b"Some text.", sent))
+            assert result["success"], sent
+            assert result["filename"] == shown, sent
+
+    def test_process_upload_failure_reports_the_uploaded_name(self, document_service):
+        """An extraction error names the user's file, not the storage file."""
+        import asyncio
+        from unittest.mock import patch
+
+        with patch(
+            "backend.ui.document_service.DocumentProcessor.extract_text",
+            side_effect=ValueError("broken"),
+        ):
+            result = asyncio.run(document_service.process_upload(b"x", "report.txt"))
+
+        assert not result["success"]
+        assert result["filename"] == "report.txt"
+
 
 class TestDocumentServiceFileSanitization:
     """Tests for filename sanitization."""

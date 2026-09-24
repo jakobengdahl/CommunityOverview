@@ -12,6 +12,7 @@ go through ChatService -> GraphService.
 
 import asyncio
 import os
+import re
 import tempfile
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -180,7 +181,16 @@ class DocumentService:
         except Exception:
             pass  # Ignore cleanup errors
 
+        # extract_text_from_file names the timestamp-prefixed storage file, but
+        # callers show this name in the chat and send it to the LLM.
+        extract_result["filename"] = self._display_filename(filename)
         return extract_result
+
+    @staticmethod
+    def _display_filename(filename: str) -> str:
+        """The uploaded file's own name, without any client path or control characters."""
+        name = re.split(r"[\\/]", filename)[-1]
+        return "".join(ch for ch in name if ch.isprintable())
 
     def _sanitize_filename(self, filename: str) -> str:
         """
