@@ -129,7 +129,7 @@ export function useSharedSession({
         // Best-effort from here on: the canvas above already loaded correctly, so a
         // sync-connect failure must not be reported as a failed switch.
         try {
-          ensureSyncConnected(targetId)?.setBaseline(baselineMirror);
+          ensureSyncConnected(targetId)?.setBaseline(baselineMirror, { seq: payload?.seq });
         } catch (syncError) {
           console.error('Error connecting sync client:', syncError);
         }
@@ -141,7 +141,9 @@ export function useSharedSession({
           // reset the carried-over UI state just as the loaded-content path does.
           resetSessionScopedState?.();
           if (eagerConnect) {
-            ensureSyncConnected(targetId)?.setBaseline({});
+            // Seq 0: the stream creates the session, so any later seq is
+            // another client's write this empty load never saw.
+            ensureSyncConnected(targetId)?.setBaseline({}, { seq: 0 });
           } else if (syncRef.current && syncRef.current.sessionId === targetId) {
             syncRef.current.setBaseline({});
           }
