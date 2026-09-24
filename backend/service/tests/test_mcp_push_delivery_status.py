@@ -1149,6 +1149,9 @@ def test_a_registry_that_cannot_report_consumers_makes_no_delivery_claim(tmp_pat
 _CLAUSE_PRECONDITIONS = {
     "no connected client": lambda s: s["hub_presence_read"] and s["hub_clients"] == 0,
     "presence count could not be read": lambda s: not s["hub_presence_read"],
+    "was published to the shared-session hub": (
+        lambda s: s["hub_published"] and not s["hub_presence_read"]
+    ),
     "a client is connected to its op stream": (
         lambda s: s["hub_presence_read"] and s["hub_clients"] > 0
     ),
