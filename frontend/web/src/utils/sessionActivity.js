@@ -190,7 +190,10 @@ function browserWriteBack(annotation) {
     // lands in it is not observable in the result at all. The translators
     // also do not normalise the payload, only clone it, so there is nothing
     // about it the write-back could have told us.
-    const withoutImage = { ...annotation, image: undefined };
+    // Deleted from a shallow copy rather than spread as `image: undefined`,
+    // so a skipped-annotation warning logs the stored object's own fields.
+    const withoutImage = { ...annotation };
+    delete withoutImage.image;
     return overlaysToAnnotations(annotationsToOverlays([withoutImage]))[0] || null;
   } catch {
     return null;

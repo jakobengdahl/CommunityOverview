@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createAnnotation } from '@community-graph/ui-graph-canvas';
 import {
   annotationsToGroups,
@@ -975,6 +975,27 @@ describe('describeActivity', () => {
       expect(
         describeActivity(record({ op: 'annotation_updated', before: stored, after: patched })).key
       ).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('logs the skipped annotation without an image field it never had', () => {
+      // browserWriteBack holds `image` out of its round trip; doing that by
+      // spreading `image: undefined` put a phantom key on the object the
+      // skipped-annotation warning prints.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        describeActivity(
+          record({ op: 'annotation_updated', before: stored, after: { ...stored, z: 9 } })
+        );
+        const logged = warn.mock.calls
+          .filter(([message]) => String(message).startsWith('Skipping an annotation'))
+          .map(([, annotation]) => annotation);
+        expect(logged.length).toBeGreaterThan(0);
+        for (const annotation of logged) {
+          expect(Object.prototype.hasOwnProperty.call(annotation, 'image')).toBe(false);
+        }
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('still describes the record rather than failing', () => {
