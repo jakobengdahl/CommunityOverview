@@ -1156,6 +1156,24 @@ class SessionStore:
         """Return the per-session op ring buffer (or None), for batch rollback."""
         return self._rings.get(session_id)
 
+    def restore_ring(
+        self, session_id: str, saved: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Roll the ring back to ``saved``, a ``list(ring)`` taken before an op.
+
+        ``None`` means no ring existed then; ``apply_state_op`` creates one on
+        demand, so the rollback drops it rather than leaving an entry for an op
+        that never committed.
+        """
+        with self._lock:
+            if saved is None:
+                self._rings.pop(session_id, None)
+                return
+            ring = self._rings.get(session_id)
+            if ring is not None:
+                ring.clear()
+                ring.extend(saved)
+
     def ops_since(
         self, session_id: str, since_seq: int
     ) -> Optional[List[Dict[str, Any]]]:

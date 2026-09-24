@@ -368,6 +368,30 @@ class TestApplyOps:
         assert store.ops_since(s.id, 0) == []
         assert await _drain(sub) == []
 
+    async def test_persist_failure_drops_a_ring_the_batch_created(self):
+        """No ring before the batch means none after a rollback: the store
+        creates one on demand, and keeping it would leave an entry for a seq
+        that never committed (smallfix-apply-op-sync-ring-created-mid-op)."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        store._rings.pop(s.id)
+        real_persist = store.persist_snapshot
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["x"]}]
+            )
+        assert store.ring(s.id) is None
+
+        store.persist_snapshot = real_persist
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["y"]}])
+        assert [op["node_ids"] for op in store.ops_since(s.id, 0)] == [["y"]]
+
 
 class TestClaimOps:
     async def test_claim_ops_are_ephemeral(self):
@@ -2844,6 +2868,26 @@ class TestRenameSessionSync:
         assert list(mgr.store.ring(s.id)) == ring_before
         assert await _drain(sub) == []
 
+    async def test_persist_failure_drops_a_ring_the_op_created(self):
+        """``_apply_op_sync``'s rollback restores "no ring" too, not only a
+        ring's prior contents (smallfix-apply-op-sync-ring-created-mid-op)."""
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        mgr.store._rings.pop(s.id)
+        real_persist = mgr.store.persist
+
+        def boom(_session):
+            raise IOError("disk full")
+
+        mgr.store.persist = boom
+        with pytest.raises(IOError):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp")
+        assert mgr.store.ring(s.id) is None
+
+        mgr.store.persist = real_persist
+        mgr.rename_session_sync(s.id, "Again", client_id="mcp")
+        assert [op["name"] for op in mgr.store.ops_since(s.id, 0)] == ["Again"]
+
     async def test_apply_op_sync_restores_a_renamed_name_on_failure(self):
         mgr = _manager()
         s = mgr.create_session(name="Before")
@@ -3318,31 +3362,100 @@ def _seed_annotations(mgr, sid):
 
 
 _MCP_BUCKET_WRITES = {
-    "apply_layout": lambda mgr, sid, i: mgr.apply_layout(
-        sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}
+    "apply_layout": lambda mgr, sid, i, label: mgr.apply_layout(
+        sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}, rate_limit_label=label
     ),
-    "add_node_refs": lambda mgr, sid, i: mgr.add_node_refs(sid, "mcp-agent", [f"n{i}"]),
-    "upsert_annotation": lambda mgr, sid, i: mgr.upsert_annotation(
-        sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}
+    "add_node_refs": lambda mgr, sid, i, label: mgr.add_node_refs(
+        sid, "mcp-agent", [f"n{i}"], rate_limit_label=label
     ),
-    "update_annotation": lambda mgr, sid, i: mgr.update_annotation(
-        sid, "mcp-agent", {"id": "note-1", "type": "note", "text": f"v{i}"}
+    "upsert_annotation": lambda mgr, sid, i, label: mgr.upsert_annotation(
+        sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}, rate_limit_label=label
     ),
-    "delete_annotation": lambda mgr, sid, i: mgr.delete_annotation(
-        sid, "mcp-agent", f"note-{i + 1}"
+    "update_annotation": lambda mgr, sid, i, label: mgr.update_annotation(
+        sid,
+        "mcp-agent",
+        {"id": "note-1", "type": "note", "text": f"v{i}"},
+        rate_limit_label=label,
     ),
-    "set_group_members": lambda mgr, sid, i: mgr.set_group_members(
-        sid, "mcp-agent", "group-1", [f"n{i}"]
+    "delete_annotation": lambda mgr, sid, i, label: mgr.delete_annotation(
+        sid, "mcp-agent", f"note-{i + 1}", rate_limit_label=label
     ),
-    "upsert_image_annotation_without_rate_limit_key": (
-        lambda mgr, sid, i: mgr.upsert_image_annotation(
-            sid,
-            "mcp-agent",
-            _image_annotation(f"img-{i}", data_bytes=100),
-            optimized_image_bytes=100,
-        )
+    "set_group_members": lambda mgr, sid, i, label: mgr.set_group_members(
+        sid, "mcp-agent", "group-1", [f"n{i}"], rate_limit_label=label
+    ),
+    # Without rate_limit_key, which would route it to _image_bucket instead.
+    "upsert_image_annotation": lambda mgr, sid, i, label: mgr.upsert_image_annotation(
+        sid,
+        "mcp-agent",
+        _image_annotation(f"img-{i}", data_bytes=100),
+        optimized_image_bytes=100,
+        rate_limit_label=label,
     ),
 }
+
+# session_manager calls in mcp_tools.py that spend no rate-limit bucket.
+_MCP_UNMETERED_CALLS = {
+    "claimed_elements",
+    "connected_count",
+    "create_session",
+    "delete_session_sync",
+    "get_session",
+    "list_sessions",
+    "push_command",
+    "rename_session_sync",
+}
+
+
+def _mcp_tools_session_manager_calls():
+    """``{method: [call keyword names, ...]}`` for every ``session_manager.X(...)``
+    call in ``backend/service/mcp_tools.py``."""
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2] / "service" / "mcp_tools.py"
+    ).read_text()
+    calls = {}
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session_manager"
+        ):
+            calls.setdefault(node.func.attr, []).append(
+                [kw.arg for kw in node.keywords]
+            )
+    return calls
+
+
+class TestMcpBucketWriteListMatchesMcpTools:
+    """``_MCP_BUCKET_WRITES`` is maintained by hand; these fail when an MCP tool
+    starts calling a session_manager method neither it nor
+    ``_MCP_UNMETERED_CALLS`` classifies, so a new write cannot skip the
+    bucket-routing test below unnoticed."""
+
+    async def test_every_mcp_tools_call_is_classified(self):
+        called = set(_mcp_tools_session_manager_calls())
+        assert called - _MCP_UNMETERED_CALLS == set(_MCP_BUCKET_WRITES)
+        assert _MCP_UNMETERED_CALLS <= called
+
+    async def test_every_metered_mcp_tools_call_passes_a_rate_limit_label(self):
+        calls = _mcp_tools_session_manager_calls()
+        for method in _MCP_BUCKET_WRITES:
+            for keywords in calls[method]:
+                assert "rate_limit_label" in keywords, method
+
+    async def test_every_manager_method_taking_a_rate_limit_label_is_listed(self):
+        import inspect
+
+        labelled = {
+            name
+            for name, fn in inspect.getmembers(SessionManager, inspect.isfunction)
+            if not name.startswith("_")
+            and "rate_limit_label" in inspect.signature(fn).parameters
+        }
+        assert labelled == set(_MCP_BUCKET_WRITES)
 
 
 class TestMcpWritesDrawFromTheMcpBucket:
@@ -3351,11 +3464,14 @@ class TestMcpWritesDrawFromTheMcpBucket:
     caller-chosen ``client_id`` — otherwise a browser posting
     ``client_id: "mcp-agent"`` could exhaust the MCP budget
     (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). The two buckets
-    get different capacities so a write charged to the wrong one cannot pass."""
+    get different capacities so a write charged to the wrong one cannot pass.
+    Run with and without ``rate_limit_label``, since the labelled key
+    (``client_id:label``) is what mcp_tools.py actually sends."""
 
+    @pytest.mark.parametrize("label", [None, "some_mcp_tool"])
     @pytest.mark.parametrize("write", list(_MCP_BUCKET_WRITES))
     async def test_write_succeeds_on_a_spent_ops_bucket_and_spends_the_mcp_bucket(
-        self, write
+        self, write, label
     ):
         mgr = _manager()
         s = mgr.create_session()
@@ -3364,9 +3480,11 @@ class TestMcpWritesDrawFromTheMcpBucket:
         mgr._mcp_bucket = _TokenBucket(1.0, 0.0)
         call = _MCP_BUCKET_WRITES[write]
 
-        call(mgr, s.id, 0)
+        call(mgr, s.id, 0, label)
         with pytest.raises(RateLimited):
-            call(mgr, s.id, 1)
+            call(mgr, s.id, 1, label)
+        # The other key has its own budget: a label splits the MCP bucket.
+        call(mgr, s.id, 1, "other_mcp_tool" if label is None else None)
 
 
 class TestUpsertAnnotation:
