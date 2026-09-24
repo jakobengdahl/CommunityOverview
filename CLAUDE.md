@@ -24,8 +24,8 @@ When a planning MCP server *is* configured:
 2. Then look at this repo, its issues and open PRs.
 3. Create and update planning **in the graph**, not in repo files. Connect every
    item as you create it: a work item is attached to the capability or the body of
-   work it serves, and a capability is attached to the value it delivers, in the
-   same write. This binds every writer, a chat over the planning MCP included. An
+   work it serves — or, where it is one piece of a larger work item, to that item —
+   and a capability is attached to the value it delivers, in the same write. This binds every writer, a chat over the planning MCP included. An
    unattached item is not merely untidy — it is invisible to anyone tracing from
    intended value down to work, so the work reads as unfunded and the value as
    unserved. Where a small fix or a review's leftovers serve no one capability,
