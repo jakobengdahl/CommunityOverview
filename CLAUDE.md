@@ -842,6 +842,15 @@ only other language with full coverage today.
 4. Add a button for it to the language selector in
    `frontend/web/src/components/SettingsDialog.jsx` — the selector lists each
    language explicitly and does not read `SUPPORTED_LANGUAGES`.
+5. Update the tests that pin the language set: `frontend/web/src/i18n/index.test.jsx`
+   asserts `SUPPORTED_LANGUAGES` equals `['en', 'sv']`, and
+   `frontend/web/src/i18n/keyParity.test.js` compares only `en.json` with
+   `sv.json`, so extend it to cover the new file.
+
+`LANGUAGE_SWITCHING_ENABLED` in `index.jsx` is currently `false`: the UI is held
+English-only and the selector in `SettingsDialog.jsx` is not rendered, so a new
+language's button stays hidden until that flag is flipped (and the
+`index.test.jsx` assertion that pins it to `false` is updated).
 
 ---
 
