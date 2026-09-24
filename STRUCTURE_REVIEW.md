@@ -12,8 +12,10 @@ item is completed, move it to the *Completed* section at the bottom with the PR
 number. Items are intentionally sliced so no single session needs more context
 than its own brief.
 
-This is a working backlog document (like `SMALL_FIXES.md`), not current-state
-documentation — items describe *desired* changes, not the present system.
+This is a working backlog document, not current-state documentation — items
+describe *desired* changes, not the present system. (New small fixes are no
+longer logged in `SMALL_FIXES.md`, which is now a historical archive; they go
+to the planning graph as `small-fix` tasks, see `CLAUDE.md`.)
 
 ---
 
@@ -24,8 +26,10 @@ The fundamentals are healthy. The layered backend architecture
 documented; REST and MCP share one service layer with integration tests
 asserting parity; the event/webhook system has real SSRF protection; auth
 comparison uses `secrets.compare_digest`; tests exist for every backend module
-and all three frontend workspaces; `SMALL_FIXES.md` plus the CLAUDE.md workflow
-is an unusually good fit for agent-driven maintenance.
+and all three frontend workspaces; a small-fix backlog (at the time
+`SMALL_FIXES.md`, now a historical archive superseded by `small-fix` tasks in
+the planning graph) plus the CLAUDE.md workflow is an unusually good fit for
+agent-driven maintenance.
 
 The problems are concentrated in four areas:
 
