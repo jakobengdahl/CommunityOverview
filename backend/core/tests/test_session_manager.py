@@ -3510,8 +3510,10 @@ class TestMcpBucketWriteListMatchesMcpTools:
         for method in _MCP_BUCKET_WRITES:
             for keywords in calls[method]:
                 assert "rate_limit_label" in keywords, method
-                # rate_limit_key would move the write to _image_bucket.
+                # rate_limit_key would move the write to _image_bucket; a
+                # ``**`` splat (arg None) could carry it past this check.
                 assert "rate_limit_key" not in keywords, method
+                assert None not in keywords, method
 
     async def test_every_manager_method_taking_a_rate_limit_label_is_listed(self):
         import inspect

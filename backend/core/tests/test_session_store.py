@@ -623,10 +623,13 @@ class TestRingBufferCatchUp:
 
 class TestRestoreRing:
     def _two_sessions(self):
+        """``b`` is created first and holds the longer ring, so a restore that
+        lands on the first ring or trims every ring to ``saved`` shows."""
         store = SessionStore(InMemorySessionPersistenceBackend())
-        a, b = store.create(), store.create()
-        for s in (a, b):
-            store.apply_state_op(s, {"op": "nodes_added", "node_ids": [s.id]})
+        b, a = store.create(), store.create()
+        store.apply_state_op(a, {"op": "nodes_added", "node_ids": ["a0"]})
+        for i in range(3):
+            store.apply_state_op(b, {"op": "nodes_added", "node_ids": [f"b{i}"]})
         return store, a, b
 
     def test_restoring_saved_contents_leaves_other_sessions_rings_alone(self):
