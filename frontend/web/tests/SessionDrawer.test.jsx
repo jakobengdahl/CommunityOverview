@@ -109,4 +109,14 @@ describe('SessionDrawer', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(props.onClose).toHaveBeenCalled();
   });
+
+  it('stops Escape from reaching listeners outside the drawer, so the canvas keeps its selection', () => {
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    const props = renderDrawer();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', outerListener);
+    expect(props.onClose).toHaveBeenCalled();
+    expect(outerListener).not.toHaveBeenCalled();
+  });
 });
