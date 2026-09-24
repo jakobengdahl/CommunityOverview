@@ -138,7 +138,15 @@ class TestChatServiceToolExecution:
         description = next(
             t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
         )["description"]
-        for field in ("tags", "subtypes", "aliases", "type label"):
+        for field in (
+            "name",
+            "description",
+            "summary",
+            "tags",
+            "subtypes",
+            "aliases",
+            "type label",
+        ):
             assert field in description
         assert "semantic-fallback" in description
         assert "returns nothing" not in description
