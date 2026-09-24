@@ -16,7 +16,7 @@ import re
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.runtime.config_context import (
     resolve_federation_config_path_info,
@@ -267,6 +267,15 @@ class CapabilityConfig(BaseModel):
     description: str = ""
     enabled: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_name_to_id(cls, data: Any) -> Any:
+        # `name` is display text; an override written as just
+        # {"id": ..., "enabled": false} must still take effect.
+        if isinstance(data, dict) and not data.get("name") and "id" in data:
+            return {**data, "name": data["id"]}
+        return data
+
 
 class RuntimeMetadataConfig(BaseModel):
     """Public runtime metadata exposed for deployment introspection."""
@@ -431,12 +440,14 @@ class ConfigLoader:
     def _load_config(self) -> None:
         """Load and validate the configuration file."""
         self._config_path = self._get_config_path()
+        self._dropped_capability_ids = set()
 
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 raw_config = json.load(f)
 
             self._sanitize_rest_interfaces(raw_config)
+            self._dropped_capability_ids = self._sanitize_capabilities(raw_config)
             self._config = SchemaFileConfig(**raw_config)
             logger.info(f"Loaded schema configuration from: {self._config_path}")
 
@@ -492,6 +503,49 @@ class ConfigLoader:
             valid.append(entry)
         raw_config["rest_interfaces"] = valid
 
+    @staticmethod
+    def _sanitize_capabilities(raw_config: Dict[str, Any]) -> set:
+        """Drop malformed ``presentation.capabilities`` entries in place.
+
+        Same hazard as ``_sanitize_rest_interfaces``: one bad entry would
+        otherwise fail the whole config and revert it to defaults. Returns the
+        string ids of dropped entries so a server-default capability the
+        deployment tried to override is not reported as enabled regardless.
+        """
+        presentation = raw_config.get("presentation")
+        if not isinstance(presentation, dict):
+            return set()
+        raw = presentation.get("capabilities")
+        if raw is None:
+            return set()
+        if not isinstance(raw, list):
+            logger.warning(
+                "presentation.capabilities must be a list, got %s — ignoring",
+                type(raw).__name__,
+            )
+            presentation["capabilities"] = []
+            if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+                return {raw["id"]}
+            return set()
+        valid: List[Any] = []
+        dropped_ids = set()
+        for index, entry in enumerate(raw):
+            try:
+                CapabilityConfig.model_validate(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid presentation.capabilities[%d] (%r): %s",
+                    index,
+                    entry,
+                    exc,
+                )
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                    dropped_ids.add(entry["id"])
+                continue
+            valid.append(entry)
+        presentation["capabilities"] = valid
+        return dropped_ids
+
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
         to_remove = set(self._config.schema_.node_types.keys()) & set(
@@ -535,6 +589,11 @@ class ConfigLoader:
     def config(self) -> SchemaFileConfig:
         """Get the full configuration."""
         return self._config
+
+    @property
+    def dropped_capability_ids(self) -> set:
+        """Ids of capability entries the config declared but that failed validation."""
+        return self._dropped_capability_ids
 
     @property
     def config_path(self) -> str:
@@ -703,10 +762,9 @@ def get_presentation() -> Dict[str, Any]:
 #
 #     {"id": "animated_layout", "name": "Animated layout", "enabled": false}
 #
-# `name` is required by CapabilityConfig — omitting it fails validation for the
-# whole schema config, not just this entry, and the deployment then falls back to
-# defaults (including this capability reporting enabled) with nothing but a
-# logged warning to say so.
+# `name` may be omitted and then defaults to the id. An entry for this id that is
+# otherwise invalid is dropped on its own, and the capability is then reported
+# disabled rather than falling back to this default.
 _ANIMATED_LAYOUT_CAPABILITY = CapabilityConfig(
     id="animated_layout",
     name="Animated layout",
@@ -727,7 +785,9 @@ def get_capabilities() -> Dict[str, Any]:
     Deployment-declared capabilities come first, in config order; a server-known
     default (see ``_ANIMATED_LAYOUT_CAPABILITY``) is appended only when the
     config does not already declare that id, so a deployment always keeps the
-    last word on its own capabilities.
+    last word on its own capabilities. A default whose id the config declared
+    in an entry that failed validation is reported disabled, so a broken
+    override never reads as the enabled default.
     """
     loader = _get_loader()
     capabilities = [
@@ -736,7 +796,10 @@ def get_capabilities() -> Dict[str, Any]:
     ]
     declared_ids = {capability.get("id") for capability in capabilities}
     if _ANIMATED_LAYOUT_CAPABILITY.id not in declared_ids:
-        capabilities.append(_ANIMATED_LAYOUT_CAPABILITY.model_dump())
+        default = _ANIMATED_LAYOUT_CAPABILITY.model_dump()
+        if _ANIMATED_LAYOUT_CAPABILITY.id in loader.dropped_capability_ids:
+            default["enabled"] = False
+        capabilities.append(default)
     return {"capabilities": capabilities}
 
 

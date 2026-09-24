@@ -372,6 +372,113 @@ class TestConfigLoader:
         assert [c["id"] for c in capabilities] == ["animated_layout"]
         assert capabilities[0]["enabled"] is False
 
+    def _load_capability_config(self, tmp_path, capabilities):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema": {
+                        "node_types": {
+                            "Widget": {
+                                "fields": ["name"],
+                                "description": "A widget",
+                                "color": "#123456",
+                            }
+                        },
+                        "relationship_types": {},
+                    },
+                    "presentation": {
+                        "title": "Capability Test Graph",
+                        "colors": {"Widget": "#abcdef"},
+                        "capabilities": capabilities,
+                    },
+                }
+            )
+        )
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+        return config_loader
+
+    def test_capability_without_name_keeps_schema_and_its_disabled_flag(self, tmp_path):
+        """The exact override that used to discard the whole config."""
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": False}]
+        )
+
+        assert "Widget" in config_loader.get_node_type_names()
+        presentation = config_loader.get_presentation()
+        assert presentation["title"] == "Capability Test Graph"
+        assert presentation["colors"]["Widget"] == "#abcdef"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert capabilities == [
+            {
+                "id": "animated_layout",
+                "name": "animated_layout",
+                "description": "",
+                "enabled": False,
+            }
+        ]
+
+    def test_invalid_capability_entry_is_dropped_alone(self, tmp_path, caplog):
+        config_loader = self._load_capability_config(
+            tmp_path,
+            [
+                {"id": "search", "name": "Search", "enabled": True},
+                {"name": "No id", "enabled": True},
+                "not-an-object",
+                {"id": "export", "name": "Export", "enabled": False},
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        presentation = config_loader.get_presentation()
+        assert presentation["title"] == "Capability Test Graph"
+        assert presentation["colors"]["Widget"] == "#abcdef"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("export", False),
+            ("animated_layout", True),
+        ]
+        skipped = [
+            r.getMessage()
+            for r in caplog.records
+            if "Skipping invalid presentation.capabilities" in r.getMessage()
+        ]
+        assert len(skipped) == 2
+        assert "capabilities[1]" in skipped[0]
+        assert "capabilities[2]" in skipped[1]
+
+    def test_invalid_override_of_default_capability_reports_it_disabled(self, tmp_path):
+        """A declared-but-broken override must not read as the enabled default."""
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+
+    def test_non_list_capabilities_is_ignored_not_fatal(self, tmp_path):
+        config_loader = self._load_capability_config(
+            tmp_path, {"id": "animated_layout", "enabled": False}
+        )
+
+        assert "Widget" in config_loader.get_node_type_names()
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        assert config_loader.get_presentation()["capabilities"] == []
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+
     def test_get_runtime_info_defaults_to_standalone(self):
         """Test runtime metadata defaults to standalone mode with no extensions."""
         from backend.config import config_loader
