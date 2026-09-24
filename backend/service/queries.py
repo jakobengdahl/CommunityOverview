@@ -175,12 +175,21 @@ def search_graph(
     if federation_manager and federation_manager.enabled:
         remaining = max(0, limit - len(visible_local_results))
         if remaining > 0:
+            # An adopted node's reference stub shares its id with the cached
+            # federated node, so the fetched window can repeat local ids that the
+            # dedup pass below drops. Widen the window by that overlap so those
+            # slots are refilled instead of left empty.
+            local_ids_in_cache = sum(
+                1
+                for node_id in result_node_ids
+                if federation_manager.get_cached_node(node_id) is not None
+            )
             federated = federation_manager.search_nodes(
                 query=query,
                 node_types=node_types,
                 limit=access.get_federated_search_limit(
                     federation_manager,
-                    remaining,
+                    remaining + local_ids_in_cache,
                     decision.graph_access,
                     widen=has_generic_filters,
                 ),
