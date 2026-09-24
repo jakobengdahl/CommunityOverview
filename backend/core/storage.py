@@ -1290,25 +1290,30 @@ class GraphStorage:
         and every CI run - takes this branch for free instead of spawning a
         thread that would fail on the same ImportError every time.
         """
-        embedded, total = self.embedding_coverage()
-        if embedded == total:
-            return
-        print(
-            f"Warning: {total - embedded} of {total} node(s) have no "
-            f"embedding; semantic search will skip them until backfilled"
-        )
-        if importlib.util.find_spec("sentence_transformers") is None:
-            return
+        try:
+            embedded, total = self.embedding_coverage()
+            if embedded == total:
+                return
+            print(
+                f"Warning: {total - embedded} of {total} node(s) have no "
+                f"embedding; semantic search will skip them until backfilled"
+            )
+            if importlib.util.find_spec("sentence_transformers") is None:
+                return
 
-        def _run() -> None:
-            try:
-                count = self.backfill_missing_embeddings()
-                if count:
-                    print(f"Backfilled {count} missing embedding(s) at startup.")
-            except Exception as exc:
-                print(f"Warning: background embedding backfill failed: {exc}")
+            def _run() -> None:
+                try:
+                    count = self.backfill_missing_embeddings()
+                    if count:
+                        print(f"Backfilled {count} missing embedding(s) at startup.")
+                except Exception as exc:
+                    print(f"Warning: background embedding backfill failed: {exc}")
 
-        threading.Thread(target=_run, name="embedding-backfill", daemon=True).start()
+            threading.Thread(
+                target=_run, name="embedding-backfill", daemon=True
+            ).start()
+        except Exception as exc:
+            print(f"Warning: could not start embedding backfill: {exc}")
 
     def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
         """Write the vector matrix to the sidecar. Returns whether it landed.

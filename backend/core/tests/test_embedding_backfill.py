@@ -230,6 +230,79 @@ class TestStartupBackfillPass:
         assert "Backfilled 1" in capsys.readouterr().out
         storage.flush()
 
+    def test_a_broken_find_spec_probe_does_not_propagate(
+        self, tmpdir_path, monkeypatch, capsys
+    ):
+        """The synchronous portion of the startup pass - the find_spec probe
+        and the Thread(...).start() call - runs from inside GraphStorage
+        construction. If either raises (a broken import hook, a
+        thread-limited container refusing Thread.start()), the exception
+        must not escape and abort startup."""
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+        capsys.readouterr()
+
+        def _raise(name):
+            raise RuntimeError("broken import hook")
+
+        monkeypatch.setattr(storage_module.importlib.util, "find_spec", _raise)
+
+        # Must not raise.
+        storage._maybe_backfill_missing_embeddings_async()
+
+        assert "could not start embedding backfill" in capsys.readouterr().out
+        storage.flush()
+
+    def test_a_thread_start_failure_does_not_propagate(
+        self, tmpdir_path, monkeypatch, capsys
+    ):
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+        capsys.readouterr()
+
+        monkeypatch.setattr(
+            storage_module.importlib.util, "find_spec", lambda name: object()
+        )
+
+        def _raise_on_start(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", _raise_on_start)
+
+        # Must not raise.
+        storage._maybe_backfill_missing_embeddings_async()
+
+        assert "could not start embedding backfill" in capsys.readouterr().out
+        storage.flush()
+
+    def test_construction_survives_a_broken_backfill_probe(
+        self, tmpdir_path, monkeypatch
+    ):
+        """The real trigger this guards: `GraphStorage.__init__` calls the
+        startup pass from inside its own try block. A raise from the
+        synchronous portion must not abort construction of the storage
+        itself."""
+        storage = _make_storage(tmpdir_path)
+        _add_node_without_embedding(
+            storage, Node(id="a", type=NodeType.ACTOR, name="Alpha")
+        )
+        storage.save().result()
+        storage.flush()
+
+        def _raise(name):
+            raise RuntimeError("broken import hook")
+
+        monkeypatch.setattr(storage_module.importlib.util, "find_spec", _raise)
+
+        # Must not raise, even though __init__ calls the startup pass itself.
+        reloaded = GraphStorage(json_path=os.path.join(tmpdir_path, "graph.json"))
+        reloaded.vector_store.model = _FakeEncoder()
+        reloaded.flush()
+
 
 class TestLoadModelConcurrency:
     """The lock `VectorStore._load_model` gained so the startup preload and
