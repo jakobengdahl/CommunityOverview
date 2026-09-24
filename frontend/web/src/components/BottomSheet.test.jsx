@@ -215,6 +215,15 @@ describe('BottomSheet', () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps Escape from reaching handlers outside the sheet', () => {
+      const outer = vi.fn();
+      document.addEventListener('keydown', outer);
+      renderSheet();
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+      document.removeEventListener('keydown', outer);
+      expect(outer).not.toHaveBeenCalled();
+    });
+
     it('closes on clicking the backdrop scrim', () => {
       const { onClose } = renderSheet();
       fireEvent.click(screen.getByTestId('bottom-sheet-scrim'));
@@ -265,6 +274,39 @@ describe('BottomSheet', () => {
       expect(trigger).toHaveFocus();
       trigger.remove();
     });
+
+    it('restores focus to the previously focused element when isOpen turns false', () => {
+      const trigger = document.createElement('button');
+      document.body.appendChild(trigger);
+      trigger.focus();
+
+      const { rerender } = renderSheet();
+      expect(trigger).not.toHaveFocus();
+
+      rerender(<BottomSheet isOpen={false} snapPoint="half" onClose={vi.fn()} />);
+      expect(trigger).toHaveFocus();
+      trigger.remove();
+    });
+
+    it('pulls focus back to the first element on Tab when it has escaped the sheet', () => {
+      renderSheet();
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus();
+
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Tab' });
+      expect(screen.getByText('first')).toHaveFocus();
+      outside.remove();
+    });
+
+    it('leaves keys other than Tab and Escape alone', () => {
+      const { onClose } = renderSheet();
+      const first = screen.getByText('first');
+      const notPrevented = fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowDown' });
+      expect(notPrevented).toBe(true);
+      expect(first).toHaveFocus();
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   describe('prefers-reduced-motion', () => {
@@ -295,6 +337,14 @@ describe('BottomSheet', () => {
       const { unmount } = renderSheet();
       expect(document.body.style.overflow).toBe('hidden');
       unmount();
+      expect(document.body.style.overflow).toBe('auto');
+    });
+
+    it('restores body scroll when isOpen turns false', () => {
+      document.body.style.overflow = 'auto';
+      const { rerender } = renderSheet();
+      expect(document.body.style.overflow).toBe('hidden');
+      rerender(<BottomSheet isOpen={false} snapPoint="half" onClose={vi.fn()} />);
       expect(document.body.style.overflow).toBe('auto');
     });
   });
