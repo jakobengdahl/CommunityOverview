@@ -7,6 +7,7 @@ receive the required state as explicit arguments so they have no dependency
 on the storage object itself.
 """
 
+import logging
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable
 
 from .events.models import (
@@ -21,6 +22,8 @@ from .models import Node, Edge
 if TYPE_CHECKING:
     from .events.dispatcher import EventDispatcher
     from .history_store import GraphHistoryStore
+
+logger = logging.getLogger(__name__)
 
 
 def emit_event(
@@ -71,29 +74,29 @@ def emit_event(
         try:
             history_store.append_event(event)
         except Exception as e:
-            print(f"Warning: Failed to persist mutation history: {e}")
+            logger.warning(f"Failed to persist mutation history: {e}")
 
     # Notify system listeners (always, even if events disabled for webhooks)
     for listener in system_listeners:
         try:
             listener(event)
         except Exception as e:
-            print(f"Error in system listener: {e}")
+            logger.error(f"Error in system listener: {e}")
 
     if not events_enabled or not event_dispatcher:
-        print(
-            f"EVENT: Skipped (events_enabled={events_enabled}, dispatcher={event_dispatcher is not None})"
+        logger.debug(
+            f"Skipped (events_enabled={events_enabled}, dispatcher={event_dispatcher is not None})"
         )
         return
 
-    print(
-        f"EVENT: Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})"
+    logger.debug(
+        f"Emitting {event_type.value} for {entity_kind.value} {entity_id} ({entity_type})"
     )
 
     try:
         event_dispatcher.dispatch(event)
     except Exception as e:
-        print(f"Warning: Failed to dispatch event: {e}")
+        logger.warning(f"Failed to dispatch event: {e}")
 
 
 def emit_federated_node_event(

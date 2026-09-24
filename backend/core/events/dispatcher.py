@@ -135,7 +135,6 @@ class EventDispatcher:
         self._subscriptions_cache = subscriptions
         self._cache_time = now
 
-        print(f"EVENT: Loaded {len(subscriptions)} EventSubscription(s)")
         logger.debug(f"Loaded {len(subscriptions)} EventSubscription(s)")
         return subscriptions
 
@@ -195,13 +194,13 @@ class EventDispatcher:
         subscriptions = self._load_subscriptions()
         dispatch_count = 0
 
-        print(
-            f"EVENT: Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}"
+        logger.debug(
+            f"Dispatching to {len(subscriptions)} subscription(s), event type: {event.event_type.value}"
         )
 
         for sub in subscriptions:
             matches = self._matches(event, sub)
-            print(f"EVENT: Subscription '{sub['name']}' matches={matches}")
+            logger.debug(f"Subscription '{sub['name']}' matches={matches}")
             if matches:
                 # Check loop prevention
                 if self._should_block(event, sub["delivery"]):
@@ -225,9 +224,6 @@ class EventDispatcher:
                         handled_by_agent = self._on_agent_deliver(event_copy, sub["id"])
                         if handled_by_agent:
                             dispatch_count += 1
-                            print(
-                                f"EVENT: Routed to agent for subscription '{sub['name']}'"
-                            )
                             logger.info(
                                 f"Routed event {event.event_id} to agent "
                                 f"via subscription {sub['name']}"

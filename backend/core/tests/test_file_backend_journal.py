@@ -8,6 +8,7 @@ must never do: replay a journal onto the wrong graph, or lose one silently.
 """
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -82,6 +83,30 @@ def backend(tmp):
     b = FileGraphPersistenceBackend(tmp / "g.json")
     b.save_graph_data(_snapshot("a", "b"))
     return b
+
+
+_BACKEND_LOGGER = "backend.core.storage_backends"
+
+
+@pytest.fixture
+def reported(caplog, capsys):
+    """What the file backend reported since the previous call, one message per
+    line: its WARNING records, none of which may also have reached stdout."""
+    caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    def take() -> str:
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
+        ]
+        caplog.clear()
+        out = capsys.readouterr().out
+        leaked = [message for message in messages if message in out]
+        assert not leaked, f"a report went to stdout: {leaked}"
+        return "\n".join(messages)
+
+    return take
 
 
 class TestJournalWrites:
@@ -216,7 +241,7 @@ class TestReplay:
 
 
 class TestCrashShapes:
-    def test_an_interrupted_last_append_is_dropped_whole(self, backend, capsys):
+    def test_an_interrupted_last_append_is_dropped_whole(self, backend, reported):
         backend.upsert_node(_payload("c"))
         with open(backend.journal_path, "a", encoding="utf-8") as f:
             f.write(
@@ -226,12 +251,12 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        assert "incomplete last record" in reported()
         assert backend.journal_path.read_bytes().endswith(b"\n")
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_a_complete_last_line_that_is_not_json_is_dropped_too(
-        self, backend, capsys
+        self, backend, reported
     ):
         backend.upsert_node(_payload("c"))
         with open(backend.journal_path, "a", encoding="utf-8") as f:
@@ -240,7 +265,7 @@ class TestCrashShapes:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        assert "incomplete last record" in reported()
         _appends_still_land_after(backend.json_path, {"a", "b", "c"})
 
     def test_an_interrupted_batch_lands_nowhere(self, backend):
@@ -348,7 +373,7 @@ class TestCheckpoints:
         assert _ids(backend.load_graph_data()) == {"z"}
 
     def test_a_failed_cadence_checkpoint_keeps_the_mutation_and_retries(
-        self, tmp, monkeypatch, capsys
+        self, tmp, monkeypatch, reported
     ):
         b = FileGraphPersistenceBackend(tmp / "g.json", checkpoint_interval=2)
         b.save_graph_data(_snapshot())
@@ -361,7 +386,7 @@ class TestCheckpoints:
         b.upsert_node(_payload("a"))
         b.upsert_node(_payload("b"))  # hits the interval, checkpoint fails
 
-        assert "checkpoint failed" in capsys.readouterr().out
+        assert "checkpoint failed" in reported()
         assert len(_lines(b.journal_path)) == 2
         monkeypatch.setattr("backend.core.storage_backends.json.dump", real_dump)
         b.upsert_node(_payload("c"))
@@ -446,7 +471,7 @@ class TestThroughGraphStorage:
 
 class TestFailureReporting:
     def test_a_valid_last_line_without_its_newline_is_still_an_interrupted_append(
-        self, backend, capsys
+        self, backend, reported
     ):
         """The newline is what says the append completed; a well-formed line
         without it was not acknowledged and must not be replayed."""
@@ -457,7 +482,7 @@ class TestFailureReporting:
         data = FileGraphPersistenceBackend(backend.json_path).load_graph_data()
 
         assert _ids(data) == {"a", "b", "c"}
-        assert "incomplete last record" in capsys.readouterr().out
+        assert "incomplete last record" in reported()
 
     def test_flush_surfaces_a_failed_checkpoint(self, tmp, monkeypatch):
         storage = GraphStorage(json_path=str(tmp / "g.json"))

@@ -867,7 +867,7 @@ and grant the app role `USAGE` on the schema plus
 `SELECT, INSERT, UPDATE, DELETE` on the tables. The grants cover the app's
 reads and writes; they do not cover maintenance. A role that owns nothing
 cannot `ANALYZE`, and PostgreSQL answers that with a warning rather than an
-error - the backend now prints the warning, but keeping the statistics
+error - the backend now logs it as a WARNING, but keeping the statistics
 current is the operator's or autovacuum's job on a store provisioned this
 way, and stale statistics leave the two indexes below unused. The
 primary key on `graph_metadata.only_row` is not decoration: the save upserts
