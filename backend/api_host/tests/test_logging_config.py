@@ -127,3 +127,35 @@ def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
                 handler.close()
         logging.root.handlers = previous_handlers
         logging.root.setLevel(previous_level)
+
+
+def test_text_format_leaves_an_existing_root_handler_and_uvicorn_alone():
+    uvicorn_names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    existing = logging.StreamHandler()
+    try:
+        logging.root.handlers = [existing]
+        uvicorn_before = {
+            name: (
+                logging.getLogger(name).level,
+                logging.getLogger(name).propagate,
+                logging.getLogger(name).handlers[:],
+            )
+            for name in uvicorn_names
+        }
+
+        configure_root_logging("text")
+
+        assert logging.root.handlers == [existing]
+        assert existing.formatter is None
+        for name in uvicorn_names:
+            logger = logging.getLogger(name)
+            assert (
+                logger.level,
+                logger.propagate,
+                logger.handlers,
+            ) == uvicorn_before[name]
+    finally:
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
