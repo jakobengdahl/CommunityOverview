@@ -369,6 +369,7 @@ class TestStateOps:
             },
         )
         assert updated["annotation"]["text"] == "hi"
+        update_version = updated["annotation"]["version"]
 
         # Simulate undo_last_action's replay of the stored inverse op: the
         # exact pre-update snapshot, applied with trusted_replay=True.
@@ -384,6 +385,11 @@ class TestStateOps:
             "undo of a sparse update that ADDED 'text' must remove the field "
             "entirely, not merely leave it in place"
         )
+        # The removal is itself a change to 'text': its field version must
+        # track the undo, not the update that added it, or a later
+        # base_version check would read 'text' as unchanged since that update.
+        assert restored["version"] > update_version
+        assert restored["field_versions"].get("text") == restored["version"]
 
     def test_annotation_updated_non_replay_merge_is_unaffected(self, tmp_path):
         """A normal (non-undo) ``annotation_updated`` — trusted_replay=False —
