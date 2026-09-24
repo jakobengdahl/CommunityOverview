@@ -1647,10 +1647,9 @@ class TestEveryTierBeatsTheOneBelowItWhenInsertedSecond:
 
 
 class TestLocalizedTypeLabelsRankEndToEnd:
-    """Every `search_nodes` fixture in this file passed an empty
-    `type_searchable_text`. `test_storage.py` ranks a label through
-    GraphStorage, but nothing here pinned the pure function's side: a label
-    reaching the record's text and `score_type` reading it off the record."""
+    """A localized type label, run through `search_nodes` itself: the label has
+    to reach the record's text, and the search has to rank by it at the type
+    tier - above a description match inserted first."""
 
     LABELS = {"Actor": "actor aktör"}
 
