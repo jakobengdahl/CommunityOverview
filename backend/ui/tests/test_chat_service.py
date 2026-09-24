@@ -152,6 +152,17 @@ class TestChatServiceToolExecution:
         assert "federated nodes: a subset of these fields" in description
         assert "semantic-fallback" in description
         assert "returns nothing" not in description
+        # Exact sentences, so a changed field list, scope or fallback clause fails.
+        assert (
+            "Matches a local node's name, description, summary, tags, subtypes, "
+            "aliases and type label (federated nodes: a subset of these fields)."
+        ) in description
+        assert (
+            "By default the whole query must occur verbatim, so a multi-word query "
+            "that no node contains matches nothing lexically and at best returns "
+            "semantic-fallback results; use match_mode='any_term' or semantic=true "
+            "for such queries."
+        ) in description
 
     def test_search_graph_any_term_matches_multi_word_query(
         self, chat_service, sample_nodes

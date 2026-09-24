@@ -59,8 +59,9 @@ export default defineConfig({
       // key and writes e2e nodes into its own graph file.
       env: {
         // The chat panel only renders when the backend reports an LLM as
-        // available. No request ever reaches a provider — the specs stop at the
-        // composer — so a placeholder value is enough to exercise the panel.
+        // available. No request ever reaches a provider — the chat specs answer
+        // /ui/chat themselves through page.route — so a placeholder value is
+        // enough to exercise the panel.
         ANTHROPIC_API_KEY: 'test-key-for-e2e',
         GRAPH_FILE: 'data/e2e/graph.json',
       },

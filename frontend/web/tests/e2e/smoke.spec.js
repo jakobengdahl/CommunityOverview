@@ -50,13 +50,21 @@ test.describe('desktop shell', () => {
     await openApp(page);
     const input = page.locator('.floating-search-input');
 
+    const query = `nomatch${uniqueToken()}`;
     const searched = page.waitForResponse(
-      (response) => response.url().endsWith('/api/search') && response.ok()
+      (response) =>
+        response.url().endsWith('/api/search') &&
+        response.ok() &&
+        response.request().postDataJSON()?.query === query
     );
-    await input.fill(`nomatch${uniqueToken()}`);
+    await input.fill(query);
     const body = await (await searched).json();
     expect(body.nodes).toEqual([]);
 
+    // The spinner clears in the same render that applies the results, so the
+    // absence checks below run against the rendered outcome, not before it.
+    await expect(page.locator('.floating-search-spinner')).toHaveCount(0);
+    await expect(input).toHaveValue(query);
     await expect(page.locator('.floating-search-dropdown')).toHaveCount(0);
     await input.press('Enter');
     await expect(page.locator('.react-flow__node')).toHaveCount(0);

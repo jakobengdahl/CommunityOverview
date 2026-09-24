@@ -197,14 +197,7 @@ test.describe('chat panel', () => {
 test.describe('chat file upload', () => {
   const fileInput = (page) => panel(page).locator('input[type="file"]');
 
-  // The chip and the message text use the filename the extract endpoint
-  // returns. That is currently the backend's timestamp-prefixed storage name
-  // ("1790…_remove-test.txt"), so the two tests below match the name as a
-  // suffix; the exact-name behaviour is pinned by the fixme test until the
-  // backend returns the original name.
-  test.fixme('the file chip shows the name the user uploaded (smallfix-upload-extract-storage-filename-20260924)', async ({
-    page,
-  }) => {
+  test('the file chip shows the name the user uploaded', async ({ page }) => {
     await openApp(page);
     await fileInput(page).setInputFiles({
       name: 'exact-name.txt',
@@ -224,7 +217,7 @@ test.describe('chat file upload', () => {
       mimeType: 'text/plain',
       buffer: Buffer.from('Test content'),
     });
-    await expect(panel(page).locator('.file-name')).toHaveText(/remove-test\.txt$/);
+    await expect(panel(page).locator('.file-name')).toHaveText('remove-test.txt');
     // A file alone is enough to send: it is analysed without a typed prompt.
     await expect(sendButton(page)).toBeEnabled();
 
@@ -243,7 +236,7 @@ test.describe('chat file upload', () => {
       mimeType: 'text/plain',
       buffer: Buffer.from(`This is a test document about AI ${marker}.`),
     });
-    await expect(panel(page).locator('.file-name')).toHaveText(/test-document\.txt$/);
+    await expect(panel(page).locator('.file-name')).toHaveText('test-document.txt');
 
     await input(page).fill('Summarise this');
     await sendButton(page).click();
@@ -254,7 +247,7 @@ test.describe('chat file upload', () => {
     expect(requests).toHaveLength(1);
     const sent = requests[0].messages.at(-1);
     expect(sent.role).toBe('user');
-    expect(sent.content).toMatch(/^Summarise this\n\n\[Uploaded file: \S*test-document\.txt\]/);
+    expect(sent.content).toMatch(/^Summarise this\n\n\[Uploaded file: test-document\.txt\]/);
     expect(sent.content).toContain(marker);
   });
 });
