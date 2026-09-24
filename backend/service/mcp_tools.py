@@ -1772,17 +1772,22 @@ def register_mcp_tools(
         seen: set = set()
         for node_id in node_ids:
             try:
-                encoded = json.dumps(node_id, sort_keys=True, default=str)
+                key = ("h", node_id)
+                hash(key)
+                hashable = True
+            except TypeError:
+                hashable = False
+            # Only an unhashable id needs the sorted form, as its dedupe key;
+            # sorting a hashable one could refuse keys the unsorted form takes.
+            try:
+                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
             except Exception:
                 key = ("i", id(node_id))
                 if key not in seen:
                     seen.add(key)
                     unencodable.append(node_id)
                 continue
-            try:
-                key = ("h", node_id)
-                hash(key)
-            except TypeError:
+            if not hashable:
                 key = ("u", encoded)
             if key not in seen:
                 seen.add(key)

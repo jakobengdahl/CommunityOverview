@@ -64,6 +64,11 @@ def _session(manager):
     return manager.create_session().id
 
 
+class _HashableDict(dict):
+    def __hash__(self):
+        return 1
+
+
 class _Unprintable:
     __hash__ = None
 
@@ -525,6 +530,34 @@ class TestAddNodesToSession:
         assert "size cap" in result["message"]
         assert "Too many" not in result["message"]
         assert lookups == []
+
+    @pytest.mark.parametrize("slack, succeeds", [(0, True), (-1, False)])
+    def test_the_byte_cap_measures_the_ids_as_one_json_list(
+        self, tmp_path, slack, succeeds
+    ):
+        """Brackets, separators and every id's encoding, unhashable ones and a
+        hashable dict with keys that do not sort included, count exactly."""
+        node_ids = ["alpha", {"id": "b", "x": [1, 2]}, _HashableDict({1: "a", "b": 2})]
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage,
+            service,
+            max_op_batch_bytes=len(json.dumps(node_ids, default=str)) + slack,
+        )
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
+
+        if succeeds:
+            assert result["success"] is True
+            assert result["added"] == ["alpha"]
+            assert result["skipped"] == node_ids[1:]
+        else:
+            assert result["error"] == "too_large"
 
     def test_the_byte_cap_counts_a_repeated_id_once(self, tmp_path):
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
