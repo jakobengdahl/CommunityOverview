@@ -99,9 +99,9 @@ class TestBackendSelection:
 
         Switching GRAPH_BACKEND back to `file` while GRAPH_POSTGRES_DSN is
         still mounted must not quietly keep the graph on PostgreSQL - the
-        mirror image of the bug this module fixes. Every other file-backend
-        test leaves the PostgreSQL fields at their defaults, so a branch that
-        consulted them would pass all of those.
+        mirror image of the bug this module fixes. The file-backend tests
+        above leave the DSN, schema and pool size at their defaults, so a
+        branch that consulted any of them would pass those.
         """
         config = AppConfig(
             graph_file="graph.json",
@@ -235,7 +235,7 @@ class TestBackendSelection:
 
     @requires_backend_module
     @pytest.mark.parametrize(
-        ("schema", "pool_size"), [("corp", 1), ("tenant_b", 7), ("Tenant B", 2)]
+        ("schema", "pool_size"), [("corp", 1), ("tenant_b", 7), ("Tenant  B", 2)]
     )
     def test_a_second_schema_and_pool_size_reach_the_backend_too(
         self, monkeypatch, schema, pool_size
@@ -458,31 +458,48 @@ class TestTheEnvironmentIsTheInterface:
         assert config.graph_backend == "file"
         assert build_persistence_backend(config) is None
 
-    def test_dsn_is_read_from_the_environment(self, monkeypatch):
-        # Mixed case: this is the path a deployment takes, and a password is
-        # case-sensitive, so a lower() in the default_factory must show here.
-        dsn = "postgresql://Usr:PwXY@Db.Example/FromEnv"
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql://Usr:PwXY@Db.Example/FromEnv",
+            "host=Db.Example  dbname=FromEnv password=PwXY",
+        ],
+    )
+    def test_dsn_is_read_from_the_environment(self, monkeypatch, dsn):
+        """Read exactly as set, on the path a deployment takes.
+
+        Mixed case because a password is case-sensitive; the keyword/value
+        form because its internal spaces are separators, doubled here so a
+        collapse shows as well as a removal.
+        """
         monkeypatch.setenv("GRAPH_POSTGRES_DSN", dsn)
         assert AppConfig().graph_postgres_dsn == dsn
 
-    def test_a_dsn_alone_does_not_select_postgres(self, monkeypatch):
+    @pytest.mark.parametrize("selected", [None, "file"])
+    def test_a_dsn_alone_does_not_select_postgres(self, monkeypatch, selected):
         """No auto-detection: the backend is chosen by GRAPH_BACKEND only.
 
-        A stale DSN in the environment with GRAPH_BACKEND unset is a rollback
-        in progress, not a request for PostgreSQL. Picking postgres because a
-        DSN happens to be present would move the graph without anyone asking,
-        and every test that sets a DSN also sets the backend, so nothing else
-        here would notice.
+        A stale DSN in the environment beside an unset or explicit
+        `GRAPH_BACKEND=file` is a rollback in progress, not a request for
+        PostgreSQL. Picking postgres because a DSN happens to be present would
+        move the graph without anyone asking. The other tests that set a DSN
+        either pass the backend as a keyword, which skips the environment
+        default entirely, or never ask which backend was chosen, so none of
+        them would notice.
         """
-        monkeypatch.delenv("GRAPH_BACKEND", raising=False)
+        if selected is None:
+            monkeypatch.delenv("GRAPH_BACKEND", raising=False)
+        else:
+            monkeypatch.setenv("GRAPH_BACKEND", selected)
         monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///stale")
         config = AppConfig()
         assert config.graph_backend == "file"
         assert build_persistence_backend(config) is None
 
     def test_schema_is_read_from_the_environment(self, monkeypatch):
-        monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "TenantB")
-        assert AppConfig().graph_postgres_schema == "TenantB"
+        # Mixed case and a doubled space: a quoted schema name keeps both.
+        monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "Tenant  B")
+        assert AppConfig().graph_postgres_schema == "Tenant  B"
 
     def test_schema_defaults_to_public(self, monkeypatch):
         monkeypatch.delenv("GRAPH_POSTGRES_SCHEMA", raising=False)
@@ -636,8 +653,9 @@ class TestRefusalOrder:
         assert "GRAPH_POSTGRES_POOL_SIZE" in message
         assert "requirements-postgres.txt" not in message
 
+    @pytest.mark.parametrize("kind", [RuntimeError, OSError, ValueError])
     def test_a_fault_inside_the_backend_module_is_not_reported_as_missing_psycopg(
-        self, monkeypatch
+        self, monkeypatch, kind
     ):
         """Only an ImportError means the extra is absent.
 
@@ -648,7 +666,7 @@ class TestRefusalOrder:
         import builtins
 
         real_import = builtins.__import__
-        fault = RuntimeError("broken at import time")
+        fault = kind("broken at import time")
 
         def broken(name, *args, **kwargs):
             if name == "backend.core.postgres_backend":
@@ -661,7 +679,7 @@ class TestRefusalOrder:
             graph_backend="postgres",
             graph_postgres_dsn="postgresql:///example",
         )
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(kind) as exc:
             build_persistence_backend(config)
         assert exc.value is fault
 
