@@ -3,8 +3,9 @@ Tests for the legacy MCP visualization-push channel and the MCP session tools.
 
 The browser no longer uploads canvas state (the ``PATCH /sessions/{id}/state``
 shim was removed in step 8). The remaining legacy endpoint is the push stream
-``GET /sessions/{id}/stream``; a registry entry simply signals that a browser is
-connected to receive MCP pushes. Session *state* is server-owned now (design
+``GET /sessions/{id}/stream``, and a browser counts as connected to it while it
+is draining that stream — a bare registry entry does not, because it outlives the
+browser that created it. Session *state* is server-owned now (design
 §3.8): the MCP query tools read visible nodes from the shared-session store and
 the current selection from the advisory claim map.
 
@@ -12,24 +13,57 @@ Covers:
 - MCP session tools connect_to_visualization_session / get_visualization_session_state
   reading server-owned state, for a session with a browser and for one no
   browser has ever opened
-- clear_visualization gating on browser presence
+- clear_visualization gating on browser presence, and refusing a stale registry
+  entry that nothing is draining
 - MCP push enqueues a command when a browser is connected
 - Invalid session ID rejection
 """
+
+import asyncio
 
 import pytest
 
 from fastapi.testclient import TestClient
 
 
-def _open_browser(test_app: TestClient, session_id: str) -> None:
+@pytest.fixture
+def open_browser(test_app: TestClient):
     """Simulate a browser holding the legacy push stream open for *session_id*.
 
     In production the browser opens ``GET /sessions/{id}/stream`` on load, which
-    calls ``registry.get_or_create``. Tests can't easily hold an SSE stream open,
-    so we materialise the registry entry directly.
+    drains ``registry.stream()``. Tests can't easily hold an SSE stream open
+    through the client, so the generator is driven directly, on a private loop,
+    until it has registered as a consumer. A bare ``get_or_create`` entry is
+    deliberately not used: that entry is exactly the state that outlives a
+    closed browser, so standing it in for an open one would hide the gate under
+    test.
     """
-    test_app.app.state.session_registry.get_or_create(session_id)
+    registry = test_app.app.state.session_registry
+    loop = asyncio.new_event_loop()
+    tasks = []
+
+    async def _drain(gen):
+        async for _ in gen:
+            pass
+
+    async def _settle(session_id):
+        for _ in range(500):
+            if registry.has_consumer(session_id):
+                return
+            await asyncio.sleep(0)
+
+    def _open(session_id: str) -> None:
+        tasks.append(loop.create_task(_drain(registry.stream(session_id))))
+        loop.run_until_complete(_settle(session_id))
+        assert registry.has_consumer(session_id), "the stream never registered"
+
+    yield _open
+
+    for task in tasks:
+        task.cancel()
+    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+    loop.run_until_complete(loop.shutdown_asyncgens())
+    loop.close()
 
 
 @pytest.fixture
@@ -77,9 +111,11 @@ class TestConnectToVisualizationSession:
         assert data["connected"] is False
         assert "not found" in data["message"].lower()
 
-    def test_returns_connected_for_open_session(self, test_app: TestClient):
+    def test_returns_connected_for_open_session(
+        self, test_app: TestClient, open_browser
+    ):
         session_id = "5678-1234"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
         _add_nodes(test_app, session_id, ["n1"])
 
         response = test_app.post(
@@ -100,7 +136,9 @@ class TestConnectToVisualizationSession:
         assert "legacy push channel" in data["message"]
         assert "connected_clients is 0" in data["message"]
 
-    def test_connected_with_empty_store_reports_zero_nodes(self, test_app: TestClient):
+    def test_connected_with_empty_store_reports_zero_nodes(
+        self, test_app: TestClient, open_browser
+    ):
         """A browser can be connected before anything is saved server-side.
 
         The op stream materialises the store entry lazily (on the first change),
@@ -110,7 +148,7 @@ class TestConnectToVisualizationSession:
         work.
         """
         session_id = "5555-6666"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
 
         data = test_app.post(
             "/execute_tool",
@@ -152,9 +190,11 @@ class TestGetVisualizationSessionState:
         assert response.status_code == 200
         assert "error" in response.json()
 
-    def test_returns_server_owned_state_for_open_session(self, test_app: TestClient):
+    def test_returns_server_owned_state_for_open_session(
+        self, test_app: TestClient, open_browser
+    ):
         session_id = "2222-3333"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
         _add_nodes(test_app, session_id, ["node-1", "node-2"])
         # The current selection is expressed as an advisory claim (design §3.8).
         test_app.post(
@@ -180,10 +220,10 @@ class TestGetVisualizationSessionState:
         assert data["selected_node_ids"] == ["node-1"]
 
     def test_hidden_nodes_are_excluded_from_visible_node_ids(
-        self, test_app: TestClient
+        self, test_app: TestClient, open_browser
     ):
         session_id = "2222-4444"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
         _add_nodes(test_app, session_id, ["node-1", "node-2"])
         test_app.post(
             f"/api/sessions/{session_id}/ops",
@@ -401,23 +441,23 @@ class TestClearVisualization:
 
         assert data["success"] is True
 
-    def test_clear_open_session_succeeds(self, test_app: TestClient):
+    def test_clear_open_session_succeeds(self, test_app: TestClient, open_browser):
         # The push transport itself is covered by the search_graph push tests; a
         # direct call has no running loop to enqueue on, so assert the tool's own
         # gating: an open session clears successfully.
         session_id = "3333-4444"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
 
         clear = test_app.app.state.tools_map["clear_visualization"]
         data = clear(visualization_session_id=session_id)
         assert data["success"] is True
 
     def test_clear_rejects_stale_expected_revision(
-        self, test_app: TestClient, headless_session
+        self, test_app: TestClient, headless_session, open_browser
     ):
         clear = test_app.app.state.tools_map["clear_visualization"]
         session_id = headless_session()
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
         test_app.app.state.session_manager.add_node_refs(session_id, "setup", ["n1"])
 
         data = clear(visualization_session_id=session_id, expected_revision=0)
@@ -431,11 +471,11 @@ class TestClearVisualization:
         )
 
     def test_clear_accepts_matching_expected_revision(
-        self, test_app: TestClient, headless_session
+        self, test_app: TestClient, headless_session, open_browser
     ):
         clear = test_app.app.state.tools_map["clear_visualization"]
         session_id = headless_session()
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
         current = test_app.app.state.session_manager.get_session(session_id).seq
 
         data = clear(visualization_session_id=session_id, expected_revision=current)
@@ -446,9 +486,11 @@ class TestClearVisualization:
 class TestVisualizationSessionIdPush:
     """MCP tools push a result to the browser queue when a session is connected."""
 
-    def test_search_graph_with_session_id_enqueues_command(self, test_app: TestClient):
+    def test_search_graph_with_session_id_enqueues_command(
+        self, test_app: TestClient, open_browser
+    ):
         session_id = "7777-8888"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
 
         response = test_app.post(
             "/execute_tool",
@@ -470,10 +512,10 @@ class TestVisualizationSessionIdPush:
         assert cmd["tool"] == "search_graph"
 
     def test_get_related_nodes_with_session_id_enqueues_command(
-        self, test_app: TestClient
+        self, test_app: TestClient, open_browser
     ):
         session_id = "4444-5555"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
 
         response = test_app.post(
             "/execute_tool",
@@ -495,10 +537,10 @@ class TestVisualizationSessionIdPush:
         assert cmd["result"].get("action") == "add_to_visualization"
 
     def test_get_saved_view_with_session_id_enqueues_command(
-        self, test_app: TestClient
+        self, test_app: TestClient, open_browser
     ):
         session_id = "6666-7777"
-        _open_browser(test_app, session_id)
+        open_browser(session_id)
 
         response = test_app.post(
             "/execute_tool",

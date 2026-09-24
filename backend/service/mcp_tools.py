@@ -283,15 +283,17 @@ def register_mcp_tools(
           ``create_visualization_session`` or lazily by a browser's first
           change, so a browser sitting on a fresh session has none yet.
         - **a push destination** — either clients reporting presence on the op
-          stream (``clients``) or an entry in the legacy push registry
+          stream (``clients``) or a consumer draining the legacy push queue
           (``push_target``). ``_push_to_session`` sends to both, but neither is
-          proof that anything reads the push. A registry entry only means the
-          command is *enqueued*: the entry outlives the browser that created it
-          and is also created with no browser at all (``mint_trigger_token``,
-          the session auto-add tools). A presence count is a live client, but
-          the hub publishes only for a session with stored state. Whether a
-          push reached a consumer is the ``visualization_delivery`` report that
-          ``_push_to_session`` returns, not either of these facts.
+          proof that a given push was read. ``push_target`` is deliberately the
+          consumer count, not ``session_exists``: a registry entry outlives the
+          browser that created it and is also created with no browser at all
+          (``mint_trigger_token``, the session auto-add tools), so an entry
+          alone would report a canvas nobody has open. A presence count is a
+          live client, but the hub publishes only for a session with stored
+          state. Whether a push reached a consumer is the
+          ``visualization_delivery`` report that ``_push_to_session`` returns,
+          not either of these facts.
 
         Gating the read tools on the registry alone made a session created and
         populated over MCP — with no browser ever opened — report not-found even
@@ -306,9 +308,10 @@ def register_mcp_tools(
             if session_manager is not None
             else 0
         )
-        push_target = bool(
-            session_registry and session_registry.session_exists(session_id)
-        )
+        # A registry that cannot report its consumers cannot support a claim
+        # that anything is reading its queue.
+        has_consumer = getattr(session_registry, "has_consumer", None)
+        push_target = bool(callable(has_consumer) and has_consumer(session_id))
         return stored, clients, push_target
 
     def register_tool(func: Callable) -> Callable:
@@ -997,10 +1000,11 @@ def register_mcp_tools(
         Removes everything currently displayed in the browser window without
         affecting the underlying graph data. Use this to start a fresh view.
 
-        This is a live-canvas command. It refuses unless a browser is currently
-        reachable through the shared-session op stream or the legacy push
-        channel. The tools that act on the session's stored state have no such
-        live-client requirement.
+        This is a live-canvas command. It refuses unless a client is currently
+        reporting presence on the shared-session op stream or draining the
+        legacy push channel. A leftover legacy registry entry with nothing
+        reading it does not count. The tools that act on the session's stored
+        state have no such live-client requirement.
 
         When ``expected_revision`` is supplied and the session has stored state,
         the clear is rejected unless it matches the current session revision.
@@ -1047,8 +1051,8 @@ def register_mcp_tools(
                 "success": False,
                 "error": (
                     f"Session '{visualization_session_id}' exists, but no "
-                    "browser is connected to its op stream or holding its "
-                    "legacy push channel open."
+                    "client is connected to its op stream or draining its "
+                    "legacy push channel."
                 ),
             }
         session = (
@@ -1247,9 +1251,9 @@ def register_mcp_tools(
         if denied:
             return denied
         stored, clients, push_target = _session_facts(session_id)
-        # Existence is the store or the legacy registry — deliberately not
-        # presence. A client can still be attached to a session that was just
-        # deleted, and reporting that as found would resurrect it.
+        # Existence is the store or a live legacy consumer — deliberately not
+        # op-stream presence. A client can still be attached to a session that
+        # was just deleted, and reporting that as found would resurrect it.
         if not stored and not push_target:
             return {
                 "connected": False,
@@ -1271,15 +1275,15 @@ def register_mcp_tools(
                 "visualization_session_id parameter reach the canvas."
             )
         elif stored and push_target:
-            # Reachable through the legacy push channel only: a browser is
-            # holding it open without reporting presence on the op stream, so
-            # the count in this very payload is 0 and must not be contradicted.
+            # Reachable through the legacy push channel only: a client is
+            # draining it without reporting presence on the op stream, so the
+            # count in this very payload is 0 and must not be contradicted.
             message = (
-                f"Session '{session_id}' exists and a browser is holding its "
-                "legacy push channel open, though none is reporting presence "
-                f"on the op stream (connected_clients is 0). "
+                f"Session '{session_id}' exists and a client is draining its "
+                "legacy push channel, though none is reporting presence on the "
+                f"op stream (connected_clients is 0). "
                 f"{stored_state_tools}, and results pushed with the "
-                "visualization_session_id parameter reach that browser."
+                "visualization_session_id parameter reach that client."
             )
         elif stored:
             message = (

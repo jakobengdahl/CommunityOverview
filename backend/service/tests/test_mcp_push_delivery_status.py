@@ -522,7 +522,8 @@ def test_the_report_is_the_only_difference_a_session_id_makes(wired):
         assert with_push[key] == value, key
 
 
-def test_clear_visualization_result_shape_is_unchanged(wired):
+@pytest.mark.asyncio
+async def test_clear_visualization_result_shape_is_unchanged(wired):
     """It gates before pushing instead of reporting, and keeps doing so."""
     tools, registry, _manager = wired
     session_id = _new_session(tools)
@@ -531,10 +532,138 @@ def test_clear_visualization_result_shape_is_unchanged(wired):
     assert refused["success"] is False
     assert "visualization_delivery" not in refused
 
-    registry.get_or_create(session_id)
-    cleared = tools["clear_visualization"](visualization_session_id=session_id)
+    async with _legacy_consumer(registry, session_id):
+        cleared = tools["clear_visualization"](visualization_session_id=session_id)
     assert cleared["success"] is True
     assert "visualization_delivery" not in cleared
+
+
+# ---------------------------------------------------------------------------
+# The pre-push reachability check agrees with the delivery report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connect_stops_claiming_a_reachable_canvas_when_the_tab_closes(wired):
+    """The entry left behind by a closed tab is not a legacy push channel.
+
+    Before the fix ``connect_to_visualization_session`` said a browser was
+    holding the channel open, and that pushes reach it, in the very state the
+    delivery report calls undelivered. The two must now agree.
+    """
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id):
+        live = tools["connect_to_visualization_session"](session_id=session_id)
+        assert live["connected"] is True
+        assert "draining its legacy push channel" in live["message"]
+        assert _delivery(tools, session_id)["delivered"] is True
+
+    assert registry.session_exists(session_id) is True
+    assert registry.has_consumer(session_id) is False
+
+    stale = tools["connect_to_visualization_session"](session_id=session_id)
+    assert stale["connected"] is True
+    assert stale["has_stored_state"] is True
+    assert stale["connected_clients"] == 0
+    assert "legacy push channel" not in stale["message"]
+    assert "with no client connected" in stale["message"]
+    assert "reaches nobody" in stale["message"]
+    assert _delivery(tools, session_id)["delivered"] is False
+
+
+@pytest.mark.asyncio
+async def test_clear_visualization_refuses_a_session_whose_tab_closed(wired):
+    """``clear_visualization`` gates on a consumer, not on the leftover entry."""
+    tools, registry, _manager = wired
+    session_id = _new_session(tools)
+
+    async with _legacy_consumer(registry, session_id):
+        cleared = tools["clear_visualization"](visualization_session_id=session_id)
+        assert cleared["success"] is True
+
+    assert registry.session_exists(session_id) is True
+    refused = tools["clear_visualization"](visualization_session_id=session_id)
+    assert refused["success"] is False
+    assert "exists, but no client" in refused["error"]
+    assert "draining its legacy push channel" in refused["error"]
+
+
+@pytest.mark.parametrize(
+    "leave_entry",
+    [
+        pytest.param(lambda reg, sid: reg.get_or_create(sid), id="get_or_create"),
+        pytest.param(lambda reg, sid: reg.mint_trigger_token(sid), id="trigger"),
+    ],
+)
+def test_a_bare_entry_with_no_stored_state_resolves_as_not_found(wired, leave_entry):
+    """With nothing stored and nothing draining, there is no session to report.
+
+    An entry left by ``mint_trigger_token`` (or any other ``get_or_create``) is
+    not a client, so the tools must not describe the id as "open in a client".
+    """
+    tools, registry, _manager = wired
+    leave_entry(registry, UNKNOWN_SESSION_ID)
+    assert registry.session_exists(UNKNOWN_SESSION_ID) is True
+    assert registry.has_consumer(UNKNOWN_SESSION_ID) is False
+
+    connect = tools["connect_to_visualization_session"](session_id=UNKNOWN_SESSION_ID)
+    assert connect["connected"] is False
+    assert "not found" in connect["message"]
+
+    state = tools["get_visualization_session_state"](session_id=UNKNOWN_SESSION_ID)
+    assert "not found" in state["error"]
+
+    refused = tools["clear_visualization"](visualization_session_id=UNKNOWN_SESSION_ID)
+    assert refused["success"] is False
+    assert "not found" in refused["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_consumer_without_stored_state_is_still_found(wired):
+    """The legacy-only case the gate exists for keeps resolving."""
+    tools, registry, _manager = wired
+
+    async with _legacy_consumer(registry, UNKNOWN_SESSION_ID):
+        connect = tools["connect_to_visualization_session"](
+            session_id=UNKNOWN_SESSION_ID
+        )
+        cleared = tools["clear_visualization"](
+            visualization_session_id=UNKNOWN_SESSION_ID
+        )
+
+    assert connect["connected"] is True
+    assert connect["has_stored_state"] is False
+    assert "no stored state yet" in connect["message"]
+    assert cleared["success"] is True
+
+
+def test_a_registry_that_cannot_report_consumers_is_not_a_push_target(tmp_path):
+    """An older or foreign registry without ``has_consumer`` gates as no consumer."""
+
+    class _ConsumerBlindRegistry:
+        def is_valid_session_id(self, session_id):
+            return True
+
+        def session_exists(self, session_id):
+            return True
+
+        def push_command_sync(self, session_id, command):
+            return True
+
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage)
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools = register_mcp_tools(
+        mock_mcp, service, session_registry=_ConsumerBlindRegistry()
+    )
+
+    refused = tools["clear_visualization"](visualization_session_id=UNKNOWN_SESSION_ID)
+    assert refused["success"] is False
+    connect = tools["connect_to_visualization_session"](session_id=UNKNOWN_SESSION_ID)
+    assert connect["connected"] is False
 
 
 def test_clear_visualization_accepts_op_stream_presence_without_registry(tmp_path):
