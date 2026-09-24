@@ -7,6 +7,7 @@ Verifies that:
 - Graph mutations go through GraphService (not direct storage access)
 """
 
+import json
 import os
 import pytest
 from unittest.mock import patch
@@ -77,6 +78,69 @@ class TestChatServiceToolExecution:
             result.get("toolResult", {})
         )
         assert result["toolUsed"] == "search_graph"
+
+    def test_search_graph_tool_schema_offers_every_match_mode_and_semantic(
+        self, chat_service
+    ):
+        """The schema sent to the LLM must offer the same search modes as MCP."""
+        from backend.core.storage_search import MATCH_MODES
+
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "ok"
+        service.process_message([{"role": "user", "content": "hi"}])
+
+        search_def = next(
+            t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
+        )
+        props = search_def["input_schema"]["properties"]
+        assert props["match_mode"]["enum"] == list(MATCH_MODES)
+        assert props["match_mode"]["default"] == "substring"
+        assert props["semantic"]["type"] == "boolean"
+        assert props["semantic"]["default"] is False
+
+    def test_search_graph_any_term_matches_multi_word_query(
+        self, chat_service, sample_nodes
+    ):
+        """A multi-word query no node contains verbatim matches in any_term mode."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {"query": "Agency Project", "match_mode": "any_term"},
+            }
+        ]
+        mock_llm.mock_text_response = "Found them."
+
+        result = service.process_message(
+            [{"role": "user", "content": "Find agency or project"}]
+        )
+
+        found = {n["id"] for n in result["toolResult"]["nodes"]}
+        assert {"test-actor-1", "test-initiative-1"} <= found
+        # Substring mode also surfaces both nodes here, via the automatic
+        # semantic fallback; only the lexical any_term match leaves it off.
+        tool_result = json.loads(
+            mock_llm.received_messages[1][-1]["content"][0]["content"]
+        )
+        assert tool_result["match_mode"] == "any_term"
+        assert tool_result["semantic"] is False
+
+    def test_search_graph_tool_forwards_match_mode_and_semantic(self, chat_service):
+        """The chat wrapper passes both modes through to GraphService unchanged."""
+        from unittest.mock import MagicMock
+
+        service, _ = chat_service
+        service._graph_service.search_graph = MagicMock(return_value={"nodes": []})
+
+        service._search_graph_tool(query="x", match_mode="any_term", semantic=True)
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["match_mode"] == "any_term"
+        assert kwargs["semantic"] is True
+
+        service._search_graph_tool(query="x")
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["match_mode"] == "substring"
+        assert kwargs["semantic"] is False
 
     def test_add_nodes_tool_uses_graph_service(self, chat_service):
         """add_nodes tool should use GraphService.add_nodes."""

@@ -18,6 +18,7 @@ import json
 import re
 from datetime import datetime, timezone
 
+from backend.core.storage_search import MATCH_MODE_SUBSTRING
 from backend.ui.chat_logic import ChatProcessor
 from backend.service import GraphService
 
@@ -115,6 +116,8 @@ class ChatService:
         action: Optional[str] = None,
         federation_depth: Optional[int] = None,
         include_archived: bool = False,
+        match_mode: str = MATCH_MODE_SUBSTRING,
+        semantic: bool = False,
     ) -> Dict[str, Any]:
         effective_depth = (
             federation_depth
@@ -128,6 +131,8 @@ class ChatService:
             action=action,
             federation_depth=effective_depth,
             include_archived=include_archived,
+            match_mode=match_mode,
+            semantic=semantic,
         )
 
     # ------------------------------------------------------------------
