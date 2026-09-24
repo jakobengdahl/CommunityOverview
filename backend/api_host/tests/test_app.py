@@ -55,9 +55,10 @@ class TestHealthAndRoot:
         assert data["endpoints"]["startup_diagnostics"] == "/diagnostics/startup"
         assert data["operability"]["startup_status"] == "ready"
         # Nothing declared in config; the manifest still carries the server's
-        # own animated_layout capability.
+        # own animated_layout capability, which is counted as a default.
         assert data["operability"]["capabilities"] == {
-            "configured": 1,
+            "configured": 0,
+            "defaulted": 1,
             "enabled": 1,
             "disabled": 0,
         }
@@ -174,9 +175,10 @@ class TestHealthAndRoot:
             },
         }
         # Nothing declared in config; the manifest still carries the server's
-        # own animated_layout capability.
+        # own animated_layout capability, which is counted as a default.
         assert data["capabilities"] == {
-            "configured": 1,
+            "configured": 0,
+            "defaulted": 1,
             "enabled": 1,
             "disabled": 0,
         }
@@ -584,6 +586,30 @@ class TestStatisticsEndpoints:
             },
         ]
         assert [c["id"] for c in data["capabilities"][2:]] == ["animated_layout"]
+
+    def test_capability_summary_separates_declared_from_defaulted(self):
+        from backend.api_host.diagnostics import count_enabled_capabilities
+        from backend.config import config_loader
+
+        os.environ["SCHEMA_FILE"] = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "test"
+            / "schema_config.json"
+        )
+        config_loader.reset_loader()
+
+        summary = count_enabled_capabilities(
+            config_loader.get_capabilities(),
+            config_loader.get_declared_capability_count(),
+        )
+
+        assert summary == {
+            "configured": 2,
+            "defaulted": 1,
+            "enabled": 2,
+            "disabled": 1,
+        }
 
     def test_get_runtime_info(self, test_app: TestClient):
         """Get runtime metadata via REST."""

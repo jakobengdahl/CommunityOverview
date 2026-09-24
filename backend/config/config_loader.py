@@ -441,6 +441,7 @@ class ConfigLoader:
         """Load and validate the configuration file."""
         self._config_path = self._get_config_path()
         self._dropped_capability_ids = set()
+        raw_config = None
 
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
@@ -464,6 +465,7 @@ class ConfigLoader:
         except Exception as e:
             logger.warning(f"Error loading config: {e}, using defaults")
             self._config = SchemaFileConfig()
+            self._keep_capabilities_through_fallback(raw_config)
 
         # Strip system node types that may be defined in the config file (backward compat).
         # System types are now managed entirely in code via SYSTEM_NODE_TYPES.
@@ -549,6 +551,24 @@ class ConfigLoader:
         presentation["capabilities"] = valid
         return dropped_ids
 
+    def _keep_capabilities_through_fallback(self, raw_config: Any) -> None:
+        """Carry the deployment's capability entries into the default config.
+
+        An unrelated fatal error must not turn a valid override such as
+        ``{"id": "animated_layout", "enabled": false}`` back into the enabled
+        server default.
+        """
+        if not isinstance(raw_config, dict):
+            return
+        self._dropped_capability_ids |= self._sanitize_capabilities(raw_config)
+        presentation = raw_config.get("presentation")
+        if not isinstance(presentation, dict):
+            return
+        self._config.presentation.capabilities = [
+            CapabilityConfig.model_validate(entry)
+            for entry in presentation.get("capabilities") or []
+        ]
+
     def _strip_system_types_from_config(self) -> None:
         """Remove any system node types found in the loaded config (backward compat)."""
         to_remove = set(self._config.schema_.node_types.keys()) & set(
@@ -597,6 +617,11 @@ class ConfigLoader:
     def dropped_capability_ids(self) -> set:
         """Ids of capability entries the config declared but that failed validation."""
         return self._dropped_capability_ids
+
+    @property
+    def declared_capabilities(self) -> List[CapabilityConfig]:
+        """Capability entries the deployment's config declared and that validated."""
+        return self._config.presentation.capabilities
 
     @property
     def config_path(self) -> str:
@@ -751,7 +776,7 @@ def get_presentation() -> Dict[str, Any]:
         "language_policy": pres.language_policy.model_dump(),
         "widget_url": pres.widget_url,
         "expert_agents": [agent.model_dump() for agent in pres.expert_agents],
-        "capabilities": [capability.model_dump() for capability in pres.capabilities],
+        "capabilities": get_capabilities()["capabilities"],
         "guides": [guide.model_dump() for guide in pres.guides],
         "ui": loader.config.ui.model_dump(),
     }
@@ -794,8 +819,7 @@ def get_capabilities() -> Dict[str, Any]:
     """
     loader = _get_loader()
     capabilities = [
-        capability.model_dump()
-        for capability in loader.config.presentation.capabilities
+        capability.model_dump() for capability in loader.declared_capabilities
     ]
     declared_ids = {capability.get("id") for capability in capabilities}
     if _ANIMATED_LAYOUT_CAPABILITY.id not in declared_ids:
@@ -804,6 +828,11 @@ def get_capabilities() -> Dict[str, Any]:
             default["enabled"] = False
         capabilities.append(default)
     return {"capabilities": capabilities}
+
+
+def get_declared_capability_count() -> int:
+    """Number of capabilities the deployment's config declared, defaults excluded."""
+    return len(_get_loader().declared_capabilities)
 
 
 def _normalize_runtime_mode(runtime_mode: Optional[str]) -> str:

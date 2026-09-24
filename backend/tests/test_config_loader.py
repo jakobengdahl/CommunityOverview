@@ -278,7 +278,7 @@ class TestConfigLoader:
         assert presentation["language_policy"]["mode"] == "required"
         assert presentation["language_policy"]["primary_language"] == "en"
         assert presentation["language_policy"]["allowed_languages"] == ["en"]
-        assert presentation["capabilities"] == [
+        assert presentation["capabilities"][:2] == [
             {
                 "id": "graph_export",
                 "name": "Graph export",
@@ -291,6 +291,9 @@ class TestConfigLoader:
                 "description": "Provides configuration for guided assistant interactions.",
                 "enabled": False,
             },
+        ]
+        assert [c["id"] for c in presentation["capabilities"][2:]] == [
+            "animated_layout"
         ]
 
         del os.environ["SCHEMA_FILE"]
@@ -494,11 +497,74 @@ class TestConfigLoader:
             for r in caplog.records
         )
         assert config_loader.get_presentation()["title"] == "Capability Test Graph"
-        assert config_loader.get_presentation()["capabilities"] == []
         capabilities = config_loader.get_capabilities()["capabilities"]
         assert [(c["id"], c["enabled"]) for c in capabilities] == [
             ("animated_layout", False)
         ]
+        assert config_loader.get_presentation()["capabilities"] == capabilities
+
+    def _load_capability_config_with_fatal_error(self, tmp_path, capabilities):
+        config_loader = self._load_capability_config(tmp_path, capabilities)
+        config_path = tmp_path / "schema_config.json"
+        broken = json.loads(config_path.read_text())
+        broken["schema"]["node_types"] = "not-an-object"
+        config_path.write_text(json.dumps(broken))
+        config_loader.reset_loader()
+        return config_loader
+
+    def test_fatal_fallback_keeps_a_valid_capability_override(self, tmp_path, caplog):
+        config_loader = self._load_capability_config_with_fatal_error(
+            tmp_path,
+            [
+                {"id": "search", "name": "Search"},
+                {"id": "animated_layout", "enabled": False},
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" not in node_type_names
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("animated_layout", False),
+        ]
+        assert config_loader.get_declared_capability_count() == 2
+
+    def test_fatal_fallback_reports_a_broken_override_disabled(self, tmp_path):
+        config_loader = self._load_capability_config_with_fatal_error(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", False)
+        ]
+
+    def test_fatal_fallback_on_non_object_config_uses_server_defaults(self, tmp_path):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(json.dumps([{"id": "animated_layout"}]))
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+
+    def test_presentation_capabilities_match_the_discovery_manifest(self, tmp_path):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "search", "name": "Search"}]
+        )
+
+        manifest = config_loader.get_capabilities()["capabilities"]
+        assert [c["id"] for c in manifest] == ["search", "animated_layout"]
+        assert config_loader.get_presentation()["capabilities"] == manifest
+        assert config_loader.get_declared_capability_count() == 1
 
     def test_reload_after_fixing_a_broken_override_restores_the_default(self, tmp_path):
         config_loader = self._load_capability_config(
