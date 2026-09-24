@@ -1202,10 +1202,12 @@ def register_mcp_tools(
         Use this tool first to confirm the session ID before using the
         visualization_session_id parameter in other tools.
 
-        A session resolves as soon as it exists — whether a browser opened it or
-        ``create_visualization_session`` did. No browser needs to be connected:
-        session state is server-owned, so a client that opens the session later
-        picks up whatever was put there meanwhile.
+        A session resolves when it has stored state (``create_visualization_session``
+        or a browser's first change creates it) or while a browser has it open.
+        No browser needs to be connected to a stored session: session state is
+        server-owned, so a client that opens the session later picks up whatever
+        was put there meanwhile. A browser that opened a session and left without
+        changing anything leaves nothing behind, so that id reports not found.
 
         Two facts decide what you can do with it, and the result reports both:
 
