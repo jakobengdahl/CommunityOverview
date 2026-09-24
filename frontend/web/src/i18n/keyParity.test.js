@@ -1,6 +1,7 @@
 /**
- * CLAUDE.md requires every UI string key to exist in both en.json and sv.json;
- * a key missing from one file makes the UI fall back to the raw key name.
+ * CLAUDE.md requires every UI string key to exist in both en.json and sv.json:
+ * a key missing from sv.json silently renders in English, and one missing from
+ * en.json renders as the raw key name.
  * Past violations were caught only by manual review, so this guards it in CI.
  */
 import { describe, it, expect } from 'vitest';
