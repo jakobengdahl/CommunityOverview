@@ -282,10 +282,16 @@ def register_mcp_tools(
           (``add_nodes_to_session``, the layout tools) need; it is created by
           ``create_visualization_session`` or lazily by a browser's first
           change, so a browser sitting on a fresh session has none yet.
-        - **a reachable canvas** — either a client reporting presence on the op
+        - **a push destination** — either clients reporting presence on the op
           stream (``clients``) or an entry in the legacy push registry
-          (``push_target``). ``_push_to_session`` delivers to both, so either
-          one means a push lands somewhere.
+          (``push_target``). ``_push_to_session`` sends to both, but neither is
+          proof that anything reads the push. A registry entry only means the
+          command is *enqueued*: the entry outlives the browser that created it
+          and is also created with no browser at all (``mint_trigger_token``,
+          the session auto-add tools). A presence count is a live client, but
+          the hub publishes only for a session with stored state. Whether a
+          push reached a consumer is the ``visualization_delivery`` report that
+          ``_push_to_session`` returns, not either of these facts.
 
         Gating the read tools on the registry alone made a session created and
         populated over MCP — with no browser ever opened — report not-found even
