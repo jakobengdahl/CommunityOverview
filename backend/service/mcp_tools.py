@@ -1388,7 +1388,7 @@ def register_mcp_tools(
                 )
             }
         visible, selected = _session_view_state(session_id)
-        node_count = len(visible)
+        node_count = 0
         dimmed_node_ids: list = []
         dimmed_edge_ids: list = []
         edge_intensity = 1.0
@@ -1716,9 +1716,10 @@ def register_mcp_tools(
         Returns:
             Dict with success, added (ids actually added, deduplicated), skipped
             (ids that did not resolve, deduplicated), node_count (nodes the
-            session references, hidden ones included — the same total
-            ``get_visualization_session`` reports, not the visible count from
-            ``get_visualization_session_state``) and the new revision. On a
+            session references, hidden ones included — the same node_count
+            ``get_visualization_session``, ``get_visualization_layout`` and
+            ``get_visualization_session_state`` report; the visible count is the
+            latter's ``visible_node_count``) and the new revision. On a
             concurrency clash returns success=false with the current revision so
             the caller can re-read and retry. Retryable errors:
             revision_conflict, busy, rate_limited; change the request for

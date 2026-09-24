@@ -2825,6 +2825,8 @@ class TestRenameSessionSync:
     async def test_persist_failure_restores_name_seq_and_ring(self):
         mgr = _manager()
         s = mgr.create_session(name="Before")
+        mgr.rename_session_sync(s.id, "Committed-7f3a", client_id="mcp")
+        s.updated_at = "2000-01-01T00:00:00Z"
         sub, _ = mgr.connect(s.id, "c1", "A")
         await _drain(sub)
         seq_before = s.seq
@@ -2836,7 +2838,8 @@ class TestRenameSessionSync:
         mgr.store.persist = boom
         with pytest.raises(IOError):
             mgr.rename_session_sync(s.id, "After", client_id="mcp")
-        assert s.name == "Before"
+        assert s.name == "Committed-7f3a"
+        assert s.updated_at == "2000-01-01T00:00:00Z"
         assert s.seq == seq_before
         assert list(mgr.store.ring(s.id)) == ring_before
         assert await _drain(sub) == []
@@ -2844,6 +2847,7 @@ class TestRenameSessionSync:
     async def test_apply_op_sync_restores_a_renamed_name_on_failure(self):
         mgr = _manager()
         s = mgr.create_session(name="Before")
+        mgr.rename_session_sync(s.id, "Committed-c21e")
 
         def boom(_session):
             raise IOError("disk full")
@@ -2856,7 +2860,18 @@ class TestRenameSessionSync:
                 "mcp",
                 {"op": "session_renamed", "name": "After", "client_id": "mcp"},
             )
-        assert s.name == "Before"
+        assert s.name == "Committed-c21e"
+
+    async def test_broadcast_carries_the_callers_actor(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        sub, _ = mgr.connect(s.id, "c1", "A")
+        await _drain(sub)
+        mgr.rename_session_sync(s.id, "Renamed", client_id="mcp-agent")
+        events = await _drain(sub)
+        renamed = [e for e in events if e.get("op", {}).get("op") == "session_renamed"]
+        assert len(renamed) == 1
+        assert renamed[0]["client_id"] == "mcp-agent"
 
     async def test_broadcast_carries_the_rest_default_actor(self):
         mgr = _manager()
