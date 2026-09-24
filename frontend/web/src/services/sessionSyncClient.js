@@ -1703,7 +1703,9 @@ export class SessionSyncClient {
             data.seq > this._loadedSeq &&
             this.handlers.onResync
           ) {
-            this.handlers.onResync();
+            // Name the session: during a session switch the host's handler can
+            // still be bound to the previous one when this snapshot arrives.
+            this.handlers.onResync(this.sessionId);
           }
         } else {
           this._readvertiseSelection();

@@ -2041,8 +2041,8 @@ function App() {
       // that had to replay locally-queued ops means real, user-visible
       // content survived a dropped connection — worth a confirmation rather
       // than a silent reconciliation.
-      onResync: async () => {
-        const recovered = await resyncFromServer(sessionId);
+      onResync: async (resyncSessionId = sessionId) => {
+        const recovered = await resyncFromServer(resyncSessionId);
         if (recovered > 0) {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
         }
