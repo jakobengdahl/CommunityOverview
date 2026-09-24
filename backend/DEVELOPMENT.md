@@ -506,7 +506,9 @@ same parameters.
 ### Lexical match mode (`match_mode` on `/api/search` and `search_graph`)
 
 The lexical matcher requires the **whole query** in a node's searchable text, so
-a multi-word query returns nothing unless some node contains that phrase.
+a multi-word query that no node contains as a phrase matches nothing lexically;
+the local results then come only from the automatic semantic fallback (see
+below), which finds nothing where no embedding model is available.
 `match_mode` makes the alternative explicit instead of forcing a caller to probe
 term by term:
 
@@ -559,8 +561,9 @@ same modes. (The chat tool does not expose the tag/metadata filters above.)
 
 The default `query` is matched **lexically** (case-insensitive substring over
 name, description, summary, tags, subtypes, aliases and type label). Multi-word or
-natural-language queries that no node contains verbatim therefore return nothing
-unless `match_mode="any_term"` (above) is used.
+natural-language queries that no node contains verbatim therefore match nothing
+lexically unless `match_mode="any_term"` (above) is used; the local results then
+come only from the automatic fallback described below.
 
 | Parameter | Meaning |
 |-----------|---------|
