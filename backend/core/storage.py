@@ -17,6 +17,7 @@ Event System:
 - Event context (origin, session_id) enables loop prevention
 """
 
+import importlib.util
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Callable, Tuple
@@ -381,6 +382,7 @@ class GraphStorage:
             self.load()
             if boot_gate is not None:
                 boot_gate.open()
+            self._maybe_backfill_missing_embeddings_async()
         except BaseException:
             # The replay is inside the guard, not after it. A raise out of
             # `open()` leaves the rest of the buffer undelivered AND the gate
@@ -1229,6 +1231,84 @@ class GraphStorage:
             self._persisted_vector_revision = self.vector_store.revision
 
         print(f"Loaded {len(vectors)} embeddings for {len(self.nodes)} nodes")
+
+    def _missing_embedding_node_ids(self) -> List[str]:
+        """Ids of nodes the vector index carries no vector for."""
+        return [
+            node_id
+            for node_id in self.nodes
+            if not self.vector_store.has_embedding(node_id)
+        ]
+
+    def embedding_coverage(self) -> Tuple[int, int]:
+        """(nodes carrying an embedding, total nodes).
+
+        add_nodes and its siblings try to embed a node as it lands and, by
+        design, swallow the failure when the optional ML stack is unavailable
+        at that moment (see add_nodes) - which leaves that node with no
+        vector and nothing that revisits it on its own. This is what makes
+        the gap visible instead of it only showing up as missing search
+        results, and what `backfill_missing_embeddings` below drains.
+        """
+        total = len(self.nodes)
+        return total - len(self._missing_embedding_node_ids()), total
+
+    def backfill_missing_embeddings(self) -> int:
+        """Embed every node with no vector yet, and persist the result.
+
+        The counterpart to the gap `add_nodes` (and friends) can leave
+        behind: they try once, inline, and move on if the ML stack was not
+        ready at that moment. This retries later - on demand, or from the
+        startup pass below - and is a no-op once the index is complete.
+
+        Returns how many nodes were embedded; 0 when there was nothing
+        missing or the ML stack is still unavailable (the same
+        optional-dependency degradation as every other embedding call in
+        this module).
+        """
+        with self._lock:
+            missing_ids = self._missing_embedding_node_ids()
+            if not missing_ids:
+                return 0
+            missing_nodes = [self.nodes[node_id] for node_id in missing_ids]
+            try:
+                self.vector_store.update_nodes_embeddings(missing_nodes)
+            except Exception as embed_error:
+                print(f"Warning: could not backfill missing embeddings: {embed_error}")
+                return 0
+            self.save()
+            return len(missing_nodes)
+
+    def _maybe_backfill_missing_embeddings_async(self) -> None:
+        """Start `backfill_missing_embeddings` in the background at startup
+        when there is a gap to close and the optional ML extra is actually
+        installed.
+
+        Probing with `importlib.util.find_spec` costs no more than a
+        filesystem lookup, unlike loading the model itself (see
+        `VectorStore.preload_model`), so a base install - the common case,
+        and every CI run - takes this branch for free instead of spawning a
+        thread that would fail on the same ImportError every time.
+        """
+        embedded, total = self.embedding_coverage()
+        if embedded == total:
+            return
+        print(
+            f"Warning: {total - embedded} of {total} node(s) have no "
+            f"embedding; semantic search will skip them until backfilled"
+        )
+        if importlib.util.find_spec("sentence_transformers") is None:
+            return
+
+        def _run() -> None:
+            try:
+                count = self.backfill_missing_embeddings()
+                if count:
+                    print(f"Backfilled {count} missing embedding(s) at startup.")
+            except Exception as exc:
+                print(f"Warning: background embedding backfill failed: {exc}")
+
+        threading.Thread(target=_run, name="embedding-backfill", daemon=True).start()
 
     def _persist_vectors(self, vectors: Dict[str, Any], vector_revision: int) -> bool:
         """Write the vector matrix to the sidecar. Returns whether it landed.
