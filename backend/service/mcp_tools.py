@@ -1361,10 +1361,13 @@ def register_mcp_tools(
                 returned by create_visualization_session (e.g. "8244-1742")
 
         Returns:
-            Dict with visible_node_ids, selected_node_ids, node_count,
-            dimmed_node_ids, dimmed_edge_ids and edge_intensity (0.0-1.0, the
-            baseline opacity every non-dimmed edge renders at; 1.0 is full
-            prominence).
+            Dict with visible_node_ids, selected_node_ids, node_count (every
+            node the session references, hidden ones included — the same value
+            get_visualization_layout and add_nodes_to_session report),
+            visible_node_count (the length of visible_node_ids, as
+            connect_to_visualization_session reports it), dimmed_node_ids,
+            dimmed_edge_ids and edge_intensity (0.0-1.0, the baseline opacity
+            every non-dimmed edge renders at; 1.0 is full prominence).
         """
         if session_registry is None and session_manager is None:
             return {"error": "Visualization sessions are not available"}
@@ -1385,12 +1388,14 @@ def register_mcp_tools(
                 )
             }
         visible, selected = _session_view_state(session_id)
+        node_count = 0
         dimmed_node_ids: list = []
         dimmed_edge_ids: list = []
         edge_intensity = 1.0
         if session_manager is not None:
             session = session_manager.get_session(session_id)
             if session is not None:
+                node_count = len(session.state.get("node_refs", []))
                 visible_set = set(visible)
                 dimmed_node_ids = [
                     n
@@ -1403,7 +1408,8 @@ def register_mcp_tools(
             "session_id": session_id,
             "visible_node_ids": visible,
             "selected_node_ids": selected,
-            "node_count": len(visible),
+            "node_count": node_count,
+            "visible_node_count": len(visible),
             "dimmed_node_ids": dimmed_node_ids,
             "dimmed_edge_ids": dimmed_edge_ids,
             "edge_intensity": edge_intensity,
@@ -1710,9 +1716,10 @@ def register_mcp_tools(
         Returns:
             Dict with success, added (ids actually added, deduplicated), skipped
             (ids that did not resolve, deduplicated), node_count (nodes the
-            session references, hidden ones included — the same total
-            ``get_visualization_session`` reports, not the visible count from
-            ``get_visualization_session_state``) and the new revision. On a
+            session references, hidden ones included — the same node_count
+            ``get_visualization_session``, ``get_visualization_layout`` and
+            ``get_visualization_session_state`` report; the visible count is the
+            latter's ``visible_node_count``) and the new revision. On a
             concurrency clash returns success=false with the current revision so
             the caller can re-read and retry. Retryable errors:
             revision_conflict, busy, rate_limited; change the request for

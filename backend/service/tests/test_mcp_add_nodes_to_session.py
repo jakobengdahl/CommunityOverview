@@ -76,6 +76,34 @@ class TestAddNodesToSession:
         assert result["node_count"] == 2
         assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
 
+    def test_node_count_means_the_same_in_every_session_tool(self, tools):
+        """``node_count`` counts the session's node references, hidden included.
+
+        get_visualization_session_state used to report the visible count under
+        the same name, so an agent chaining the tools saw two numbers for one
+        session. The visible count has its own field there instead.
+        """
+        tools_map, manager = tools
+        sid = _session(manager)
+        tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha", "beta"])
+        session = manager.get_session(sid)
+        manager.store.apply_state_op(
+            session, {"op": "nodes_hidden", "node_ids": ["beta"]}
+        )
+        manager.store.persist(session)
+
+        added = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["gamma"])
+        state = tools_map["get_visualization_session_state"](session_id=sid)
+        layout = tools_map["get_visualization_layout"](session_id=sid)
+        resource = tools_map["get_visualization_session"](session_id=sid)
+
+        assert added["node_count"] == 3
+        assert state["node_count"] == 3
+        assert layout["node_count"] == 3
+        assert resource["session"]["node_count"] == 3
+        assert state["visible_node_count"] == 2
+        assert state["visible_node_count"] == len(state["visible_node_ids"])
+
     def test_adding_is_additive_and_never_duplicates(self, tools):
         tools_map, manager = tools
         sid = _session(manager)

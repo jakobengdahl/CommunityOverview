@@ -703,35 +703,9 @@ class SessionManager:
         if session is None:
             raise SessionNotFound()
 
-        op = {"op": "session_renamed", "name": name, "client_id": client_id or "rest"}
-        saved_state = copy.deepcopy(session.state)
-        saved_seq = session.seq
-        saved_name = session.name
-        saved_updated_at = session.updated_at
-        ring = self.store.ring(session_id)
-        saved_ring = list(ring) if ring is not None else None
-        try:
-            applied = self.store.apply_state_op(session, op)
-            self.store.persist(session)
-        except Exception:
-            session.state = saved_state
-            session.seq = saved_seq
-            session.name = saved_name
-            session.updated_at = saved_updated_at
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
-            raise
-
-        self.bus.publish(
-            session_id,
-            {
-                "type": "op",
-                "client_id": op["client_id"],
-                "op": applied,
-                "seq": applied["seq"],
-            },
-        )
+        actor = client_id or "rest"
+        op = {"op": "session_renamed", "name": name, "client_id": actor}
+        self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def delete_session_sync(
@@ -1859,13 +1833,15 @@ class SessionManager:
         """Apply, persist and broadcast one state op on the calling thread.
 
         Snapshots for rollback so a persistence failure leaves in-memory state,
-        seq and ring untouched — mirroring apply_ops' all-or-nothing guarantee.
+        name, seq and ring untouched — mirroring apply_ops' all-or-nothing
+        guarantee (``session_renamed`` writes ``session.name``, not the state).
         Returns ``None`` when ``apply_state_op`` reports a legitimate no-op (e.g.
         an update on an already-deleted annotation, or a create retry for an id
         another collaborator just deleted) — nothing is persisted or broadcast,
         and the caller decides how to surface that (the two annotation callers
-        above raise a typed exception; ``apply_layout``/``add_node_refs`` never
-        hit this branch, since their ops always apply). ``record_activity=False``
+        above raise a typed exception; ``apply_layout``, ``add_node_refs`` and
+        ``rename_session_sync`` never hit this branch, since their ops always
+        apply). ``record_activity=False``
         is passed through to ``apply_state_op`` by ``undo_last_action`` so
         replaying an inverse op does not itself become a new undoable action,
         together with ``trusted_replay=True`` so restoring the session's own
@@ -1873,6 +1849,7 @@ class SessionManager:
         """
         saved_state = copy.deepcopy(session.state)
         saved_seq = session.seq
+        saved_name = session.name
         saved_updated_at = session.updated_at
         saved_activity_log = copy.deepcopy(session.activity_log)
         ring = self.store.ring(session_id)
@@ -1889,6 +1866,7 @@ class SessionManager:
         except Exception:
             session.state = saved_state
             session.seq = saved_seq
+            session.name = saved_name
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
             if ring is not None and saved_ring is not None:
