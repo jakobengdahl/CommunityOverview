@@ -115,14 +115,13 @@ async def test_sync_degrades_when_unreachable_url():
 
 
 def _ranked_ids(nodes, query):
-    """Ids in federated search order, with nodes placed in the cache directly
-    (_build_cache does not carry aliases over) in the order given."""
-    manager = _manager_with_cached_nodes([])
-    manager._cache["g"].nodes = {
-        n.id: n.model_copy(update={"metadata": {"origin_graph_id": "g"}}) for n in nodes
-    }
-    result = manager.search_nodes(query=query, node_types=None, limit=10)
-    return [n.id for n in result["nodes"]]
+    """Origin ids in federated search order, with nodes ingested through
+    _build_cache in the order given."""
+    manager = _manager_with_cached_nodes([n.to_dict() for n in nodes])
+    result = manager.search_nodes(
+        query=query, node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+    return _origin_ids(result["nodes"])
 
 
 def test_alias_match_outranks_a_description_match():
@@ -166,7 +165,81 @@ def test_alias_does_not_lift_a_node_above_a_stronger_name_match():
     assert _ranked_ids([name_plus_alias, exact_name], "esam") == ["y", "x"]
 
 
-_TYPE_TEXT = {"Actor": "actor aktör", "Initiative": "initiative initiativ"}
+def test_build_cache_carries_aliases_and_subtypes_over():
+    manager = _manager_with_cached_nodes(
+        [
+            {
+                "id": "full",
+                "type": "Actor",
+                "name": "Office",
+                "description": "A description",
+                "summary": "A summary",
+                "tags": ["Tag"],
+                "aliases": ["eSam", "Second Alias"],
+                "subtypes": ["Agency", "Board"],
+                "archived": True,
+            },
+            {"id": "bare", "type": "Actor", "name": "Bare"},
+            {
+                "id": "nulls",
+                "type": "Actor",
+                "name": "Nulls",
+                "aliases": None,
+                "subtypes": None,
+            },
+        ]
+    )
+    cached = {
+        n.metadata["origin_node_id"]: n for n in manager._cache["g"].nodes.values()
+    }
+
+    full = cached["full"]
+    assert (full.name, full.description, full.summary) == (
+        "Office",
+        "A description",
+        "A summary",
+    )
+    assert (full.tags, full.aliases, full.subtypes, full.archived) == (
+        ["Tag"],
+        ["eSam", "Second Alias"],
+        ["Agency", "Board"],
+        True,
+    )
+    assert (cached["bare"].aliases, cached["bare"].subtypes) == ([], [])
+    assert (cached["nulls"].aliases, cached["nulls"].subtypes) == ([], [])
+
+
+def test_subtype_match_outranks_a_description_match():
+    desc_node = Node(
+        id="d", type=NodeType.ACTOR, name="Another", description="an agency"
+    )
+    subtype_node = Node(id="s", type=NodeType.ACTOR, name="Other", subtypes=["Agency"])
+    assert _ranked_ids([desc_node, subtype_node], "agency") == ["s", "d"]
+
+
+def test_alias_match_outranks_every_secondary_signal_combined():
+    """Secondary signals (type label, tag, subtype, description, summary) must not
+    add up to beat an alias-only match in federated search."""
+    secondary = Node(
+        id="secondary",
+        type=NodeType.ACTOR,
+        name="Office",
+        description="aktör",
+        summary="aktör",
+        tags=["aktör"],
+        subtypes=["aktör"],
+    )
+    alias_node = Node(
+        id="alias", type=NodeType.INITIATIVE, name="Plan", aliases=["aktör"]
+    )
+    assert _ranked_ids([secondary, alias_node], "aktör") == ["alias", "secondary"]
+
+
+_TYPE_TEXT = {
+    "Actor": "actor aktör",
+    "Initiative": "initiative initiativ",
+    "Resource": "resource dokument",
+}
 
 
 def _manager_with_cached_nodes(source_nodes):
@@ -213,10 +286,14 @@ def test_search_matches_a_localized_type_label():
     assert _origin_ids(result["nodes"]) == ["a"]
 
 
-@pytest.mark.parametrize("query", ["aktör", "act", "nordic", "network", "x", "*"])
+@pytest.mark.parametrize(
+    "query", ["aktör", "act", "nordic", "network", "dokument", "x", "*"]
+)
 def test_search_returns_what_local_search_returns_in_the_same_order(query):
     """Local and federated search must match and rank the same nodes the same
-    way; a divergence between the two paths is what hid type-label matches."""
+    way; a divergence between the two paths is what hid type-label matches and
+    alias/subtype matches. The nodes go through ingestion, so a field that
+    _build_cache drops shows up as a divergence."""
     source_nodes = [
         {"id": "desc", "type": "Initiative", "name": "Plan", "description": "actor"},
         {"id": "tag", "type": "Initiative", "name": "Plan B", "tags": ["actor"]},
@@ -224,15 +301,10 @@ def test_search_returns_what_local_search_returns_in_the_same_order(query):
         {"id": "alias", "type": "Initiative", "name": "Y", "aliases": ["nordic"]},
         {"id": "name", "type": "Initiative", "name": "Nordic network x"},
         {"id": "sub", "type": "Actor", "name": "Z", "subtypes": ["Network"]},
+        {"id": "doc", "type": "Resource", "name": "Handbook"},
     ]
-    # Placed in the cache directly: _build_cache does not carry aliases or
-    # subtypes over, and this pins search_nodes, not ingestion.
-    manager = _manager_with_cached_nodes([])
-    manager._cache["g"].nodes = {
-        n["id"]: Node.from_dict({**n, "metadata": {"origin_graph_id": "g"}})
-        for n in source_nodes
-    }
-    local_nodes = {n["id"]: Node.from_dict(n) for n in source_nodes}
+    manager = _manager_with_cached_nodes(source_nodes)
+    local_nodes = {n["id"]: Node.from_dict(dict(n)) for n in source_nodes}
 
     local = storage_search.search_nodes(
         local_nodes, {}, _TYPE_TEXT, query=query, limit=50
@@ -241,7 +313,7 @@ def test_search_returns_what_local_search_returns_in_the_same_order(query):
         query=query, node_types=None, limit=50, type_searchable_text=_TYPE_TEXT
     )
 
-    assert [n.id for n in federated["nodes"]] == [n.id for n in local]
+    assert _origin_ids(federated["nodes"]) == [n.id for n in local]
 
 
 def test_name_match_outranks_a_type_label_match_with_every_secondary_signal():
@@ -281,9 +353,10 @@ def test_type_label_match_outranks_a_description_match():
     assert _origin_ids(result["nodes"]) == ["label", "desc"]
 
 
+@pytest.mark.parametrize("node_types", [None, ["Actor"]])
 @pytest.mark.parametrize("archived_first", [True, False])
 @pytest.mark.parametrize("query", ["", "office"])
-def test_archived_nodes_do_not_take_limit_slots(query, archived_first):
+def test_archived_nodes_do_not_take_limit_slots(query, archived_first, node_types):
     # Both nodes tie, so cache order decides which one a missing filter would
     # let into the single slot; each order takes a turn.
     nodes = [
@@ -292,13 +365,87 @@ def test_archived_nodes_do_not_take_limit_slots(query, archived_first):
     ]
     manager = _manager_with_cached_nodes(nodes if archived_first else nodes[::-1])
 
-    hidden = manager.search_nodes(query=query, node_types=None, limit=1)
+    hidden = manager.search_nodes(query=query, node_types=node_types, limit=1)
     shown = manager.search_nodes(
-        query=query, node_types=None, limit=2, include_archived=True
+        query=query, node_types=node_types, limit=2, include_archived=True
     )
 
     assert _origin_ids(hidden["nodes"]) == ["new"]
     assert sorted(_origin_ids(shown["nodes"])) == ["new", "old"]
+
+
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_are_not_returned_when_the_limit_has_room(query):
+    """Sorting archived nodes last and slicing would still return them here;
+    they must be dropped, not demoted."""
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "old", "type": "Actor", "name": "Office", "archived": True},
+            {"id": "new", "type": "Actor", "name": "Office new"},
+        ]
+    )
+
+    result = manager.search_nodes(query=query, node_types=None, limit=10)
+
+    assert _origin_ids(result["nodes"]) == ["new"]
+
+
+def _manager_with_two_caches(first_nodes, second_nodes):
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": graph_id,
+                        "display_name": graph_id.upper(),
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": f"https://example.invalid/{graph_id}.json"
+                        },
+                    }
+                    for graph_id in ("g1", "g2")
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    for graph, nodes in zip(config.federation.graphs, (first_nodes, second_nodes)):
+        manager._cache[graph.graph_id].nodes, _ = manager._build_cache(graph, nodes, [])
+    return manager
+
+
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_in_a_second_cache_do_not_take_limit_slots(query):
+    # The archived node is an exact name match, so ranking would put it first
+    # for "office"; for match-all it precedes the second visible node.
+    manager = _manager_with_two_caches(
+        [{"id": "a", "type": "Actor", "name": "Office a"}],
+        [
+            {"id": "old", "type": "Actor", "name": "Office", "archived": True},
+            {"id": "b", "type": "Actor", "name": "Office b"},
+        ],
+    )
+
+    result = manager.search_nodes(query=query, node_types=None, limit=2)
+
+    assert sorted(_origin_ids(result["nodes"])) == ["a", "b"]
+
+
+def test_ranking_runs_over_every_match_before_the_limit_slice():
+    """The best match sits last in the cache; cutting to the limit in cache
+    order before ranking would return a weaker one."""
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "weak1", "type": "Actor", "name": "Nordic office"},
+            {"id": "weak2", "type": "Actor", "name": "Big office"},
+            {"id": "best", "type": "Actor", "name": "Office"},
+        ]
+    )
+
+    result = manager.search_nodes(query="office", node_types=None, limit=1)
+
+    assert _origin_ids(result["nodes"]) == ["best"]
 
 
 def test_scheduler_starts_for_scheduled_graph():

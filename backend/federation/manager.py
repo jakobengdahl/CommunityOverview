@@ -516,6 +516,8 @@ class FederationManager:
                 "description": source_node.get("description", ""),
                 "summary": source_node.get("summary", ""),
                 "tags": source_node.get("tags", []),
+                "subtypes": source_node.get("subtypes") or [],
+                "aliases": source_node.get("aliases") or [],
                 "metadata": metadata,
                 # Preserve the remote lifecycle flag so a node archived in the
                 # origin graph stays archived (hidden by default) when federated.
