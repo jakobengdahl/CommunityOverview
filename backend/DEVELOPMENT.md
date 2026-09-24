@@ -997,9 +997,11 @@ are carried into the fallback config, so a valid `"enabled": false` override
 still wins. `get_presentation` / `GET /api/presentation` returns this same
 manifest as its `capabilities` field rather than a second, raw copy of the
 config. The capability summary in `/info` (`operability.capabilities`) and
-`/diagnostics/startup` (`capabilities`) counts `configured` (entries the config
-declared) separately from `defaulted` (server-known defaults appended to the
-manifest); `enabled` and `disabled` cover the whole manifest.
+`/diagnostics/startup` (`capabilities`) counts `configured` (declared entries
+that passed validation) separately from `defaulted` (server-known capabilities
+the manifest adds because no valid entry declared them — reported disabled when
+the declaring entry failed validation); `enabled` and `disabled` cover the whole
+manifest.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas
