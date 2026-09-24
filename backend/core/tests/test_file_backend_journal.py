@@ -1844,6 +1844,10 @@ class TestSaveNowFlagHandling:
         path = str(tmp / "g.json")
         storage = GraphStorage(json_path=path)
         storage.add_nodes([Node(id="a", type=NodeType.ACTOR, name="A")], [])
+        # The add_nodes write is queued, not landed. Under load it can reach
+        # the stubs below and spend the one upsert failure, which sends
+        # update_node down save() and lets _save_now succeed a shutdown early.
+        storage.flush()
 
         backend = storage._persistence_backend
         real_save = backend.save_graph_data
