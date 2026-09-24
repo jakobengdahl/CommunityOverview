@@ -3277,12 +3277,12 @@ _MCP_BUCKET_WRITES = {
 
 
 class TestMcpWritesDrawFromTheMcpBucket:
-    """Every synchronous MCP write is charged to ``_mcp_bucket``, never to the
-    browser-reachable ``_bucket`` that ``/ops`` spends under a caller-chosen
-    ``client_id`` — otherwise a browser posting ``client_id: "mcp-agent"`` could
-    exhaust the MCP budget (smallfix-ops-client-id-can-collide-with-mcp-agent-marker).
-    The two buckets get different capacities so a write charged to the wrong
-    one cannot pass."""
+    """Each rate-limited synchronous MCP write is charged to ``_mcp_bucket``,
+    never to the browser-reachable ``_bucket`` that ``/ops`` spends under a
+    caller-chosen ``client_id`` — otherwise a browser posting
+    ``client_id: "mcp-agent"`` could exhaust the MCP budget
+    (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). The two buckets
+    get different capacities so a write charged to the wrong one cannot pass."""
 
     @pytest.mark.parametrize("write", list(_MCP_BUCKET_WRITES))
     async def test_write_succeeds_on_a_spent_ops_bucket_and_spends_the_mcp_bucket(
