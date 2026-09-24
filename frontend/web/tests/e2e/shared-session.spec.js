@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
 
@@ -18,7 +19,7 @@ import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
 
 const SESSION_URL = (id) => `/?session=${id}`;
 const randomSessionId = () => {
-  const d4 = () => String(Math.floor(1000 + Math.random() * 9000));
+  const d4 = () => String(randomInt(1000, 10000));
   return `${d4()}-${d4()}`;
 };
 
