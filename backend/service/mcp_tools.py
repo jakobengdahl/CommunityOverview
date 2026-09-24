@@ -4712,8 +4712,8 @@ def _push_to_session(
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
-    ``delivered`` means a consumer was attached when the command was enqueued,
-    not that the canvas has finished applying it.
+    ``delivered`` means a consumer was attached when the command was sent, not
+    that the canvas has finished applying it.
     """
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}

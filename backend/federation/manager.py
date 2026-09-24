@@ -515,7 +515,7 @@ class FederationManager:
                 "name": source_node.get("name", "Unnamed"),
                 "description": source_node.get("description", ""),
                 "summary": source_node.get("summary", ""),
-                "tags": source_node.get("tags", []),
+                "tags": source_node.get("tags") or [],
                 "subtypes": source_node.get("subtypes") or [],
                 "aliases": source_node.get("aliases") or [],
                 "metadata": metadata,
