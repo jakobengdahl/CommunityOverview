@@ -524,9 +524,12 @@ class ConfigLoader:
                 type(raw).__name__,
             )
             presentation["capabilities"] = []
-            if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+            if not isinstance(raw, dict):
+                return set()
+            # Either a single entry or an id-keyed mapping; both declare ids.
+            if isinstance(raw.get("id"), str):
                 return {raw["id"]}
-            return set()
+            return {key for key in raw if isinstance(key, str)}
         valid: List[Any] = []
         dropped_ids = set()
         for index, entry in enumerate(raw):

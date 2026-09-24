@@ -401,11 +401,15 @@ class TestConfigLoader:
         config_loader.reset_loader()
         return config_loader
 
-    def test_capability_without_name_keeps_schema_and_its_disabled_flag(self, tmp_path):
+    @pytest.mark.parametrize("name", ["<absent>", "", None])
+    def test_capability_without_name_keeps_schema_and_its_disabled_flag(
+        self, tmp_path, name
+    ):
         """The exact override that used to discard the whole config."""
-        config_loader = self._load_capability_config(
-            tmp_path, [{"id": "animated_layout", "enabled": False}]
-        )
+        entry = {"id": "animated_layout", "enabled": False}
+        if name != "<absent>":
+            entry["name"] = name
+        config_loader = self._load_capability_config(tmp_path, [entry])
 
         assert "Widget" in config_loader.get_node_type_names()
         presentation = config_loader.get_presentation()
@@ -428,6 +432,7 @@ class TestConfigLoader:
                 {"id": "search", "name": "Search", "enabled": True},
                 {"name": "No id", "enabled": True},
                 "not-an-object",
+                {"id": "broken", "enabled": None},
                 {"id": "export", "name": "Export", "enabled": False},
             ],
         )
@@ -450,9 +455,10 @@ class TestConfigLoader:
             for r in caplog.records
             if "Skipping invalid presentation.capabilities" in r.getMessage()
         ]
-        assert len(skipped) == 2
+        assert len(skipped) == 3
         assert "capabilities[1]" in skipped[0]
         assert "capabilities[2]" in skipped[1]
+        assert "capabilities[3]" in skipped[2]
 
     def test_invalid_override_of_default_capability_reports_it_disabled(self, tmp_path):
         """A declared-but-broken override must not read as the enabled default."""
@@ -466,17 +472,49 @@ class TestConfigLoader:
             ("animated_layout", False)
         ]
 
-    def test_non_list_capabilities_is_ignored_not_fatal(self, tmp_path):
-        config_loader = self._load_capability_config(
-            tmp_path, {"id": "animated_layout", "enabled": False}
-        )
+    @pytest.mark.parametrize(
+        "capabilities",
+        [
+            {"id": "animated_layout", "enabled": False},
+            {"id": "animated_layout", "name": "Animated layout"},
+            {"animated_layout": {"enabled": False}},
+        ],
+    )
+    def test_non_list_capabilities_is_ignored_not_fatal(
+        self, tmp_path, caplog, capabilities
+    ):
+        config_loader = self._load_capability_config(tmp_path, capabilities)
 
-        assert "Widget" in config_loader.get_node_type_names()
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        assert any(
+            "presentation.capabilities must be a list" in r.getMessage()
+            for r in caplog.records
+        )
         assert config_loader.get_presentation()["title"] == "Capability Test Graph"
         assert config_loader.get_presentation()["capabilities"] == []
         capabilities = config_loader.get_capabilities()["capabilities"]
         assert [(c["id"], c["enabled"]) for c in capabilities] == [
             ("animated_layout", False)
+        ]
+
+    def test_reload_after_fixing_a_broken_override_restores_the_default(self, tmp_path):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+        assert config_loader.get_capabilities()["capabilities"][0]["enabled"] is False
+
+        config_path = tmp_path / "schema_config.json"
+        fixed = json.loads(config_path.read_text())
+        fixed["presentation"]["capabilities"] = []
+        config_path.write_text(json.dumps(fixed))
+        config_loader.reload_config()
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
         ]
 
     def test_get_runtime_info_defaults_to_standalone(self):
