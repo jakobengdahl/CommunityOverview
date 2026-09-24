@@ -659,8 +659,11 @@ steps 6–8.
 >   (`backend/core/tests/test_session_multiuser.py`) drives two clients through one
 >   session (presence, add/move fan-out, annotation create, claims, rename, delete
 >   broadcast, reconnect catch-up) in CI; a Playwright multi-context spec
->   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises the same scenarios
->   through the real UI + SSE transport (run locally, outside the core pytest CI).
+>   (`frontend/web/tests/e2e/shared-session.spec.js`) exercises presence, add/move
+>   fan-out, annotation create and the delete warning through the real UI + SSE
+>   transport (run locally, outside the core pytest CI). Its reconnect catch-up
+>   scenario is marked `test.fixme`: a client that joins late can miss ops that
+>   land between its initial session load and its stream subscribe.
 
 ## 6. Decisions
 
