@@ -127,6 +127,97 @@ describe('ActivityDrawer mobile overlay', () => {
     expect(enabledButtons()[enabledButtons().length - 1]).toHaveFocus();
   });
 
+  it('wraps Tab from the last focusable to the first and prevents the default move', async () => {
+    setMobile(true);
+    const { container } = renderDrawer();
+    await settled();
+
+    const enabledButtons = Array.from(container.querySelectorAll('button:not([disabled])'));
+    enabledButtons[enabledButtons.length - 1].focus();
+
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(false);
+    expect(enabledButtons[0]).toHaveFocus();
+  });
+
+  it('pulls focus back into the drawer when Tab is pressed with focus outside it', async () => {
+    setMobile(true);
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    const { container } = renderDrawer();
+    await settled();
+
+    outside.focus();
+    const notPrevented = fireEvent.keyDown(document, { key: 'Tab' });
+    expect(notPrevented).toBe(false);
+    expect(container.querySelector('button:not([disabled])')).toHaveFocus();
+    outside.remove();
+  });
+
+  it('leaves Tab between inner controls and non-Tab keys to the browser', async () => {
+    setMobile(true);
+    const { container } = renderDrawer();
+    await settled();
+
+    const enabledButtons = Array.from(container.querySelectorAll('button:not([disabled])'));
+    expect(enabledButtons.length).toBeGreaterThan(2);
+    const last = enabledButtons[enabledButtons.length - 1];
+
+    enabledButtons[0].focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(true);
+    expect(enabledButtons[0]).toHaveFocus();
+
+    last.focus();
+    expect(fireEvent.keyDown(document, { key: 'Enter' })).toBe(true);
+    expect(fireEvent.keyDown(document, { key: 'ArrowDown' })).toBe(true);
+    expect(last).toHaveFocus();
+  });
+
+  it('does not trap Tab, move focus in, or restore it on desktop', async () => {
+    setMobile(false);
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const { container, rerender } = renderDrawer({ open: true });
+    await settled();
+    expect(trigger).toHaveFocus();
+
+    const enabledButtons = Array.from(container.querySelectorAll('button:not([disabled])'));
+    const last = enabledButtons[enabledButtons.length - 1];
+    last.focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(true);
+    expect(last).toHaveFocus();
+
+    rerender(
+      <I18nProvider>
+        <ActivityDrawer
+          open={false}
+          onClose={vi.fn()}
+          sessionId="1234-5678"
+          currentClientId="client-me"
+          roster={[]}
+        />
+      </I18nProvider>
+    );
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  it('stops Escape from reaching listeners outside the drawer', async () => {
+    setMobile(true);
+    const onClose = vi.fn();
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    renderDrawer({ onClose });
+    await settled();
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', outerListener);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(outerListener).not.toHaveBeenCalled();
+  });
+
   it('restores focus to the previously-focused element on close in mobile mode', async () => {
     setMobile(true);
     const trigger = document.createElement('button');

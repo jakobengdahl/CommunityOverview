@@ -14,7 +14,7 @@ import asyncio
 import os
 import tempfile
 from typing import Optional, Dict, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from backend.ui.document_processor import DocumentProcessor
 
@@ -180,7 +180,17 @@ class DocumentService:
         except Exception:
             pass  # Ignore cleanup errors
 
+        # extract_text_from_file names the timestamp-prefixed storage file, but
+        # callers show this name in the chat and send it to the LLM.
+        extract_result["filename"] = self._display_filename(filename)
         return extract_result
+
+    @staticmethod
+    def _display_filename(filename: str) -> str:
+        """The uploaded file's own name, without any client path or control characters."""
+        # Same basename rule as storage, with Windows separators treated as separators.
+        name = PurePosixPath(filename.replace("\\", "/")).name
+        return "".join(ch for ch in name if ch.isprintable())
 
     def _sanitize_filename(self, filename: str) -> str:
         """

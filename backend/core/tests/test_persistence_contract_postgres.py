@@ -65,6 +65,7 @@ from backend.core.postgres_backend import (  # noqa: E402  (after importorskip)
     DEFAULT_POOL_SIZE,
     MIGRATION_LOCK_KEY,
     NOTIFY_PAYLOAD_LIMIT,
+    SAVE_LOCK_KEY,
     SCOPE_COLUMN,
     SCOPE_POLICY_SUFFIX,
     SCOPE_SETTING,
@@ -1603,8 +1604,29 @@ class TestPostgresIndexWorkIsDoneOnce:
             "a catalog that could not be read was taken as an answer: " + printed
         )
 
+    # Both kinds, because the `except` around the ANALYZE is deliberately
+    # broad. A psycopg error alone lets it be narrowed to `psycopg.Error`
+    # with the suite still green, and then a failure that is not the
+    # driver's - `remove_notice_handler` raising ValueError for a handler it
+    # does not hold, say, or composing the table name - escapes and fails a
+    # save that had already committed. Not a pool failure: psycopg_pool's
+    # errors are `psycopg.Error` subclasses, so the narrowed form would still
+    # catch those. Nor the handler's own logging: psycopg catches whatever a
+    # notice handler raises.
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda: psycopg.errors.InsufficientPrivilege("no ANALYZE for you"),
+                id="psycopg",
+            ),
+            pytest.param(
+                lambda: ValueError("notice handler not registered"), id="not-psycopg"
+            ),
+        ],
+    )
     def test_an_analyze_that_raises_does_not_fail_the_save(
-        self, schema, backends, reported
+        self, schema, backends, reported, failure
     ):
         import psycopg as _psycopg
 
@@ -1616,7 +1638,7 @@ class TestPostgresIndexWorkIsDoneOnce:
 
         def _refuse_analyze(self, query, *args, **kwargs):
             if "ANALYZE" in repr(query):
-                raise _psycopg.errors.InsufficientPrivilege("no ANALYZE for you")
+                raise failure()
             return original(self, query, *args, **kwargs)
 
         _psycopg.Connection.execute = _refuse_analyze
@@ -1803,6 +1825,51 @@ class TestPostgresProvisionsWhatTheTraversalNeeds:
         assert rows is not None and rows[1] >= 1, (
             "the statistics describe the table before the save rather than "
             f"after it: reltuples = {rows}"
+        )
+
+    # The size the test above was measured at. Smaller is not
+    # a cheaper version of the same test: measured on this server, at 500
+    # nodes / 5 000 edges the planner joins graph_nodes by sequential scan
+    # whatever the indexes, because at that size it is the cheaper plan.
+    PLANNED_NODES = 2000
+    PLANNED_EDGES = 20000
+
+    def test_the_traversal_is_planned_on_its_indexes(self, schema, backends):
+        """The test above asserts that the indexes exist; this one asserts
+        that the traversal is planned on them. An index that exists and is not
+        used - on an expression the level query does not repeat exactly, say -
+        passes every catalog check and leaves the sequential scan in place.
+
+        Depth 1, so the frontier is one id and the plan is the one whose
+        choice does not hinge on how wide a level has grown. Planned against
+        the statistics the save itself left, with no ANALYZE of this test's
+        own. Measured on this seed: a BitmapOr over both indexes, and a
+        sequential scan of graph_edges as soon as either index is dropped.
+        """
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        nodes, edges = self.PLANNED_NODES, self.PLANNED_EDGES
+        backend.save_graph_data(
+            snapshot(
+                [node_payload(f"n{i}") for i in range(nodes)],
+                [
+                    edge_payload(f"e{i}", f"n{i % nodes}", f"n{(i * 7 + 1) % nodes}")
+                    for i in range(edges)
+                ],
+            )
+        )
+
+        issued = _statements_issued(lambda: backend.traverse("n0", 1))
+
+        touched, scanning = _sequential_scans(issued)
+        # The level query in particular, so a traversal that stopped issuing
+        # it through a cursor this spy sees cannot pass by planning nothing.
+        assert any("far_id" in text for text in touched), (
+            f"the traversal's level query was not among what it issued: {touched}"
+        )
+        assert not scanning, (
+            "the traversal is planned as a sequential scan although its "
+            f"indexes exist: {scanning}"
         )
 
 
@@ -3359,10 +3426,21 @@ class TestPostgresEntityWritesLeaveNoLockBehind:
         # write actually used whether *it* still holds anything narrows the
         # question to this backend, the same way `_wait_until_blocking`
         # narrows "is anything blocked" to "is this pid blocked".
+        #
+        # The pid alone answers for one connection, and the pool may hold
+        # more than one: a lock left on another of this backend's connections
+        # would not be seen. So the lock the entity write takes is also looked
+        # for by its key, on any connection - `(SAVE_LOCK_KEY,
+        # hashtext(schema))` is two int4 keys, which `pg_locks` shows as
+        # classid, objid and objsubid 2. The schema is this test's own, so an
+        # unrelated session cannot hold that key.
         with backend._pool.connection() as conn:
             held = conn.execute(
-                "SELECT count(*) FROM pg_locks"
-                " WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                " AND (pid = pg_backend_pid()"
+                " OR (classid = %s::oid AND objid = hashtext(%s)::oid"
+                " AND objsubid = 2))",
+                (SAVE_LOCK_KEY, schema),
             ).fetchone()[0]
 
         assert held == 0, (
