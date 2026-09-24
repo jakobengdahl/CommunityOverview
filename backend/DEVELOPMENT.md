@@ -328,8 +328,19 @@ npm run test:e2e
 ```
 
 E2E tests include:
-- `chat.spec.js` - Complete chat workflow testing
+- `smoke.spec.js` - Desktop shell: header, search-to-canvas, toolbar node
+  creation, Settings stats
+- `chat.spec.js` - Desktop chat panel; every `/ui/chat` call is answered by
+  `page.route`, so no request reaches an LLM provider
+- `shared-session.spec.js` - Two browser contexts in one shared session
+  (presence, node and note fan-out, move sync, delete warning)
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
+
+The e2e graph file starts empty, so the desktop specs seed the nodes they need
+through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). Only
+`mobile-smoke.spec.js` runs in CI (the non-required `mobile-e2e` job); the three
+desktop specs run locally only, under the `chromium` project. Tests marked
+`test.fixme` pin a known product defect and name the tracking item.
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
 block in `playwright.config.js`), so no server needs to be running first. If one
@@ -339,8 +350,8 @@ hand-started dev server keeps its own key and its e2e nodes land in its own
 graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
 makes Playwright refuse to start against an occupied port.
 
-The mobile specs require the backend to report an LLM as available, because the
-chat panel does not mount otherwise. Against a reused backend with no API key
+The mobile and chat specs require the backend to report an LLM as available,
+because the chat panel does not mount otherwise. Against a reused backend with no API key
 configured they fail at startup rather than half-passing.
 
 #### Mobile smoke tests

@@ -1,252 +1,260 @@
 import { test, expect } from '@playwright/test';
+import { canvasNode, uniqueToken } from './helpers';
 
 /**
- * E2E tests for Chat Panel functionality
+ * Desktop chat panel ("Graph assistant").
  *
- * These tests verify the complete user flow:
- * 1. Open the chat panel
- * 2. Send messages and receive responses
- * 3. Create nodes via chat
- * 4. Verify nodes appear in the graph
+ * No request reaches an LLM provider: every test answers POST /ui/chat itself
+ * through page.route, so the replies are fixed and the tests check what the
+ * panel does with them — what it sends, what it renders, and what a reply's
+ * tool result does to the canvas. The panel is mounted only because the
+ * backend reports an LLM as available (see the placeholder key in
+ * playwright.config.js).
  */
 
-test.describe('Chat Panel', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    // Wait for app to load
-    await page.waitForSelector('.app-header');
+const CHAT_URL = '**/ui/chat';
+
+/**
+ * Answers every chat request with `reply(body, index)` and records the parsed
+ * request bodies, so a test can assert on exactly what the panel sent.
+ */
+async function mockChat(page, reply = () => ({ content: 'Mocked reply' })) {
+  const requests = [];
+  await page.route(CHAT_URL, async (route) => {
+    const body = route.request().postDataJSON();
+    requests.push(body);
+    const answer = await reply(body, requests.length - 1);
+    await route.fulfill({
+      status: answer.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(
+        answer.status ? answer.body : { toolUsed: null, toolResult: null, ...answer }
+      ),
+    });
+  });
+  return requests;
+}
+
+async function openApp(page) {
+  await page.goto('/');
+  await expect(page.locator('.chat-panel-floating')).toBeVisible();
+}
+
+const panel = (page) => page.locator('.chat-panel-floating');
+const input = (page) => panel(page).locator('.chat-input');
+const sendButton = (page) => panel(page).locator('.chat-send-button');
+const userMessages = (page) => panel(page).locator('.chat-message.user');
+const assistantMessages = (page) => panel(page).locator('.chat-message.assistant');
+
+test.describe('chat panel', () => {
+  test('starts expanded and minimizes to a bar and back', async ({ page }) => {
+    await openApp(page);
+    await expect(panel(page).locator('.chat-header h3')).toHaveText('Graph assistant');
+
+    await panel(page).locator('.chat-collapse-button').click();
+    await expect(panel(page)).toHaveCount(0);
+    const minimized = page.locator('.chat-panel-minimized');
+    await expect(minimized).toBeVisible();
+
+    await minimized.click();
+    await expect(panel(page)).toBeVisible();
+    await expect(minimized).toHaveCount(0);
   });
 
-  test('opens and closes chat panel', async ({ page }) => {
-    // Chat should be closed initially
-    await expect(page.locator('.chat-panel')).not.toBeVisible();
+  test('greets with the welcome message and a disabled Send', async ({ page }) => {
+    await openApp(page);
 
-    // Open chat
-    await page.click('.chat-toggle-button');
-    await expect(page.locator('.chat-panel')).toBeVisible();
-    await expect(page.locator('.chat-header')).toContainText('Graph Assistant');
-
-    // Close chat
-    await page.click('.chat-close-button');
-    await expect(page.locator('.chat-panel')).not.toBeVisible();
-  });
-
-  test('displays welcome message', async ({ page }) => {
-    await page.click('.chat-toggle-button');
-
-    await expect(page.locator('.chat-welcome')).toBeVisible();
-    await expect(page.locator('.chat-welcome')).toContainText('Ask questions');
-    await expect(page.locator('.chat-examples')).toBeVisible();
-  });
-
-  test('sends a message and receives response', async ({ page }) => {
-    await page.click('.chat-toggle-button');
-
-    // Type a message
-    await page.fill('.chat-input', 'What nodes are in the graph?');
-    await page.click('.chat-send-button');
-
-    // User message should appear
-    await expect(page.locator('.chat-message.user').first()).toContainText(
-      'What nodes are in the graph'
+    await expect(assistantMessages(page)).toHaveCount(1);
+    await expect(assistantMessages(page).first()).toContainText(
+      'Welcome to Community Knowledge Graph'
     );
-
-    // Wait for response (may take time due to API call)
-    await expect(page.locator('.chat-message.assistant').first()).toBeVisible({ timeout: 30000 });
+    await expect(userMessages(page)).toHaveCount(0);
+    await expect(sendButton(page)).toBeDisabled();
   });
 
-  test('shows loading state while processing', async ({ page }) => {
-    await page.click('.chat-toggle-button');
+  test('Send posts the message, renders the reply and clears the composer', async ({ page }) => {
+    const requests = await mockChat(page, () => ({ content: 'There are **three** nodes.' }));
+    await openApp(page);
 
-    await page.fill('.chat-input', 'Search for AI');
-    await page.click('.chat-send-button');
+    await input(page).fill('What nodes are in the graph?');
+    await sendButton(page).click();
 
-    // Should show loading indicator
-    await expect(page.locator('.loading-text')).toContainText('Processing');
+    await expect(userMessages(page)).toHaveCount(1);
+    await expect(userMessages(page).first()).toContainText('What nodes are in the graph?');
+    await expect(assistantMessages(page).last()).toContainText('There are three nodes.');
+    // The reply is rendered as Markdown, not shown as raw asterisks.
+    await expect(assistantMessages(page).last().locator('strong')).toHaveText('three');
+    await expect(input(page)).toHaveValue('');
+
+    expect(requests).toHaveLength(1);
+    // The welcome message is UI-only and never part of the conversation sent.
+    expect(requests[0].messages).toEqual([
+      { role: 'user', content: 'What nodes are in the graph?' },
+    ]);
   });
 
-  test('clears input after sending', async ({ page }) => {
-    await page.click('.chat-toggle-button');
+  test('shows a processing state until the reply arrives', async ({ page }) => {
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    await mockChat(page, async () => {
+      await held;
+      return { content: 'Done processing' };
+    });
+    await openApp(page);
 
-    await page.fill('.chat-input', 'Test message');
-    await page.click('.chat-send-button');
+    await input(page).fill('Search for AI');
+    await sendButton(page).click();
 
-    // Input should be cleared
-    await expect(page.locator('.chat-input')).toHaveValue('');
+    await expect(panel(page).locator('.loading-text')).toHaveText('Processing...');
+    await expect(sendButton(page)).toBeDisabled();
+    await expect(sendButton(page)).toHaveText('Processing...');
+    await expect(input(page)).toBeDisabled();
+    await expect(assistantMessages(page)).toHaveCount(1);
+
+    release();
+
+    await expect(assistantMessages(page).last()).toContainText('Done processing');
+    await expect(panel(page).locator('.loading-text')).toHaveCount(0);
+    await expect(input(page)).toBeEnabled();
   });
 
-  test('sends message on Enter key', async ({ page }) => {
-    await page.click('.chat-toggle-button');
+  test('Enter sends; Shift+Enter adds a line instead', async ({ page }) => {
+    const requests = await mockChat(page);
+    await openApp(page);
 
-    await page.fill('.chat-input', 'Enter key test');
-    await page.press('.chat-input', 'Enter');
+    await input(page).fill('Line 1');
+    await input(page).press('Shift+Enter');
+    await input(page).pressSequentially('Line 2');
+    await expect(input(page)).toHaveValue('Line 1\nLine 2');
+    await expect(userMessages(page)).toHaveCount(0);
 
-    // Message should be sent
-    await expect(page.locator('.chat-message.user').first()).toContainText('Enter key test');
+    await input(page).press('Enter');
+    await expect(userMessages(page)).toHaveCount(1);
+    await expect(assistantMessages(page).last()).toContainText('Mocked reply');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].messages.at(-1)).toEqual({ role: 'user', content: 'Line 1\nLine 2' });
   });
 
-  test('does not send on Shift+Enter', async ({ page }) => {
-    await page.click('.chat-toggle-button');
+  test('a follow-up carries the earlier turns', async ({ page }) => {
+    const requests = await mockChat(page, (_body, index) => ({ content: `Reply ${index + 1}` }));
+    await openApp(page);
 
-    await page.fill('.chat-input', 'Line 1');
-    await page.press('.chat-input', 'Shift+Enter');
+    await input(page).fill('Hello');
+    await sendButton(page).click();
+    await expect(assistantMessages(page).last()).toContainText('Reply 1');
 
-    // Should not have sent (no user message visible)
-    const userMessages = await page.locator('.chat-message.user').count();
-    expect(userMessages).toBe(0);
+    await input(page).fill('What did I just say?');
+    await sendButton(page).click();
+    await expect(assistantMessages(page).last()).toContainText('Reply 2');
+
+    await expect(userMessages(page)).toHaveCount(2);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages).toEqual([
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Reply 1' },
+      { role: 'user', content: 'What did I just say?' },
+    ]);
+  });
+
+  test('a reply that returns nodes adds them to the canvas', async ({ page }) => {
+    const name = `Chat added ${uniqueToken()}`;
+    await mockChat(page, () => ({
+      content: 'Added one node.',
+      toolUsed: 'search_graph',
+      toolResult: {
+        action: 'add_to_visualization',
+        nodes: [{ id: `node-${uniqueToken()}`, name, type: 'Initiative', description: 'e2e' }],
+        edges: [],
+      },
+    }));
+    await openApp(page);
+    await expect(page.locator('.react-flow__node')).toHaveCount(0);
+
+    await input(page).fill('Show me the new initiative');
+    await sendButton(page).click();
+
+    await expect(assistantMessages(page).last()).toContainText('Added one node.');
+    await expect(canvasNode(page, name)).toBeVisible();
+    await expect(page.locator('.react-flow__node')).toHaveCount(1);
+  });
+
+  test('a failed request is reported in the thread and the banner', async ({ page }) => {
+    await mockChat(page, () => ({ status: 500, body: { error: 'Internal server error' } }));
+    await openApp(page);
+
+    await input(page).fill('This should fail');
+    await sendButton(page).click();
+
+    await expect(assistantMessages(page).last()).toHaveText(/Error: Internal server error/);
+    await expect(panel(page).locator('.chat-error')).toHaveText('Internal server error');
+    // The composer recovers, so the user can try again.
+    await expect(input(page)).toBeEnabled();
   });
 });
 
-test.describe('Chat File Upload', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.click('.chat-toggle-button');
-  });
+test.describe('chat file upload', () => {
+  const fileInput = (page) => panel(page).locator('input[type="file"]');
 
-  test('shows upload button', async ({ page }) => {
-    await expect(page.locator('.chat-upload-button')).toBeVisible();
-    await expect(page.locator('.chat-upload-button')).toContainText('Upload');
-  });
-
-  test('shows file indicator after upload', async ({ page }) => {
-    // Create a test file
-    const fileContent = 'This is a test document about AI governance.';
-
-    // Upload file
-    const fileInput = page.locator('input[type="file"]');
-    await fileInput.setInputFiles({
-      name: 'test-document.txt',
+  // The chip and the message text use the filename the extract endpoint
+  // returns. That is currently the backend's timestamp-prefixed storage name
+  // ("1790…_remove-test.txt"), so the two tests below match the name as a
+  // suffix; the exact-name behaviour is pinned by the fixme test until the
+  // backend returns the original name.
+  test.fixme('the file chip shows the name the user uploaded (smallfix-upload-extract-storage-filename-20260924)', async ({
+    page,
+  }) => {
+    await openApp(page);
+    await fileInput(page).setInputFiles({
+      name: 'exact-name.txt',
       mimeType: 'text/plain',
-      buffer: Buffer.from(fileContent),
+      buffer: Buffer.from('Test content'),
     });
-
-    // File indicator should appear
-    await expect(page.locator('.file-indicator')).toBeVisible();
-    await expect(page.locator('.file-name')).toContainText('test-document.txt');
+    await expect(panel(page).locator('.file-name')).toHaveText('exact-name.txt');
   });
 
-  test('removes file when remove button clicked', async ({ page }) => {
-    const fileInput = page.locator('input[type="file"]');
-    await fileInput.setInputFiles({
+  test('an uploaded text file is attached and can be removed', async ({ page }) => {
+    await openApp(page);
+    await expect(panel(page).locator('.chat-upload-button')).toHaveText('Upload');
+    await expect(panel(page).locator('.file-indicator')).toHaveCount(0);
+
+    await fileInput(page).setInputFiles({
       name: 'remove-test.txt',
       mimeType: 'text/plain',
       buffer: Buffer.from('Test content'),
     });
+    await expect(panel(page).locator('.file-name')).toHaveText(/remove-test\.txt$/);
+    // A file alone is enough to send: it is analysed without a typed prompt.
+    await expect(sendButton(page)).toBeEnabled();
 
-    await expect(page.locator('.file-indicator')).toBeVisible();
-
-    // Click remove button
-    await page.click('.remove-file-button');
-
-    // File indicator should disappear
-    await expect(page.locator('.file-indicator')).not.toBeVisible();
-  });
-});
-
-test.describe('Chat Graph Integration', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.click('.chat-toggle-button');
+    await panel(page).locator('.remove-file-button').click();
+    await expect(panel(page).locator('.file-indicator')).toHaveCount(0);
+    await expect(sendButton(page)).toBeDisabled();
   });
 
-  test('search results appear in graph', async ({ page }) => {
-    // First add a test node via search panel
-    await page.fill('.search-input', 'test');
-    await page.click('.search-button');
+  test('the attached file text is sent with the message', async ({ page }) => {
+    const requests = await mockChat(page, () => ({ content: 'Read it.' }));
+    const marker = `governance-${uniqueToken()}`;
+    await openApp(page);
 
-    // Wait for any existing nodes to load
-    await page.waitForTimeout(1000);
-
-    // Now search via chat
-    await page.fill('.chat-input', 'Search for all nodes');
-    await page.click('.chat-send-button');
-
-    // Wait for response
-    await page.waitForSelector('.chat-message.assistant', { timeout: 30000 });
-
-    // The response should mention nodes or search results
-    const response = await page.locator('.chat-message.assistant').first().textContent();
-    expect(response).toBeTruthy();
-  });
-
-  test('can request to add a node', async ({ page }) => {
-    await page.fill('.chat-input', 'Add a new initiative called E2E Test Initiative about testing');
-    await page.click('.chat-send-button');
-
-    // Wait for response
-    await page.waitForSelector('.chat-message.assistant', { timeout: 30000 });
-
-    // Response should acknowledge the request
-    const response = await page.locator('.chat-message.assistant').first().textContent();
-    expect(response).toBeTruthy();
-  });
-});
-
-test.describe('Chat Conversation Flow', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.click('.chat-toggle-button');
-  });
-
-  test('maintains conversation history', async ({ page }) => {
-    // Send first message
-    await page.fill('.chat-input', 'Hello');
-    await page.click('.chat-send-button');
-    await page.waitForSelector('.chat-message.assistant', { timeout: 30000 });
-
-    // Send second message
-    await page.fill('.chat-input', 'What did I just say?');
-    await page.click('.chat-send-button');
-
-    // Wait for second response
-    await page.waitForTimeout(2000);
-
-    // Should have 2 user messages
-    const userMessages = await page.locator('.chat-message.user').count();
-    expect(userMessages).toBe(2);
-
-    // Should have 2 assistant messages
-    const assistantMessages = await page.locator('.chat-message.assistant').count();
-    expect(assistantMessages).toBeGreaterThanOrEqual(2);
-  });
-
-  test('scrolls to new messages', async ({ page }) => {
-    // Send multiple messages to create scroll
-    for (let i = 0; i < 3; i++) {
-      await page.fill('.chat-input', `Message ${i + 1}`);
-      await page.click('.chat-send-button');
-      await page.waitForSelector('.chat-message.assistant', { timeout: 30000 });
-      await page.waitForTimeout(500);
-    }
-
-    // The last message should be visible
-    const lastMessage = page.locator('.chat-message').last();
-    await expect(lastMessage).toBeInViewport();
-  });
-});
-
-test.describe('Chat Error Handling', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.click('.chat-toggle-button');
-  });
-
-  test('displays error message on failure', async ({ page }) => {
-    // Intercept API call and return error
-    await page.route('**/ui/chat', async (route) => {
-      await route.fulfill({
-        status: 500,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Internal server error' }),
-      });
+    await fileInput(page).setInputFiles({
+      name: 'test-document.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from(`This is a test document about AI ${marker}.`),
     });
+    await expect(panel(page).locator('.file-name')).toHaveText(/test-document\.txt$/);
 
-    await page.fill('.chat-input', 'This should fail');
-    await page.click('.chat-send-button');
+    await input(page).fill('Summarise this');
+    await sendButton(page).click();
+    await expect(assistantMessages(page).last()).toContainText('Read it.');
+    // Sending consumes the attachment.
+    await expect(panel(page).locator('.file-indicator')).toHaveCount(0);
 
-    // Error message should appear
-    await expect(page.locator('.chat-message.assistant')).toContainText(/error/i, {
-      timeout: 10000,
-    });
+    expect(requests).toHaveLength(1);
+    const sent = requests[0].messages.at(-1);
+    expect(sent.role).toBe('user');
+    expect(sent.content).toMatch(/^Summarise this\n\n\[Uploaded file: \S*test-document\.txt\]/);
+    expect(sent.content).toContain(marker);
   });
 });

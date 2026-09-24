@@ -1,88 +1,118 @@
 import { test, expect } from '@playwright/test';
+import { addNodeViaSearch, canvasNode, seedNode, uniqueToken } from './helpers';
 
-test.describe('Community Graph Web App', () => {
-  test('loads the main page', async ({ page }) => {
-    await page.goto('/');
+/**
+ * Desktop smoke tests: the floating-chrome shell on a mouse pointer.
+ *
+ * Runs under the `chromium` project only. The phone layout has its own spec
+ * (mobile-smoke.spec.js); the first test here pins that this one really is the
+ * desktop branch, so a project that started emulating touch would fail loudly
+ * rather than quietly test the mobile shell twice.
+ */
 
-    // Should display the app title
-    await expect(page.locator('h1')).toContainText('Community Graph');
+async function openApp(page) {
+  await page.goto('/');
+  await expect(page.locator('.react-flow')).toBeVisible();
+}
+
+test.describe('desktop shell', () => {
+  test('renders the canvas under the floating header with a session id', async ({ page }) => {
+    await openApp(page);
+
+    await expect(page.locator('.floating-header-title')).toHaveText('Community Graph View');
+    await expect(page.locator('.floating-header-session-id')).toHaveText(
+      /^\d{4}-\d{4}(-\d{4}-\d{4})?$/
+    );
+    await expect(page.locator('.floating-search-input')).toBeVisible();
+    await expect(page.locator('.app.is-touch')).toHaveCount(0);
+    await expect(page.locator('.mobile-shell-bottomnav')).toHaveCount(0);
   });
 
-  test('displays search panel', async ({ page }) => {
-    await page.goto('/');
+  test('search offers a matching node and Enter adds it to the canvas', async ({
+    page,
+    request,
+  }) => {
+    const token = uniqueToken();
+    const node = await seedNode(request, { name: `Smoke search ${token}` });
+    await openApp(page);
+    await expect(page.locator('.react-flow__node')).toHaveCount(0);
 
-    // Search input should be visible
-    const searchInput = page.locator('input[placeholder*="Search"]');
-    await expect(searchInput).toBeVisible();
+    await addNodeViaSearch(page, token, node.name);
 
-    // Search button should be visible
-    const searchButton = page.locator('button:has-text("Search")');
-    await expect(searchButton).toBeVisible();
+    await expect(page.locator('.react-flow__node')).toHaveCount(1);
+    await expect(canvasNode(page, node.name)).toHaveAttribute('data-id', node.id);
+    // Picking a result resets the search so the next query starts clean.
+    await expect(page.locator('.floating-search-input')).toHaveValue('');
+    await expect(page.locator('.floating-search-dropdown')).toHaveCount(0);
   });
 
-  test('displays stats panel', async ({ page }) => {
-    await page.goto('/');
+  test('a query with no match offers nothing and Enter adds nothing', async ({ page }) => {
+    await openApp(page);
+    const input = page.locator('.floating-search-input');
 
-    // Stats panel should be visible with node/edge counts
-    await expect(page.locator('text=Nodes')).toBeVisible();
-    await expect(page.locator('text=Edges')).toBeVisible();
+    const searched = page.waitForResponse(
+      (response) => response.url().endsWith('/api/search') && response.ok()
+    );
+    await input.fill(`nomatch${uniqueToken()}`);
+    const body = await (await searched).json();
+    expect(body.nodes).toEqual([]);
+
+    await expect(page.locator('.floating-search-dropdown')).toHaveCount(0);
+    await input.press('Enter');
+    await expect(page.locator('.react-flow__node')).toHaveCount(0);
   });
 
-  test('can perform a search', async ({ page }) => {
-    await page.goto('/');
+  test('a toolbar type button creates and stores a node of that type', async ({
+    page,
+    request,
+  }) => {
+    const name = `Toolbar actor ${uniqueToken()}`;
+    await openApp(page);
 
-    // Type in search box
-    const searchInput = page.locator('input[placeholder*="Search"]');
-    await searchInput.fill('test');
+    await page.locator('.floating-toolbar-item[aria-label="Actor"]').click();
+    const dialog = page.locator('.create-node-dialog');
+    await expect(dialog).toBeVisible();
+    await dialog.locator('#create-name').fill(name);
+    await dialog.locator('button[type="submit"]').click();
+    await expect(dialog).toBeHidden();
 
-    // Click search button
-    const searchButton = page.locator('button:has-text("Search")');
-    await searchButton.click();
-
-    // Wait for network request or loading state to complete
-    // Either we get results or "no results" message
-    await page.waitForTimeout(1000);
-
-    // Graph canvas should be present
-    const canvas = page.locator('.react-flow');
-    await expect(canvas).toBeVisible();
+    await expect(canvasNode(page, name)).toBeVisible();
+    const found = await request.post('/api/search', { data: { query: name, limit: 5 } });
+    const stored = (await found.json()).nodes.filter((n) => n.name === name);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].type).toBe('Actor');
   });
 
-  test('graph canvas renders', async ({ page }) => {
-    await page.goto('/');
+  test('the Settings dialog reports the totals the backend returned', async ({ page, request }) => {
+    // At least one node, so a dialog stuck at its `|| 0` fallback cannot pass.
+    await seedNode(request, { name: `Stats seed ${uniqueToken()}` });
 
-    // ReactFlow container should be rendered
-    const reactFlow = page.locator('.react-flow');
-    await expect(reactFlow).toBeVisible();
-  });
+    // Other tests seed nodes in parallel, so compare against the latest stats
+    // response this page received rather than a separate read that could race.
+    let latestStats = null;
+    page.on('response', async (response) => {
+      if (response.url().endsWith('/api/stats') && response.ok()) {
+        latestStats = await response.json().catch(() => latestStats);
+      }
+    });
+    await openApp(page);
 
-  test('displays type filters', async ({ page }) => {
-    await page.goto('/');
+    await page.locator('.floating-header-hamburger').click();
+    await page.locator('.session-drawer-item', { hasText: 'Settings' }).click();
+    const dialog = page.locator('.settings-dialog');
+    await expect(dialog).toBeVisible();
 
-    // Type filter checkboxes should exist
-    // Looking for common node types
-    const typeFilters = page.locator('.type-filters');
-    await expect(typeFilters).toBeVisible();
-  });
-
-  test('search input accepts keyboard input', async ({ page }) => {
-    await page.goto('/');
-
-    const searchInput = page.locator('input[placeholder*="Search"]');
-    await searchInput.fill('community');
-
-    await expect(searchInput).toHaveValue('community');
-  });
-
-  test('can press Enter to search', async ({ page }) => {
-    await page.goto('/');
-
-    const searchInput = page.locator('input[placeholder*="Search"]');
-    await searchInput.fill('actor');
-    await searchInput.press('Enter');
-
-    // Should trigger search - verify no crash
-    await page.waitForTimeout(500);
-    await expect(page.locator('.react-flow')).toBeVisible();
+    const values = dialog.locator('.settings-dialog-stat-value');
+    await expect(values).toHaveCount(2);
+    await expect(dialog.locator('.settings-dialog-stat-label')).toHaveText(['Nodes', 'Edges']);
+    const reported = () =>
+      latestStats ? [String(latestStats.total_nodes), String(latestStats.total_edges)] : null;
+    await expect
+      .poll(async () => {
+        const expected = reported();
+        return expected !== null && (await values.allTextContents()).join() === expected.join();
+      })
+      .toBe(true);
+    expect(Number(await values.first().textContent())).toBeGreaterThan(0);
   });
 });
