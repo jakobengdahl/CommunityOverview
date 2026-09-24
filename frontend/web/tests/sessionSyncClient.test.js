@@ -863,8 +863,10 @@ describe('SessionSyncClient', () => {
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
       client.syncState({ node_refs: ['a'] });
-      await vi.advanceTimersByTimeAsync(30); // let retry fire
-      expect(fetchImpl.calls.length).toBeGreaterThanOrEqual(2);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(fetchImpl.calls).toHaveLength(1); // requeued, waiting out the backoff
+      await vi.advanceTimersByTimeAsync(500); // _scheduleRetry's 500ms floor elapses
+      expect(fetchImpl.calls).toHaveLength(2);
       expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
 
       const dropFetch = makeFetch([{ ok: false, status: 400 }]);
@@ -947,7 +949,7 @@ describe('SessionSyncClient', () => {
     } finally {
       vi.useRealTimers();
     }
-  }, 10_000);
+  });
 
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
     vi.useFakeTimers();
@@ -981,13 +983,81 @@ describe('SessionSyncClient', () => {
       await vi.advanceTimersByTimeAsync(10);
       // A later move made while the first request is still hung must still get out.
       client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
-      await vi.advanceTimersByTimeAsync(150); // past the timeout + retry backoff
+      await vi.advanceTimersByTimeAsync(600); // past the 20ms timeout + the 500ms retry backoff
 
       expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
       const allOps = bodies.flatMap((b) => b.ops || []);
       // Neither move is lost: the hung batch's op is requeued, the later one sent.
       expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
       expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A failing server must not be re-hit on the flush debounce: after a
+  // 429/5xx/network error the requeued batch — and any op enqueued meanwhile —
+  // waits for _scheduleRetry's backoff (max(500, 4 * flushIntervalMs)).
+  it.each([
+    ['429', { ok: false, status: 429 }],
+    ['503', { ok: false, status: 503 }],
+    ['network error', new Error('network down')],
+  ])('waits out the retry backoff before resending after a %s', async (_label, failure) => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([failure]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      client.syncState({ node_refs: ['a', 'b'] }); // enqueued during the backoff
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[1].body.ops).toEqual([
+        { op: 'nodes_added', node_ids: ['a'] },
+        { op: 'nodes_added', node_ids: ['b'] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a flush debounced while the failing request was in flight does not pre-empt the backoff', async () => {
+    vi.useFakeTimers();
+    try {
+      let failFirst;
+      const firstSettled = new Promise((r) => {
+        failFirst = r;
+      });
+      const fetchImpl = vi.fn(async () => {
+        if (fetchImpl.mock.calls.length === 1) {
+          await firstSettled;
+          return { ok: false, status: 500 };
+        }
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      // Backoff is max(500, 4 * 100) = 500ms; the debounce is 100ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 100 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
+
+      client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+      await vi.advanceTimersByTimeAsync(10);
+      failFirst();
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -1004,7 +1074,7 @@ describe('SessionSyncClient', () => {
       client.connect();
       FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
       client.syncState({ node_refs: ['a'] });
-      await vi.advanceTimersByTimeAsync(120);
+      await vi.advanceTimersByTimeAsync(1200); // two 20ms timeouts, each followed by a 500ms backoff
       // Each hung POST times out and releases `_flushing`, so the client keeps
       // reattempting instead of freezing on the first hung request forever. If the
       // guard were never released, exactly one attempt would ever be made.

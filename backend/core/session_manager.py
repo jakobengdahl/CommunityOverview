@@ -937,9 +937,7 @@ class SessionManager:
                 session.name = saved_name
                 session.updated_at = saved_updated_at
                 session.activity_log = saved_activity_log
-                if ring is not None and saved_ring is not None:
-                    ring.clear()
-                    ring.extend(saved_ring)
+                self.store.restore_ring(session_id, saved_ring)
                 raise
 
             # Commit succeeded: apply ephemeral claim/lease effects and broadcast
@@ -1869,9 +1867,7 @@ class SessionManager:
             session.name = saved_name
             session.updated_at = saved_updated_at
             session.activity_log = saved_activity_log
-            if ring is not None and saved_ring is not None:
-                ring.clear()
-                ring.extend(saved_ring)
+            self.store.restore_ring(session_id, saved_ring)
             raise
 
         if applied is None:
