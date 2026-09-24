@@ -217,6 +217,7 @@ class TestGetVisualizationSessionState:
         assert data["session_id"] == session_id
         assert data["visible_node_ids"] == ["node-1", "node-2"]
         assert data["node_count"] == 2
+        assert data["visible_node_count"] == 2
         assert data["selected_node_ids"] == ["node-1"]
 
     def test_hidden_nodes_are_excluded_from_visible_node_ids(
@@ -243,7 +244,10 @@ class TestGetVisualizationSessionState:
         assert response.status_code == 200
         data = response.json()
         assert data["visible_node_ids"] == ["node-1"]
-        assert data["node_count"] == 1
+        assert data["visible_node_count"] == 1
+        # node_count means "referenced by the session" in every session tool,
+        # hidden nodes included; only visible_node_count narrows to the canvas.
+        assert data["node_count"] == 2
 
 
 class TestHeadlessSessionAddressability:
