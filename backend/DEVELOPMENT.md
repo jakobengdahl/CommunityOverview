@@ -547,6 +547,10 @@ discarded. `match_mode` is still echoed in that case while `result["semantic"]`
 flips to true. Federated search stays substring-matched — the same boundary
 semantic ranking has.
 
+The in-app chat agent's `search_graph` tool exposes `match_mode` and `semantic`
+with the same values and defaults, so the chat and MCP search surfaces offer the
+same modes. (The chat tool does not expose the tag/metadata filters above.)
+
 ### Semantic search (`semantic` flag on `/api/search` and `search_graph`)
 
 The default `query` is matched **lexically** (case-insensitive substring over
