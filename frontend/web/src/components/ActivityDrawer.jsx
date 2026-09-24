@@ -12,11 +12,10 @@ import './ActivityDrawer.css';
 const GRAPH_PAGE_SIZE = 25;
 const SESSION_ACTIVITY_LIMIT = 100;
 
-// Mirrors SessionDrawer.jsx's (and BottomSheet.jsx's) focus-trap contract,
-// applied here only for the mobile full-screen variant — see the
-// isMobile-gated effects below. Each of those components keeps its own copy
-// rather than sharing one (no such hook has been extracted yet in this
-// codebase); this is a third, matching the same shape deliberately.
+// Mirrors the focus-trap contract SessionDrawer.jsx and BottomSheet.jsx now
+// share through hooks/useModalFocusTrap.js, applied here only for the mobile
+// full-screen variant — see the isMobile-gated effects below. This component
+// still keeps its own copy of that contract rather than using the hook.
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 

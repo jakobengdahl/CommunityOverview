@@ -112,7 +112,7 @@ function BottomSheet({
   // return) would permanently ignore every future pointerdown on this
   // instance, and a stale dragOffset could paint on the next open.
   useEffect(() => {
-    if (!isOpen || typeof document === 'undefined') return undefined;
+    if (!isOpen) return undefined;
     return () => {
       dragStateRef.current = null;
       setDragOffset(0);

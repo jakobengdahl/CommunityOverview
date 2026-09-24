@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { useRef } from 'react';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { useModalFocusTrap } from './useModalFocusTrap';
@@ -93,8 +93,17 @@ describe('useModalFocusTrap', () => {
 
     const { rerender } = render(<Trap active>{threeButtons}</Trap>);
     trigger.remove();
+    // jsdom ignores focus() on a detached element, so assert the call itself.
+    const focusSpy = vi.spyOn(trigger, 'focus');
     rerender(<Trap active={false}>{threeButtons}</Trap>);
-    expect(trigger).not.toHaveFocus();
+    expect(focusSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not re-steal focus when re-rendered while still active', () => {
+    const { rerender } = render(<Trap active>{threeButtons}</Trap>);
+    screen.getByText('two').focus();
+    rerender(<Trap active>{threeButtons}</Trap>);
+    expect(screen.getByText('two')).toHaveFocus();
   });
 
   it('restores the overflow value it found, not a hard-coded default', () => {
