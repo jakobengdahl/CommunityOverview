@@ -28,8 +28,13 @@ When a planning MCP server *is* configured:
    same write. This binds every writer, a chat over the planning MCP included. An
    unattached item is not merely untidy — it is invisible to anyone tracing from
    intended value down to work, so the work reads as unfunded and the value as
-   unserved. The planning graph's own metamodel carries the normative wording and
-   the node types it uses; this repo does not restate them.
+   unserved. Where a small fix or a review's leftovers serve no one capability,
+   the graph carries a standing maintenance bucket to attach them to — ask the
+   graph for it rather than leaving the item loose; and where nothing fits at
+   all, the item is usually a feature request in a task's clothes, so name the
+   capability it delivers and create that too. The planning graph's own metamodel
+   carries the normative wording and the node types it uses; this repo does not
+   restate them.
 4. Do the code work here through a branch and a PR.
 5. Write the PR, commit SHA, implementation evidence and verification results back
    onto the relevant graph nodes.
