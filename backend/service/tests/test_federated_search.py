@@ -2,7 +2,7 @@
 
 import json
 
-from backend.core import GraphStorage
+from backend.core import GraphStorage, Node, NodeType
 from backend.federation.config import FederationFileConfig
 from backend.federation.manager import FederationManager
 from backend.service import GraphService
@@ -384,6 +384,66 @@ def test_federated_widening_keeps_low_ranked_filter_match_under_limit(tmp_path):
 
     names = {n["name"] for n in result["nodes"]}
     assert names == {"please keep this remote"}
+
+
+def _empty_storage(tmp_path):
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(json.dumps({"nodes": [], "edges": []}), encoding="utf-8")
+    return GraphStorage(str(graph_file))
+
+
+def test_localized_type_label_finds_federated_nodes_like_local_ones(tmp_path):
+    """The schema's Swedish label for Actor must reach federated nodes as it
+    reaches local ones: the query names the type, not any field of the node."""
+    storage = _empty_storage(tmp_path)
+    storage.add_nodes(
+        [Node(id="local-a", type=NodeType.ACTOR, name="Local office")], []
+    )
+    manager = _manager_with_federated_nodes(
+        [
+            {"id": "remote-a", "type": "Actor", "name": "Remote office"},
+            {"id": "remote-i", "type": "Initiative", "name": "Remote programme"},
+        ]
+    )
+
+    service = GraphService(storage, federation_manager=manager)
+    result = service.search_graph(query="aktör")
+
+    assert [n["id"] for n in result["nodes"]] == [
+        "local-a",
+        "federated::esam-main::remote-a",
+    ]
+
+
+def test_archived_federated_nodes_do_not_leave_the_window_short(tmp_path):
+    """Without a filter the federated fetch asks only for the free slots, so an
+    archived node counted in that window and dropped afterwards left a visible
+    node out even though the limit had room for it."""
+    storage = _empty_storage(tmp_path)
+    storage.add_nodes(
+        [Node(id="local-a", type=NodeType.ACTOR, name="Local remote")], []
+    )
+    manager = _manager_with_federated_nodes(
+        [
+            {"id": "old", "type": "Actor", "name": "Remote old", "archived": True},
+            {"id": "new", "type": "Actor", "name": "Remote new"},
+        ]
+    )
+    service = GraphService(storage, federation_manager=manager)
+
+    for query in ("", "remote"):
+        hidden = service.search_graph(query=query, limit=2)
+        shown = service.search_graph(query=query, limit=3, include_archived=True)
+
+        assert [n["id"] for n in hidden["nodes"]] == [
+            "local-a",
+            "federated::esam-main::new",
+        ]
+        assert hidden["total"] == 2
+        assert {n["id"] for n in shown["nodes"]} >= {
+            "federated::esam-main::old",
+            "federated::esam-main::new",
+        }
 
 
 def test_graph_stats_exposes_depth_and_graph_labels(tmp_path):

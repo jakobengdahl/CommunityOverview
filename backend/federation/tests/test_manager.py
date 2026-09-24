@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx2 as httpx
 
+from backend.core import storage_search
 from backend.core.models import Node, NodeType
 from backend.federation import manager as manager_module
 from backend.federation.config import FederationFileConfig
@@ -158,6 +159,139 @@ def test_score_node_match_alias_does_not_lift_above_stronger_name():
     assert FederationManager._score_node_match(
         exact_name, "esam"
     ) > FederationManager._score_node_match(name_plus_alias, "esam")
+
+
+_TYPE_TEXT = {"Actor": "actor aktör", "Initiative": "initiative initiativ"}
+
+
+def _manager_with_cached_nodes(source_nodes):
+    config = FederationFileConfig.model_validate(
+        {
+            "federation": {
+                "enabled": True,
+                "graphs": [
+                    {
+                        "graph_id": "g",
+                        "display_name": "G",
+                        "enabled": True,
+                        "endpoints": {
+                            "graph_json_url": "https://example.invalid/graph.json"
+                        },
+                    }
+                ],
+            }
+        }
+    )
+    manager = FederationManager(config)
+    manager._cache["g"].nodes, _ = manager._build_cache(
+        config.federation.graphs[0], source_nodes, []
+    )
+    return manager
+
+
+def _origin_ids(nodes):
+    return [n.metadata["origin_node_id"] for n in nodes]
+
+
+def test_search_matches_a_localized_type_label():
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "a", "type": "Actor", "name": "Nordic Office"},
+            {"id": "i", "type": "Initiative", "name": "Nordic Programme"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="Aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["a"]
+
+
+@pytest.mark.parametrize("query", ["aktör", "act", "nordic", "network", "x", "*"])
+def test_search_returns_what_local_search_returns_in_the_same_order(query):
+    """Local and federated search must match and rank the same nodes the same
+    way; a divergence between the two paths is what hid type-label matches."""
+    source_nodes = [
+        {"id": "desc", "type": "Initiative", "name": "Plan", "description": "actor"},
+        {"id": "tag", "type": "Initiative", "name": "Plan B", "tags": ["actor"]},
+        {"id": "label", "type": "Actor", "name": "Nordic Office"},
+        {"id": "alias", "type": "Initiative", "name": "Y", "aliases": ["nordic"]},
+        {"id": "name", "type": "Initiative", "name": "Nordic network x"},
+        {"id": "sub", "type": "Actor", "name": "Z", "subtypes": ["Network"]},
+    ]
+    # Placed in the cache directly: _build_cache does not carry aliases or
+    # subtypes over, and this pins search_nodes, not ingestion.
+    manager = _manager_with_cached_nodes([])
+    manager._cache["g"].nodes = {
+        n["id"]: Node.from_dict({**n, "metadata": {"origin_graph_id": "g"}})
+        for n in source_nodes
+    }
+    local_nodes = {n["id"]: Node.from_dict(n) for n in source_nodes}
+
+    local = storage_search.search_nodes(
+        local_nodes, {}, _TYPE_TEXT, query=query, limit=50
+    )
+    federated = manager.search_nodes(
+        query=query, node_types=None, limit=50, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert [n.id for n in federated["nodes"]] == [n.id for n in local]
+
+
+def test_name_match_outranks_a_type_label_match_with_every_secondary_signal():
+    manager = _manager_with_cached_nodes(
+        [
+            {
+                "id": "secondary",
+                "type": "Actor",
+                "name": "Office",
+                "description": "aktör",
+                "tags": ["aktör"],
+                "subtypes": ["aktör"],
+            },
+            {"id": "name", "type": "Initiative", "name": "Aktörsnätverk"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["name", "secondary"]
+
+
+def test_type_label_match_outranks_a_description_match():
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "desc", "type": "Initiative", "name": "P", "description": "aktör"},
+            {"id": "label", "type": "Actor", "name": "Q"},
+        ]
+    )
+
+    result = manager.search_nodes(
+        query="aktör", node_types=None, limit=10, type_searchable_text=_TYPE_TEXT
+    )
+
+    assert _origin_ids(result["nodes"]) == ["label", "desc"]
+
+
+@pytest.mark.parametrize("query", ["", "office"])
+def test_archived_nodes_do_not_take_limit_slots(query):
+    manager = _manager_with_cached_nodes(
+        [
+            {"id": "old", "type": "Actor", "name": "Office old", "archived": True},
+            {"id": "new", "type": "Actor", "name": "Office new"},
+        ]
+    )
+
+    hidden = manager.search_nodes(query=query, node_types=None, limit=1)
+    shown = manager.search_nodes(
+        query=query, node_types=None, limit=2, include_archived=True
+    )
+
+    assert _origin_ids(hidden["nodes"]) == ["new"]
+    assert sorted(_origin_ids(shown["nodes"])) == ["new", "old"]
 
 
 def test_scheduler_starts_for_scheduled_graph():
