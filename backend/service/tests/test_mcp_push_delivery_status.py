@@ -1095,6 +1095,13 @@ _CLAUSE_PRECONDITIONS = {
             and s["legacy_consumers"] == 0
         )
     ),
+    "may still apply it": (
+        lambda s: (
+            s["registry_configured"]
+            and s["legacy_enqueued"]
+            and s["legacy_consumers"] == 0
+        )
+    ),
     "no browser is holding": (
         lambda s: (
             s["registry_configured"]
@@ -1176,8 +1183,10 @@ def test_no_warning_clause_ever_asserts_an_unestablished_state():
         warning = _undelivered_push_warning(outcome_unknown=outcome_unknown, **state)
         reason = warning.split(". A push")[0]
         checked += 1
+        # The whole warning, remedy included: a clause moved into the remedy
+        # would otherwise be appended to every state unchecked.
         for fragment, established in _CLAUSE_PRECONDITIONS.items():
-            if fragment in reason:
+            if fragment in warning:
                 assert established(state), (
                     f"clause {fragment!r} is not established by {state}"
                 )

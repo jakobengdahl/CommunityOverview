@@ -917,9 +917,9 @@ registry entry with nothing draining it, the command still waits in that
 entry's bounded queue (oldest dropped first), and a browser that opens the
 session before the entry expires drains it and may apply it then. So an
 undelivered push can still change a canvas later; `delivered` reports only
-whether a consumer was attached when it was sent. A routine that refreshes a canvas on a schedule has
-to check `delivered` instead of reading a successful search as a refreshed
-canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
+whether a consumer took it when it was sent, not whether it is applied later.
+A routine that refreshes a canvas on a schedule has to check `delivered` instead
+of reading a successful search as a refreshed canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
 verdict for that check either: it is read before the push, and a consumer
 present then can be gone by the time the push is sent. It does agree with the
 delivery report on the state that matters most — a registry entry with nothing

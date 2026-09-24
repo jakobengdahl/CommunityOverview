@@ -409,9 +409,9 @@ def register_mcp_tools(
                 state when nothing did). A push writes no session state when it
                 is sent, so reading the session back cannot show whether it
                 landed — check this field rather than assuming the canvas
-                changed. Undelivered is not discarded: a legacy registry entry
-                with nothing draining it keeps the command queued, and a browser
-                that opens the session later may still apply it.
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             Dict with matching nodes and edges connecting them, and
@@ -474,9 +474,9 @@ def register_mcp_tools(
                 state when nothing did). A push writes no session state when it
                 is sent, so reading the session back cannot show whether it
                 landed — check this field rather than assuming the canvas
-                changed. Undelivered is not discarded: a legacy registry entry
-                with nothing draining it keeps the command queued, and a browser
-                that opens the session later may still apply it.
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             Dict with nodes and edges, and ``visualization_delivery`` when a
@@ -978,9 +978,9 @@ def register_mcp_tools(
                 state when nothing did). A push writes no session state when it
                 is sent, so reading the session back cannot show whether it
                 landed — check this field rather than assuming the canvas
-                changed. Undelivered is not discarded: a legacy registry entry
-                with nothing draining it keeps the command queued, and a browser
-                that opens the session later may still apply it.
+                changed. Undelivered is not always discarded: a legacy registry
+                entry with nothing draining it keeps the command queued, and a
+                browser that opens the session later may still apply it.
 
         Returns:
             The nodes and edges to display in the visualization, with position
