@@ -832,12 +832,12 @@ writing a backend of your own against a shared server:
   does not reproduce here — treat the numbers above, from an actual prepared
   statement, as authoritative.)
 
-  `_resolve` still does not need `prepare=False`, because unlike the level
-  query it never reaches the regime where the mis-estimate costs more than the
-  correct one: `_resolve` filters on the primary key directly, so even the
-  generic plan's index scan stays cheap relative to a full table read, and a
-  real `_resolve` call in production carries a change notification's worth of
-  ids, not 20 000. A separate prepared-statement run at
+  `_resolve` still does not need `prepare=False`. Unlike the level query, the
+  mis-estimate here does cost more in isolation — 45.3 ms vs. 15.3 ms at
+  20 000 ids, roughly 3x — but `_resolve` filters on the primary key directly,
+  and a real call in production carries a change notification's worth of ids,
+  not 20 000; at that scale the ~30 ms planning delta is swamped by the cost
+  of transferring the documents themselves. A separate prepared-statement run at
   `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
   no cliff, dominated by transferring 20 000 jsonb documents rather than by
   planning. The level query is different because it filters on *expressions*
