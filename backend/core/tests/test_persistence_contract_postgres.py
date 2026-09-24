@@ -329,11 +329,14 @@ def _tables_named(text):
     }
 
 
-# The statements EXPLAIN can plan that read or write rows. Anything else
-# naming a graph table - the `ANALYZE` a whole-graph save issues after its
-# transaction, a VACUUM - is maintenance with no plan, and `EXPLAIN ANALYZE
-# <table>` is a syntax error rather than a question about scans.
-_PLANNABLE = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH"})
+# Statements naming a graph table that have no plan: the `ANALYZE` a
+# whole-graph save issues after its transaction, and its kin. `EXPLAIN
+# ANALYZE <table>` is a syntax error rather than a question about scans.
+# A denylist on purpose: an allowlist of verbs would silently drop a
+# `(SELECT ...)` or a `TABLE ...` read and report it as "not scanning",
+# where anything unlisted here is still EXPLAINed and fails loudly if it
+# cannot be planned.
+_MAINTENANCE = frozenset({"ANALYZE", "ANALYSE", "VACUUM"})
 
 # Whitespace and SQL comments ahead of a statement's first keyword. Matched
 # on the raw text: `_rendered` folds newlines, and a folded `--` comment
@@ -342,12 +345,7 @@ _LEADING_NOISE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
 
 
 def _leading_verb(conn, query):
-    if hasattr(query, "as_string"):
-        raw = query.as_string(conn)
-    elif isinstance(query, bytes):
-        raw = query.decode()
-    else:
-        raw = str(query)
+    raw = query.as_string(conn) if hasattr(query, "as_string") else str(query)
     rest = raw[_LEADING_NOISE.match(raw).end() :]
     match = re.match(r"[A-Za-z]+", rest)
     return match.group(0).upper() if match else ""
@@ -357,7 +355,7 @@ def _sequential_scans(issued):
     """(statements naming a graph table, those whose plan scans one).
 
     EXPLAIN does not execute, so this is safe to run for every statement.
-    Maintenance statements are skipped, not planned: see `_PLANNABLE`.
+    Maintenance statements are skipped, not planned: see `_MAINTENANCE`.
     """
     touched, scanning = [], []
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -367,7 +365,7 @@ def _sequential_scans(issued):
                 continue
             if params is _EXECUTED_NEVER:
                 continue
-            if _leading_verb(conn, query) not in _PLANNABLE:
+            if _leading_verb(conn, query) in _MAINTENANCE:
                 continue
             touched.append(text)
             if params is None and "%s" in text:
@@ -477,6 +475,26 @@ class TestPostgresSequentialScanHelperSkipsMaintenance:
         finally:
             backend.close()
         query = psycopg.sql.SQL(f'{prefix}{verb} doc FROM "{schema}".graph_nodes')
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            '(SELECT doc FROM "{schema}".graph_nodes)',
+            'TABLE "{schema}".graph_nodes',
+            '-- ANALYZE\nSELECT doc FROM "{schema}".graph_nodes',
+        ],
+    )
+    def test_a_read_not_led_by_a_dml_verb_is_still_planned(self, schema, read):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(read.format(schema=schema))
 
         touched, scanning = _sequential_scans([(query, None)])
 
