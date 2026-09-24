@@ -1016,6 +1016,14 @@ from the session state. The returned `revision` threads straight into
 `apply_visualization_layout`'s `expected_revision`, making "create → populate →
 arrange" three deterministic calls.
 
+A repeated id counts once: the tool deduplicates `node_ids` before checking the
+500-id cap, the 256 KiB byte cap and the per-client rate budget. Both caps are
+checked before any id is resolved and return `too_large`, with a `message` that
+names which cap was hit. An unknown session is reported as not found before any
+id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
+returned when the session exists but none of the ids resolve, and it lists them
+in `skipped`.
+
 ##### `get_visualization_layout` response
 
 | Field | Type | Notes |

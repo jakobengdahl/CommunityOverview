@@ -7,13 +7,15 @@ wrapper over ``SessionManager.add_node_refs``; the op semantics themselves are
 covered in ``backend/core/tests/test_session_manager.py``.
 """
 
+import inspect
+import json
 import os
 from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from backend.core import GraphStorage, Node
-from backend.core.session_manager import SessionManager
+from backend.core.session_manager import SessionManager, _TokenBucket
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
@@ -244,6 +246,32 @@ class TestAddNodesToSession:
         assert result["success"] is False
         assert "not found" in result["error"]
 
+    def test_unknown_session_is_reported_when_no_id_resolves_either(self, tools):
+        """no_resolvable_nodes must not mask the session-not-found error."""
+        tools_map, _ = tools
+        result = tools_map["add_nodes_to_session"](
+            session_id="9999-9999", node_ids=["ghost"]
+        )
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_an_unknown_session_is_reported_before_any_node_is_resolved(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        lookups = []
+        original = storage.get_node
+        storage.get_node = lambda node_id: (lookups.append(node_id), original(node_id))[
+            1
+        ]
+        tools_map, _ = _wire(storage, service)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id="9999-9999", node_ids=["a", "b"]
+        )
+
+        assert "not found" in result["error"]
+        assert lookups == []
+
     def test_empty_node_ids_is_rejected(self, tools):
         tools_map, manager = tools
         sid = _session(manager)
@@ -314,6 +342,104 @@ class TestAddNodesToSession:
         assert result["success"] is False
         assert result["error"] == "too_large"
         assert lookups == []
+
+    def test_a_repeated_id_draws_one_token_from_the_rate_budget(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        manager._mcp_bucket = _TokenBucket(1.0, 0.0)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha"] * 10
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+
+    def test_a_repeated_id_counts_once_against_the_batch_cap(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_ops_per_batch=2)
+        tools_map["add_nodes"](
+            nodes=[
+                {"id": "alpha", "type": "Initiative", "name": "Alpha"},
+                {"id": "beta", "type": "Actor", "name": "Beta"},
+            ],
+            edges=[],
+        )
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "alpha", "beta", "beta"]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha", "beta"]
+
+    def test_repeated_unhashable_ids_are_skipped_once(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid,
+            node_ids=["alpha", {"id": "b", "x": 1}, {"x": 1, "id": "b"}, [1], [1]],
+        )
+
+        assert result["success"] is True
+        assert result["skipped"] == [{"id": "b", "x": 1}, [1]]
+
+    def test_an_oversized_byte_payload_is_rejected_before_any_node_is_resolved(
+        self, tmp_path
+    ):
+        """The byte cap bounds the per-id resolve too, and says it is a size cap."""
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        lookups = []
+        original = storage.get_node
+        storage.get_node = lambda node_id: (lookups.append(node_id), original(node_id))[
+            1
+        ]
+        tools_map, manager = _wire(storage, service, max_op_batch_bytes=50)
+        sid = _session(manager)
+        node_ids = ["x" * 30, "y" * 30]
+        assert len(json.dumps(node_ids)) > 50
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
+
+        assert result["success"] is False
+        assert result["error"] == "too_large"
+        assert "size cap" in result["message"]
+        assert "Too many" not in result["message"]
+        assert lookups == []
+
+    def test_the_byte_cap_counts_a_repeated_id_once(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_op_batch_bytes=50)
+        long_id = "n" * 30
+        tools_map["add_nodes"](
+            nodes=[{"id": long_id, "type": "Actor", "name": "Long"}], edges=[]
+        )
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=[long_id, long_id]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == [long_id]
+
+    def test_an_oversized_count_names_the_count_cap(self, tmp_path):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_ops_per_batch=2)
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["a", "b", "c"]
+        )
+
+        assert result["error"] == "too_large"
+        assert "Too many node ids" in result["message"]
 
     def test_an_unadopted_federated_search_result_id_is_not_addable(self, tmp_path):
         """The tool sends agents to search_graph, which can return remote ids.
@@ -469,3 +595,29 @@ class TestAuthorization:
         assert {(c.action, c.target) for c in hook.seen_contexts} == {
             ("mutate", "add_nodes_to_session")
         }
+
+
+def test_every_session_tool_names_both_accepted_session_id_forms(tools):
+    """SESSION_ID_RE accepts DDDD-DDDD as well as DDDD-DDDD-DDDD-DDDD, and the
+    tools' own docstring examples use the short form, so an invalid-id error
+    that names only the long form would steer a caller away from a valid id."""
+    tools_map, _ = tools
+    checked = []
+    for name, tool in tools_map.items():
+        params = inspect.signature(tool).parameters
+        if "session_id" not in params:
+            continue
+        kwargs = {
+            p.name: None
+            for p in params.values()
+            if p.default is inspect.Parameter.empty
+        }
+        kwargs["session_id"] = "nope"
+        result = tool(**kwargs)
+        assert "Invalid session ID format" in result["error"], name
+        assert "DDDD-DDDD-DDDD-DDDD" in result["error"], name
+        assert "older DDDD-DDDD form" in result["error"], name
+        checked.append(name)
+    assert "add_nodes_to_session" in checked
+    assert "apply_visualization_layout" in checked
+    assert "rename_visualization_session" in checked
