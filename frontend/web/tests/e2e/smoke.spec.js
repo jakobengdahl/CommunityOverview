@@ -61,9 +61,9 @@ test.describe('desktop shell', () => {
     const body = await (await searched).json();
     expect(body.nodes).toEqual([]);
 
-    // The spinner clears in the same render that applies the results, so the
-    // absence checks below run against the rendered outcome, not before it.
-    await expect(page.locator('.floating-search-spinner')).toHaveCount(0);
+    // Set together with the results, so the absence checks below run against
+    // the rendered outcome for this query, not before it.
+    await expect(page.locator('.floating-search')).toHaveAttribute('data-results-query', query);
     await expect(input).toHaveValue(query);
     await expect(page.locator('.floating-search-dropdown')).toHaveCount(0);
     await input.press('Enter');
