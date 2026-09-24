@@ -100,6 +100,32 @@ def test_adopt_federated_node_creates_local_clone(tmp_path):
     assert len(result["added_edge_ids"]) == 1
 
 
+def test_adopted_node_keeps_the_remote_aliases_and_subtypes(tmp_path):
+    """The adopted copy must keep the aliases and subtypes the federated node was
+    found by, so it stays findable by them in local search."""
+    service = _service_with_cached_federated_node(
+        tmp_path,
+        source_node={
+            "id": "remote-1",
+            "type": "Actor",
+            "name": "External Node",
+            "aliases": ["eSam", "Second Alias"],
+            "subtypes": ["Agency", "Board"],
+        },
+    )
+
+    result = service.adopt_federated_node("federated::esam-main::remote-1")
+
+    assert result["success"] is True
+    adopted = service.storage.get_node(result["adopted_node"]["id"])
+    assert (adopted.aliases, adopted.subtypes) == (
+        ["eSam", "Second Alias"],
+        ["Agency", "Board"],
+    )
+    found = service.search_graph(query="second alias", limit=10)
+    assert result["adopted_node"]["id"] in [node["id"] for node in found["nodes"]]
+
+
 def test_adopted_node_appears_once_in_search_graph_with_correct_federated_count(
     tmp_path,
 ):
@@ -312,8 +338,8 @@ def test_search_graph_trims_a_federated_window_that_overflows_the_free_slots(
     windows = []
     real_search = manager.search_nodes
 
-    def _record(**kwargs):
-        found = real_search(**kwargs)
+    def _record(*args, **kwargs):
+        found = real_search(*args, **kwargs)
         windows.append([node.id for node in found["nodes"]])
         return found
 

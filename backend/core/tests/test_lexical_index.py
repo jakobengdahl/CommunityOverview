@@ -128,7 +128,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
 
     def test_a_node_added_after_the_first_search_is_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "first node")], [])
         assert [n.id for n in storage.search_nodes(query="first")] == ["a"]
 
@@ -139,7 +139,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "before")], [])
         assert [n.id for n in storage.search_nodes(query="before")] == ["a"]
 
@@ -149,7 +149,7 @@ class TestTheCorpusNoticesEveryWayItCanGoStale:
 
     def test_a_deleted_node_stops_being_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        storage = GraphStorage()
+        storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         storage.add_nodes([_node("a", "doomed"), _node("b", "surviving")], [])
         assert [n.id for n in storage.search_nodes(query="doomed")] == ["a"]
 
@@ -687,7 +687,7 @@ class TestTheIndexAlwaysCoversTheNodesItAnswersFor:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
         finally:
             os.chdir(cwd)
             # Building a GraphStorage resolves the config loader against the
@@ -844,7 +844,7 @@ class TestAReloadLeavesTheIndexIteratingInStepWithTheNodes:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
             storage.add_nodes([_node(i, f"{i} widget") for i in ids], [])
 
             for _ in range(15):  # make the corpus worth rebuilding
@@ -943,7 +943,7 @@ class TestTwoWritesInFlightCannotHideEachOther:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            storage = GraphStorage()
+            storage = GraphStorage(json_path=str(tmp_path / "graph.json"))
             seen = []
             real = LexicalIndex.__setitem__
 
@@ -1024,7 +1024,15 @@ class TestEveryWritePathOrdersTheIndexAgainstTheNodes:
         cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            return GraphStorage(), cwd, reset_loader
+            # An absolute graph path, not the relative default: the write
+            # lands on a background worker that can run after the caller has
+            # restored the working directory, and a relative path then puts
+            # the journal and history files in the repository root.
+            return (
+                GraphStorage(json_path=str(tmp_path / "graph.json")),
+                cwd,
+                reset_loader,
+            )
         except Exception:
             os.chdir(cwd)
             raise

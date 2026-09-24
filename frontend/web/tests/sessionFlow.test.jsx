@@ -102,15 +102,21 @@ class FakeEventSource {
     this.onmessage = null;
     this.onerror = null;
     FakeEventSource.instances.push(this);
-    setTimeout(() => {
+    const configuredSeq = FakeEventSource.snapshotSeqByUrl[url.split('?')[0]];
+    const deliver = () =>
       this.onmessage?.({
-        data: JSON.stringify({ type: 'snapshot', seq: 0, session: { state: {} } }),
+        data: JSON.stringify({ type: 'snapshot', seq: configuredSeq ?? 0, session: { state: {} } }),
       });
-    }, 0);
+    // A configured seq is delivered on a microtask: it lands after the load's
+    // setBaseline but before App re-renders with the new session id, the
+    // window where App's handlers are still bound to the previous session.
+    if (configuredSeq === undefined) setTimeout(deliver, 0);
+    else queueMicrotask(deliver);
   }
   close() {}
 }
 FakeEventSource.instances = [];
+FakeEventSource.snapshotSeqByUrl = {};
 global.EventSource = FakeEventSource;
 
 // The sync client posts op batches with global fetch; capture them.
@@ -150,6 +156,7 @@ describe('Server-backed session lifecycle', () => {
     window.localStorage.clear();
     useGraphStore.getState().clearVisualization();
     FakeEventSource.instances = [];
+    FakeEventSource.snapshotSeqByUrl = {};
     // Reset, or a leftover value from the previous test satisfies the "canvas
     // has rendered" barrier below and it stops being a barrier at all.
     canvasProps.baselineEpoch = null;
@@ -943,6 +950,161 @@ describe('Server-backed session lifecycle', () => {
     expect(useGraphStore.getState().hiddenNodeIds || []).not.toContain('ghost-node');
 
     getPendingOpsSpy.mockRestore();
+  });
+
+  // A resync for the session being left, still waiting on its reload, must
+  // not swallow the first-snapshot resync of the session just switched to:
+  // the old call bails at its switched-away check, so nothing else would
+  // reload the new session and its canvas would stay on the stale load.
+  it('a slow resync for the session being left does not block the new session first-snapshot resync', async () => {
+    sessionStore.touchSession('5555-6666');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/5555-6666/stream'] = 7;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+
+    let releaseOldReload;
+    const oldReloadGate = new Promise((resolve) => {
+      releaseOldReload = resolve;
+    });
+    let gateOtherSessions = false;
+    let targetLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id === '5555-6666') {
+        targetLoads += 1;
+        // The load is older (seq 3) than the stream's first snapshot (seq 7);
+        // only the resync that snapshot triggers returns node-c.
+        const nodes = targetLoads === 1 ? [NODE_B] : [NODE_B, NODE_C];
+        return {
+          id,
+          seq: targetLoads === 1 ? 3 : 7,
+          state: { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] },
+          resolved: { nodes, edges: [] },
+          roster: [],
+        };
+      }
+      if (gateOtherSessions) {
+        await oldReloadGate;
+        return { id, state: {}, resolved: { nodes: [NODE_A], edges: [] }, roster: [] };
+      }
+      return originalGetSession(id, opts);
+    });
+
+    try {
+      const { container } = renderApp();
+      act(() => {
+        useGraphStore.getState().updateVisualization([NODE_A], []);
+      });
+      const toolbarButtons = container.querySelectorAll('.floating-toolbar-item');
+      fireEvent.click(toolbarButtons[toolbarButtons.length - 1]);
+      await waitFor(() => screen.getByText('Save View'));
+
+      const oldSource = await waitFor(() => {
+        const found = FakeEventSource.instances.find(
+          (es) => es.url.includes('/api/sessions/') && es.url.includes('/stream')
+        );
+        expect(found).toBeTruthy();
+        return found;
+      });
+      const oldSessionId = oldSource.url.split('/api/sessions/')[1].split('/')[0];
+
+      gateOtherSessions = true;
+      act(() => {
+        oldSource.onmessage({
+          data: JSON.stringify({
+            type: 'catch_up',
+            seq: 5,
+            ops: [{ op: 'nodes_hidden', node_ids: [] }],
+            roster: [],
+            claims: {},
+          }),
+        });
+      });
+      await waitFor(() =>
+        expect(api.getSession).toHaveBeenCalledWith(oldSessionId, { resolve: true })
+      );
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+
+      await waitFor(() => expect(targetLoads).toBe(2));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b', 'node-c']);
+      });
+
+      // The old reload settling late must not clobber the new session's canvas.
+      await act(async () => {
+        releaseOldReload();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b', 'node-c']);
+    } finally {
+      releaseOldReload();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // Switching away and back builds a new sync client for the same session
+  // id. Its first-snapshot resync must not be swallowed by the resync the
+  // previous client for that id left in flight, and that older resync, when
+  // it finally settles, must not overwrite the newer reload.
+  it('a slow resync from an earlier visit does not block the resync on returning to the session', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3, older than the stream's seq 9) — 2: the resync
+      // that first snapshot triggers, held open — 3: the reload on returning
+      // — 4: the returning client's own first-snapshot resync.
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      const nodes = call === 4 ? [NODE_A, NODE_C] : [NODE_A];
+      return { id, seq: call === 4 ? 9 : 3, state: emptyState, resolved: { nodes, edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(4));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+    } finally {
+      releaseFirstResync();
+      api.getSession.mockImplementation(originalGetSession);
+    }
   });
 
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {

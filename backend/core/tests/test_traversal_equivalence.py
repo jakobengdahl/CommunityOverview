@@ -86,6 +86,21 @@ def schema():
         conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
 
 
+class _VanishingOnLookup(dict):
+    """Says yes, then loses the key - exactly one id, exactly once."""
+
+    def __init__(self, *args, victim=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.victim = victim
+
+    def __contains__(self, key):
+        present = super().__contains__(key)
+        if key == self.victim:
+            super().pop(key, None)
+            self.victim = None
+        return present
+
+
 def _reference(nodes, edges, anchor, depth, types, include_archived):
     """The in-memory walk, which is the contract the store must match."""
     import networkx as nx
@@ -1395,20 +1410,6 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
 
-        class _VanishingOnLookup(dict):
-            """Says yes, then loses the key - exactly one id, exactly once."""
-
-            def __init__(self, *args, victim=None, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.victim = victim
-
-            def __contains__(self, key):
-                present = super().__contains__(key)
-                if key == self.victim:
-                    super().pop(key, None)
-                    self.victim = None
-                return present
-
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         storage = GraphStorage(persistence_backend=backend)
         try:
@@ -1731,3 +1732,67 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         finally:
             psycopg.Connection.execute = original
             backend.close()
+
+
+class TestTheWalkResolvesEachIdOnce:
+    """The walk is also the fallback, and it reads `nodes` and `edges` without
+    the lock every mutator holds. Resolving a result with a membership test and
+    then an index observes the dict twice; a delete landing between the two
+    raised KeyError out of the traversal. These drive the walk directly, so the
+    store cannot answer in its place and hide the window.
+    """
+
+    @staticmethod
+    def _graph(nodes, edges):
+        import networkx as nx
+
+        graph = nx.MultiDiGraph()
+        for node in nodes.values():
+            graph.add_node(node.id, data=node)
+        for edge in edges.values():
+            graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
+        return graph
+
+    @staticmethod
+    def _fixture():
+        nodes = {
+            "a": Node(id="a", type=NodeType.ACTOR, name="a"),
+            "b": Node(id="b", type=NodeType.ACTOR, name="b"),
+        }
+        edges = {
+            "ab": Edge(
+                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
+            )
+        }
+        return nodes, edges
+
+    def test_a_node_deleted_between_check_and_lookup_does_not_raise(self):
+        nodes, edges = self._fixture()
+        graph = self._graph(nodes, edges)
+        vanishing = _VanishingOnLookup(nodes, victim="b")
+
+        result = storage_search.get_related_nodes(vanishing, edges, graph, "a")
+
+        assert {n.id for n in result["nodes"]} == {"a", "b"}
+        assert {e.id for e in result["edges"]} == {"ab"}
+
+    def test_an_edge_deleted_between_check_and_lookup_does_not_raise(self):
+        nodes, edges = self._fixture()
+        graph = self._graph(nodes, edges)
+        vanishing = _VanishingOnLookup(edges, victim="ab")
+
+        result = storage_search.get_related_nodes(nodes, vanishing, graph, "a")
+
+        assert {n.id for n in result["nodes"]} == {"a", "b"}
+        assert {e.id for e in result["edges"]} == {"ab"}
+
+    def test_an_id_that_is_already_gone_is_dropped_not_returned_as_none(self):
+        nodes, edges = self._fixture()
+        graph = self._graph(nodes, edges)
+        del nodes["b"]
+        del edges["ab"]
+
+        result = storage_search.get_related_nodes(nodes, edges, graph, "a")
+
+        assert [n.id for n in result["nodes"]] == ["a"]
+        assert result["edges"] == []
