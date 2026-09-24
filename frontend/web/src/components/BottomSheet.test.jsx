@@ -160,8 +160,12 @@ describe('BottomSheet', () => {
 
       // Start a drag but never fire pointerup - e.g. Escape or a surface
       // manager closes the sheet mid-gesture, unmounting the handle before
-      // finishDrag runs and clears dragStateRef.
-      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointerdown', 300, 1);
+      // finishDrag runs and clears dragStateRef. A distinct pointerId and
+      // start Y from the later drag, so a leftover dragStateRef can neither
+      // accept that drag's events nor coincidentally yield the same snap.
+      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointerdown', 800, 7);
+      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointermove', 850, 7);
+      expect(screen.getByRole('dialog').style.transform).toBe('translateY(50px)');
 
       rerender(
         <BottomSheet
@@ -183,6 +187,9 @@ describe('BottomSheet', () => {
           <button type="button">first</button>
         </BottomSheet>
       );
+
+      // The abandoned gesture's offset must not paint on the new open.
+      expect(screen.getByRole('dialog').style.transform).toBe('');
 
       // A fresh pointerdown must start a new drag, not be swallowed by a
       // dragStateRef the abandoned gesture left set.

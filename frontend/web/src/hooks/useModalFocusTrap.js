@@ -10,7 +10,7 @@ export function getFocusableElements(container) {
 
 /**
  * useModalFocusTrap - the modal focus contract shared by BottomSheet and the
- * mobile SessionDrawer overlay: while `active`, body scroll is locked, focus
+ * mobile SessionDrawer and ActivityDrawer overlays: while `active`, body scroll is locked, focus
  * moves into `containerRef` (its first focusable descendant, else the
  * container itself), and on deactivation both the previous overflow value
  * and the previously focused element are restored.
@@ -18,8 +18,9 @@ export function getFocusableElements(container) {
  * Returns `trapTabKey(event)`, which callers invoke from their own keydown
  * handler: it wraps Tab / Shift+Tab at the ends of the container and pulls
  * focus back in when it has escaped. Escape is left to the caller, because
- * the two consumers close differently (BottomSheet listens on its own
- * element; SessionDrawer listens on the document and peels menus first).
+ * the consumers close differently (BottomSheet listens on its own element;
+ * SessionDrawer listens on the document and peels menus first; ActivityDrawer
+ * listens on the document and closes outright).
  */
 export function useModalFocusTrap(containerRef, active) {
   const lastFocusedRef = useRef(null);
