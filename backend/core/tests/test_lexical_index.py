@@ -1271,8 +1271,9 @@ def _watch_candidates(monkeypatch, index):
 class TestTheBandBetweenTheFloorAndTheFraction:
     """At 200 nodes a quarter is 50, so the floor of 64 is what decides between
     51 and 64 hits. No fixture sat in that band: the small ones never reach 51
-    hits and the big ones are far past 64. So the floor could be dropped, or
-    the candidate list cut short, and every test still passed."""
+    hits and the big ones are far past 64. Dropping the floor outright is
+    caught elsewhere, by a two-node graph; lowering it into the band, or
+    cutting the candidate list short, passed every test."""
 
     @staticmethod
     def _graph(hits):
@@ -1468,7 +1469,8 @@ class TestTheRecordViewIsLive:
 
 def _tier_node(node_id, **kwargs):
     kwargs.setdefault("name", f"plain {node_id}")
-    return Node(id=node_id, type=NodeType.ACTOR, **kwargs)
+    kwargs.setdefault("type", NodeType.ACTOR)
+    return Node(id=node_id, **kwargs)
 
 
 class TestEveryTierBeatsTheOneBelowItWhenInsertedSecond:
@@ -1602,11 +1604,53 @@ class TestEveryTierBeatsTheOneBelowItWhenInsertedSecond:
             "won on insertion order"
         )
 
+    # Node types are schema-defined strings, so one type can carry the query
+    # as its whole name, another as a prefix, and a third only in its label.
+    TYPE_LABELS = {"Gadget": "gadget widget"}
+
+    @pytest.mark.parametrize(
+        "weaker,stronger",
+        [
+            pytest.param(
+                {"type": "WidgetKind"},
+                {"type": "Widget"},
+                id="type exact over type prefix",
+            ),
+            pytest.param(
+                {"type": "Gadget"},
+                {"type": "WidgetKind"},
+                id="type prefix over type label",
+            ),
+            pytest.param(
+                {"tags": ["widget"]},
+                {"type": "Gadget"},
+                id="type label over tag exact",
+            ),
+        ],
+    )
+    def test_the_stronger_type_tier_ranks_first(self, weaker, stronger):
+        weak = _tier_node("weaker", **weaker)
+        strong = _tier_node("stronger", **stronger)
+        by_id = {"weaker": weak, "stronger": strong}
+
+        found = search_nodes(
+            by_id,
+            _index_with([weak, strong], self.TYPE_LABELS),
+            self.TYPE_LABELS,
+            query="widget",
+            limit=10,
+        )
+
+        assert [n.id for n in found] == ["stronger", "weaker"], (
+            "the stronger type tier did not outscore the weaker one"
+        )
+
 
 class TestLocalizedTypeLabelsRankEndToEnd:
-    """Every search fixture passed an empty `type_searchable_text`, so the type
-    limb - a label reaching the record's text and `score_type` reading it off
-    the record - never ran through a search."""
+    """Every `search_nodes` fixture in this file passed an empty
+    `type_searchable_text`. `test_storage.py` ranks a label through
+    GraphStorage, but nothing here pinned the pure function's side: a label
+    reaching the record's text and `score_type` reading it off the record."""
 
     LABELS = {"Actor": "actor aktör"}
 
@@ -1729,7 +1773,10 @@ class TestAReaderInsideTheReloadSwapIsNotAnsweredFromTheOldGraph:
 
 
 class TestTheSmallerStepsEachHaveATest:
-    """Each of these was unpinned: the suite passed with it reversed."""
+    """One test per step, so each fails on its own name. Sort-then-truncate and
+    the replacing `update` were unpinned before these; the guard, the
+    searchsorted side and the offset step were already caught, but only
+    indirectly, by tests about something else."""
 
     def test_the_ranking_sorts_before_it_truncates(self):
         """Cutting to `limit` in scan order and sorting what is left returns
@@ -1750,9 +1797,10 @@ class TestTheSmallerStepsEachHaveATest:
             assert [n.id for n in found] == ["strong"], match_mode
 
     def test_update_replaces_a_record_it_already_holds(self):
-        """`update` is how a reload refills the index. With `setdefault`
-        semantics a record for an id already present would survive the
-        reload, and the node would go on matching its old text."""
+        """`update` must replace, like `dict.update`, for any caller. `load`
+        does not depend on it today - it empties the index before refilling -
+        so this pins the method rather than a reload: with `setdefault`
+        semantics an id already present would keep matching its old text."""
         index = _index([_node("a", "oldtext")])
         index.update({"a": build_match_fields(_node("a", "newtext"), TYPE_TEXT)})
         _let_the_index_rebuild(index)
