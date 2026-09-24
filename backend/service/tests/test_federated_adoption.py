@@ -181,8 +181,9 @@ def test_adopted_node_carries_none_of_the_build_cache_bookkeeping_keys(tmp_path)
 
 @pytest.mark.parametrize(
     "limit,tags_any",
-    # Match-all without filters: limits up to the four local nodes.
-    [(limit, None) for limit in range(1, 5)]
+    # Match-all without filters: the federated window must refill the slots its
+    # repeated stub ids take, so remote-3 still arrives at limit 5 and 6.
+    [(limit, None) for limit in range(1, 7)]
     # Tag filter widens the federated fetch to the whole cache.
     + [(limit, ["t"]) for limit in range(1, 7)],
 )
@@ -236,6 +237,59 @@ def test_search_graph_dedups_before_the_limit_trim_on_the_widened_path(tmp_path)
 
     assert set(node_ids) == eligible_ids
     assert result["total"] == len(node_ids) == len(eligible_ids)
+
+
+def test_search_graph_federated_window_refills_slots_taken_by_local_stub_ids(
+    tmp_path,
+):
+    """Without a filter the federated fetch is not widened to the whole cache.
+    After adopting remote-1 the window repeats the stub's id, which the dedup
+    pass drops; the window must be sized so remote-3 still fills the last slot,
+    while the local nodes keep their places ahead of every federated one."""
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    adopted = service.adopt_federated_node("federated::esam-main::remote-1")
+    assert adopted["success"] is True
+    local_ids = [adopted["adopted_node"]["id"], "federated::esam-main::remote-1"]
+
+    result = service.search_graph(query="", limit=4)
+    node_ids = [node["id"] for node in result["nodes"]]
+
+    assert sorted(node_ids[:2]) == sorted(local_ids)
+    assert set(node_ids[2:]) == {
+        "federated::esam-main::remote-2",
+        "federated::esam-main::remote-3",
+    }
+    assert result["total"] == 4
+
+
+def test_search_graph_federated_window_is_not_widened_without_local_stubs(
+    tmp_path, monkeypatch
+):
+    """With no adopted node nothing local can repeat in the window, so the
+    federated fetch asks for exactly the free slots."""
+    service = _service_with_cached_federated_node(
+        tmp_path, source_nodes=_TAGGED_REMOTE_NODES
+    )
+    service.storage.add_nodes(
+        [Node(id="local-a", type=NodeType.ACTOR, name="Local A")], []
+    )
+    manager = service._federation_manager
+    requested = []
+    real_search = manager.search_nodes
+
+    def _record(**kwargs):
+        requested.append(kwargs["limit"])
+        return real_search(**kwargs)
+
+    monkeypatch.setattr(manager, "search_nodes", _record)
+
+    result = service.search_graph(query="", limit=3)
+
+    assert requested == [2]
+    assert [node["id"] for node in result["nodes"]][0] == "local-a"
+    assert result["total"] == 3
 
 
 def test_search_graph_keeps_same_named_local_nodes_with_different_ids(tmp_path):
