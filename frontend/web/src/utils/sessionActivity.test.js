@@ -972,6 +972,96 @@ describe('describeActivity', () => {
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
+
+    it('reports a style key drop on a kind outside label/line as a restyle', () => {
+      // Only the label/line translators changed between builds; whatever
+      // note/shape drop is the same in every build and already shows in
+      // `browserWriteBack`, so a style narrowed to {color, opacity} there is
+      // a real edit.
+      for (const type of ['note', 'shape']) {
+        const stored = {
+          id: 's1',
+          type,
+          position: { x: 0, y: 0 },
+          z: 0,
+          locked: false,
+          style: { color: 'red', opacity: 0.5, dash: 'dotted' },
+        };
+        const r = record({
+          op: 'annotation_updated',
+          before: stored,
+          after: { ...stored, style: { color: 'red', opacity: 0.5 } },
+        });
+        expect(describeActivity(r).key, type).toBe('history.desc.annotation_updated_style');
+      }
+    });
+
+    it('reports a label that also lost a named key as a restyle', () => {
+      // An older build kept fontSize, so its write-back never drops it.
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a change to an uncontrolled style key alone as a restyle', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { ...label.style, dash: 'dashed' } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a partial drop of uncontrolled style keys as a restyle', () => {
+      // An older build dropped every key beyond the named ones, never some.
+      const twoExtra = { ...label, style: { ...label.style, width: 2 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: twoExtra,
+        after: { ...twoExtra, style: label.style },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it("treats a line's fontSize as a key older builds dropped", () => {
+      const withFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: withFontSize,
+        after: { ...withFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it("recognises an older build's drop on records that carry only type", () => {
+      const { kind: _kind, ...labelByType } = label;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByType,
+        after: { ...labelByType, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it("recognises an older build's drop on records that carry only kind", () => {
+      const { type: _labelType, ...labelByKind } = label;
+      const { type: _lineType, ...lineByKind } = line;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByKind,
+        after: { ...labelByKind, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+      const olderArrowhead = record({
+        op: 'annotation_updated',
+        before: lineByKind,
+        after: { ...lineByKind, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    });
   });
 
   describe('shape spelling', () => {
