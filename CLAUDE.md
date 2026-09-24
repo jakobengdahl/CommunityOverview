@@ -849,8 +849,10 @@ only other language with full coverage today.
 
 `LANGUAGE_SWITCHING_ENABLED` in `index.jsx` is currently `false`: the UI is held
 English-only and the selector in `SettingsDialog.jsx` is not rendered, so a new
-language's button stays hidden until that flag is flipped (and the
-`index.test.jsx` assertion that pins it to `false` is updated).
+language's button stays hidden until that flag is flipped. Flipping it also means
+replacing the tests that pin the English-only state: the "interim English-only
+lock" block in `frontend/web/src/i18n/index.test.jsx` and the hidden-selector
+test in `frontend/web/tests/SettingsDialog.test.jsx`.
 
 ---
 
