@@ -249,21 +249,24 @@ function shapeChanged(before, after) {
 // counted them would report every update as a change to them.
 const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
 
+// The only style keys the label/line translators carried before
+// smallfix-label-overlay-drops-nonvisual-style-keys.
+const OLDER_BUILD_STYLE_KEYS = {
+  label: ['color', 'fontSize', 'opacity'],
+  line: ['color', 'opacity'],
+};
+
 /**
  * Whether `after.style` is exactly what a build from before
  * smallfix-label-overlay-drops-nonvisual-style-keys wrote back for `before`:
- * its label/line translators carried only these keys and dropped the rest.
+ * its label/line translators carried only OLDER_BUILD_STYLE_KEYS and
+ * dropped the rest.
  * The log keeps 7 days, so it holds such records — and a browser tab still
  * on that build — and without this their dropped keys would read as a
  * restyle the user never made. A change to exactly that projection is then
  * indistinguishable from the drop, so it reads as a plain update instead:
  * the same safe-direction asymmetry `browserWriteBack` describes.
  */
-const OLDER_BUILD_STYLE_KEYS = {
-  label: ['color', 'fontSize', 'opacity'],
-  line: ['color', 'opacity'],
-};
-
 function olderBuildStyleWriteBack(before, after) {
   const annotationType = before.type || before.kind;
   const keys = OLDER_BUILD_STYLE_KEYS[annotationType];
