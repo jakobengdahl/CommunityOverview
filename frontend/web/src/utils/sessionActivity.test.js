@@ -1004,6 +1004,15 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
 
+    it('reports a change to an uncontrolled style key alone as a restyle', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { ...label.style, dash: 'dashed' } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
     it("treats a line's fontSize as a key older builds dropped", () => {
       const withFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
       const r = record({
@@ -1012,6 +1021,16 @@ describe('describeActivity', () => {
         after: { ...withFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it("recognises an older build's drop on records that carry only type", () => {
+      const { kind: _kind, ...labelByType } = label;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByType,
+        after: { ...labelByType, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
     });
 
     it("recognises an older build's drop on records that carry only kind", () => {
