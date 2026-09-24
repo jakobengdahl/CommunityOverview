@@ -287,9 +287,14 @@ def test_search_graph_federated_window_refills_slots_taken_by_local_stub_ids(
     assert result["total"] == 4
 
 
-@pytest.mark.parametrize("adopted_remote", ["remote-1", "remote-2", "remote-3"])
+# The two-node window is the cache's first two remotes, so only adopting
+# remote-3 leaves the stub's id outside it and makes the window overflow.
+@pytest.mark.parametrize(
+    "adopted_remote,overflows",
+    [("remote-1", False), ("remote-2", False), ("remote-3", True)],
+)
 def test_search_graph_trims_a_federated_window_that_overflows_the_free_slots(
-    tmp_path, adopted_remote
+    tmp_path, monkeypatch, adopted_remote, overflows
 ):
     """The stub-overlap widening asks for one extra federated node per local
     stub. When the stub's own id is not in the window that extra node is not
@@ -303,7 +308,21 @@ def test_search_graph_trims_a_federated_window_that_overflows_the_free_slots(
     assert adopted["success"] is True
     local_ids = [adopted["adopted_node"]["id"], stub_id]
 
+    manager = service._federation_manager
+    windows = []
+    real_search = manager.search_nodes
+
+    def _record(**kwargs):
+        found = real_search(**kwargs)
+        windows.append([node.id for node in found["nodes"]])
+        return found
+
+    monkeypatch.setattr(manager, "search_nodes", _record)
+
     result = service.search_graph(query="", limit=3)
+    free_slots = 3 - len(local_ids)
+    (window,) = windows
+    assert (len(set(window) - set(local_ids)) > free_slots) is overflows
     node_ids = [node["id"] for node in result["nodes"]]
 
     assert len(node_ids) == len(set(node_ids)) == 3
