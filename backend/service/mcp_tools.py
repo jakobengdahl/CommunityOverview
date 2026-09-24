@@ -1885,10 +1885,17 @@ def register_mcp_tools(
         Create a new, empty visualization session and return its identity.
 
         Use this to prepare a named session from scratch: create it, add nodes
-        with the search/related tools (passing the returned session id as
-        ``visualization_session_id``), inspect its geometry with
+        with ``add_nodes_to_session``, inspect its geometry with
         ``get_visualization_layout``, arrange it with
         ``apply_visualization_layout``, then hand the user its link.
+
+        ``add_nodes_to_session`` writes the session's stored state whether or
+        not anyone has it open. Passing the session id as
+        ``visualization_session_id`` to the search/related tools is not a
+        substitute: a push writes no session state, so its nodes land only if a
+        canvas receives it and adds them. Check ``visualization_delivery``
+        (``delivered``, ``status``) on such a result before assuming the push
+        reached anything.
 
         Args:
             name: Optional display name. Names are not required to be unique; when

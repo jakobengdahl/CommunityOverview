@@ -1091,8 +1091,11 @@ returned `revision` into the next `expected_revision`.
   ```python
   s = create_visualization_session(name="Q3 dependency map")
   sid = s["session"]["session_id"]
-  # put the exact node set on the canvas (or push results into it with
-  # search_graph/get_related_nodes and visualization_session_id=sid):
+  # put the exact node set in the session's stored state. Pushing results with
+  # search_graph/get_related_nodes and visualization_session_id=sid stores
+  # nothing unless a canvas receives the push and adds them; check
+  # visualization_delivery (delivered, status) on that result before assuming
+  # the push reached anything:
   added = add_nodes_to_session(session_id=sid, node_ids=["init-a", "init-b"])
   # then arrange with apply_visualization_layout as above, threading
   # expected_revision=added["revision"], then:
