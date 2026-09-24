@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { X, ClockHistory, ArrowClockwise } from 'react-bootstrap-icons';
 import { useI18n } from '../i18n';
 import { useViewportMode } from '../hooks/useViewportMode';
+import { useModalFocusTrap } from '../hooks/useModalFocusTrap';
 import useGraphStore from '../store/graphStore';
 import * as api from '../services/api';
 import HistoryList from './HistoryList';
@@ -11,18 +12,6 @@ import './ActivityDrawer.css';
 
 const GRAPH_PAGE_SIZE = 25;
 const SESSION_ACTIVITY_LIMIT = 100;
-
-// Mirrors the focus-trap contract SessionDrawer.jsx and BottomSheet.jsx now
-// share through hooks/useModalFocusTrap.js, applied here only for the mobile
-// full-screen variant — see the isMobile-gated effects below. This component
-// still keeps its own copy of that contract rather than using the hook.
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusableElements(container) {
-  if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
-}
 
 /**
  * ActivityDrawer — full-height panel docked to the right screen edge (the
@@ -40,7 +29,6 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
   const { isMobile } = useViewportMode();
   const [tab, setTab] = useState('session');
   const drawerRef = useRef(null);
-  const lastFocusedRef = useRef(null);
 
   // Closing while a descendant still holds focus would commit aria-hidden on
   // an ancestor of the active element in the same render that flips `open`
@@ -174,6 +162,10 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
     }
   }, [sessionId, currentClientId, undoing, loadSessionActivity]);
 
+  // Body scroll lock, focus move-in on open and focus restore on close, for
+  // the mobile full-screen overlay only.
+  const trapTabKey = useModalFocusTrap(drawerRef, open && isMobile);
+
   // Escape closes the drawer regardless of which tab is active. In mobile
   // mode (full-screen overlay) Tab is also trapped inside the drawer, the
   // same contract SessionDrawer.jsx and BottomSheet.jsx use for the sibling
@@ -187,58 +179,11 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
         closeDrawer();
         return;
       }
-      if (!isMobile || e.key !== 'Tab') return;
-
-      const focusables = getFocusableElements(drawerRef.current);
-      if (focusables.length === 0) {
-        e.preventDefault();
-        return;
-      }
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      } else if (!focusables.includes(active)) {
-        e.preventDefault();
-        first.focus();
-      }
+      if (isMobile) trapTabKey(e);
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [open, closeDrawer, isMobile]);
-
-  // Modal focus management for the mobile overlay only: move focus in on
-  // open, restore it to whatever had focus beforehand on close.
-  useEffect(() => {
-    if (!open || !isMobile) return undefined;
-    lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
-
-    const focusable = getFocusableElements(drawerRef.current);
-    (focusable[0] || drawerRef.current)?.focus();
-
-    return () => {
-      const toRestore = lastFocusedRef.current;
-      if (toRestore && typeof toRestore.focus === 'function' && document.contains(toRestore)) {
-        toRestore.focus();
-      }
-    };
-  }, [open, isMobile]);
-
-  // Body scroll lock for the mobile overlay only, mirroring
-  // SessionDrawer.jsx/BottomSheet.jsx's contract.
-  useEffect(() => {
-    if (!isMobile || !open || typeof document === 'undefined') return undefined;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [isMobile, open]);
+  }, [open, closeDrawer, isMobile, trapTabKey]);
 
   const isGraphEmpty = !graphLoading && !graphError && graphEntries.length === 0;
   const undoNoticeKey = undoNotice
@@ -265,8 +210,8 @@ function ActivityDrawer({ open, onClose, sessionId, currentClientId, roster }) {
         aria-modal={isMobile ? open : undefined}
         aria-label={t('history.panel_title')}
         // Matches SessionDrawer.jsx's drawerRef: makes the container itself a
-        // valid focus target so the `focusable[0] || drawerRef.current`
-        // fallback above can move focus into an (unreachable today, but
+        // valid focus target so useModalFocusTrap's first-focusable-else-
+        // container fallback can move focus into an (unreachable today, but
         // defensively handled) drawer with no focusable descendants.
         tabIndex={-1}
       >
