@@ -982,10 +982,12 @@ Whether the connected canvas actually tweens the hint is a *deployment* fact, no
 something a write result can report, so it is published as the `animated_layout`
 capability in `get_capabilities` / `GET /api/capabilities`. A deployment whose
 canvas does not animate says so by declaring that id in its presentation config —
-`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. The
-`name` is required: a capability entry missing it fails validation for the entire
-schema config, which then falls back to defaults and reports the capability as
-enabled — the opposite of what was intended.
+`{"id": "animated_layout", "name": "Animated layout", "enabled": false}`. A
+missing `name` defaults to the id. Capability entries are validated one by one,
+like `rest_interfaces`: an invalid entry is skipped with a logged warning and the
+rest of the schema config still loads. If a skipped entry declared
+`animated_layout`, the capability is reported disabled, never as the enabled
+default.
 
 `add_nodes_to_session` populates the same shared session directly: it takes the
 node ids and applies one `nodes_added` op, so a known set lands on the canvas
