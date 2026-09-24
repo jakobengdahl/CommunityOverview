@@ -13,6 +13,7 @@ import json
 import pytest
 
 from backend.core.session_store import (
+    AnnotationFieldConflict,
     FileSessionPersistenceBackend,
     InMemorySessionPersistenceBackend,
     OpError,
@@ -388,8 +389,58 @@ class TestStateOps:
         # The removal is itself a change to 'text': its field version must
         # track the undo, not the update that added it, or a later
         # base_version check would read 'text' as unchanged since that update.
-        assert restored["version"] > update_version
+        assert restored["version"] == update_version + 1
         assert restored["field_versions"].get("text") == restored["version"]
+
+    def test_stale_patch_to_a_field_undo_removed_conflicts(self, tmp_path):
+        """The consequence of the field-version bump above: a writer still on
+        the update's version that touches 'text' after undo removed it must be
+        told it conflicts, not silently re-add the field."""
+        store = _store(tmp_path)
+        s = store.create()
+        created = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_created",
+                "annotation": {"id": "note-1", "kind": "note"},
+            },
+        )
+        prior_snapshot = copy.deepcopy(created["annotation"])
+        updated = self._apply(
+            store,
+            s,
+            {
+                "op": "annotation_updated",
+                "annotation": {"id": "note-1", "kind": "note", "text": "hi"},
+            },
+        )
+        update_version = updated["annotation"]["version"]
+        store.apply_state_op(
+            s,
+            {"op": "annotation_updated", "annotation": prior_snapshot},
+            record_activity=False,
+            trusted_replay=True,
+        )
+        seq_after_undo = s.seq
+
+        with pytest.raises(AnnotationFieldConflict) as exc:
+            self._apply(
+                store,
+                s,
+                {
+                    "op": "annotation_updated",
+                    "annotation": {
+                        "id": "note-1",
+                        "kind": "note",
+                        "text": "stale edit",
+                    },
+                    "base_version": update_version,
+                },
+            )
+        assert set(exc.value.conflicts) == {"text"}
+        assert "text" not in s.state["annotations"][0]
+        assert s.seq == seq_after_undo
 
     def test_annotation_updated_non_replay_merge_is_unaffected(self, tmp_path):
         """A normal (non-undo) ``annotation_updated`` — trusted_replay=False —
