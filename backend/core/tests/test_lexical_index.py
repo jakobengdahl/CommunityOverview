@@ -1476,10 +1476,7 @@ def _tier_node(node_id, **kwargs):
 class TestEveryTierBeatsTheOneBelowItWhenInsertedSecond:
     """Equal scores keep insertion order, so a pair inserted stronger-first
     still comes out right after the stronger tier collapses onto the one below
-    it. The few weaker-first fixtures elsewhere - the label cases in
-    `test_storage.py`, the strongest-term case above - pit tiers far apart
-    against each other, so none of them catches a collapse onto the ADJACENT
-    tier. Here each adjacent pair goes in weaker-first: the stronger node wins
+    it. Here every adjacent pair goes in weaker-first: the stronger node wins
     only by actually scoring higher."""
 
     @pytest.mark.parametrize(
