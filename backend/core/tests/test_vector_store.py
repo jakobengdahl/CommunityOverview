@@ -491,7 +491,9 @@ def test_compute_node_embeddings_returns_vectors_without_touching_the_index():
     store = VectorStore()
     store.load_vectors({"held": np.array([1.0, 0.0, 0.0], dtype=np.float32)})
     store.model = _FakeModel()
-    before = store.export_vectors()
+    # A copy: export_vectors() hands back the live arrays, so comparing
+    # against it would not see an in-place write.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
     revision_before = store.revision
 
     computed = store.compute_node_embeddings(

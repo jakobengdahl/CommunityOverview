@@ -357,18 +357,13 @@ class TestGenerationStalenessGuard:
         assert stored.result["embeddings_status"] == "superseded"
         assert not storage.vector_store.has_embedding("n2")
 
-    def test_no_replace_can_land_between_the_generation_check_and_the_write(
-        self,
-        store: InMemoryExecutionStore,
-        storage: GraphStorage,
-        monkeypatch,
+    def _run_with_a_replace_hooked_to_the_commits_lock(
+        self, store, storage, monkeypatch, *, fire_on
     ):
-        """The replace in the test above lands during the encode, before
-        ``commit_generation_embeddings`` is entered, so it passes just as well
-        against a commit that checks the generation under the lock, releases
-        it, and re-acquires it to write. This one lands a replace at the first
-        moment the commit gives the lock up — which is after the write only if
-        the check and the write are one critical section."""
+        """Run one import job whose encode finishes normally, and land a real
+        second replace at the commit's first ``acquire`` or first full
+        ``release`` of GraphStorage's lock. Returns the job's generation and
+        whether "shared-1" was already embedded when the replace ran."""
         storage.replace_all_nodes_and_edges(
             [Node(id="shared-1", type=NodeType.ACTOR, name="First content")], []
         )
@@ -381,33 +376,37 @@ class TestGenerationStalenessGuard:
         seen_by_the_replace = []
 
         def _second_import():
+            nonlocal armed
+            armed = False
             seen_by_the_replace.append(storage.vector_store.has_embedding("shared-1"))
             storage.replace_all_nodes_and_edges(
                 [Node(id="shared-1", type=NodeType.ACTOR, name="Second content")],
                 [],
             )
 
-        class _ReplaceOnFirstRelease:
+        class _HookedLock:
             def __enter__(self):
                 nonlocal depth
+                if armed and fire_on == "acquire" and depth == 0:
+                    _second_import()
                 real_lock.acquire()
                 depth += 1
 
             def __exit__(self, *exc):
-                nonlocal armed, depth
+                nonlocal depth
                 depth -= 1
                 real_lock.release()
-                if armed and depth == 0:
-                    armed = False
+                if armed and fire_on == "release" and depth == 0:
                     _second_import()
 
         def _encode_then_arm(nodes):
-            # Armed only now, so the first release it fires on is the commit's.
+            # Armed only now, so the first acquire/release it fires on is the
+            # commit's.
             nonlocal armed
             armed = True
             return {n.id: [1.0, 0.0, 0.0] for n in nodes}
 
-        monkeypatch.setattr(storage, "_lock", _ReplaceOnFirstRelease())
+        monkeypatch.setattr(storage, "_lock", _HookedLock())
         monkeypatch.setattr(
             storage.vector_store, "compute_node_embeddings", _encode_then_arm
         )
@@ -418,9 +417,52 @@ class TestGenerationStalenessGuard:
 
         assert seen_by_the_replace, "the hook never fired: nothing was tested"
         assert storage.generation == job_generation + 1
+        assert storage.get_node("shared-1").name == "Second content"
+        return store.get(job.id), seen_by_the_replace
+
+    def test_the_commit_does_not_release_the_lock_between_its_check_and_its_write(
+        self,
+        store: InMemoryExecutionStore,
+        storage: GraphStorage,
+        monkeypatch,
+    ):
+        """The replace in the tests above lands during the encode, before
+        ``commit_generation_embeddings`` is entered, so they pass just as well
+        against a commit that checks the generation under the lock, releases
+        it, and re-acquires it to write. Here the replace lands at the first
+        moment the commit gives the lock up — which is after the write only if
+        the check and the write are one critical section."""
+        stored, seen_by_the_replace = (
+            self._run_with_a_replace_hooked_to_the_commits_lock(
+                store, storage, monkeypatch, fire_on="release"
+            )
+        )
+
         # The commit was already whole when it first let the lock go ...
         assert seen_by_the_replace == [True]
+        assert stored.state == ExecutionState.SUCCEEDED
         # ... so the replace dropped it, and the first content's vector is not
         # left sitting on the second content's node.
         assert not storage.vector_store.has_embedding("shared-1")
-        assert storage.get_node("shared-1").name == "Second content"
+
+    def test_the_generation_check_is_made_under_the_same_lock_as_the_write(
+        self,
+        store: InMemoryExecutionStore,
+        storage: GraphStorage,
+        monkeypatch,
+    ):
+        """The companion case: a check made BEFORE taking the lock never
+        releases it in between, so the test above cannot see it. Landing the
+        replace just before the commit's first acquire can: a check under the
+        lock then sees the new generation and refuses, while a check made
+        outside it has already passed and writes onto the new graph."""
+        stored, seen_by_the_replace = (
+            self._run_with_a_replace_hooked_to_the_commits_lock(
+                store, storage, monkeypatch, fire_on="acquire"
+            )
+        )
+
+        assert seen_by_the_replace == [False]
+        assert stored.state == ExecutionState.CANCELLED
+        assert stored.result["embeddings_status"] == "superseded"
+        assert not storage.vector_store.has_embedding("shared-1")
