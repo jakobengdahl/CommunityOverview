@@ -3,7 +3,7 @@
 The MCP OAuth Gateway is a small FastAPI service that wraps the CommunityOverview MCP endpoint
 with OAuth 2.1 Authorization Code + PKCE authentication, using Google as the Identity Provider.
 It runs as a separate Cloud Run service per pilot (esam / unece / scb) and per environment
-(prod / dev).
+(prod / preview).
 
 ---
 

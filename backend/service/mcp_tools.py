@@ -357,18 +357,21 @@ def register_mcp_tools(
         before.
 
         By default the query is matched lexically (substring). Multi-word or
-        natural-language queries that no node contains verbatim therefore return
-        nothing; set ``match_mode="any_term"`` to match any single term instead,
-        or ``semantic=True`` to rank nodes by embedding meaning.
-        As a safety net the search also falls back to semantic ranking
-        automatically when a non-empty lexical query yields zero results, so a
-        conceptual query still surfaces the closest nodes. The response includes
-        a ``"semantic"`` boolean indicating whether semantic ranking produced the
-        returned nodes.
+        natural-language queries that no node contains verbatim therefore match
+        nothing lexically; set ``match_mode="any_term"`` to match any single term
+        instead, or ``semantic=True`` to rank nodes by embedding meaning.
+        As a safety net the search falls back to semantic ranking automatically
+        when a non-empty lexical query matches no local node, so such a
+        query's local results come only from that fallback (none where no
+        embedding model is available); federated results stay
+        substring-matched. The response includes a ``"semantic"`` boolean
+        indicating whether semantic ranking produced the returned nodes.
 
         Args:
-            query: Search text (matches against name, description, summary). Use ""
-                to match on the filters alone.
+            query: Search text, matched against a local node's name,
+                description, summary, tags, subtypes, aliases and type label
+                (federated nodes against a subset of these fields). Use "" to
+                match on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)

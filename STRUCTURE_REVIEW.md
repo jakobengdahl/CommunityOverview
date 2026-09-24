@@ -683,8 +683,8 @@ in PR #239; row 13 fully done.)*
    assumption, changed priorities), correct the item text rather than forcing
    the described change — this document must stay true.
 5. New structural findings discovered en route: add them as new rows/items
-   (or `SMALL_FIXES.md` entries if they are small bugs), never fix them in the
-   same branch.
+   (or `small-fix`-tagged Task nodes in the planning graph if they are small
+   bugs, per `CLAUDE.md`), never fix them in the same branch.
 
 ## Completed
 
