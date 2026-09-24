@@ -5,6 +5,7 @@ factory. See docs/adr/0006-graph-import-replace-mode.md.
 """
 
 import os
+import threading
 import time
 
 import pytest
@@ -119,9 +120,16 @@ class TestImportReturnsBeforeEmbeddingsComplete:
     ):
         """POST /import must not block on embedding generation (ADR 0006,
         section 2: "commit is synchronous; embeddings are not"). Proven here
-        with a deliberately slow (mocked) encode step: the HTTP response must
-        come back long before that delay elapses, and the job only reaches a
-        terminal state afterwards."""
+        with an encode step that cannot finish until the test lets it: the
+        HTTP response must come back while that step is still held, and the
+        job only reaches a terminal state once it is released.
+
+        A gate rather than a sleep: timing the response against a sleeping
+        encode step failed under CI load (1.387s against a 2.0s delay) with
+        the endpoint behaving correctly. Nothing here races a clock - an
+        endpoint that waits on the encode step returns only after the gate's
+        timeout has run out, by which point the step has finished and the
+        first assertion below fails, however slow or fast the runner is."""
         json_path = os.path.join(temp_dir, "test.json")
         storage = GraphStorage(json_path=json_path)
         service = GraphService(storage)
@@ -130,35 +138,42 @@ class TestImportReturnsBeforeEmbeddingsComplete:
         app.include_router(router, prefix="/api/graph")
         client = TestClient(app)
 
-        delay_seconds = 2.0
+        # Only bounds how long a blocking endpoint hangs the test before it
+        # fails; a correct endpoint never waits on it.
+        gate_timeout_seconds = 30.0
+        release = threading.Event()
+        finished = threading.Event()
 
-        def _slow_compute(nodes):
-            time.sleep(delay_seconds)
+        def _gated_compute(nodes):
+            release.wait(timeout=gate_timeout_seconds)
+            finished.set()
             return {node.id: [0.1, 0.2, 0.3] for node in nodes}
 
         monkeypatch.setattr(
-            storage.vector_store, "compute_node_embeddings", _slow_compute
+            storage.vector_store, "compute_node_embeddings", _gated_compute
         )
 
-        start = time.monotonic()
-        response = client.post("/api/graph/import", json=_valid_document())
-        elapsed = time.monotonic() - start
+        try:
+            response = client.post("/api/graph/import", json=_valid_document())
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["success"] is True
-        assert body["embeddings_status"] == "queued"
-        assert elapsed < delay_seconds / 2, (
-            f"POST /import took {elapsed:.3f}s against a {delay_seconds}s "
-            "embedding delay — it must return well before embeddings finish, "
-            "not block on them"
-        )
+            assert not finished.is_set(), (
+                "POST /import returned only after embedding generation "
+                "finished - it must return before embeddings finish, not "
+                "block on them"
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["success"] is True
+            assert body["embeddings_status"] == "queued"
 
-        # Immediately after the (fast) response, the job must still be
-        # non-terminal — the slow step genuinely has not run yet.
-        immediate = client.get(f"/api/graph/import/{body['job_id']}").json()
-        assert immediate["status"] in ("queued", "running")
+            # Immediately after the response, the job must still be
+            # non-terminal - the held step genuinely has not completed yet.
+            immediate = client.get(f"/api/graph/import/{body['job_id']}").json()
+            assert immediate["status"] in ("queued", "running")
+        finally:
+            release.set()
 
-        job = _wait_for_terminal(client, body["job_id"], timeout=delay_seconds + 5.0)
+        job = _wait_for_terminal(client, body["job_id"], timeout=10.0)
         assert job["status"] == "succeeded"
         assert job["embeddings_status"] == "succeeded"
+        assert finished.is_set()

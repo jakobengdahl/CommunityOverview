@@ -6,7 +6,11 @@ which may take time on first run. Tests are designed to be skippable
 if the model is not available.
 """
 
+import json
+import subprocess
 import sys
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch
 import numpy as np
@@ -500,10 +504,37 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         what a bytes-derived budget let through - with a second assertion that
         the budget is far under the index, so it cannot pass by being
         generous."""
-        import tracemalloc
+        # tracemalloc's peak is process-wide: it counts every thread's
+        # allocations, not just this search's. By the time the full suite
+        # reaches this file it has left hundreds of live threads behind
+        # (event-delivery workers, executor threads), and one of them waking
+        # inside the window put 16-18 KB on a 70 KB peak - which failed this
+        # budget on main twice in a fortnight. A fresh interpreter has no such
+        # threads, so the measurement runs there, and the child reports its
+        # thread count so that isolation is checked rather than assumed.
+        repo_root = Path(__file__).resolve().parents[3]
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json\n"
+                "from backend.core.tests.test_vector_store import "
+                "_measure_search_peaks\n"
+                "print(json.dumps(_measure_search_peaks()))",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert child.returncode == 0, child.stderr
+        measured = json.loads(child.stdout.strip().splitlines()[-1])
+        assert measured["threads"] == 1, (
+            f"the measuring process had {measured['threads']} threads, so its "
+            f"peak is not this search's alone"
+        )
 
-        store = self._store(4000, dim=256)
-        rows = len(store.node_ids)
+        rows = measured["rows"]
         # What a query legitimately needs is proportional to the NUMBER of
         # nodes - the similarities, their negation, and the argsort's output -
         # and not to the size of the index. So the budget is sized to the
@@ -518,54 +549,27 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         # tried, which is the budget shape this one exists to reject.
         budget = rows * 20
 
-        probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
-        # The FIRST search after the index was built, inside the measurement.
-        # A warm-up outside it hides anything cached per index revision - and
-        # `_update_matrix` runs on every add and every remove, so a workload
-        # that writes between searches pays such a cache every time. Measured,
-        # caching the transposed matrix per revision peaks at 155 MB on a cold
-        # search at 100k x 384 and at nothing at all on a warm one.
-        tracemalloc.start()
-        store.search(query_node=probe_node, limit=10)
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-
+        peak = measured["peak"]
         assert peak < budget, (
             f"one search allocated {peak} bytes for {rows} rows, over the "
             f"{budget}-byte budget: it is allocating per node rather than per "
             f"query, or copying the matrix again"
         )
 
-        # Again at the shapes production asks for. The measurement above uses
-        # the default threshold of 0.0, and so did every other allocation
-        # budget here - so a pre-filter gated on `threshold > 0` allocated 33
-        # bytes a row against this 20-byte budget and no test looked.
-        #
-        # EVERY production floor is measured, not one and not two.
-        # `semantic_search_nodes` asks for 200 rows above 0.3.
-        # `find_similar_nodes` asks for 5 above `max(0.4, threshold - 0.2)`,
-        # and both ends of that expression matter: 0.5 is what its own default
-        # of 0.7 gives, but 0.4 is the CLAMP, which every threshold of 0.6 or
-        # below lands on - so the clamp is the common case and the derived
-        # value is the rare one. Measuring 0.5 alone left a pre-filter gated on
-        # `0.4 <= threshold < 0.5` allocating 28 bytes a row against this
-        # 20-byte budget, bit-identical in its results and costing a constant
-        # number of Python lines, so the tracer could not see it either.
-        for floor, floored_limit in ((0.3, 200), (0.4, 5), (0.5, 5)):
-            tracemalloc.start()
-            store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
-            _, floored_peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-
+        # Again at the shapes production asks for - see `_FLOORED_SEARCHES`.
+        for floor, floored_limit, floored_peak in measured["floored"]:
             assert floored_peak < budget, (
                 f"a search for {floored_limit} rows above a {floor} floor "
                 f"allocated {floored_peak} bytes for {rows} rows, over the "
                 f"{budget}-byte budget: the floor is being applied by building "
                 f"something the size of the index"
             )
+        assert [[f, lim] for f, lim, _ in measured["floored"]] == [
+            list(pair) for pair in _FLOORED_SEARCHES
+        ]
         # And the budget is not passing by being generous: the index it is
         # measured against is far larger than it.
-        assert budget < store.unit_matrix.nbytes / 8
+        assert budget < measured["matrix_nbytes"] / 8
 
     def test_results_are_what_the_normalise_per_query_form_returned(self):
         """Equivalence with the form this replaced, computed here rather than
@@ -1586,3 +1590,58 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                         f"({first_score} vs {second_score}). That is a real "
                         f"reordering, not the width running out of resolution"
                     )
+
+
+# The first measurement uses the default threshold of 0.0, and so did every
+# other allocation budget here - so a pre-filter gated on `threshold > 0`
+# allocated 33 bytes a row against the 20-byte budget and no test looked.
+#
+# EVERY production floor is measured, not one and not two.
+# `semantic_search_nodes` asks for 200 rows above 0.3.
+# `find_similar_nodes` asks for 5 above `max(0.4, threshold - 0.2)`, and both
+# ends of that expression matter: 0.5 is what its own default of 0.7 gives, but
+# 0.4 is the CLAMP, which every threshold of 0.6 or below lands on - so the
+# clamp is the common case and the derived value is the rare one. Measuring 0.5
+# alone left a pre-filter gated on `0.4 <= threshold < 0.5` allocating 28 bytes
+# a row against the 20-byte budget, bit-identical in its results and costing a
+# constant number of Python lines, so the tracer could not see it either.
+_FLOORED_SEARCHES = ((0.3, 200), (0.4, 5), (0.5, 5))
+
+
+def _measure_search_peaks():
+    """Run in a fresh interpreter by
+    `test_a_query_allocates_nothing_the_size_of_the_index`, which asserts on
+    what this returns."""
+    import threading
+    import tracemalloc
+
+    store = TestSearchCostsNothingItDoesNotHaveTo._store(4000, dim=256)
+    probe_node = Node(id="n0", type=NodeType.ACTOR, name="n0")
+    threads = threading.active_count()
+
+    # The FIRST search after the index was built, inside the measurement.
+    # A warm-up outside it hides anything cached per index revision - and
+    # `_update_matrix` runs on every add and every remove, so a workload
+    # that writes between searches pays such a cache every time. Measured,
+    # caching the transposed matrix per revision peaks at 155 MB on a cold
+    # search at 100k x 384 and at nothing at all on a warm one.
+    tracemalloc.start()
+    store.search(query_node=probe_node, limit=10)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    floored = []
+    for floor, floored_limit in _FLOORED_SEARCHES:
+        tracemalloc.start()
+        store.search(query_node=probe_node, limit=floored_limit, threshold=floor)
+        _, floored_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        floored.append((floor, floored_limit, floored_peak))
+
+    return {
+        "threads": max(threads, threading.active_count()),
+        "rows": len(store.node_ids),
+        "peak": peak,
+        "floored": floored,
+        "matrix_nbytes": store.unit_matrix.nbytes,
+    }
