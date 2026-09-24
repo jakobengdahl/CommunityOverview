@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { useVisualViewportInset } from '../hooks/useVisualViewportInset';
+import { useModalFocusTrap } from '../hooks/useModalFocusTrap';
 import './BottomSheet.css';
 
 // Ordered low-to-high; index arithmetic in the drag handler and tests relies
@@ -14,9 +15,6 @@ const SNAP_HEIGHTS = {
 };
 
 const DRAG_THRESHOLD_PX = 60;
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 function isReducedMotionSupported() {
   return typeof window !== 'undefined' && typeof window.matchMedia === 'function';
@@ -39,11 +37,6 @@ function usePrefersReducedMotion() {
   }, []);
 
   return reduced;
-}
-
-function getFocusableElements(container) {
-  if (!container) return [];
-  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR));
 }
 
 /**
@@ -75,7 +68,6 @@ function BottomSheet({
   const prefersReducedMotion = usePrefersReducedMotion();
 
   const sheetRef = useRef(null);
-  const lastFocusedRef = useRef(null);
   const dragStateRef = useRef(null);
   const [dragOffset, setDragOffset] = useState(0);
   // Keeps the whole sheet above an on-screen keyboard rather than letting it
@@ -110,45 +102,25 @@ function BottomSheet({
     focusActiveIntoView();
   }, [isOpen, keyboardInset, focusActiveIntoView]);
 
-  // Body scroll lock while open - restores whatever value was there before,
-  // so a sheet opened while some other overlay already locked scroll doesn't
-  // clobber that lock on close. The same cleanup also clears any drag left
-  // in progress: isOpen can flip to false mid-drag (Escape closes
-  // unconditionally in handleKeyDown below, and this primitive is meant to
-  // be driven by useSurfaceManager, whose mutual-exclusion open() can close
-  // a sheet for reasons that have nothing to do with the drag gesture).
-  // Without this, the component un-mounts its content and returns null
-  // while dragStateRef is still set, so handlePointerDown's multi-pointer
-  // guard (dragStateRef.current truthy -> return) would permanently ignore
-  // every future pointerdown on this instance, and a stale dragOffset could
-  // paint on the next open.
+  // Clears any drag left in progress when the sheet closes: isOpen can flip
+  // to false mid-drag (Escape closes unconditionally in handleKeyDown below,
+  // and this primitive is meant to be driven by useSurfaceManager, whose
+  // mutual-exclusion open() can close a sheet for reasons that have nothing
+  // to do with the drag gesture). Without this, the component un-mounts its
+  // content and returns null while dragStateRef is still set, so
+  // handlePointerDown's multi-pointer guard (dragStateRef.current truthy ->
+  // return) would permanently ignore every future pointerdown on this
+  // instance, and a stale dragOffset could paint on the next open.
   useEffect(() => {
-    if (!isOpen || typeof document === 'undefined') return undefined;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    if (!isOpen) return undefined;
     return () => {
-      document.body.style.overflow = previousOverflow;
       dragStateRef.current = null;
       setDragOffset(0);
     };
   }, [isOpen]);
 
-  // Move focus into the sheet on open, restore it to whatever had focus
-  // beforehand on close - the standard modal focus-management contract.
-  useEffect(() => {
-    if (!isOpen) return undefined;
-    lastFocusedRef.current = typeof document !== 'undefined' ? document.activeElement : null;
-
-    const focusable = getFocusableElements(sheetRef.current);
-    (focusable[0] || sheetRef.current)?.focus();
-
-    return () => {
-      const toRestore = lastFocusedRef.current;
-      if (toRestore && typeof toRestore.focus === 'function' && document.contains(toRestore)) {
-        toRestore.focus();
-      }
-    };
-  }, [isOpen]);
+  // Body scroll lock, focus move-in on open and focus restore on close.
+  const trapTabKey = useModalFocusTrap(sheetRef, isOpen);
 
   const handleKeyDown = useCallback(
     (event) => {
@@ -157,31 +129,9 @@ function BottomSheet({
         onClose?.();
         return;
       }
-      if (event.key !== 'Tab') return;
-
-      const focusables = getFocusableElements(sheetRef.current);
-      if (focusables.length === 0) {
-        event.preventDefault();
-        return;
-      }
-
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      } else if (!focusables.includes(active)) {
-        // Focus escaped the sheet (e.g. programmatic blur) - pull it back in.
-        event.preventDefault();
-        first.focus();
-      }
+      trapTabKey(event);
     },
-    [onClose]
+    [onClose, trapTabKey]
   );
 
   const handlePointerDown = useCallback((event) => {
