@@ -317,6 +317,40 @@ class TestWhatGoesIntoTheMatchedText:
         assert "ab cd" in text
 
 
+class TestTypeLabelsReachEveryType:
+    """The type-text lookup is keyed on the schema's type name. Legacy enum
+    types used to look themselves up as ``str(NodeType.ACTOR)`` -
+    ``'NodeType.ACTOR'`` - and miss, while schema-only string types hit, so
+    localized labels were reachable for some types and not others."""
+
+    LABELLED = {
+        "Actor": "actor aktör",
+        "CustomerSegment": "customersegment kundsegment",
+    }
+
+    @pytest.mark.parametrize(
+        "node_type,label",
+        [
+            (NodeType.ACTOR, "aktör"),
+            ("Actor", "aktör"),
+            ("CustomerSegment", "kundsegment"),
+        ],
+    )
+    def test_the_localized_label_is_searchable(self, node_type, label):
+        fields = build_match_fields(
+            Node(id="a", type=node_type, name="x"), self.LABELLED
+        )
+        assert label in fields.text
+        assert fields.type_text == self.LABELLED[fields.type_key]
+
+    def test_an_enum_type_does_not_match_its_python_repr(self):
+        fields = build_match_fields(
+            Node(id="a", type=NodeType.ACTOR, name="x"), self.LABELLED
+        )
+        assert fields.type_name == "actor"
+        assert "nodetype" not in fields.text
+
+
 class TestTheRankingKeptItsOrderAndItsTieBreak:
     """`test_the_whole_ranking_is_unchanged_by_going_through_the_index` cannot
     reach these: they change the index path and the walk path identically, so
