@@ -683,7 +683,7 @@ one copy to keep true.
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Six things about it are worth knowing before
+should have an opinion about. Seven things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same
@@ -732,12 +732,21 @@ writing a backend of your own against a shared server:
   after it takes a fresh snapshot at statement start; under a server or role
   default of `REPEATABLE READ` the snapshot would be taken at the lock,
   before it blocks, and the writer that waited would die on a serialization
-  failure rather than proceed. Neither level is left to the environment for
-  the save or the load — each states its own. Migration (`_ensure_schema()`)
-  and `exists()` are not part of that guarantee: they run under whatever the
-  connection's environment defaults to, which is fine for what they do —
-  neither reads graph data, so neither is exposed to the statement-snapshot
-  anomaly the save and the load guard against. What they actually send
+  failure rather than proceed. Two more transactions state theirs for the
+  same two reasons: `traverse()` states `REPEATABLE READ`, so every level of
+  one traversal reads the same moment, and `apply_batch()` — which every
+  entity write goes through — states `READ COMMITTED`, so a second writer on
+  a contended row waits and wins rather than failing on serialization. None
+  of those four leaves its level to the environment. Migration
+  (`_ensure_schema()`) and `exists()` are not part of that guarantee: they
+  run under whatever the connection's environment defaults to, which is fine
+  for what they do — neither reads graph data, so neither is exposed to the
+  snapshot anomalies those four guard against.
+  `_resolve()`, the read behind change notification, inherits the default
+  too; it answers each identifier from what the store holds when it reads,
+  and a write it sees that is newer than the announcement it is resolving is
+  followed by that write's own announcement. What migration and `exists()`
+  actually send
   depends on whether the store has been migrated before. Cold (nothing
   provisioned yet), `_ensure_schema()` issues one advisory-lock statement,
   then one catalog lookup for the schema (`pg_namespace`) plus a
@@ -840,7 +849,11 @@ writing a backend of your own against a shared server:
   of transferring the documents themselves. A separate prepared-statement run at
   `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
   no cliff, dominated by transferring 20 000 jsonb documents rather than by
-  planning. The level query is different because it filters on *expressions*
+  planning. The two scales are not in conflict: the `_resolve` figures above
+  are server-side execution times as `EXPLAIN ANALYZE` reports them, which
+  never send a row to the client, while the per-call figure includes
+  transferring and decoding every one of those 20 000 documents. The level
+  query is different because it filters on *expressions*
   (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
   the frontier's size decides the join strategy and where the mis-estimate can
   turn into orders of magnitude rather than tens of milliseconds. Every other
