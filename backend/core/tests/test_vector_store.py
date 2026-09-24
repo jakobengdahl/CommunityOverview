@@ -477,6 +477,41 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     np.testing.assert_allclose(after["a"], before["a"])
 
 
+def test_compute_node_embeddings_returns_vectors_without_touching_the_index():
+    """The import worker encodes with this and commits only if no later
+    import has replaced the graph meanwhile. A compute that also wrote to the
+    index would land the vectors before that check, whatever it decided."""
+
+    class _FakeModel:
+        def encode(self, texts):
+            return [
+                np.full(3, float(i + 2), dtype=np.float32) for i in range(len(texts))
+            ]
+
+    store = VectorStore()
+    store.load_vectors({"held": np.array([1.0, 0.0, 0.0], dtype=np.float32)})
+    store.model = _FakeModel()
+    # A copy: export_vectors() hands back the live arrays, so comparing
+    # against it would not see an in-place write.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
+    revision_before = store.revision
+
+    computed = store.compute_node_embeddings(
+        [
+            Node(id="held", type=NodeType.ACTOR, name="Held"),
+            Node(id="fresh", type=NodeType.ACTOR, name="Fresh"),
+        ]
+    )
+
+    assert set(computed) == {"held", "fresh"}
+    np.testing.assert_allclose(computed["held"], [2.0, 2.0, 2.0])
+    assert not store.has_embedding("fresh")
+    assert store.revision == revision_before
+    after = store.export_vectors()
+    assert set(after) == set(before)
+    np.testing.assert_allclose(after["held"], before["held"])
+
+
 class TestSearchCostsNothingItDoesNotHaveTo:
     """What normalising the index once instead of once per query has to buy,
     and what it must not cost.

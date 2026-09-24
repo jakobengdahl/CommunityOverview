@@ -276,6 +276,18 @@ class TestGenerationSurvivesAProcessRestart:
 
         assert restarted.generation == 2
 
+    @pytest.mark.parametrize("corrupted", ["not-a-number", None, [3], {"n": 3}])
+    def test_a_non_integer_persisted_generation_loads_as_zero(
+        self, storage: GraphStorage, backend: _SnapshotBackend, corrupted
+    ):
+        storage.replace_all_nodes_and_edges([_old_node()], [])
+        backend.data["metadata"]["graph_generation"] = corrupted
+
+        restarted = GraphStorage(persistence_backend=backend)
+
+        assert restarted.generation == 0
+        assert restarted.get_node("old-1") is not None
+
 
 class TestReplaceIsAtomicUnderConcurrentUnlockedReads:
     """Every OTHER read path on GraphStorage (get_node, get_all_nodes,
