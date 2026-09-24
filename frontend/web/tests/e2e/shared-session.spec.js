@@ -6,7 +6,8 @@ import { addNodeViaSearch, seedNode, uniqueToken } from './helpers';
  *
  * Two browser contexts (two "users") join the *same* session by URL and drive
  * the real collaboration surface: presence, node add/move fan-out, annotation
- * create, delete-with-warning, and reconnect catch-up. The deterministic
+ * create, delete-with-warning, and reconnect catch-up (currently test.fixme, see
+ * that test). The deterministic
  * core of these scenarios is also covered headlessly in
  * backend/core/tests/test_session_multiuser.py; this spec proves they hold
  * through the actual UI + SSE transport.
@@ -88,6 +89,11 @@ test.describe('shared session — two users, one session', () => {
     const b = await ctxB.newPage();
     await a.goto(SESSION_URL(sessionId));
     await b.goto(SESSION_URL(sessionId));
+    // Wait until B's stream is live (A sees it on the roster) before seeding, so
+    // the add reaches B as an op rather than racing B's initial load.
+    await expect(a.locator('.floating-header-presence-dot').first()).toBeVisible({
+      timeout: 15000,
+    });
 
     const count = await seedNodes(a, request);
     await expect.poll(() => nodeCount(b), { timeout: 15000 }).toBe(count);
