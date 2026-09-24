@@ -563,6 +563,12 @@ describe('label/line style keys the canvas has no control for', () => {
     expect(lineBack.style).toEqual(line.style);
   });
 
+  it("keep a line's fontSize, which the line overlay has no field for", () => {
+    const withFontSize = { ...line, style: { ...line.style, fontSize: 18 } };
+    const [back] = overlaysToAnnotations(annotationsToOverlays([withFontSize]));
+    expect(back.style).toEqual(withFontSize.style);
+  });
+
   it('survive a GUI edit of a named style key, which still wins', () => {
     const overlays = annotationsToOverlays([label, line]).map((o) => ({
       ...o,

@@ -972,6 +972,64 @@ describe('describeActivity', () => {
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
+
+    it('still reports a key drop on a kind older builds carried whole as a restyle', () => {
+      // Only label and line went through the lossy translators, so on any
+      // other kind a style narrowed to {color, opacity} is a real edit.
+      for (const type of ['note', 'shape']) {
+        const stored = {
+          id: 's1',
+          type,
+          position: { x: 0, y: 0 },
+          z: 0,
+          locked: false,
+          style: { color: 'red', opacity: 0.5, dash: 'dotted' },
+        };
+        const r = record({
+          op: 'annotation_updated',
+          before: stored,
+          after: { ...stored, style: { color: 'red', opacity: 0.5 } },
+        });
+        expect(describeActivity(r).key, type).toBe('history.desc.annotation_updated_style');
+      }
+    });
+
+    it('reports a label that also lost a named key as a restyle', () => {
+      // An older build kept fontSize, so its write-back never drops it.
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it("treats a line's fontSize as a key older builds dropped", () => {
+      const withFontSize = { ...line, style: { color: 'red', opacity: 0.5, fontSize: 18 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: withFontSize,
+        after: { ...withFontSize, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it("recognises an older build's drop on records that carry only kind", () => {
+      const { type: _labelType, ...labelByKind } = label;
+      const { type: _lineType, ...lineByKind } = line;
+      const olderText = record({
+        op: 'annotation_updated',
+        before: labelByKind,
+        after: { ...labelByKind, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+      const olderArrowhead = record({
+        op: 'annotation_updated',
+        before: lineByKind,
+        after: { ...lineByKind, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    });
   });
 
   describe('shape spelling', () => {
