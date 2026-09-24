@@ -973,9 +973,11 @@ describe('describeActivity', () => {
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
 
-    it('still reports a key drop on a kind older builds carried whole as a restyle', () => {
-      // Only label and line went through the lossy translators, so on any
-      // other kind a style narrowed to {color, opacity} is a real edit.
+    it('reports a style key drop on a kind outside label/line as a restyle', () => {
+      // Only the label/line translators changed between builds; whatever
+      // note/shape drop is the same in every build and already shows in
+      // `browserWriteBack`, so a style narrowed to {color, opacity} there is
+      // a real edit.
       for (const type of ['note', 'shape']) {
         const stored = {
           id: 's1',
@@ -1009,6 +1011,17 @@ describe('describeActivity', () => {
         op: 'annotation_updated',
         before: label,
         after: { ...label, style: { ...label.style, dash: 'dashed' } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it('reports a partial drop of uncontrolled style keys as a restyle', () => {
+      // An older build dropped every key beyond the named ones, never some.
+      const twoExtra = { ...label, style: { ...label.style, width: 2 } };
+      const r = record({
+        op: 'annotation_updated',
+        before: twoExtra,
+        after: { ...twoExtra, style: label.style },
       });
       expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
     });
