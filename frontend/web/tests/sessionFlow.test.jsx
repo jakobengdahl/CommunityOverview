@@ -1044,6 +1044,69 @@ describe('Server-backed session lifecycle', () => {
     }
   });
 
+  // Switching away and back builds a new sync client for the same session
+  // id. Its first-snapshot resync must not be swallowed by the resync the
+  // previous client for that id left in flight, and that older resync, when
+  // it finally settles, must not overwrite the newer reload.
+  it('a slow resync from an earlier visit does not block the resync on returning to the session', async () => {
+    sessionStore.touchSession('5555-6666');
+    sessionStore.touchSession('7777-8888');
+    FakeEventSource.snapshotSeqByUrl['http://localhost/api/sessions/7777-8888/stream'] = 9;
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const emptyState = { positions: {}, hidden_node_ids: [], hidden_edge_ids: [], annotations: [] };
+
+    let releaseFirstResync;
+    const firstResyncGate = new Promise((resolve) => {
+      releaseFirstResync = resolve;
+    });
+    let returningLoads = 0;
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (id !== '7777-8888') return originalGetSession(id, opts);
+      returningLoads += 1;
+      const call = returningLoads;
+      // 1: first load (seq 3, older than the stream's seq 9) — 2: the resync
+      // that first snapshot triggers, held open — 3: the reload on returning
+      // — 4: the returning client's own first-snapshot resync.
+      if (call === 2) {
+        await firstResyncGate;
+        return { id, seq: 9, state: emptyState, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      const nodes = call === 4 ? [NODE_A, NODE_C] : [NODE_A];
+      return { id, seq: call === 4 ? 9 : 3, state: emptyState, resolved: { nodes, edges: [] } };
+    });
+
+    try {
+      renderApp();
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(2));
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('5555-6666'));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-b']);
+      });
+
+      fireEvent.click(screen.getByTitle('Menu'));
+      fireEvent.click(screen.getByText('7777-8888'));
+      await waitFor(() => expect(returningLoads).toBe(4));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+      });
+
+      await act(async () => {
+        releaseFirstResync();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-c']);
+    } finally {
+      releaseFirstResync();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
   it('drawer name-refresh does not overwrite a locally kept name with a null server name (R7)', async () => {
     // A session renamed locally before the server ever materialised it (or
     // simply one the server hasn't got a name for) must keep its local name

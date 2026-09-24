@@ -252,9 +252,11 @@ function App() {
   // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
   // GET must not wedge reconnect recovery forever) recognise it is no longer
   // the current owner and not stomp on a newer resync that started meanwhile.
-  // Holds the session id the in-flight resync is for (null when idle), not a
-  // bare boolean: a slow resync for the session being left must not swallow
-  // the first resync of the session just switched to.
+  // Holds `{ client }`, the sync client the in-flight resync was started
+  // for (null when idle), not a bare boolean or a session id: a slow resync
+  // for the session being left must not swallow the first resync of the
+  // session just switched to, and switching away and back builds a new
+  // client for the same id whose first resync must not be swallowed either.
   const resyncInFlightRef = useRef(null);
   const resyncGuardTokenRef = useRef(0);
   // Ops the sync client has told us (via onDropped) were terminally rejected
@@ -597,21 +599,23 @@ function App() {
       // including onDropped's own resync call, whose "converge back to
       // server truth" goal an already-in-flight resync accomplishes anyway.
       //
-      // Only a resync for the *same* session is skipped. One for the session
-      // the sync client is now on supersedes an in-flight one for a session
-      // the user has left: taking the token below makes the old call stop at
-      // its next checkpoint, and it would bail at its own switched-away check
-      // anyway. A resync naming a session the client is no longer on never
-      // supersedes, or it would cancel the current session's resync and then
-      // bail itself, leaving nothing to reload.
-      const inFlightId = resyncInFlightRef.current;
-      if (inFlightId !== null) {
-        if (inFlightId === targetId || syncRef.current?.sessionId !== targetId) return 0;
+      // Only a resync for the *same* sync client is skipped. One for the
+      // current client's session supersedes an in-flight one started for a
+      // client that has since been replaced (a session switch, including away
+      // and back to the same id): taking the token below makes the old call
+      // stop at its next checkpoint. A resync naming a session the current
+      // client is not on never supersedes, or it would cancel the current
+      // session's resync and then bail at its own switched-away check,
+      // leaving nothing to reload.
+      const client = syncRef.current;
+      const inFlight = resyncInFlightRef.current;
+      if (inFlight !== null) {
+        if (inFlight.client === client || client?.sessionId !== targetId) return 0;
       }
-      resyncInFlightRef.current = targetId;
-      // A token, not just the boolean: if the guard timer below fires (its
-      // request never settles) while a *later* resync has since legitimately
-      // taken over, this call's eventual finally must not clear a flag it no
+      resyncInFlightRef.current = { client };
+      // A token, not just the marker: if the guard timer below fires (its
+      // request never settles), or a resync for a newer client supersedes
+      // this one, this call's eventual finally must not clear a marker it no
       // longer owns (review round 3). Every checkpoint below that could run
       // after an arbitrarily long await (the reload, and each recovered
       // nodes_added's node fetch inside the replay loop) re-checks this same
