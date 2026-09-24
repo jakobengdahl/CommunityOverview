@@ -1760,18 +1760,41 @@ def register_mcp_tools(
         # below count it. This runs on the uncapped list, so it must stay
         # linear — an unhashable value (a dict or list arriving unvalidated
         # through POST /execute_tool) is keyed by its canonical JSON instead of
-        # being compared pairwise.
+        # being compared pairwise. Every id is encoded once here, and the byte
+        # cap below is summed from those encodings. A value with no canonical
+        # JSON (a cycle, mixed-type dict keys, nesting past the recursion
+        # limit, a ``__str__`` that raises) can only come from an in-process
+        # caller; it could never resolve and the byte cap could not measure
+        # it, so it is skipped before both, whether it is hashable or not.
         unique_ids: List[Any] = []
+        unique_ids_bytes = 0
+        unencodable: List[Any] = []
         seen: set = set()
         for node_id in node_ids:
             try:
                 key = ("h", node_id)
                 hash(key)
-            except TypeError:
-                key = ("u", json.dumps(node_id, sort_keys=True, default=str))
+                hashable = True
+            except Exception:
+                hashable = False
+            if hashable and key in seen:
+                continue
+            # Only an unhashable id needs the sorted form, as its dedupe key;
+            # sorting a hashable one could refuse keys the unsorted form takes.
+            try:
+                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
+            except Exception:
+                key = ("i", id(node_id))
+                if key not in seen:
+                    seen.add(key)
+                    unencodable.append(node_id)
+                continue
+            if not hashable:
+                key = ("u", encoded)
             if key not in seen:
                 seen.add(key)
                 unique_ids.append(node_id)
+                unique_ids_bytes += len(encoded)
         # Both caps are checked before the resolve below, which costs one node
         # lookup per id: the write path enforces them too, but only after that
         # work is already done.
@@ -1784,7 +1807,9 @@ def register_mcp_tools(
                     f"{session_manager.max_ops_per_batch}); split into batches."
                 ),
             }
-        if len(json.dumps(unique_ids, default=str)) > (
+        # The length of ``json.dumps(unique_ids)``: the brackets plus a ", "
+        # between items.
+        if unique_ids_bytes + 2 * max(len(unique_ids), 1) > (
             session_manager.max_op_batch_bytes
         ):
             return {
@@ -1823,7 +1848,7 @@ def register_mcp_tools(
             node_id
             for node_id in unique_ids
             if not (isinstance(node_id, str) and node_id in known)
-        ]
+        ] + unencodable
         if not resolvable:
             return {
                 "success": False,
