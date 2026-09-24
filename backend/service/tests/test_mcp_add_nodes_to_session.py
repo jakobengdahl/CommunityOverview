@@ -64,6 +64,41 @@ def _session(manager):
     return manager.create_session().id
 
 
+class _EqualToAlpha:
+    def __eq__(self, other):
+        return other == "alpha" or isinstance(other, _EqualToAlpha)
+
+    def __hash__(self):
+        return hash("alpha")
+
+    def __str__(self):
+        raise _NoStringForm()
+
+
+class _UnhashingUnprintable:
+    def __hash__(self):
+        raise ValueError("no hash")
+
+    def __str__(self):
+        raise _NoStringForm()
+
+
+class _HashableDict(dict):
+    def __hash__(self):
+        return 1
+
+
+class _NoStringForm(Exception):
+    pass
+
+
+class _Unprintable:
+    __hash__ = None
+
+    def __str__(self):
+        raise _NoStringForm()
+
+
 class TestAddNodesToSession:
     def test_named_nodes_become_the_sessions_nodes(self, tools):
         tools_map, manager = tools
@@ -422,6 +457,107 @@ class TestAddNodesToSession:
         assert result["success"] is True
         assert result["skipped"] == [{"id": "b", "x": 1}, [1]]
 
+    def test_an_id_with_no_canonical_json_is_skipped_not_an_exception(self, tools):
+        """An in-process caller can pass a value ``json.dumps`` rejects; the
+        dedupe keys unhashable ids by their JSON, so it must not raise."""
+        tools_map, manager = tools
+        sid = _session(manager)
+        cyclic = []
+        cyclic.append(cyclic)
+        mixed_keys = {1: "a", "b": 2}
+        deep = []
+        deep_hashable = ()
+        for _ in range(5000):
+            deep = [deep]
+            deep_hashable = (deep_hashable,)
+        unprintable = _Unprintable()
+        unusual = [cyclic, mixed_keys, deep, deep_hashable, unprintable]
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid,
+            node_ids=["alpha", *unusual, cyclic, deep_hashable, "beta"],
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha", "beta"]
+        assert len(result["skipped"]) == len(unusual)
+        assert all(a is b for a, b in zip(result["skipped"], unusual))
+        assert manager.get_session(sid).state["node_refs"] == ["alpha", "beta"]
+
+    def test_a_repeat_of_a_hashable_id_is_dropped_before_it_is_encoded(self, tools):
+        """Equal to an id already seen, it is the same id, as on main, even if
+        it has no JSON form of its own."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", _EqualToAlpha()]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert result["skipped"] == []
+
+    def test_an_id_whose_hash_raises_is_skipped_not_an_exception(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        unhashing = _UnhashingUnprintable()
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", unhashing]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0] is unhashing
+
+    def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
+        self, tmp_path
+    ):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage, service, max_ops_per_batch=1, max_op_batch_bytes=9
+        )
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+        assert len(json.dumps(["alpha"])) == manager.max_op_batch_bytes
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+        cyclic = []
+        cyclic.append(cyclic)
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", cyclic]
+        )
+
+        assert result["success"] is True
+        assert result["added"] == ["alpha"]
+        assert resolved_with == [["alpha"]]
+
+    def test_only_ids_with_no_canonical_json_is_no_resolvable_nodes(self, tools):
+        tools_map, manager = tools
+        sid = _session(manager)
+        cyclic = {}
+        cyclic["self"] = cyclic
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=[cyclic])
+
+        assert result["success"] is False
+        assert result["error"] == "no_resolvable_nodes"
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0] is cyclic
+        assert manager.get_session(sid).state["node_refs"] == []
+
     def test_an_oversized_byte_payload_is_rejected_before_any_node_is_resolved(
         self, tmp_path
     ):
@@ -445,6 +581,41 @@ class TestAddNodesToSession:
         assert "size cap" in result["message"]
         assert "Too many" not in result["message"]
         assert lookups == []
+
+    @pytest.mark.parametrize("slack, succeeds", [(0, True), (-1, False)])
+    def test_the_byte_cap_measures_the_ids_as_one_json_list(
+        self, tmp_path, slack, succeeds
+    ):
+        """Brackets, separators and every id's encoding count exactly: escaped
+        non-ASCII, an unhashable id, one encoded through ``default=str`` and a
+        hashable dict whose keys do not sort included."""
+        node_ids = [
+            "alpha",
+            {"id": "b", "x": [1, 2]},
+            "é",
+            {1},
+            _HashableDict({1: "a", "b": 2}),
+        ]
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(
+            storage,
+            service,
+            max_op_batch_bytes=len(json.dumps(node_ids, default=str)) + slack,
+        )
+        tools_map["add_nodes"](
+            nodes=[{"id": "alpha", "type": "Initiative", "name": "Alpha"}], edges=[]
+        )
+        sid = _session(manager)
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
+
+        if succeeds:
+            assert result["success"] is True
+            assert result["added"] == ["alpha"]
+            assert result["skipped"] == node_ids[1:]
+        else:
+            assert result["error"] == "too_large"
 
     def test_the_byte_cap_counts_a_repeated_id_once(self, tmp_path):
         storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
@@ -646,6 +817,21 @@ class TestAuthorization:
         result = tools_map["add_nodes_to_session"](
             session_id=sid, node_ids=["a", "b", "c"]
         )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+
+    def test_read_only_mode_is_denied_before_the_byte_cap(self, tmp_path, monkeypatch):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_op_batch_bytes=50)
+        sid = _session(manager)
+        node_ids = ["x" * 30, "y" * 30]
+        assert len(node_ids) <= manager.max_ops_per_batch
+        assert len(json.dumps(node_ids)) > manager.max_op_batch_bytes
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
 
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
