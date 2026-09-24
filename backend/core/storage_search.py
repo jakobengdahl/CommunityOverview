@@ -819,9 +819,13 @@ def get_related_nodes(
 
         current_layer = next_layer
 
+    # One `.get()` per id, not `in` then `[]`: this path takes no lock, so a
+    # delete can land between two observations of the same dict.
+    resolved_nodes = (nodes.get(nid) for nid in visited_nodes)
+    resolved_edges = (edges.get(eid) for eid in visited_edges)
     return {
-        "nodes": [nodes[nid] for nid in visited_nodes if nid in nodes],
-        "edges": [edges[eid] for eid in visited_edges if eid in edges],
+        "nodes": [n for n in resolved_nodes if n is not None],
+        "edges": [e for e in resolved_edges if e is not None],
     }
 
 
