@@ -19,6 +19,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import secrets
 import threading
 import time
@@ -328,10 +329,35 @@ def _tables_named(text):
     }
 
 
+# The statements EXPLAIN can plan that read or write rows. Anything else
+# naming a graph table - the `ANALYZE` a whole-graph save issues after its
+# transaction, a VACUUM - is maintenance with no plan, and `EXPLAIN ANALYZE
+# <table>` is a syntax error rather than a question about scans.
+_PLANNABLE = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH"})
+
+# Whitespace and SQL comments ahead of a statement's first keyword. Matched
+# on the raw text: `_rendered` folds newlines, and a folded `--` comment
+# would swallow the statement that follows it.
+_LEADING_NOISE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+
+
+def _leading_verb(conn, query):
+    if hasattr(query, "as_string"):
+        raw = query.as_string(conn)
+    elif isinstance(query, bytes):
+        raw = query.decode()
+    else:
+        raw = str(query)
+    rest = raw[_LEADING_NOISE.match(raw).end() :]
+    match = re.match(r"[A-Za-z]+", rest)
+    return match.group(0).upper() if match else ""
+
+
 def _sequential_scans(issued):
     """(statements naming a graph table, those whose plan scans one).
 
     EXPLAIN does not execute, so this is safe to run for every statement.
+    Maintenance statements are skipped, not planned: see `_PLANNABLE`.
     """
     touched, scanning = [], []
     with psycopg.connect(DSN, autocommit=True) as conn:
@@ -340,6 +366,8 @@ def _sequential_scans(issued):
             if "graph_nodes" not in text and "graph_edges" not in text:
                 continue
             if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) not in _PLANNABLE:
                 continue
             touched.append(text)
             if params is None and "%s" in text:
@@ -392,6 +420,80 @@ class TestPostgresStatementSpyHandlesAnEmptyExecutemany:
             "an empty save's executemany calls were not recorded with the "
             "'executed never' sentinel - _EXECUTED_NEVER is dead code"
         )
+
+
+class TestPostgresSequentialScanHelperSkipsMaintenance:
+    """`_sequential_scans` around a whole-graph save, ANALYZE included.
+
+    `save_graph_data` ends with an `ANALYZE` of each graph table. Planned as
+    `EXPLAIN ANALYZE <table>` that is a syntax error, so without the verb
+    guard this raises. The guard must not be a blanket skip either: the
+    save's unfiltered `DELETE` of the previous graph has no index to seek
+    with, so it still has to be read as scanning.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        analyzes = [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ]
+        assert len(analyzes) == 2, (
+            f"the save no longer issues its trailing ANALYZE, so this test "
+            f"no longer exercises the guard: {analyzes}"
+        )
+
+        touched, scanning = _sequential_scans(issued)
+
+        assert not [t for t in touched if t.upper().startswith("ANALYZE")]
+        assert any(t.upper().startswith("INSERT") for t in touched), touched
+        deletes = [t for t in touched if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
+        assert set(deletes) <= set(scanning), (
+            f"the whole-graph DELETE plans as a sequential scan and was not "
+            f"reported as one: {scanning}"
+        )
+
+    @pytest.mark.parametrize(
+        "prefix", ["", "  \n\t", "-- note\n", "/* note */ ", "/* a */\n-- b\n  "]
+    )
+    @pytest.mark.parametrize("verb", ["select", "Select", "SELECT"])
+    def test_a_statement_behind_comments_is_still_planned(self, schema, prefix, verb):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{prefix}{verb} doc FROM "{schema}".graph_nodes')
+
+        touched, scanning = _sequential_scans([(query, None)])
+
+        assert touched and scanning == touched, (touched, scanning)
+
+    @pytest.mark.parametrize(
+        "statement", ["ANALYZE", "-- DELETE\nVACUUM", "/* SELECT */ analyze"]
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _sequential_scans([(query, None)]) == ([], [])
 
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
