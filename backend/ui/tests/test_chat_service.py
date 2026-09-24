@@ -13,6 +13,26 @@ import pytest
 from unittest.mock import patch
 
 
+def _tool_result_payloads(mock_llm):
+    """Decode each distinct tool_result block the LLM received, in order.
+
+    Every provider call re-sends the growing history, so a block is keyed by its
+    tool_use_id to count it once.
+    """
+    payloads = {}
+    for messages in mock_llm.received_messages:
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    payloads.setdefault(
+                        block["tool_use_id"], json.loads(block["content"])
+                    )
+    return list(payloads.values())
+
+
 class TestChatServiceInit:
     """Tests for ChatService initialization."""
 
@@ -92,11 +112,36 @@ class TestChatServiceToolExecution:
         search_def = next(
             t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
         )
-        props = search_def["input_schema"]["properties"]
+        schema = search_def["input_schema"]
+        props = schema["properties"]
+        assert schema["required"] == ["query"]
+        assert props["match_mode"]["type"] == "string"
         assert props["match_mode"]["enum"] == list(MATCH_MODES)
         assert props["match_mode"]["default"] == "substring"
         assert props["semantic"]["type"] == "boolean"
         assert props["semantic"]["default"] is False
+        assert props["include_archived"]["type"] == "boolean"
+        assert props["include_archived"]["default"] is False
+
+    def test_search_graph_tool_description_matches_lexical_fields_and_fallback(
+        self, chat_service
+    ):
+        """The description must not tell the LLM an unmatched query returns nothing.
+
+        An unmatched lexical query falls back to semantic ranking, and the lexical
+        matcher covers more fields than name/description/summary.
+        """
+        service, mock_llm = chat_service
+        mock_llm.mock_text_response = "ok"
+        service.process_message([{"role": "user", "content": "hi"}])
+
+        description = next(
+            t for t in mock_llm.received_tools[0] if t["name"] == "search_graph"
+        )["description"]
+        for field in ("tags", "subtypes", "aliases", "type label"):
+            assert field in description
+        assert "semantic-fallback" in description
+        assert "returns nothing" not in description
 
     def test_search_graph_any_term_matches_multi_word_query(
         self, chat_service, sample_nodes
@@ -119,11 +164,28 @@ class TestChatServiceToolExecution:
         assert {"test-actor-1", "test-initiative-1"} <= found
         # Substring mode also surfaces both nodes here, via the automatic
         # semantic fallback; only the lexical any_term match leaves it off.
-        tool_result = json.loads(
-            mock_llm.received_messages[1][-1]["content"][0]["content"]
-        )
+        (tool_result,) = _tool_result_payloads(mock_llm)
         assert tool_result["match_mode"] == "any_term"
         assert tool_result["semantic"] is False
+
+    def test_search_graph_invalid_match_mode_surfaces_as_tool_error(
+        self, chat_service, sample_nodes
+    ):
+        """An unsupported match_mode reaches the LLM as an error, not as results."""
+        service, mock_llm = chat_service
+        mock_llm.mock_tool_calls = [
+            {
+                "name": "search_graph",
+                "input": {"query": "Agency", "match_mode": "fuzzy"},
+            }
+        ]
+        mock_llm.mock_text_response = "That failed."
+
+        service.process_message([{"role": "user", "content": "Find agency"}])
+
+        (tool_result,) = _tool_result_payloads(mock_llm)
+        assert "fuzzy" in tool_result["error"]
+        assert "nodes" not in tool_result
 
     def test_search_graph_tool_forwards_match_mode_and_semantic(self, chat_service):
         """The chat wrapper passes both modes through to GraphService unchanged."""
@@ -141,6 +203,26 @@ class TestChatServiceToolExecution:
         kwargs = service._graph_service.search_graph.call_args.kwargs
         assert kwargs["match_mode"] == "substring"
         assert kwargs["semantic"] is False
+
+    def test_search_graph_tool_forwards_federation_depth_and_include_archived(
+        self, chat_service
+    ):
+        """An omitted depth falls back to the request's; an explicit 0 is kept."""
+        from unittest.mock import MagicMock
+
+        service, _ = chat_service
+        service._graph_service.search_graph = MagicMock(return_value={"nodes": []})
+        service._current_federation_depth = 3
+
+        service._search_graph_tool(query="x")
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["federation_depth"] == 3
+        assert kwargs["include_archived"] is False
+
+        service._search_graph_tool(query="x", federation_depth=0, include_archived=True)
+        kwargs = service._graph_service.search_graph.call_args.kwargs
+        assert kwargs["federation_depth"] == 0
+        assert kwargs["include_archived"] is True
 
     def test_add_nodes_tool_uses_graph_service(self, chat_service):
         """add_nodes tool should use GraphService.add_nodes."""
