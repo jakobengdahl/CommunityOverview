@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import pathlib
 import random
@@ -250,6 +251,34 @@ def backends():
     yield made
     for backend in made:
         backend.close()
+
+
+_BACKEND_LOGGER = "backend.core.postgres_backend"
+
+
+@pytest.fixture
+def reported(caplog, capsys):
+    """What the backend reported since the previous call, one message per line.
+
+    A report is a WARNING record on the backend's module logger. Each one is
+    also checked not to have reached stdout, so a report printed as well as
+    logged fails here rather than reading as a single line.
+    """
+    caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    def take() -> str:
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == _BACKEND_LOGGER and record.levelno >= logging.WARNING
+        ]
+        caplog.clear()
+        out = capsys.readouterr().out
+        leaked = [message for message in messages if message in out]
+        assert not leaked, f"a report went to stdout: {leaked}"
+        return "\n".join(messages)
+
+    return take
 
 
 def _statements_issued(action, into=None):
@@ -1296,7 +1325,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
     def test_a_role_that_owns_nothing_is_not_warned_about_indexes_it_has(
-        self, lowpriv, backends, capsys
+        self, lowpriv, backends, reported
     ):
         """The operator provisioned the store exactly as the docs prescribe -
         tables AND the two traversal indexes - and the role owns none of it.
@@ -1344,9 +1373,9 @@ class TestPostgresBootsForALeastPrivilegeRole:
         low_dsn = _dsn_as_role(name, password)
         backend = PostgresGraphPersistenceBackend(low_dsn, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend.save_graph_data(snapshot([node_payload("a")]))
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" not in printed, (
             "warned about indexes the store already has: " + printed
         )
@@ -1360,7 +1389,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # "only table or database owner can analyze it", and both are
         # lc_messages-dependent. What this test is about is that the notice
         # reaches the operator at all.
-        # With the colon: "Warning: ANALYZE after save:" is the notice-handler
+        # With the colon: "ANALYZE after save:" is the notice-handler
         # line, which is what this test is about. "could not ANALYZE after
         # save;" is the exception line, and matching both would let a mutation
         # that makes ANALYZE raise outright satisfy an assertion about the
@@ -1371,7 +1400,7 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # leave four handlers, and an unrelated statement's notices then print
         # four times, each labelled as coming from ANALYZE - which a
         # substring assertion is perfectly happy with.
-        assert printed.count("Warning: ANALYZE after save:") == 2, (
+        assert printed.count("ANALYZE after save:") == 2, (
             "one line per table, once: " + printed
         )
         # A second save must cost the same two lines, not four. A handler
@@ -1381,11 +1410,11 @@ class TestPostgresBootsForALeastPrivilegeRole:
         # four times, each labelled as coming from ANALYZE. A substring
         # assertion is perfectly happy with that; a count is not.
         backend.save_graph_data(snapshot([node_payload("a")]))
-        again = capsys.readouterr().out
-        assert again.count("Warning: ANALYZE after save:") == 2, (
+        again = reported()
+        assert again.count("ANALYZE after save:") == 2, (
             "the notice handler from the first save is still attached: " + again
         )
-        assert "Warning: ANALYZE after save:" in printed, (
+        assert "ANALYZE after save:" in printed, (
             "a role that cannot ANALYZE was told nothing about it: " + printed
         )
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
@@ -1407,7 +1436,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
     statement raises anyway.
     """
 
-    def _boot_with_a_losing_create(self, schema, backends, capsys, really_create):
+    def _boot_with_a_losing_create(self, schema, backends, reported, really_create):
         import psycopg as _psycopg
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -1428,22 +1457,22 @@ class TestPostgresIndexCreationLosesRacesQuietly:
 
         _psycopg.Connection.execute = _lose
         try:
-            capsys.readouterr()
+            reported()
             backend._ensure_schema()
         finally:
             _psycopg.Connection.execute = original
-        return capsys.readouterr().out
+        return reported()
 
-    def test_a_lost_race_is_not_reported(self, schema, backends, capsys):
+    def test_a_lost_race_is_not_reported(self, schema, backends, reported):
         printed = self._boot_with_a_losing_create(
-            schema, backends, capsys, really_create=True
+            schema, backends, reported, really_create=True
         )
         assert "scan instead of seek" not in printed, (
             "reported a failure on a store whose index is there: " + printed
         )
 
     def test_a_create_that_really_failed_is_still_reported(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         # The same index name exists in ANOTHER schema first. The re-check asks
         # the catalog by name and schema; by name alone it finds the neighbour's
@@ -1479,7 +1508,7 @@ class TestPostgresIndexCreationLosesRacesQuietly:
                 )
         try:
             printed = self._boot_with_a_losing_create(
-                schema, backends, capsys, really_create=False
+                schema, backends, reported, really_create=False
             )
             for index in ("graph_edges_source_idx", "graph_edges_target_idx"):
                 assert index in printed and "scan instead of seek" in printed, (
@@ -1509,7 +1538,9 @@ class TestPostgresIndexWorkIsDoneOnce:
     nothing exercised the path where it raises.
     """
 
-    def test_a_store_that_has_its_indexes_issues_no_ddl(self, schema, backends, capsys):
+    def test_a_store_that_has_its_indexes_issues_no_ddl(
+        self, schema, backends, reported
+    ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
         backend._ensure_schema()
@@ -1531,7 +1562,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         )
 
     def test_a_catalog_it_cannot_read_is_reported_not_assumed_away(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         """`_index_state` answers "missing" when it cannot ask - a pool blip
         during boot, a server that refuses a connection - so the caller
@@ -1559,7 +1590,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         backend.save_graph_data(snapshot([node_payload("a")]))
         again = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(again)
-        capsys.readouterr()
+        reported()
         ConnectionPool.connection = _blip
         try:
             again._ensure_schema()
@@ -1567,13 +1598,13 @@ class TestPostgresIndexWorkIsDoneOnce:
             pass
         finally:
             ConnectionPool.connection = real
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "scan instead of seek" in printed, (
             "a catalog that could not be read was taken as an answer: " + printed
         )
 
     def test_an_analyze_that_raises_does_not_fail_the_save(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         import psycopg as _psycopg
 
@@ -1597,7 +1628,7 @@ class TestPostgresIndexWorkIsDoneOnce:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
             "the save did not land"
         )
-        assert "could not ANALYZE after save" in capsys.readouterr().out
+        assert "could not ANALYZE after save" in reported()
 
 
 class TestPostgresReportsAnIndexItCannotUse:
@@ -1610,7 +1641,7 @@ class TestPostgresReportsAnIndexItCannotUse:
     """
 
     def test_an_invalid_index_is_reported_rather_than_taken_as_done(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(
@@ -1656,9 +1687,9 @@ class TestPostgresReportsAnIndexItCannotUse:
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
-        capsys.readouterr()
+        reported()
         backend._ensure_schema()
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "graph_edges_source_idx" in printed and "not valid" in printed, (
             "an index the planner cannot use was taken as done: " + printed
         )
@@ -5665,7 +5696,7 @@ class TestPostgresReportsAContractViolationDistinctly:
     """
 
     def test_a_refusal_is_reported_and_reporting_continues(
-        self, schema, backends, capsys
+        self, schema, backends, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -5687,7 +5718,7 @@ class TestPostgresReportsAContractViolationDistinctly:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
-        assert "refused" in capsys.readouterr().out
+        assert "refused" in reported()
 
 
 class TestPostgresStopFromInsideTheListener:
@@ -7407,7 +7438,7 @@ class TestTheOptionalScopeSeam:
         assert by_id(backend.load_graph_data(), "nodes")["old"]["name"] == "Renamed"
 
     def test_a_column_without_its_policy_is_reported_once_asked_for(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """The only thing that tells an operator the server enforces nothing.
 
@@ -7428,11 +7459,11 @@ class TestTheOptionalScopeSeam:
                 )
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
         backends.append(backend)
-        capsys.readouterr()
+        reported()
 
         backend.save_graph_data(snapshot([node_payload("a")]))
 
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "not its row-level security policy" in printed, (
             f"nothing said the server enforces nothing: {printed}"
         )
@@ -7445,7 +7476,7 @@ class TestTheOptionalScopeSeam:
     # -- optional, and what happens when it cannot be provisioned ------------
 
     def test_a_store_without_the_column_is_read_and_written_as_it_was(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """Nothing about such a store may change.
 
@@ -7469,7 +7500,7 @@ class TestTheOptionalScopeSeam:
         # to hear about is the ANALYZE its role cannot run, which it heard
         # about before this seam existed.
         backend.exists()
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
 
         issued = _statements_issued(
             lambda: (
@@ -7497,7 +7528,7 @@ class TestTheOptionalScopeSeam:
             if "set_config" in text
             or (params and SCOPE_SETTING in [str(value) for value in params])
         ], "an unscoped instance bound a scope setting"
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"]
 
     @staticmethod
@@ -7548,7 +7579,7 @@ class TestTheOptionalScopeSeam:
         ["column only", "policy, not enabled", "enabled, not forced"],
     )
     def test_a_scope_the_server_does_not_enforce_is_reported(
-        self, columnless, backends, capsys, provision
+        self, columnless, backends, reported, provision
     ):
         """Three ways for the server to be enforcing nothing, and the warning
         has to fire for each.
@@ -7595,11 +7626,11 @@ class TestTheOptionalScopeSeam:
                 )
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema, scope="scope-a")
         backends.append(backend)
-        capsys.readouterr()
+        reported()
 
         backend.save_graph_data(snapshot([node_payload("a")]))
 
-        printed = capsys.readouterr().out
+        printed = reported()
         assert "not by the server" in printed, (
             f"a store the server does not enforce was not reported ({provision}): "
             f"{printed}"
@@ -7608,7 +7639,7 @@ class TestTheOptionalScopeSeam:
         assert _stored(schema, "graph_nodes") == {"a": "scope-a"}
 
     def test_an_unscoped_instance_on_a_half_provisioned_store_says_nothing(
-        self, columnless, backends, capsys
+        self, columnless, backends, reported
     ):
         """The column on one scoped table and not the other, with no scope.
 
@@ -7632,7 +7663,7 @@ class TestTheOptionalScopeSeam:
         backend = PostgresGraphPersistenceBackend(dsn, schema=schema)
         backends.append(backend)
         backend.exists()
-        self._assert_silent_about_the_seam(capsys.readouterr().out)
+        self._assert_silent_about_the_seam(reported())
 
         issued = _statements_issued(
             lambda: (
@@ -7845,7 +7876,7 @@ class TestTheOptionalScopeSeam:
             )
 
     def test_a_store_that_configured_no_scope_gets_no_policy(
-        self, owner, backends, capsys
+        self, owner, backends, reported
     ):
         """The column, and nothing that would cost it its traversal plan.
 
@@ -7855,7 +7886,7 @@ class TestTheOptionalScopeSeam:
         """
         name, schema, password = owner
         backend = self._as_owner(owner, backends)
-        capsys.readouterr()
+        reported()
         backend.save_graph_data(snapshot([node_payload("a")]))
 
         with psycopg.connect(DSN, autocommit=True) as conn:
@@ -7870,7 +7901,7 @@ class TestTheOptionalScopeSeam:
                 assert not enabled, f"{table} took row-level security unasked"
                 assert not policy, f"{table} took a policy unasked"
                 assert _stored(schema, table, "id") is not None
-        assert capsys.readouterr().out == ""
+        assert reported() == ""
         # The column is there all the same, which is what lets a host turn the
         # seam on later without rewriting a table full of rows.
         assert _stored(schema, "graph_nodes") == {"a": None}

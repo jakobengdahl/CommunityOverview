@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -82,6 +83,8 @@ from backend.core.storage_backends import (
     ExternalChange,
     ExternalChangeRefused,
 )
+
+logger = logging.getLogger(__name__)
 
 # Every instance runs the same migration on boot, so they race. The lock is
 # taken for the duration of the migrating transaction and released with it -
@@ -508,8 +511,8 @@ class PostgresGraphPersistenceBackend:
                             qualified = sql.Identifier(self.schema, name).as_string(
                                 conn
                             )
-                            print(
-                                f"Warning: {name} exists but is not valid - a "
+                            logger.warning(
+                                f"{name} exists but is not valid - a "
                                 f"concurrent build that failed, or one still "
                                 f"running. If no build is in progress, "
                                 f"REINDEX INDEX CONCURRENTLY {qualified} "
@@ -545,8 +548,8 @@ class PostgresGraphPersistenceBackend:
                     # fires when nothing is wrong - so the warning is for the
                     # case where the index really is missing.
                     if self._index_state(None, name) != "valid":
-                        print(
-                            f"Warning: could not create {name}; traversal will "
+                        logger.warning(
+                            f"could not create {name}; traversal will "
                             f"scan instead of seek: {exc}"
                         )
             # Last, and outside the migrating transaction for the same reason
@@ -813,8 +816,8 @@ class PostgresGraphPersistenceBackend:
             # apart is not missing anything by not having the policy, and a
             # warning that fires when nothing is wrong teaches an operator to
             # ignore warnings.
-            print(
-                f"Warning: {', '.join(unprotected)} in schema {self.schema!r} "
+            logger.warning(
+                f"{', '.join(unprotected)} in schema {self.schema!r} "
                 f"carries the {SCOPE_COLUMN} column but not its row-level "
                 f"security policy, so the scope is enforced by this "
                 f"application alone and not by the server"
@@ -1264,8 +1267,8 @@ class PostgresGraphPersistenceBackend:
         # handlers, and an unrelated DROP's notices then print four times,
         # each labelled as coming from ANALYZE.
         def _report(diag: Any) -> None:
-            print(
-                f"Warning: ANALYZE after save: {diag.severity}: {diag.message_primary}"
+            logger.warning(
+                f"ANALYZE after save: {diag.severity}: {diag.message_primary}"
             )
 
         try:
@@ -1277,8 +1280,8 @@ class PostgresGraphPersistenceBackend:
                 finally:
                     conn.remove_notice_handler(_report)
         except Exception as exc:
-            print(
-                f"Warning: could not ANALYZE after save; the traversal's "
+            logger.warning(
+                f"could not ANALYZE after save; the traversal's "
                 f"indexes may go unused: {exc}"
             )
 
@@ -1614,8 +1617,8 @@ class PostgresGraphPersistenceBackend:
                 # reading that as "nothing is running" cleared the handle on
                 # the one thread guaranteed to still be alive.
                 if mine:
-                    print(
-                        f"Warning: the listener thread for {self._channel} "
+                    logger.warning(
+                        f"the listener thread for {self._channel} "
                         f"did not stop within {_LISTEN_STOP_TIMEOUT}s; "
                         f"notification cannot be started again on this "
                         f"backend"
@@ -1659,9 +1662,8 @@ class PostgresGraphPersistenceBackend:
                     self._listen_error = exc
                     ready.set()
                     return
-                print(
-                    f"Warning: reconnecting to {self._channel} after "
-                    f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    f"reconnecting to {self._channel} after {type(exc).__name__}: {exc}"
                 )
                 self._listen_stop.wait(delay)
                 delay = min(delay * 2, NOTIFY_RECONNECT_MAX_SECONDS)
@@ -1685,8 +1687,8 @@ class PostgresGraphPersistenceBackend:
                 self._read_until_stopped(conn)
             except Exception as exc:
                 if not self._listen_stop.is_set():
-                    print(
-                        f"Warning: lost the listening connection on "
+                    logger.warning(
+                        f"lost the listening connection on "
                         f"{self._channel}: {type(exc).__name__}: {exc}"
                     )
             finally:
@@ -1858,11 +1860,10 @@ class PostgresGraphPersistenceBackend:
             # is not. Either the application called us back into itself, or
             # this backend grew a path that reports inline. Loud, because the
             # refresh did not happen and the instance is now behind.
-            print(f"Warning: change notification refused: {exc}")
+            logger.warning(f"change notification refused: {exc}")
         except Exception as exc:
-            print(
-                f"Warning: applying an external change failed: "
-                f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                f"applying an external change failed: {type(exc).__name__}: {exc}"
             )
 
     def checkpoint(self) -> None:

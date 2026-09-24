@@ -21,11 +21,14 @@ than failing a load.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 MAGIC = b"CKGEMB\x01"
 _HEADER_LEN_STRUCT = struct.Struct("<I")
@@ -281,8 +284,8 @@ class FileEmbeddingSidecar:
                 # evidence of what went wrong.
                 spoiled = self.path.with_name(self.path.name + ".corrupt")
                 os.replace(self.path, spoiled)
-                print(
-                    f"Warning: {self.path} was not a readable sidecar; moved it "
+                logger.warning(
+                    f"{self.path} was not a readable sidecar; moved it "
                     f"to {spoiled} and rebuilding it"
                 )
 
