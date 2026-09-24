@@ -93,16 +93,15 @@ _MCP_SESSION_CLIENT_ID = "mcp-agent"
 _DEFAULT_SESSION_NAME = "Untitled session"
 
 # Appended to every undelivered-push warning: a push writes nothing, so an
-# agent that simply retries it gets the same silence. It deliberately does NOT
-# send the caller to connect_to_visualization_session as the pre-push check:
-# that tool's reachability verdict counts a bare registry entry, which is the
-# false positive this report exists to remove.
+# agent that simply retries it gets the same silence. It deliberately names
+# this report, not connect_to_visualization_session, as the verdict: that tool
+# is read before the push, and a consumer present then can be gone by the time
+# the push is sent.
 _UNDELIVERED_PUSH_REMEDY = (
     " A push is not stored, so this left no trace — use add_nodes_to_session to "
-    "change what the session holds. Trust this report rather than "
-    "connect_to_visualization_session's reachability line, which counts a "
-    "registry entry that outlives the browser that created it; its "
-    "connected_clients count is sound."
+    "change what the session holds. Trust this report rather than a "
+    "reachability check made before the push (connect_to_visualization_session): "
+    "a client present then may have left by the time the push was sent."
 )
 
 

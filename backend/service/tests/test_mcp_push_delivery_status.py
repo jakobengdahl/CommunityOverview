@@ -179,7 +179,7 @@ def test_stored_session_with_no_consumer_reports_undelivered(wired):
     assert "has a registry entry but nothing" not in delivery["warning"]
     assert "no stored state" not in delivery["warning"]
     assert "could not be queried" not in delivery["warning"]
-    # And it must not send the caller to a check with the same false positive.
+    # And it must name this report, not a pre-push check, as the verdict.
     assert "Trust this report" in delivery["warning"]
     # The push left no trace to read back — the half of the defect that makes
     # the report the only way to notice.

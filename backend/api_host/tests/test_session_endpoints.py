@@ -250,7 +250,7 @@ class TestHeadlessSessionAddressability:
     """A session with no connected client is still a session.
 
     Both read tools used to gate on the legacy push registry, which only records
-    that a browser holds the SSE stream open. A session created and populated
+    that a browser opened the SSE stream at some point. A session created and populated
     over MCP — the unattended-agent path — therefore reported "not found" while
     its state was there and ``get_visualization_layout`` read it fine.
     """
@@ -299,8 +299,9 @@ class TestHeadlessSessionAddressability:
     ):
         """A disconnected client is not a deleted session.
 
-        The registry entry is evicted when the browser stops holding the stream
-        open; the stored session outlives it and must keep resolving.
+        Nothing removes the registry entry when the browser leaves, so its TTL
+        eviction is forced here; the stored session outlives it and must keep
+        resolving.
         """
         session_id = headless_session()
         _add_nodes(test_app, session_id, ["node-1"])

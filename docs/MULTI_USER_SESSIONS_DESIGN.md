@@ -631,6 +631,11 @@ steps 6–8.
 >   facts separately — `has_stored_state` and `connected_clients` — because the
 >   tools acting on stored state and the pushes aimed at a live canvas fail in
 >   opposite cases.
+>   *Superseded in part:* a registry entry turned out to outlive the browser that
+>   created it, and to be created with no browser at all, so the gate and the
+>   "registry only" resolution now use the registry's consumer count
+>   (`SessionRegistry.has_consumer`) instead of the entry — see "Why an entry in
+>   the push registry is not a consumer" in `backend/DEVELOPMENT.md`.
 > - **Legacy push channel kept (scope boundary).** The legacy
 >   `GET /sessions/{id}/stream` MCP-push channel stays: §3.8 keeps MCP command
 >   pushes, the browser opens it eagerly on load, and the op stream (which
