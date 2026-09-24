@@ -35,7 +35,9 @@ When a planning MCP server *is* configured:
    all, the item is usually a feature request in a task's clothes, so name the
    capability it delivers and create that too. The planning graph's own metamodel
    carries the normative wording and the node types it uses; this repo does not
-   restate them.
+   restate them. **This governs every instruction in this file that creates a work
+   item in the graph**, wherever it appears — the sites below point back here
+   rather than repeating it.
 4. Do the code work here through a branch and a PR.
 5. Write the PR, commit SHA, implementation evidence and verification results back
    onto the relevant graph nodes.
@@ -155,12 +157,12 @@ If any part of the request is unclear, stop and ask rather than assume.
   requests" above).
 - Add features beyond what the task requires. If you discover a related bug or
   improvement, log it in the Corp planning graph as a `small-fix`-tagged Task
-  node (via the planning MCP), not in `SMALL_FIXES.md`, and stop — never fix it
-  in the same branch.
+  node (via the planning MCP, attached per item 3), not in `SMALL_FIXES.md`, and
+  stop — never fix it in the same branch.
 - Fix pre-existing bugs in the active branch. Pre-existing means: the problem
   existed before you started working, or is in code you did not change. Log it
   in the Corp planning graph as a `small-fix`-tagged Task node (via the planning
-  MCP) with file, line, and context, then continue.
+  MCP, attached per item 3) with file, line, and context, then continue.
 - Skip the review loop for non-trivial changes.
 - Merge PRs against `preview` or `prod` unless explicitly asked to in that turn —
   those gates belong to the project owner (see "Explicit merge requests" above).
@@ -653,7 +655,8 @@ Follow the full Standard Development Workflow (steps 1–10), with these additio
    if the batch has a clear theme.
 2. **After Implement:** re-run the test suite for every file touched. If a new
    test failure appears that is unrelated to your batch, log it in the Corp
-   planning graph as a `small-fix`-tagged Task node and do not fix it here.
+   planning graph as a `small-fix`-tagged Task node (attached per item 3) and do
+   not fix it here.
 3. **PR body:** list each `small-fix`-tagged Task node being resolved (by node
    id/name). Note items explicitly **not** addressed.
 4. **Review loop:** run it as described in step 8, reading the reviewer count off
@@ -809,7 +812,8 @@ commit messages, and code comments.
 ### What never belongs in docs
 
 - Future proposals or TODOs in current-state documents — file them in the Corp
-  planning graph as a `small-fix`-tagged Task node, or discuss in the PR body instead.
+  planning graph as a `small-fix`-tagged Task node (attached per item 3), or
+  discuss in the PR body instead.
 - Swedish text in any file under `docs/` or in code comments — English only.
 
 ### Screenshot workflow (USER_GUIDE.md)
