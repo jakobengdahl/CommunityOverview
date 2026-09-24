@@ -1,6 +1,6 @@
-# Manual Test Plan — dev branch (pre-preview)
+# Manual Test Plan — main branch (pre-preview)
 
-Features merged to `dev` but not yet in `preview`. Tested against the default profile unless otherwise noted.
+Features merged to `main` but not yet in `preview`. Tested against the default profile unless otherwise noted.
 
 > **Status legend:** ⬜ Not tested · ✅ Pass · ❌ Fail · ⚠️ Partial
 
@@ -315,6 +315,6 @@ exercise is unchanged, so re-test them once the lock is lifted.
 ## Notes
 
 - Tests marked ⬜ are not yet executed.
-- Add new feature sections here as more features land on `dev` before the next preview release.
+- Add new feature sections here as more features land on `main` before the next preview release.
 - For backend seam features (#123–#129): these are hook/extension points that may require integration tests rather than manual UI testing; verify via API calls or unit test suite (`pytest`).
 - Guide system example guides: `?guide=first_intro` and `?guide=actions_demo` (both defined in `config/default/schema_config.json`).
