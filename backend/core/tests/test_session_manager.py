@@ -392,6 +392,26 @@ class TestApplyOps:
         await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["y"]}])
         assert [op["node_ids"] for op in store.ops_since(s.id, 0)] == [["y"]]
 
+    async def test_persist_failure_restores_a_non_empty_ring(self):
+        """A rollback puts back the ring's prior contents, not an empty or
+        missing ring, and not the ring as the failed batch left it."""
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        mgr = SessionManager(store)
+        s = mgr.create_session()
+        await mgr.apply_ops(s.id, "c1", 0, [{"op": "nodes_added", "node_ids": ["a"]}])
+        ring_before = list(store.ring(s.id))
+        assert len(ring_before) == 1
+
+        def _boom(snapshot):
+            raise OSError("disk full")
+
+        store.persist_snapshot = _boom
+        with pytest.raises(OSError):
+            await mgr.apply_ops(
+                s.id, "c1", 1, [{"op": "nodes_added", "node_ids": ["b"]}]
+            )
+        assert list(store.ring(s.id)) == ring_before
+
 
 class TestClaimOps:
     async def test_claim_ops_are_ephemeral(self):
@@ -2933,7 +2953,7 @@ class TestRenameSessionSync:
             mgr._apply_op_sync(s, s.id, "mcp", move(2))
         assert s.activity_log == log_before
 
-    def test_a_non_string_name_is_rejected_before_the_session_is_created(self):
+    async def test_a_non_string_name_is_rejected_before_the_session_is_created(self):
         """A rename materialises an unknown id — but not for a request that is
         refused anyway, or a bad call leaves an empty session behind."""
         mgr = _manager()
@@ -2944,7 +2964,7 @@ class TestRenameSessionSync:
         assert mgr.get_session(sid) is None
         assert mgr.store.session_count() == 0
 
-    def test_an_invalid_id_is_not_found(self):
+    async def test_an_invalid_id_is_not_found(self):
         mgr = _manager()
 
         with pytest.raises(SessionNotFound):
@@ -3490,6 +3510,10 @@ class TestMcpBucketWriteListMatchesMcpTools:
         for method in _MCP_BUCKET_WRITES:
             for keywords in calls[method]:
                 assert "rate_limit_label" in keywords, method
+                # rate_limit_key would move the write to _image_bucket; a
+                # ``**`` splat (arg None) could carry it past this check.
+                assert "rate_limit_key" not in keywords, method
+                assert None not in keywords, method
 
     async def test_every_manager_method_taking_a_rate_limit_label_is_listed(self):
         import inspect
@@ -3501,6 +3525,46 @@ class TestMcpBucketWriteListMatchesMcpTools:
             and "rate_limit_label" in inspect.signature(fn).parameters
         }
         assert labelled == set(_MCP_BUCKET_WRITES)
+
+
+class _RecordingBucket:
+    def __init__(self, calls):
+        self._calls = calls
+
+    def consume(self, key, n=1.0):
+        self._calls.append(key)
+        return False
+
+
+_MCP_UNMETERED_RUNS = {
+    "claimed_elements": lambda mgr, sid: mgr.claimed_elements(sid),
+    "connected_count": lambda mgr, sid: mgr.connected_count(sid),
+    "create_session": lambda mgr, sid: mgr.create_session(),
+    "delete_session_sync": lambda mgr, sid: mgr.delete_session_sync(sid),
+    "get_session": lambda mgr, sid: mgr.get_session(sid),
+    "list_sessions": lambda mgr, sid: mgr.list_sessions(),
+    "push_command": lambda mgr, sid: mgr.push_command(sid, {"type": "noop"}),
+    "rename_session_sync": lambda mgr, sid: mgr.rename_session_sync(
+        sid, "Renamed", client_id="mcp-agent"
+    ),
+}
+
+
+class TestMcpUnmeteredCallsSpendNoBucket:
+    async def test_every_unmetered_call_has_a_run(self):
+        assert set(_MCP_UNMETERED_RUNS) == _MCP_UNMETERED_CALLS
+
+    @pytest.mark.parametrize("call", sorted(_MCP_UNMETERED_CALLS))
+    async def test_call_succeeds_with_every_bucket_spent_and_consumes_none(self, call):
+        mgr = _manager()
+        s = mgr.create_session()
+        consumed = []
+        for attr in ("_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"):
+            setattr(mgr, attr, _RecordingBucket(consumed))
+
+        _MCP_UNMETERED_RUNS[call](mgr, s.id)
+
+        assert consumed == []
 
 
 class TestMcpWritesDrawFromTheMcpBucket:
