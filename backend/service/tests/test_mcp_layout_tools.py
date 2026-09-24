@@ -8,6 +8,7 @@ visualization session and move nodes back into it. They are thin wrappers over
 are covered in ``backend/core/tests/test_session_manager.py``.
 """
 
+import asyncio
 import os
 from unittest.mock import MagicMock, Mock
 
@@ -380,22 +381,37 @@ class TestGetVisualizationLayout:
 
 
 class TestGetVisualizationSessionState:
-    def test_claims_outliving_their_session_are_not_reported_as_selection(
+    @pytest.mark.asyncio
+    async def test_claims_outliving_their_session_are_not_reported_as_selection(
         self, authz_tools
     ):
         """The claim map is not purged on delete, the selection read is.
 
         Both halves of the state read come off the stored session, so a session
-        the manager no longer holds reports no selection even while a registry
-        entry (and its stale claims) survive.
+        the manager no longer holds reports no selection even while a browser
+        is still draining its legacy push channel (and its stale claims survive).
         """
         tools_map, manager, registry = authz_tools
         session = _session_with_nodes(manager, ["a"])
-        registry.get_or_create(session.id)
         manager.claims.claim(session.id, "client-1", ["a"])
         manager.delete_session_sync(session.id)
 
-        state = tools_map["get_visualization_session_state"](session_id=session.id)
+        gen = registry.stream(session.id)
+        task = asyncio.create_task(gen.__anext__())
+        for _ in range(500):
+            if registry.has_consumer(session.id):
+                break
+            await asyncio.sleep(0)
+        assert registry.has_consumer(session.id)
+        try:
+            state = tools_map["get_visualization_session_state"](session_id=session.id)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            await gen.aclose()
 
         assert state["visible_node_ids"] == []
         assert state["selected_node_ids"] == []

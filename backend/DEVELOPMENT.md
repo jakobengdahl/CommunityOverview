@@ -857,7 +857,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `save_view` | Save a named view (creates SavedView node) |
 | `connect_to_visualization_session` | Check that a session id resolves, and how many clients are watching it (`connected_clients`) |
 | `get_visualization_session_state` | Read a session's visible and selected node ids |
-| `clear_visualization` | Clear the canvas in the browsers displaying a session (requires a registry entry for the session — a narrower gate than "a browser is watching", see below) |
+| `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
 | `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
@@ -887,10 +887,14 @@ Two independent things can be true of a session id, and
   `visualization_session_id` parameter goes to the op-stream hub *and* the
   legacy push registry, so it can still reach a browser that has only the legacy
   stream open and reports no presence; `message` states which case the session is
-  in. `clear_visualization` gates on the legacy registry specifically.
+  in. The legacy channel counts only while something is draining it
+  (`SessionRegistry.has_consumer`), never because a registry entry exists — see
+  "Why an entry in the push registry is not a consumer" below.
+  `clear_visualization` gates on the same two facts: it refuses unless a client
+  is on the op stream or draining the legacy channel.
 
-A session id that is in neither the store nor the registry is reported as not
-found, by both read tools.
+A session id with no stored state and nothing draining its legacy push channel is
+reported as not found, by both read tools.
 
 **A push reports its own delivery.** `search_graph`, `get_related_nodes` and
 `get_saved_view` add a `visualization_delivery` object to their result whenever a
@@ -911,10 +915,10 @@ trace at all, and reading the session back afterwards cannot tell it apart from
 a push that never happened. A routine that refreshes a canvas on a schedule has
 to check `delivered` instead of reading a successful search as a refreshed
 canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
-verdict for that check: it resolves a session through `session_exists`, so it
-reports a bare registry entry as a reachable canvas — the same false positive
-described below. Its `connected_clients` count is sound; its "a browser is
-holding its legacy push channel open" line is not.
+verdict for that check either: it is read before the push, and a consumer
+present then can be gone by the time the push is sent. It does agree with the
+delivery report on the state that matters most — a registry entry with nothing
+draining it is reported as unreachable by both.
 
 `live_consumers` can be non-zero while `delivered` is false: a client that joined
 a session the store does not hold is genuinely connected, but `push_command`
@@ -954,9 +958,9 @@ delivery claim on its own: without the consumer ref-count
 (`SessionRegistry.consumer_count` / `has_consumer`, held for as long as
 `stream()` is draining the queue) a nightly push into a session whose tab closed
 months ago would report `delivered: true` forever, and would inflate
-`live_consumers` with a reader that is not there. `clear_visualization` gates on
-`session_exists` and so still has that looseness; it is a narrower gate than it
-reads as.
+`live_consumers` with a reader that is not there. The pre-push checks
+(`connect_to_visualization_session`, `get_visualization_session_state` and
+`clear_visualization`) use the same consumer count for the same reason.
 
 `delivered` means a consumer was attached when the command was enqueued, not
 that the canvas has finished applying it. `clear_visualization` has nothing to
