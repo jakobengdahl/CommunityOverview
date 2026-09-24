@@ -619,3 +619,32 @@ class TestRingBufferCatchUp:
         assert store.ops_since(s.id, 1) is None
         # but a recent enough since_seq is served from the ring
         assert [op["seq"] for op in store.ops_since(s.id, 4)] == [5]
+
+
+class TestRestoreRing:
+    def _two_sessions(self):
+        store = SessionStore(InMemorySessionPersistenceBackend())
+        a, b = store.create(), store.create()
+        for s in (a, b):
+            store.apply_state_op(s, {"op": "nodes_added", "node_ids": [s.id]})
+        return store, a, b
+
+    def test_restoring_saved_contents_leaves_other_sessions_rings_alone(self):
+        store, a, b = self._two_sessions()
+        saved = list(store.ring(a.id))
+        b_before = list(store.ring(b.id))
+        store.apply_state_op(a, {"op": "nodes_added", "node_ids": ["later"]})
+
+        store.restore_ring(a.id, saved)
+
+        assert list(store.ring(a.id)) == saved
+        assert list(store.ring(b.id)) == b_before
+
+    def test_restoring_no_ring_drops_only_that_sessions_ring(self):
+        store, a, b = self._two_sessions()
+        b_before = list(store.ring(b.id))
+
+        store.restore_ring(a.id, None)
+
+        assert store.ring(a.id) is None
+        assert list(store.ring(b.id)) == b_before
