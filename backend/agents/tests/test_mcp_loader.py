@@ -553,8 +553,9 @@ class TestMCPLoaderLifecycle:
 class TestConnectHttpInfoQuery:
     """Tests for the HTTP info-endpoint tool-discovery path."""
 
-    @patch("backend.agents.mcp_loader.httpx.get")
-    def test_info_endpoint_non_json_body_is_swallowed(self, mock_get):
+    @patch("backend.agents.mcp_loader.is_safe_url", return_value=True)
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_info_endpoint_non_json_body_is_swallowed(self, mock_client_cls, mock_is_safe_url):
         """A 200 response with a non-JSON body must not raise.
 
         httpx surfaces a JSON decode failure as a plain ValueError, which — unlike
@@ -563,9 +564,15 @@ class TestConnectHttpInfoQuery:
         empty list instead of propagating out of _connect_http.
         """
         response = Mock()
+        response.is_redirect = False
         response.status_code = 200
         response.json.side_effect = json.JSONDecodeError("no json", "<html>", 0)
-        mock_get.return_value = response
+
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=None)
+        client.get.return_value = response
+        mock_client_cls.return_value = client
 
         integration = MCPIntegration(
             id="WEB",
@@ -597,6 +604,51 @@ class TestConnectHttpInfoQuery:
         tools = loader._connect_http(integration)
 
         assert tools == []
+
+    @patch("backend.agents.mcp_loader.is_safe_url", return_value=False)
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_info_endpoint_internal_ip_is_rejected(self, mock_client_cls, mock_is_safe_url):
+        """An initial info URL resolving to an internal IP fails immediately."""
+        integration = MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url="http://127.0.0.1/mcp",
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._connect_http(integration)
+
+        assert tools == []
+        mock_client_cls.assert_not_called()
+
+    @patch("backend.agents.mcp_loader.is_safe_url", side_effect=[True, False])
+    @patch("backend.agents.mcp_loader.httpx.Client")
+    def test_info_endpoint_redirect_to_internal_ip_is_rejected(self, mock_client_cls, mock_is_safe_url):
+        """A redirect to an internal IP is blocked during tool discovery."""
+        response = Mock()
+        response.is_redirect = True
+        response.status_code = 302
+        response.headers = {"location": "http://169.254.169.254/metadata"}
+
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=None)
+        client.get.return_value = response
+        mock_client_cls.return_value = client
+
+        integration = MCPIntegration(
+            id="WEB",
+            name="Some HTTP MCP",
+            transport=MCPTransport.HTTP,
+            url="http://example.com/mcp",
+        )
+        loader = MCPLoader([integration])
+
+        tools = loader._connect_http(integration)
+
+        assert tools == []
+        client.get.assert_called_once_with("http://example.com/info")
 
 
 def _redirect_response(location, status_code=302):
