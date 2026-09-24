@@ -250,24 +250,6 @@ function shapeChanged(before, after) {
 const BOOKKEEPING_FIELDS = new Set(['updated_at', 'updated_by', 'created_at', 'created_by']);
 
 /**
- * The annotation fields this update actually changed, from the record's own
- * before/after snapshots.
- *
- * Deliberately not `affected.fields`: that is the *incoming payload's* key
- * set, not a change set (session_store.py's `annotation_updated` branch
- * records `sorted(incoming.keys())`), and the browser sends the whole
- * annotation in every op. For any browser-originated edit `fields` is
- * therefore the annotation's entire key set and is identical whatever the
- * user did — reading it as a change set made a move, a recolour or a text
- * edit all render as "Unlocked", asserting a security-relevant state change
- * that never happened. before/after are populated for every producer, because
- * `apply_state_op` is the single choke point both the browser batch and the
- * MCP write path go through, so the diff is authoritative for both.
- *
- * Returns null when there is no before snapshot to compare against, which is
- * the one case where nothing about the change can be asserted.
- */
-/**
  * Whether `after.style` is exactly what a build from before
  * smallfix-label-overlay-drops-nonvisual-style-keys wrote back for `before`:
  * its label/line translators carried only these keys and dropped the rest.
@@ -291,6 +273,24 @@ function olderBuildStyleWriteBack(before, after) {
   return sameValue(after.style, written, ['style'], annotationType);
 }
 
+/**
+ * The annotation fields this update actually changed, from the record's own
+ * before/after snapshots.
+ *
+ * Deliberately not `affected.fields`: that is the *incoming payload's* key
+ * set, not a change set (session_store.py's `annotation_updated` branch
+ * records `sorted(incoming.keys())`), and the browser sends the whole
+ * annotation in every op. For any browser-originated edit `fields` is
+ * therefore the annotation's entire key set and is identical whatever the
+ * user did — reading it as a change set made a move, a recolour or a text
+ * edit all render as "Unlocked", asserting a security-relevant state change
+ * that never happened. before/after are populated for every producer, because
+ * `apply_state_op` is the single choke point both the browser batch and the
+ * MCP write path go through, so the diff is authoritative for both.
+ *
+ * Returns null when there is no before snapshot to compare against, which is
+ * the one case where nothing about the change can be asserted.
+ */
 function changedFields(before, after, normalised) {
   if (!before || typeof before !== 'object') return null;
   if (!after || typeof after !== 'object') return null;
