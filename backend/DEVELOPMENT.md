@@ -941,7 +941,7 @@ registry entry with nothing draining it, the command still waits in that
 entry's bounded queue (oldest dropped first), and a browser that opens the
 session before the entry expires drains it and may apply it then. So an
 undelivered push can still change a canvas later; `delivered` reports only
-whether a consumer took it when it was sent, not whether it is applied later.
+whether a consumer was attached when it was sent, not whether it is applied later.
 A routine that refreshes a canvas on a schedule has to check `delivered` instead
 of reading a successful search as a refreshed canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
 verdict for that check either: it is read before the push, and a consumer
@@ -991,7 +991,7 @@ months ago would report `delivered: true` forever, and would inflate
 (`connect_to_visualization_session`, `get_visualization_session_state` and
 `clear_visualization`) use the same consumer count for the same reason.
 
-`delivered` means a consumer was attached when the command was enqueued, not
+`delivered` means a consumer was attached when the command was sent, not
 that the canvas has finished applying it. `clear_visualization` has nothing to
 report — it refuses up front instead.
 
