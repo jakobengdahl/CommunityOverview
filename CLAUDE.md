@@ -820,8 +820,10 @@ only other language with full coverage today.
 - **Never hardcode display strings** in React components. Use the `useI18n()` hook
   and look up a key from the JSON files.
 - **Always add new keys to both** `frontend/web/src/i18n/en.json` **and**
-  `frontend/web/src/i18n/sv.json`. Missing a language file key causes the UI to
-  fall back to the key name, not English.
+  `frontend/web/src/i18n/sv.json`. A key missing from `sv.json` silently falls
+  back to English; one missing from `en.json` renders as the `fallback` argument
+  passed to `t()`, or the raw key name when there is none, in English and in any
+  language that lacks it too.
 - **`packages/ui-graph-canvas`** has no access to the host app's i18n system.
   All user-visible text in that package must be accepted as props with English
   defaults. Wire new props through `App.jsx` (translating with `t()`) and add the
@@ -834,9 +836,12 @@ only other language with full coverage today.
 ### Adding support for a new language
 
 1. Create `frontend/web/src/i18n/<lang>.json` mirroring the structure of `en.json`.
-2. Add `'<lang>'` to `SUPPORTED_LANGUAGES` in `frontend/web/src/i18n/index.jsx`.
+2. In `frontend/web/src/i18n/index.jsx`, import the new file, add it to the
+   `translations` map, and add `'<lang>'` to `SUPPORTED_LANGUAGES`.
 3. Add a `menu.language_<lang>` key to both `en.json` and `sv.json` (and the new file).
-4. The language selector in `FloatingHeader.jsx` will pick it up automatically.
+4. Add a button for it to the language selector in
+   `frontend/web/src/components/SettingsDialog.jsx` — the selector lists each
+   language explicitly and does not read `SUPPORTED_LANGUAGES`.
 
 ---
 
