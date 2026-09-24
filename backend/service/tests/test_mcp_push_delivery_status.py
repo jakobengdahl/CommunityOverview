@@ -815,11 +815,18 @@ async def test_a_live_consumer_without_stored_state_is_still_found(wired):
         cleared = tools["clear_visualization"](
             visualization_session_id=UNKNOWN_SESSION_ID
         )
+        state = tools["get_visualization_session_state"](session_id=UNKNOWN_SESSION_ID)
 
     assert connect["connected"] is True
     assert connect["has_stored_state"] is False
     assert "no stored state yet" in connect["message"]
     assert cleared["success"] is True
+    # With no stored state there is nothing to count: both counts are present
+    # and zero, the same shape a stored session reports.
+    assert "error" not in state
+    assert state["visible_node_ids"] == []
+    assert state["node_count"] == 0
+    assert state["visible_node_count"] == 0
 
 
 def test_a_registry_that_cannot_report_consumers_is_not_a_push_target(tmp_path):
