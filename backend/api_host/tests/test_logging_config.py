@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sys
 
 from backend.api_host.config import AppConfig
@@ -69,15 +70,17 @@ def test_structured_json_formatter_emits_json_log_line():
     assert "RuntimeError: boom" in payload["exception"]
 
 
-def test_text_format_labels_app_warnings_with_level_and_logger():
+def test_text_format_labels_app_logs_from_boot_at_info():
     previous_handlers = logging.root.handlers[:]
     previous_level = logging.root.level
     try:
         logging.root.handlers = []
+        logging.root.setLevel(logging.WARNING)
 
         configure_root_logging("text")
 
         assert len(logging.root.handlers) == 1
+        assert logging.root.level == logging.INFO
         record = logging.LogRecord(
             name="backend.core.postgres_backend",
             level=logging.WARNING,
@@ -88,11 +91,36 @@ def test_text_format_labels_app_warnings_with_level_and_logger():
             exc_info=None,
         )
         line = logging.root.handlers[0].format(record)
-        assert line == (
-            "WARNING:backend.core.postgres_backend:"
-            "graph checkpoint failed, will retry: disk full"
-        )
-        assert logging.root.level == logging.WARNING
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} WARNING "
+            r"backend\.core\.postgres_backend: "
+            r"graph checkpoint failed, will retry: disk full",
+            line,
+        ), line
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+
+
+def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
+    """FastMCP's constructor configures logging with basicConfig; once the
+    text-mode handler exists that must be a no-op, not a second handler."""
+    from mcp.server.fastmcp import FastMCP
+
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+
+        configure_root_logging("text")
+        installed = logging.root.handlers[:]
+        FastMCP("probe")
+
+        assert logging.root.handlers == installed
+        assert logging.root.level == logging.INFO
     finally:
         for handler in logging.root.handlers:
             if handler not in previous_handlers:
