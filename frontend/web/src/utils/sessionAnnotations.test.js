@@ -564,10 +564,42 @@ describe('label/line style keys the canvas has no control for', () => {
   });
 
   it('survive a GUI edit of a named style key, which still wins', () => {
-    const overlays = annotationsToOverlays([label, line]).map((o) => ({ ...o, color: 'blue' }));
+    const overlays = annotationsToOverlays([label, line]).map((o) => ({
+      ...o,
+      color: 'blue',
+      opacity: 0.9,
+      ...(o.kind === 'label' ? { fontSize: 24 } : {}),
+    }));
     const [labelBack, lineBack] = overlaysToAnnotations(overlays);
-    expect(labelBack.style).toEqual({ ...label.style, color: 'blue' });
-    expect(lineBack.style).toEqual({ ...line.style, color: 'blue' });
+    expect(labelBack.style).toEqual({ ...label.style, color: 'blue', opacity: 0.9, fontSize: 24 });
+    expect(lineBack.style).toEqual({ ...line.style, color: 'blue', opacity: 0.9 });
+  });
+
+  it('never override a named key, even one left in extraStyle', () => {
+    const [labelBack, lineBack] = overlaysToAnnotations([
+      {
+        id: 'l1',
+        kind: 'label',
+        position: { x: 0, y: 0 },
+        text: 'x',
+        color: 'blue',
+        fontSize: 24,
+        opacity: 0.9,
+        extraStyle: { color: 'stale', fontSize: 99, opacity: 0.1, dash: 'dotted' },
+      },
+      {
+        id: 'a1',
+        kind: 'arrow',
+        position: { x: 0, y: 0 },
+        dx: 160,
+        dy: 0,
+        color: 'blue',
+        opacity: 0.9,
+        extraStyle: { color: 'stale', opacity: 0.1, dash: 'dotted' },
+      },
+    ]);
+    expect(labelBack.style).toEqual({ color: 'blue', fontSize: 24, opacity: 0.9, dash: 'dotted' });
+    expect(lineBack.style).toEqual({ color: 'blue', opacity: 0.9, dash: 'dotted' });
   });
 
   it('are not duplicated as the named overlay fields', () => {

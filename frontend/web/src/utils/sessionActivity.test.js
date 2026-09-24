@@ -898,6 +898,82 @@ describe('describeActivity', () => {
     });
   });
 
+  describe('label/line style keys beyond the ones the canvas controls', () => {
+    // smallfix-label-overlay-drops-nonvisual-style-keys: the translators now
+    // carry every style key, where builds before it dropped all but these.
+    const label = {
+      id: 'l1',
+      type: 'label',
+      kind: 'label',
+      position: { x: 0, y: 0 },
+      geometry: { x: 0, y: 0, w: 0, h: 0, rotation: 0 },
+      text: 'hi',
+      z: 0,
+      locked: false,
+      style: { color: 'red', fontSize: 18, opacity: 0.5, dash: 'dotted' },
+    };
+    const line = {
+      id: 'a1',
+      type: 'line',
+      kind: 'line',
+      from: { x: 0, y: 0 },
+      to: { x: 160, y: 0 },
+      startArrow: false,
+      endArrow: true,
+      z: 0,
+      locked: false,
+      style: { color: 'red', opacity: 0.5, dash: 'dotted' },
+    };
+
+    function browserEdit(stored, edit) {
+      const overlays = annotationsToOverlays([stored]).map(edit);
+      const incoming = JSON.parse(JSON.stringify(overlaysToAnnotations(overlays)[0]));
+      return record({
+        op: 'annotation_updated',
+        before: stored,
+        after: { ...stored, ...incoming },
+      });
+    }
+
+    it('reports a text edit from this build as a text edit', () => {
+      const r = browserEdit(label, (o) => ({ ...o, text: 'bye' }));
+      expect(r.after.style).toEqual(label.style);
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_text');
+    });
+
+    it('still reports a restyle from this build as a restyle', () => {
+      const r = browserEdit(label, (o) => ({ ...o, color: 'blue' }));
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+      const lineRestyle = browserEdit(line, (o) => ({ ...o, opacity: 0.9 }));
+      expect(describeActivity(lineRestyle).key).toBe('history.desc.annotation_updated_style');
+    });
+
+    it("does not report an older build's dropped keys as a restyle", () => {
+      // What a pre-fix build wrote for a text edit: the extra key gone.
+      const olderText = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, text: 'bye', style: { color: 'red', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(olderText).key).toBe('history.desc.annotation_updated_text');
+      const olderArrowhead = record({
+        op: 'annotation_updated',
+        before: line,
+        after: { ...line, endArrow: false, style: { color: 'red', opacity: 0.5 } },
+      });
+      expect(describeActivity(olderArrowhead).key).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('still reports a restyle an older build wrote', () => {
+      const r = record({
+        op: 'annotation_updated',
+        before: label,
+        after: { ...label, style: { color: 'blue', fontSize: 18, opacity: 0.5 } },
+      });
+      expect(describeActivity(r).key).toBe('history.desc.annotation_updated_style');
+    });
+  });
+
   describe('shape spelling', () => {
     it('does not report an agent respelling a shape it already is as a shape change', () => {
       // The server stores content.shape verbatim, so an agent may write
@@ -975,6 +1051,17 @@ describe('describeActivity', () => {
       expect(
         describeActivity(record({ op: 'annotation_updated', before: stored, after: patched })).key
       ).toBe('history.desc.annotation_updated_generic');
+    });
+
+    it('leaves the stored image on the record it classifies', () => {
+      const image = { url: 'data:image/webp;base64,AAAA' };
+      const r = record({
+        op: 'annotation_updated',
+        before: { type: 'image', image },
+        after: { type: 'image', image, z: 2 },
+      });
+      describeActivity(r);
+      expect(r.before.image).toBe(image);
     });
 
     it('logs the skipped annotation without an image field it never had', () => {
