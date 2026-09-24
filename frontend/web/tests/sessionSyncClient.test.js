@@ -386,6 +386,53 @@ describe('SessionSyncClient', () => {
     expect(client.seq).toBe(5);
   });
 
+  // smallfix-late-joiner-misses-ops-before-stream-20260924: the first snapshot
+  // only adopts its seq, so ops that landed between the host's initial load
+  // and the stream subscribe must be recovered through onResync.
+  it.each([
+    ['a loaded session', { node_refs: ['a'] }, 2],
+    ['a 404 load (session created by the stream)', {}, 0],
+  ])('resyncs on a first snapshot newer than %s', async (_label, baseline, loadedSeq) => {
+    const onReady = vi.fn();
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onReady, onResync } });
+    client.connect();
+    client.setBaseline(baseline, { seq: loadedSeq });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onReady).toHaveBeenCalledWith(5);
+    expect(onResync).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resync on a first snapshot at the seq the load already reflected', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 5 });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+  });
+
+  it('does not resync on a first snapshot when the baseline carries no load seq', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] });
+    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(onResync).not.toHaveBeenCalled();
+  });
+
+  it('checks the load seq only on the first snapshot, not on a later one', () => {
+    const onResync = vi.fn();
+    const { client } = makeClient({ handlers: { onResync } });
+    client.connect();
+    client.setBaseline({ node_refs: ['a'] }, { seq: 1 });
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 3, session: { state: {} } });
+    expect(onResync).toHaveBeenCalledTimes(1);
+    es.emit({ type: 'snapshot', seq: 4, session: { state: {} } });
+    expect(onResync).toHaveBeenCalledTimes(2); // the ordinary later-snapshot resync
+  });
+
   it('forwards command events (MCP pushes broadcast via the hub, design R5)', async () => {
     const onCommand = vi.fn();
     const { client } = makeClient({ handlers: { onCommand } });
