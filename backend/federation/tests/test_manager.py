@@ -172,8 +172,12 @@ def test_build_cache_carries_aliases_and_subtypes_over():
                 "id": "full",
                 "type": "Actor",
                 "name": "Office",
-                "aliases": ["esam"],
-                "subtypes": ["Agency"],
+                "description": "A description",
+                "summary": "A summary",
+                "tags": ["Tag"],
+                "aliases": ["eSam", "Second Alias"],
+                "subtypes": ["Agency", "Board"],
+                "archived": True,
             },
             {"id": "bare", "type": "Actor", "name": "Bare"},
             {
@@ -189,7 +193,18 @@ def test_build_cache_carries_aliases_and_subtypes_over():
         n.metadata["origin_node_id"]: n for n in manager._cache["g"].nodes.values()
     }
 
-    assert (cached["full"].aliases, cached["full"].subtypes) == (["esam"], ["Agency"])
+    full = cached["full"]
+    assert (full.name, full.description, full.summary) == (
+        "Office",
+        "A description",
+        "A summary",
+    )
+    assert (full.tags, full.aliases, full.subtypes, full.archived) == (
+        ["Tag"],
+        ["eSam", "Second Alias"],
+        ["Agency", "Board"],
+        True,
+    )
     assert (cached["bare"].aliases, cached["bare"].subtypes) == ([], [])
     assert (cached["nulls"].aliases, cached["nulls"].subtypes) == ([], [])
 
