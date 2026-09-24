@@ -291,7 +291,8 @@ parallel code paths, dead code, stale TODO comments, or obvious bugs outside
 your change radius.
 
 **Do not fix them now.** Instead, create a `small-fix`-tagged Task node in the
-Corp planning graph (via the planning MCP) with these fields:
+Corp planning graph (via the planning MCP), attached to what it serves in the
+same write per item 3 of MCP-first planning above, with these fields:
 
 - **name:** short description of the issue
 - **file(s):** `path/to/file.py:line`
@@ -463,7 +464,8 @@ round with no findings.** A reviewer briefed to find something always can, so
 than the change. Only `production-defect` blocks: log **both** other classes —
 every surviving `test-durability` and `unfalsifiable` finding — as **one**
 `small-fix`-tagged Task node in the Corp planning graph, one node for the whole
-residue, and merge. A "meaningful gap" in the tests is a `test-durability`
+residue, attached in the same write per item 3 of MCP-first planning, and merge.
+A "meaningful gap" in the tests is a `test-durability`
 finding and goes to that node, not into this loop. A round that comes back with
 its findings unlabelled is not a completed round — ask the reviewers for the
 labels rather than guessing them — but it counts toward the ten-round backstop
