@@ -15,7 +15,9 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from backend.core import GraphStorage, Node
-from backend.core.session_manager import SessionManager, _TokenBucket
+from backend.core.session_auto_add import SessionAutoAddRegistry
+from backend.core.session_manager import SessionManager, SessionNotFound, _TokenBucket
+from backend.core.session_registry import SessionRegistry
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
@@ -82,15 +84,20 @@ class TestAddNodesToSession:
         get_visualization_session_state used to report the visible count under
         the same name, so an agent chaining the tools saw two numbers for one
         session. The visible count has its own field there instead.
+
+        ``nodes_hidden`` accepts an id the session does not reference, so the
+        hidden list also carries one: a count built from the visible and hidden
+        lists instead of from ``node_refs`` then comes out one too high.
         """
         tools_map, manager = tools
         sid = _session(manager)
         tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha", "beta"])
         session = manager.get_session(sid)
         manager.store.apply_state_op(
-            session, {"op": "nodes_hidden", "node_ids": ["beta"]}
+            session, {"op": "nodes_hidden", "node_ids": ["beta", "not-referenced"]}
         )
         manager.store.persist(session)
+        assert "not-referenced" in session.state["hidden_node_ids"]
 
         added = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["gamma"])
         state = tools_map["get_visualization_session_state"](session_id=sid)
@@ -469,6 +476,85 @@ class TestAddNodesToSession:
         assert result["error"] == "too_large"
         assert "Too many node ids" in result["message"]
 
+    def test_deduplication_compares_each_id_a_bounded_number_of_times(self, tools):
+        """The dedupe runs on the uncapped list, so it must stay linear.
+
+        Checking membership in the growing result list instead of a set would
+        still dedupe correctly — it is only quadratic, which no result shows.
+        Counting ``__eq__`` calls makes that visible: a set compares an id only
+        against the entries its hash lands on, a list against every one before it.
+        """
+        tools_map, manager = tools
+        sid = _session(manager)
+        comparisons = []
+
+        class CountingId(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                comparisons.append(1)
+                return str.__eq__(self, other)
+
+        distinct = 400
+        node_ids = [CountingId(f"id-{i}") for i in range(distinct)] * 2
+
+        result = tools_map["add_nodes_to_session"](session_id=sid, node_ids=node_ids)
+
+        assert result["error"] == "no_resolvable_nodes"
+        assert len(result["skipped"]) == distinct
+        assert len(comparisons) <= len(node_ids)
+
+    def test_only_the_deduplicated_ids_are_resolved(self, tmp_path):
+        """The per-id resolve is bounded by the caps only if it gets the ids the
+        caps counted, not the raw list with its repeats."""
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service)
+        tools_map["add_nodes"](
+            nodes=[
+                {"id": "alpha", "type": "Initiative", "name": "Alpha"},
+                {"id": "beta", "type": "Actor", "name": "Beta"},
+            ],
+            edges=[],
+        )
+        sid = _session(manager)
+        resolved_with = []
+        original = service.resolve_session_node_semantics
+
+        def spy(node_ids, **kwargs):
+            resolved_with.append(list(node_ids))
+            return original(node_ids, **kwargs)
+
+        service.resolve_session_node_semantics = spy
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["alpha", "alpha", "beta", "ghost", "ghost"]
+        )
+
+        assert result["added"] == ["alpha", "beta"]
+        assert resolved_with == [["alpha", "beta", "ghost"]]
+
+    def test_a_session_deleted_before_the_write_is_reported_as_not_found(
+        self, tools, monkeypatch
+    ):
+        """The session can go between the upfront lookup and the write. That race
+        must read exactly like the upfront not-found, not as a different error."""
+        tools_map, manager = tools
+        sid = _session(manager)
+
+        def deleted_meanwhile(*args, **kwargs):
+            raise SessionNotFound()
+
+        monkeypatch.setattr(manager, "add_node_refs", deleted_meanwhile)
+        raced = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+        monkeypatch.undo()
+        manager.store.delete(sid)
+        upfront = tools_map["add_nodes_to_session"](session_id=sid, node_ids=["alpha"])
+
+        assert raced == upfront
+        assert raced["success"] is False
+        assert f"Session '{sid}' not found" in raced["error"]
+
     def test_an_unadopted_federated_search_result_id_is_not_addable(self, tmp_path):
         """The tool sends agents to search_graph, which can return remote ids.
 
@@ -530,6 +616,39 @@ class TestAuthorization:
         assert result["success"] is False
         assert result.get("error_code") == "access_denied"
         assert manager.get_session(sid).state["node_refs"] == []
+
+    def test_read_only_mode_is_denied_before_the_session_lookup(
+        self, tools, monkeypatch
+    ):
+        """The gate comes first, so a denied caller cannot probe which session
+        ids exist. The later mutate-scoped resolve denies as well, which is why
+        only a call that never reaches the resolve tells the two apart."""
+        tools_map, manager = tools
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["add_nodes_to_session"](
+            session_id="9999-9999", node_ids=["alpha"]
+        )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
+        assert manager.get_session("9999-9999") is None
+
+    def test_read_only_mode_is_denied_before_the_batch_caps(
+        self, tmp_path, monkeypatch
+    ):
+        storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+        service = GraphService(storage)
+        tools_map, manager = _wire(storage, service, max_ops_per_batch=2)
+        sid = _session(manager)
+        monkeypatch.setenv(AUTHORIZATION_MODE_ENV, "read-only")
+
+        result = tools_map["add_nodes_to_session"](
+            session_id=sid, node_ids=["a", "b", "c"]
+        )
+
+        assert result["success"] is False
+        assert result.get("error_code") == "access_denied"
 
     def test_a_node_outside_the_callers_graph_scope_is_not_added(self, tmp_path):
         """Graph-scope narrowing decides what may enter the session."""
@@ -649,3 +768,49 @@ def test_every_session_tool_names_both_accepted_session_id_forms(tools):
     assert "add_nodes_to_session" in checked
     assert "apply_visualization_layout" in checked
     assert "rename_visualization_session" in checked
+
+
+def test_every_visualization_session_id_tool_names_both_accepted_forms(tmp_path):
+    """The same rule for the tools that take ``visualization_session_id``.
+
+    They validate the id only once a push registry (and, for the auto-add
+    tools, an auto-add registry) is wired, so the ``session_id`` test above,
+    which wires neither, never reaches their id check.
+    """
+    storage = GraphStorage(json_path=os.path.join(tmp_path, "g.json"))
+    service = GraphService(storage)
+    mock_mcp = Mock()
+    mock_mcp.tool = MagicMock(return_value=lambda f: f)
+    tools_map = register_mcp_tools(
+        mock_mcp,
+        service,
+        session_registry=SessionRegistry(),
+        session_manager=SessionManager(
+            SessionStore(InMemorySessionPersistenceBackend())
+        ),
+        auto_add_registry=SessionAutoAddRegistry(),
+    )
+    checked = []
+    for name, tool in tools_map.items():
+        params = inspect.signature(tool).parameters
+        param = params.get("visualization_session_id")
+        # Optional on the search/read tools, where no id means "do not push".
+        if param is None or param.default is not inspect.Parameter.empty:
+            continue
+        kwargs = {
+            p.name: None
+            for p in params.values()
+            if p.default is inspect.Parameter.empty
+        }
+        kwargs["visualization_session_id"] = "nope"
+        result = tool(**kwargs)
+        assert "Invalid session ID format" in result["error"], name
+        assert "DDDD-DDDD-DDDD-DDDD" in result["error"], name
+        assert "older DDDD-DDDD form" in result["error"], name
+        checked.append(name)
+    assert sorted(checked) == [
+        "clear_visualization",
+        "create_session_auto_add_agent",
+        "list_session_auto_add_agents",
+        "remove_session_auto_add_agent",
+    ]
