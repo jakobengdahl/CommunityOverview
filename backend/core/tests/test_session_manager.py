@@ -3242,6 +3242,64 @@ class TestAddNodeRefs:
             mgr.apply_layout(s.id, "mcp-agent", positions={"a": {"x": 1, "y": 2}})
 
 
+def _seed_annotations(mgr, sid):
+    for ann_id in ("note-1", "note-2"):
+        mgr.upsert_annotation(sid, "mcp-agent", {"id": ann_id, "type": "note"})
+    mgr.upsert_annotation(sid, "mcp-agent", {"id": "group-1", "type": "group"})
+
+
+_MCP_BUCKET_WRITES = {
+    "apply_layout": lambda mgr, sid, i: mgr.apply_layout(
+        sid, "mcp-agent", positions={"n1": {"x": i, "y": i}}
+    ),
+    "add_node_refs": lambda mgr, sid, i: mgr.add_node_refs(sid, "mcp-agent", [f"n{i}"]),
+    "upsert_annotation": lambda mgr, sid, i: mgr.upsert_annotation(
+        sid, "mcp-agent", {"id": f"new-{i}", "type": "note"}
+    ),
+    "update_annotation": lambda mgr, sid, i: mgr.update_annotation(
+        sid, "mcp-agent", {"id": "note-1", "type": "note", "text": f"v{i}"}
+    ),
+    "delete_annotation": lambda mgr, sid, i: mgr.delete_annotation(
+        sid, "mcp-agent", f"note-{i + 1}"
+    ),
+    "set_group_members": lambda mgr, sid, i: mgr.set_group_members(
+        sid, "mcp-agent", "group-1", [f"n{i}"]
+    ),
+    "upsert_image_annotation_without_rate_limit_key": (
+        lambda mgr, sid, i: mgr.upsert_image_annotation(
+            sid,
+            "mcp-agent",
+            _image_annotation(f"img-{i}", data_bytes=100),
+            optimized_image_bytes=100,
+        )
+    ),
+}
+
+
+class TestMcpWritesDrawFromTheMcpBucket:
+    """Each rate-limited synchronous MCP write is charged to ``_mcp_bucket``,
+    never to the browser-reachable ``_bucket`` that ``/ops`` spends under a
+    caller-chosen ``client_id`` — otherwise a browser posting
+    ``client_id: "mcp-agent"`` could exhaust the MCP budget
+    (smallfix-ops-client-id-can-collide-with-mcp-agent-marker). The two buckets
+    get different capacities so a write charged to the wrong one cannot pass."""
+
+    @pytest.mark.parametrize("write", list(_MCP_BUCKET_WRITES))
+    async def test_write_succeeds_on_a_spent_ops_bucket_and_spends_the_mcp_bucket(
+        self, write
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        _seed_annotations(mgr, s.id)
+        mgr._bucket = _TokenBucket(0.0, 0.0)
+        mgr._mcp_bucket = _TokenBucket(1.0, 0.0)
+        call = _MCP_BUCKET_WRITES[write]
+
+        call(mgr, s.id, 0)
+        with pytest.raises(RateLimited):
+            call(mgr, s.id, 1)
+
+
 class TestUpsertAnnotation:
     """The synchronous MCP annotation-create/upsert write path (``upsert_annotation``)."""
 
@@ -3438,8 +3496,11 @@ class TestUpsertImageAnnotation:
     ):
         """The MCP path passes no key and must keep drawing from the dedicated
         MCP bucket under its own client id — dropping that fallback would
-        leave it unthrottled entirely."""
-        mgr = _manager(bucket_capacity=1, bucket_refill_per_sec=0)
+        leave it unthrottled entirely. ``_bucket`` gets no tokens at all, so a
+        fallback charged to it instead would fail the first call."""
+        mgr = _manager()
+        mgr._bucket = _TokenBucket(0.0, 0.0)
+        mgr._mcp_bucket = _TokenBucket(1.0, 0.0)
         s = mgr.create_session()
 
         mgr.upsert_image_annotation(
