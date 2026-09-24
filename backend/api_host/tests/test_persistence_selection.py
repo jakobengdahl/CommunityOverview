@@ -94,6 +94,24 @@ class TestBackendSelection:
         config = AppConfig(graph_file="graph.json", graph_backend="file")
         assert build_persistence_backend(config) is None
 
+    def test_file_ignores_every_postgres_setting_left_behind(self):
+        """A rollback to the file backend usually leaves the old secrets set.
+
+        Switching GRAPH_BACKEND back to `file` while GRAPH_POSTGRES_DSN is
+        still mounted must not quietly keep the graph on PostgreSQL - the
+        mirror image of the bug this module fixes. Every other file-backend
+        test leaves the PostgreSQL fields at their defaults, so a branch that
+        consulted them would pass all of those.
+        """
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="file",
+            graph_postgres_dsn="postgresql:///stale",
+            graph_postgres_schema="leftover",
+            graph_postgres_pool_size=4,
+        )
+        assert build_persistence_backend(config) is None
+
     def test_an_unknown_backend_name_is_refused_not_silently_filed(self):
         """A typo must not boot happily on the file backend.
 
@@ -145,8 +163,12 @@ class TestBackendSelection:
         config = AppConfig(
             graph_file="graph.json",
             graph_backend="postgres",
-            graph_postgres_dsn="postgresql://u:pw@db.example:5432/one",
-            graph_postgres_schema="corp",
+            # Mixed case in both: a password and a quoted schema name are
+            # case-sensitive, so a lower() anywhere on the way is a wrong
+            # password or a different schema, and all-lowercase fixtures
+            # cannot tell.
+            graph_postgres_dsn="postgresql://Usr:PwXY@Db.Example:5432/One",
+            graph_postgres_schema="TenantB",
             graph_postgres_pool_size=3,
         )
         backend = build_persistence_backend(config)
@@ -161,18 +183,24 @@ class TestBackendSelection:
 
     @requires_backend_module
     def test_a_second_distinct_dsn_also_reaches_the_backend(self, monkeypatch):
-        """One hardcoded constant cannot satisfy two different DSNs."""
+        """One hardcoded constant cannot satisfy two different DSNs.
+
+        This one is libpq's keyword/value form, whose separators ARE the
+        internal spaces: stripping the ends is required (see the padded-DSN
+        test below), removing or collapsing anything inside is not.
+        """
         monkeypatch.setattr(
             "backend.core.postgres_backend.PostgresGraphPersistenceBackend",
             StubBackend,
         )
+        dsn = "host=Elsewhere port=6543  dbname=Two user=Other"
         config = AppConfig(
             graph_file="graph.json",
             graph_backend="postgres",
-            graph_postgres_dsn="postgresql://other@elsewhere:6543/two",
+            graph_postgres_dsn=dsn,
         )
         backend = build_persistence_backend(config)
-        assert backend.conninfo == "postgresql://other@elsewhere:6543/two"
+        assert backend.conninfo == dsn
 
     @requires_backend_module
     def test_a_padded_dsn_is_stripped_before_it_reaches_libpq(self, monkeypatch):
@@ -206,7 +234,9 @@ class TestBackendSelection:
         assert conninfo_to_dict(backend.conninfo)["password"] == "pw"
 
     @requires_backend_module
-    @pytest.mark.parametrize(("schema", "pool_size"), [("corp", 1), ("tenant_b", 7)])
+    @pytest.mark.parametrize(
+        ("schema", "pool_size"), [("corp", 1), ("tenant_b", 7), ("Tenant B", 2)]
+    )
     def test_a_second_schema_and_pool_size_reach_the_backend_too(
         self, monkeypatch, schema, pool_size
     ):
@@ -432,6 +462,21 @@ class TestTheEnvironmentIsTheInterface:
         monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///from-env")
         assert AppConfig().graph_postgres_dsn == "postgresql:///from-env"
 
+    def test_a_dsn_alone_does_not_select_postgres(self, monkeypatch):
+        """No auto-detection: the backend is chosen by GRAPH_BACKEND only.
+
+        A stale DSN in the environment with GRAPH_BACKEND unset is a rollback
+        in progress, not a request for PostgreSQL. Picking postgres because a
+        DSN happens to be present would move the graph without anyone asking,
+        and every test that sets a DSN also sets the backend, so nothing else
+        here would notice.
+        """
+        monkeypatch.delenv("GRAPH_BACKEND", raising=False)
+        monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///stale")
+        config = AppConfig()
+        assert config.graph_backend == "file"
+        assert build_persistence_backend(config) is None
+
     def test_schema_is_read_from_the_environment(self, monkeypatch):
         monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "corp")
         assert AppConfig().graph_postgres_schema == "corp"
@@ -587,6 +632,35 @@ class TestRefusalOrder:
         message = str(exc.value)
         assert "GRAPH_POSTGRES_POOL_SIZE" in message
         assert "requirements-postgres.txt" not in message
+
+    def test_a_fault_inside_the_backend_module_is_not_reported_as_missing_psycopg(
+        self, monkeypatch
+    ):
+        """Only an ImportError means the extra is absent.
+
+        Anything else raised while importing the backend is a bug in it, and
+        telling the operator to install a package they already have would
+        send them the wrong way. It has to arrive as itself.
+        """
+        import builtins
+
+        real_import = builtins.__import__
+        fault = RuntimeError("broken at import time")
+
+        def broken(name, *args, **kwargs):
+            if name == "backend.core.postgres_backend":
+                raise fault
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", broken)
+        config = AppConfig(
+            graph_file="graph.json",
+            graph_backend="postgres",
+            graph_postgres_dsn="postgresql:///example",
+        )
+        with pytest.raises(RuntimeError) as exc:
+            build_persistence_backend(config)
+        assert exc.value is fault
 
     def test_a_missing_dsn_outranks_a_bad_pool_size(self):
         """With both wrong, the more fundamental one is named.
