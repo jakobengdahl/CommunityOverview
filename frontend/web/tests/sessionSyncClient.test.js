@@ -1131,6 +1131,157 @@ describe('SessionSyncClient', () => {
     }
   });
 
+  // smallfix-sessionsync-backoff-residue-20260924: the catch path (network
+  // error, request timeout) must cancel an in-flight debounce just like 5xx.
+  it.each([
+    ['network error', {}],
+    ['request timeout', { requestTimeoutMs: 50 }],
+  ])(
+    'a flush debounced while a request failing with a %s was in flight does not pre-empt the backoff',
+    async (label, overrides) => {
+      vi.useFakeTimers();
+      try {
+        let failFirst;
+        const firstSettled = new Promise((r) => {
+          failFirst = r;
+        });
+        const fetchImpl = vi.fn(async () => {
+          if (fetchImpl.mock.calls.length === 1) {
+            if (label === 'request timeout') return new Promise(() => {});
+            await firstSettled;
+            throw new Error('network down');
+          }
+          return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+        });
+        // Backoff is max(500, 4 * 100) = 500ms; the debounce is 100ms.
+        const { client } = makeClient({ fetchImpl, flushIntervalMs: 100, ...overrides });
+        client.connect();
+        FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+        client.syncState({ node_refs: ['a'] });
+        await vi.advanceTimersByTimeAsync(100);
+        expect(fetchImpl).toHaveBeenCalledTimes(1); // in flight
+
+        client.syncState({ node_refs: ['a', 'b'] }); // schedules a 100ms debounce
+        await vi.advanceTimersByTimeAsync(10);
+        failFirst(); // the timeout variant fails at +50ms on its own
+        await vi.advanceTimersByTimeAsync(480);
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(80);
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('scales the retry backoff with flushIntervalMs above the 500ms floor', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      // Backoff is max(500, 4 * 200) = 800ms after the failure at +200ms.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 200 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(780);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends a new op on the normal debounce once a retry has succeeded', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(500); // the retry resends and succeeds
+      expect(fetchImpl.calls).toHaveLength(2);
+
+      client.syncState({ node_refs: ['a', 'b'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(3);
+      expect(fetchImpl.calls[2].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['b'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a snapshot arriving during the backoff does not pre-empt it', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      es.emit({ type: 'snapshot', seq: 1, session: { state: {} } });
+      await vi.advanceTimersByTimeAsync(480);
+      expect(fetchImpl.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fetchImpl.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a retry that fires while the stream is down keeps the op and sends it once the stream is back', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      const es = FakeEventSource.instances[0];
+      es.emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      es.error(false); // transient drop: not ready until the stream catches up
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(fetchImpl.calls).toHaveLength(1);
+      expect(client.getPendingOps()).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+
+      es.emit({ type: 'catch_up', seq: 0, ops: [] });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[1].body.ops).toEqual([{ op: 'nodes_added', node_ids: ['a'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('close() during an armed backoff sends nothing more', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([{ ok: false, status: 503 }]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(10);
+      client.close();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(fetchImpl.calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('folds a remote op into the baseline so re-syncing the same state emits nothing (echo-safe)', async () => {
     const onRemoteOps = vi.fn();
     const { client, fetchImpl } = makeClient({ handlers: { onRemoteOps } });
