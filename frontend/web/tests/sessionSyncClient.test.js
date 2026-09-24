@@ -853,27 +853,32 @@ describe('SessionSyncClient', () => {
   });
 
   it('requeues ops on a 500 and drops them on a 400', async () => {
-    const fetchImpl = makeFetch([
-      { ok: false, status: 500 },
-      { ok: true, status: 200, json: async () => ({ seq: 1 }) },
-    ]);
-    const { client } = makeClient({ fetchImpl });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 30)); // let retry fire
-    expect(fetchImpl.calls.length).toBeGreaterThanOrEqual(2);
-    expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: false, status: 500 },
+        { ok: true, status: 200, json: async () => ({ seq: 1 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(30); // let retry fire
+      expect(fetchImpl.calls.length).toBeGreaterThanOrEqual(2);
+      expect(fetchImpl.calls[1].body.ops).toContainEqual({ op: 'nodes_added', node_ids: ['a'] });
 
-    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
-    const onDropped = vi.fn();
-    const { client: c2 } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
-    c2.connect();
-    FakeEventSource.instances[1].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    c2.syncState({ node_refs: ['x'] });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(onDropped).toHaveBeenCalled();
-    expect(dropFetch.calls).toHaveLength(1); // not retried
+      const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+      const onDropped = vi.fn();
+      const { client: c2 } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+      c2.connect();
+      FakeEventSource.instances[1].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      c2.syncState({ node_refs: ['x'] });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(onDropped).toHaveBeenCalled();
+      expect(dropFetch.calls).toHaveLength(1); // not retried
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Review round 9 (PR #496 / task fbd32fc9): onDropped is invoked
@@ -884,19 +889,24 @@ describe('SessionSyncClient', () => {
   // server truth) must see the dropped op already gone — otherwise the very
   // resync meant to drop it would instead resurrect it.
   it('a dropped op is already gone from getPendingOps by the time onDropped fires', async () => {
-    const dropFetch = makeFetch([{ ok: false, status: 400 }]);
-    let pendingDuringDrop = null;
-    const onDropped = vi.fn(() => {
-      pendingDuringDrop = client.getPendingOps();
-    });
-    const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['x'] });
-    await new Promise((r) => setTimeout(r, 30));
+    vi.useFakeTimers();
+    try {
+      const dropFetch = makeFetch([{ ok: false, status: 400 }]);
+      let pendingDuringDrop = null;
+      const onDropped = vi.fn(() => {
+        pendingDuringDrop = client.getPendingOps();
+      });
+      const { client } = makeClient({ fetchImpl: dropFetch, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['x'] });
+      await vi.advanceTimersByTimeAsync(30);
 
-    expect(onDropped).toHaveBeenCalled();
-    expect(pendingDuringDrop).toEqual([]);
+      expect(onDropped).toHaveBeenCalled();
+      expect(pendingDuringDrop).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Regression for the review finding on PR #527 (task-annotation-exclusive-
@@ -908,85 +918,100 @@ describe('SessionSyncClient', () => {
   // that stale content would then replay unconditionally against whatever the
   // annotation's current state had become, silently overwriting real work.
   it('drops a 409/LeaseConflict op instead of retrying it forever, and never replays it once the conflict clears', async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
-    const onDropped = vi.fn();
-    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async () => ({ ok: false, status: 409 }));
+      const onDropped = vi.fn();
+      const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 30)); // let the first flush's fetch settle
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(30); // let the first flush's fetch settle
 
-    // Terminal handling: onDropped fires with the 409 status so the UI can
-    // tell the user their edit didn't apply, and the op is gone from the
-    // queue rather than sitting there to be resent.
-    expect(onDropped).toHaveBeenCalledTimes(1);
-    expect(onDropped.mock.calls[0][1]).toBe(409);
-    expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
-    expect(client.getPendingOps()).toEqual([]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // Terminal handling: onDropped fires with the 409 status so the UI can
+      // tell the user their edit didn't apply, and the op is gone from the
+      // queue rather than sitting there to be resent.
+      expect(onDropped).toHaveBeenCalledTimes(1);
+      expect(onDropped.mock.calls[0][1]).toBe(409);
+      expect(onDropped.mock.calls[0][0][0].op).toBe('nodes_added');
+      expect(client.getPendingOps()).toEqual([]);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
 
-    // Wait well past the retry-backoff window (500ms floor). If the silent-
-    // infinite-retry bug were still present, the op would be resent here with
-    // its original, now-stale content — exactly the replay this fix rules out.
-    await new Promise((r) => setTimeout(r, 700));
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(onDropped).toHaveBeenCalledTimes(1);
+      // Wait well past the retry-backoff window (500ms floor). If the silent-
+      // infinite-retry bug were still present, the op would be resent here with
+      // its original, now-stale content — exactly the replay this fix rules out.
+      await vi.advanceTimersByTimeAsync(700);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(onDropped).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 10_000);
 
   it('does not permanently wedge outbound delivery when a POST /ops never settles', async () => {
-    // Regression for the shared-session "moves silently stop persisting over
-    // time" data-loss bug: a single hung POST (a half-open request held by a
-    // proxy) used to leave `_flushing` stuck true forever, so every later op —
-    // moves, node adds, everything — silently never reached the server, the
-    // batch in flight was lost, and a reload showed none of it stored. The
-    // request timeout must abort the stuck POST so delivery resumes.
-    const bodies = [];
-    let hang = true;
-    const fetchImpl = vi.fn((url, opts) => {
-      bodies.push(JSON.parse(opts.body));
-      if (hang) {
-        hang = false;
-        return new Promise(() => {}); // first POST never settles
-      }
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => ({ applied: [], seq: bodies.length }),
+    vi.useFakeTimers();
+    try {
+      // Regression for the shared-session "moves silently stop persisting over
+      // time" data-loss bug: a single hung POST (a half-open request held by a
+      // proxy) used to leave `_flushing` stuck true forever, so every later op —
+      // moves, node adds, everything — silently never reached the server, the
+      // batch in flight was lost, and a reload showed none of it stored. The
+      // request timeout must abort the stuck POST so delivery resumes.
+      const bodies = [];
+      let hang = true;
+      const fetchImpl = vi.fn((url, opts) => {
+        bodies.push(JSON.parse(opts.body));
+        if (hang) {
+          hang = false;
+          return new Promise(() => {}); // first POST never settles
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ applied: [], seq: bodies.length }),
+        });
       });
-    });
-    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-    // First move → its POST hangs.
-    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 1, y: 1 } } });
-    await new Promise((r) => setTimeout(r, 10));
-    // A later move made while the first request is still hung must still get out.
-    client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
-    await new Promise((r) => setTimeout(r, 150)); // past the timeout + retry backoff
+      // First move → its POST hangs.
+      client.syncState({ node_refs: ['n0'], positions: { n0: { x: 1, y: 1 } } });
+      await vi.advanceTimersByTimeAsync(10);
+      // A later move made while the first request is still hung must still get out.
+      client.syncState({ node_refs: ['n0'], positions: { n0: { x: 2, y: 2 } } });
+      await vi.advanceTimersByTimeAsync(150); // past the timeout + retry backoff
 
-    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
-    const allOps = bodies.flatMap((b) => b.ops || []);
-    // Neither move is lost: the hung batch's op is requeued, the later one sent.
-    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
-    expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1); // not wedged
+      const allOps = bodies.flatMap((b) => b.ops || []);
+      // Neither move is lost: the hung batch's op is requeued, the later one sent.
+      expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 1, y: 1 } });
+      expect(allOps).toContainEqual({ op: 'node_moved', node_id: 'n0', position: { x: 2, y: 2 } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('releases the flush guard and retries after a hung ops request times out', async () => {
-    // The heart of the wedge fix: a request that never settles must not leave
-    // `_flushing` stuck true (which permanently blocks every later flush). After
-    // the timeout it is released and the op is retried on a fresh request.
-    const fetchImpl = vi.fn(() => new Promise(() => {})); // every POST hangs
-    const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'] });
-    await new Promise((r) => setTimeout(r, 120));
-    // Each hung POST times out and releases `_flushing`, so the client keeps
-    // reattempting instead of freezing on the first hung request forever. If the
-    // guard were never released, exactly one attempt would ever be made.
-    expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
+    vi.useFakeTimers();
+    try {
+      // The heart of the wedge fix: a request that never settles must not leave
+      // `_flushing` stuck true (which permanently blocks every later flush). After
+      // the timeout it is released and the op is retried on a fresh request.
+      const fetchImpl = vi.fn(() => new Promise(() => {})); // every POST hangs
+      const { client } = makeClient({ fetchImpl, requestTimeoutMs: 20 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'] });
+      await vi.advanceTimersByTimeAsync(120);
+      // Each hung POST times out and releases `_flushing`, so the client keeps
+      // reattempting instead of freezing on the first hung request forever. If the
+      // guard were never released, exactly one attempt would ever be made.
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('folds a remote op into the baseline so re-syncing the same state emits nothing (echo-safe)', async () => {
@@ -1027,47 +1052,57 @@ describe('SessionSyncClient', () => {
   });
 
   it('isolates a poison-pill op: a rejected multi-op batch resends singly, dropping only the bad op', async () => {
-    const onDropped = vi.fn();
-    // The server rejects any batch containing the annotation op; valid ops pass.
-    const fetchImpl = vi.fn(async (url, opts) => {
-      const ops = JSON.parse(opts.body).ops;
-      if (ops.some((o) => o.op === 'annotation_created')) return { ok: false, status: 400 };
-      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
-    });
-    fetchImpl.calls = () => fetchImpl.mock.calls.map(([, o]) => JSON.parse(o.body).ops);
-    const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
-    await new Promise((r) => setTimeout(r, 60));
-    // The valid nodes_added was delivered in its own batch; the annotation was dropped.
-    const sent = fetchImpl.calls();
-    expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
-    expect(onDropped).toHaveBeenCalled();
-    expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
+    vi.useFakeTimers();
+    try {
+      const onDropped = vi.fn();
+      // The server rejects any batch containing the annotation op; valid ops pass.
+      const fetchImpl = vi.fn(async (url, opts) => {
+        const ops = JSON.parse(opts.body).ops;
+        if (ops.some((o) => o.op === 'annotation_created')) return { ok: false, status: 400 };
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      fetchImpl.calls = () => fetchImpl.mock.calls.map(([, o]) => JSON.parse(o.body).ops);
+      const { client } = makeClient({ fetchImpl, handlers: { onDropped } });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], annotations: [{ id: 'n1', kind: 'note', text: 'x' }] });
+      await vi.advanceTimersByTimeAsync(60);
+      // The valid nodes_added was delivered in its own batch; the annotation was dropped.
+      const sent = fetchImpl.calls();
+      expect(sent.some((ops) => ops.length === 1 && ops[0].op === 'nodes_added')).toBe(true);
+      expect(onDropped).toHaveBeenCalled();
+      expect(onDropped.mock.calls.at(-1)[0][0].op).toBe('annotation_created');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('teardown flush drains every queued op in force-single mode (close() loses none)', async () => {
-    // First POST (the multi-op batch) is terminally rejected, flipping the client
-    // into force-single recovery with the whole batch requeued.
-    const fetchImpl = makeFetch([{ ok: false, status: 400 }]);
-    // Long debounce so no automatic re-flush races the explicit teardown flush.
-    const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
-    await client.flush();
-    expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
+    vi.useFakeTimers();
+    try {
+      // First POST (the multi-op batch) is terminally rejected, flipping the client
+      // into force-single recovery with the whole batch requeued.
+      const fetchImpl = makeFetch([{ ok: false, status: 400 }]);
+      // Long debounce so no automatic re-flush races the explicit teardown flush.
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 60_000 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'] }); // 2 ops in one batch
+      await client.flush();
+      expect(fetchImpl.calls).toHaveLength(1); // rejected batch, both ops requeued
 
-    client.flush();
-    client.close();
-    await new Promise((r) => setTimeout(r, 10));
-    // Both requeued ops left as their own single-op batches despite close().
-    const singles = fetchImpl.calls.slice(1).map((c) => c.body.ops);
-    expect(singles).toEqual([
-      [{ op: 'nodes_added', node_ids: ['a'] }],
-      [{ op: 'nodes_hidden', node_ids: ['h'] }],
-    ]);
+      client.flush();
+      client.close();
+      await vi.advanceTimersByTimeAsync(10);
+      // Both requeued ops left as their own single-op batches despite close().
+      const singles = fetchImpl.calls.slice(1).map((c) => c.body.ops);
+      expect(singles).toEqual([
+        [{ op: 'nodes_added', node_ids: ['a'] }],
+        [{ op: 'nodes_hidden', node_ids: ['h'] }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('teardown force-single flush reports the current single-op POST as pending', async () => {
@@ -1102,37 +1137,42 @@ describe('SessionSyncClient', () => {
   });
 
   it('teardown flush drains the remainder even while a force-single op is in flight', async () => {
-    let release;
-    const gate = new Promise((r) => {
-      release = r;
-    });
-    let call = 0;
-    // Call 1: the multi-op batch, terminally rejected (enters force-single).
-    // Call 2: the debounced single-op resend, held in flight across teardown.
-    const fetchImpl = vi.fn(async (url, opts) => {
-      fetchImpl.sent.push(JSON.parse(opts.body).ops);
-      call += 1;
-      if (call === 1) return { ok: false, status: 400 };
-      if (call === 2) await gate;
-      return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
-    });
-    fetchImpl.sent = [];
-    const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
-    client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
-    await client.flush(); // batch rejected → force-single, all 3 requeued
-    await new Promise((r) => setTimeout(r, 10)); // debounce resends op 1, which now hangs
-    expect(fetchImpl.sent).toHaveLength(2);
+    vi.useFakeTimers();
+    try {
+      let release;
+      const gate = new Promise((r) => {
+        release = r;
+      });
+      let call = 0;
+      // Call 1: the multi-op batch, terminally rejected (enters force-single).
+      // Call 2: the debounced single-op resend, held in flight across teardown.
+      const fetchImpl = vi.fn(async (url, opts) => {
+        fetchImpl.sent.push(JSON.parse(opts.body).ops);
+        call += 1;
+        if (call === 1) return { ok: false, status: 400 };
+        if (call === 2) await gate;
+        return { ok: true, status: 200, json: async () => ({ seq: 1 }) };
+      });
+      fetchImpl.sent = [];
+      const { client } = makeClient({ fetchImpl, flushIntervalMs: 1 });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+      client.syncState({ node_refs: ['a'], hidden_node_ids: ['h'], hidden_edge_ids: ['e'] }); // 3 ops
+      await client.flush(); // batch rejected → force-single, all 3 requeued
+      await vi.advanceTimersByTimeAsync(10); // debounce resends op 1, which now hangs
+      expect(fetchImpl.sent).toHaveLength(2);
 
-    client.flush();
-    client.close();
-    await new Promise((r) => setTimeout(r, 10));
-    release();
-    expect(fetchImpl.sent.slice(2)).toEqual([
-      [{ op: 'nodes_hidden', node_ids: ['h'] }],
-      [{ op: 'edges_hidden', edge_ids: ['e'] }],
-    ]);
+      client.flush();
+      client.close();
+      await vi.advanceTimersByTimeAsync(10);
+      release();
+      expect(fetchImpl.sent.slice(2)).toEqual([
+        [{ op: 'nodes_hidden', node_ids: ['h'] }],
+        [{ op: 'edges_hidden', edge_ids: ['e'] }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('teardown flush sends queued ops even if the stream never became ready', async () => {
@@ -1237,31 +1277,36 @@ describe('SessionSyncClient', () => {
   });
 
   it('proactively chunks an oversized queue against the server batch caps (R9)', async () => {
-    const fetchImpl = makeFetch([
-      { ok: true, status: 200, json: async () => ({ seq: 500 }) },
-      { ok: true, status: 200, json: async () => ({ seq: 600 }) },
-    ]);
-    const { client } = makeClient({ fetchImpl });
-    client.connect();
-    FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = makeFetch([
+        { ok: true, status: 200, json: async () => ({ seq: 500 }) },
+        { ok: true, status: 200, json: async () => ({ seq: 600 }) },
+      ]);
+      const { client } = makeClient({ fetchImpl });
+      client.connect();
+      FakeEventSource.instances[0].emit({ type: 'snapshot', seq: 0, session: { state: {} } });
 
-    // 600 distinct annotation_created ops — one op per annotation id — well
-    // over the server's 500-op-per-batch cap but nowhere near the byte cap.
-    const annotations = Array.from({ length: 600 }, (_, i) => ({
-      id: `ann-${i}`,
-      kind: 'note',
-      text: 'x',
-      position: { x: 0, y: 0 },
-    }));
-    client.syncState({ annotations });
+      // 600 distinct annotation_created ops — one op per annotation id — well
+      // over the server's 500-op-per-batch cap but nowhere near the byte cap.
+      const annotations = Array.from({ length: 600 }, (_, i) => ({
+        id: `ann-${i}`,
+        kind: 'note',
+        text: 'x',
+        position: { x: 0, y: 0 },
+      }));
+      client.syncState({ annotations });
 
-    // Let the debounced flush chain run to completion (each flush's `finally`
-    // reschedules the next one while the queue is non-empty).
-    await new Promise((r) => setTimeout(r, 50));
+      // Let the debounced flush chain run to completion (each flush's `finally`
+      // reschedules the next one while the queue is non-empty).
+      await vi.advanceTimersByTimeAsync(50);
 
-    expect(fetchImpl.calls).toHaveLength(2);
-    expect(fetchImpl.calls[0].body.ops).toHaveLength(500);
-    expect(fetchImpl.calls[1].body.ops).toHaveLength(100);
+      expect(fetchImpl.calls).toHaveLength(2);
+      expect(fetchImpl.calls[0].body.ops).toHaveLength(500);
+      expect(fetchImpl.calls[1].body.ops).toHaveLength(100);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ignores a duplicate or stale sequenced op event (R15)', () => {
