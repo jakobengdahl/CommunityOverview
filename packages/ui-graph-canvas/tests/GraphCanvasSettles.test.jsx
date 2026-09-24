@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { GraphCanvas } from '../src/index';
 
 // Regression test for a real render-stability bug (not a harness artifact):
@@ -34,25 +34,33 @@ import { GraphCanvas } from '../src/index';
 // effects on every single render, each of which used to commit a brand new
 // (if content-identical) array unconditionally.
 let renderCount = 0;
+// What GraphCanvas last handed ReactFlow, and the selection listener it
+// registered — the focus-view and remote-marker cases below assert on the
+// committed node array itself (positions, data, reference identity).
+let flowNodes = [];
+let selectionOnChange = null;
 
 vi.mock('reactflow', () => {
-  const MockReactFlow = ({ children, nodes, edges }) => (
-    <div data-testid="react-flow">
-      <div data-testid="nodes">
-        {nodes?.map((n) => (
-          <div key={n.id} data-testid={`node-${n.id}`}>
-            {n.data?.label}
-          </div>
-        ))}
+  const MockReactFlow = ({ children, nodes, edges }) => {
+    flowNodes = nodes || [];
+    return (
+      <div data-testid="react-flow">
+        <div data-testid="nodes">
+          {nodes?.map((n) => (
+            <div key={n.id} data-testid={`node-${n.id}`}>
+              {n.data?.label}
+            </div>
+          ))}
+        </div>
+        <div data-testid="edges">
+          {edges?.map((e) => (
+            <div key={e.id} data-testid={`edge-${e.id}`} />
+          ))}
+        </div>
+        {children}
       </div>
-      <div data-testid="edges">
-        {edges?.map((e) => (
-          <div key={e.id} data-testid={`edge-${e.id}`} />
-        ))}
-      </div>
-      {children}
-    </div>
-  );
+    );
+  };
   return {
     default: MockReactFlow,
     ReactFlow: MockReactFlow,
@@ -77,7 +85,9 @@ vi.mock('reactflow', () => {
     },
     useReactFlow: () => ({
       fitView: vi.fn(),
-      getNodes: () => [],
+      // ReactFlow's live store; entering the focus view snapshots it so that
+      // leaving can restore the pre-focus canvas.
+      getNodes: () => flowNodes,
       getEdges: () => [],
       setNodes: vi.fn(),
       setEdges: vi.fn(),
@@ -87,7 +97,9 @@ vi.mock('reactflow', () => {
       zoomOut: vi.fn(),
       getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
     }),
-    useOnSelectionChange: () => {},
+    useOnSelectionChange: ({ onChange }) => {
+      selectionOnChange = onChange;
+    },
     addEdge: (params, eds) => [...eds, params],
     Background: () => <div data-testid="background" />,
     Controls: () => <div data-testid="controls" />,
@@ -115,6 +127,8 @@ const SETTLE_BOUND = 20;
 describe('GraphCanvas settles under real (non-pass-through) useNodesState/useEdgesState', () => {
   beforeEach(() => {
     renderCount = 0;
+    flowNodes = [];
+    selectionOnChange = null;
     vi.clearAllMocks();
   });
 
@@ -162,3 +176,123 @@ describe('GraphCanvas settles under real (non-pass-through) useNodesState/useEdg
     expect(renderCount).toBeLessThan(SETTLE_BOUND * 3);
   });
 });
+
+// A triangle, so the focus view on any corner keeps all three nodes: the node
+// count is the same inside and outside focus, and nothing that feeds a node's
+// `data` changes either. Entering or leaving focus is then a render whose only
+// difference is positions — the one case where the settle check's structural
+// comparison must still see `position`, or it hands back the stale array.
+const triangleNodes = [
+  { id: 'node-1', name: 'Node 1', type: 'Actor' },
+  { id: 'node-2', name: 'Node 2', type: 'Initiative' },
+  { id: 'node-3', name: 'Node 3', type: 'Initiative' },
+];
+const triangleEdges = [
+  { id: 'edge-1', source: 'node-1', target: 'node-2', type: 'RELATES_TO' },
+  { id: 'edge-2', source: 'node-2', target: 'node-3', type: 'RELATES_TO' },
+  { id: 'edge-3', source: 'node-3', target: 'node-1', type: 'RELATES_TO' },
+];
+const positionsById = () => new Map(flowNodes.map((n) => [n.id, n.position]));
+
+describe('GraphCanvas settle check still commits a position-only change', () => {
+  beforeEach(() => {
+    renderCount = 0;
+    flowNodes = [];
+    selectionOnChange = null;
+  });
+
+  it('moves the root to the focus centre and back to its pre-focus position, with an unchanged node count', () => {
+    render(<GraphCanvas nodes={triangleNodes} edges={triangleEdges} compactMode="on" />);
+    const before = positionsById();
+    expect(before.size).toBe(3);
+    expect(before.get('node-1')).not.toEqual({ x: 0, y: 0 });
+
+    act(() => selectionOnChange({ nodes: [{ id: 'node-1', type: 'custom' }], edges: [] }));
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Focus on selected node' }));
+    });
+
+    const focused = positionsById();
+    expect(focused.size).toBe(3);
+    expect(focused.get('node-1')).toEqual({ x: 0, y: 0 });
+    for (const id of ['node-2', 'node-3']) {
+      expect(focused.get(id)).not.toEqual(before.get(id));
+    }
+
+    // Leaving focus: the root was at {x: 0}, the node count is unchanged, and
+    // every node must land back where it was before focus.
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Back to whole graph' }));
+    });
+
+    const restored = positionsById();
+    expect(restored.size).toBe(3);
+    for (const id of ['node-1', 'node-2', 'node-3']) {
+      expect(restored.get(id)).toEqual(before.get(id));
+    }
+  });
+});
+
+// `remoteMarkerEqual` is module-private, so it is exercised through the two
+// effects that use it: the remote-selection and remote-lease mirrors that
+// stamp a collaborator's marker onto an annotation node's data.
+const NOTE = [{ id: 'note-1', kind: 'note', position: { x: 10, y: 10 }, text: 'a note' }];
+const MARKER = { clientId: 'c2', color: '#e6194b', displayName: 'Ada' };
+const noteNode = () => flowNodes.find((n) => n.id === 'note-1');
+
+const MIRRORS = [
+  { prop: 'remoteSelections', dataKey: 'remoteSelection' },
+  { prop: 'remoteLeases', dataKey: 'remoteLease' },
+];
+
+describe.each(MIRRORS)(
+  'GraphCanvas $prop mirror compares markers by value',
+  ({ prop, dataKey }) => {
+    beforeEach(() => {
+      renderCount = 0;
+      flowNodes = [];
+      selectionOnChange = null;
+    });
+
+    // The other mirror's map keeps one identity across every rerender below, so
+    // its effect never re-runs and cannot mask what this one did.
+    const otherProp = prop === 'remoteSelections' ? 'remoteLeases' : 'remoteSelections';
+    const stableOther = {};
+    const renderWith = (marker) => (
+      <GraphCanvas
+        nodes={[]}
+        edges={[]}
+        annotationsToRestore={NOTE}
+        {...{ [prop]: { 'note-1': marker }, [otherProp]: stableOther }}
+      />
+    );
+
+    it.each(['clientId', 'color', 'displayName'])(
+      'a marker differing only in %s replaces the previous one',
+      (field) => {
+        const { rerender } = render(renderWith({ ...MARKER }));
+        expect(noteNode().data[dataKey]).toEqual(MARKER);
+
+        const changed = { ...MARKER, [field]: `${MARKER[field]}-changed` };
+        rerender(renderWith(changed));
+
+        expect(noteNode().data[dataKey]).toEqual(changed);
+      }
+    );
+
+    it('a fresh but content-equal marker, twice in a row, keeps the committed node array and node', () => {
+      const { rerender } = render(renderWith({ ...MARKER }));
+      const committedNodes = flowNodes;
+      const committedNote = noteNode();
+      expect(committedNote.data[dataKey]).toEqual(MARKER);
+
+      rerender(renderWith({ ...MARKER }));
+      expect(flowNodes).toBe(committedNodes);
+      expect(noteNode()).toBe(committedNote);
+
+      rerender(renderWith({ ...MARKER }));
+      expect(flowNodes).toBe(committedNodes);
+      expect(noteNode()).toBe(committedNote);
+    });
+  }
+);
