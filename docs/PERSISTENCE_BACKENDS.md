@@ -811,15 +811,41 @@ writing a backend of your own against a shared server:
   a sequential scan (45 ms) and a generic one a nested loop (830 ms).
 
   Nothing else here needs it, and that was measured rather than assumed.
-  `_resolve`'s `WHERE id = ANY(%s)` looks the same but is not: equality
-  against the primary key's unique btree gives the identical plan either way
-  — bitmap index scan into a bitmap heap scan, 51 ms against 55 ms for 20 000
-  ids — because the plan does not turn on the array's estimated length. The
-  level query is different because it filters on *expressions*
+  `_resolve`'s `WHERE id = ANY(%s)` is subject to the same generic-vs-custom
+  split as the level query — the primary key's unique btree is just as
+  sensitive to the array's estimated length, not immune to it. Measured with a
+  real prepared statement crossing psycopg's `prepare_threshold` (`PREPARE
+  r(text[]) AS SELECT id, doc FROM graph_nodes WHERE id = ANY($1)`, simple
+  protocol, execution 1 = custom plan vs. execution 10 = generic plan, on the
+  repo's 50 000-node fixture): at 1 000 ids the custom plan is a bitmap heap
+  scan (1 000 rows, 3.6 ms) and the generic plan an index scan on the primary
+  key (its fixed `rows=10` estimate, 2.2 ms); at 20 000 ids the custom plan
+  switches to a sequential scan (20 000 rows, 15.3 ms) while the generic plan
+  stays an index scan on the same fixed `rows=10` estimate and costs more,
+  45.3 ms. The plans are not identical at any size, and the generic plan's
+  *fixed* mis-estimate — never updated for the array actually bound — is the
+  same array-length sensitivity the paragraph above describes for the level
+  query, not its absence. (A separate measurement using
+  `SET plan_cache_mode = force_generic_plan / force_custom_plan` instead of a
+  real prepared statement reported identical plans and 51/55 ms; that method
+  does not reach `prepare_threshold` the way psycopg does in production and
+  does not reproduce here — treat the numbers above, from an actual prepared
+  statement, as authoritative.)
+
+  `_resolve` still does not need `prepare=False`. Unlike the level query, the
+  mis-estimate here does cost more in isolation — 45.3 ms vs. 15.3 ms at
+  20 000 ids, roughly 3x — but `_resolve` filters on the primary key directly,
+  and a real call in production carries a change notification's worth of ids,
+  not 20 000; at that scale the ~30 ms planning delta is swamped by the cost
+  of transferring the documents themselves. A separate prepared-statement run at
+  `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
+  no cliff, dominated by transferring 20 000 jsonb documents rather than by
+  planning. The level query is different because it filters on *expressions*
   (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
-  the frontier's size decides the join strategy. Every other statement is
-  single-row key access, or a read whose only parameter is the scope — a value
-  that changes no selectivity worth a plan of its own.
+  the frontier's size decides the join strategy and where the mis-estimate can
+  turn into orders of magnitude rather than tens of milliseconds. Every other
+  statement is single-row key access, or a read whose only parameter is the
+  scope — a value that changes no selectivity worth a plan of its own.
 
 `exists()` answers for the *graph*, not for the tables. Migration creates the
 tables on every boot, so table presence would report a store that was never
