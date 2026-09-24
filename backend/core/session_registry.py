@@ -10,7 +10,9 @@ tool pushes a command to the queue the browser receives it immediately.
 This registry is the MCP *push* channel only.  Session *state* (what the
 browser is showing) is owned by the shared-session store
 (``core.session_store``); MCP query tools read it from there.  A registry
-entry simply signals that a browser is connected to receive pushes.
+entry holds a session's push queue; it does not mean a browser is connected.
+Whether anything is draining that queue is ``has_consumer`` (see "Entries vs.
+consumers" below).
 
 Thread-safety notes
 -------------------

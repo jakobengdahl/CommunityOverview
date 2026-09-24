@@ -909,12 +909,17 @@ field is additive and does not bump the session contract version (§9):
 | `live_consumers` | Consumers actually attached to the session: those draining the legacy queue plus the op-stream presence count above. A queue entry with nothing draining it counts for nothing here. |
 | `warning` | Present only when undelivered, naming the state that made it so. |
 
-This matters because a push writes no session state — only
-`add_nodes_to_session` writes `node_refs` — so an undelivered push leaves no
-trace at all, and reading the session back afterwards cannot tell it apart from
-a push that never happened. A routine that refreshes a canvas on a schedule has
-to check `delivered` instead of reading a successful search as a refreshed
-canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
+This matters because a push writes no session state when it is sent — only
+`add_nodes_to_session` writes `node_refs` — so reading the session back
+afterwards cannot tell an undelivered push apart from one that never happened.
+Undelivered is not the same as discarded, though: when the session has a legacy
+registry entry with nothing draining it, the command still waits in that
+entry's bounded queue (oldest dropped first), and a browser that opens the
+session before the entry expires drains it and may apply it then. So an
+undelivered push can still change a canvas later; `delivered` reports only
+whether a consumer took it when it was sent, not whether it is applied later.
+A routine that refreshes a canvas on a schedule has to check `delivered` instead
+of reading a successful search as a refreshed canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
 verdict for that check either: it is read before the push, and a consumer
 present then can be gone by the time the push is sent. It does agree with the
 delivery report on the state that matters most — a registry entry with nothing
