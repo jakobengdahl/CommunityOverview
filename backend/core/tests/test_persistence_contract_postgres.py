@@ -1607,10 +1607,12 @@ class TestPostgresIndexWorkIsDoneOnce:
     # Both kinds, because the `except` around the ANALYZE is deliberately
     # broad. A psycopg error alone lets it be narrowed to `psycopg.Error`
     # with the suite still green, and then a failure that is not the
-    # driver's - a bug in the notice-handler plumbing or in the logging it
-    # does - escapes and fails a save that had already committed. Not a pool
-    # failure: psycopg_pool's errors are `psycopg.Error` subclasses, so the
-    # narrowed form would still catch those.
+    # driver's - `remove_notice_handler` raising ValueError for a handler it
+    # does not hold, say, or composing the table name - escapes and fails a
+    # save that had already committed. Not a pool failure: psycopg_pool's
+    # errors are `psycopg.Error` subclasses, so the narrowed form would still
+    # catch those. Nor the handler's own logging: psycopg catches whatever a
+    # notice handler raises.
     @pytest.mark.parametrize(
         "failure",
         [
@@ -1618,7 +1620,9 @@ class TestPostgresIndexWorkIsDoneOnce:
                 lambda: psycopg.errors.InsufficientPrivilege("no ANALYZE for you"),
                 id="psycopg",
             ),
-            pytest.param(lambda: RuntimeError("pool exhausted"), id="not-psycopg"),
+            pytest.param(
+                lambda: ValueError("notice handler not registered"), id="not-psycopg"
+            ),
         ],
     )
     def test_an_analyze_that_raises_does_not_fail_the_save(
