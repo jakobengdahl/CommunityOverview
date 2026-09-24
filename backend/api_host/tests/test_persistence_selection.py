@@ -164,9 +164,9 @@ class TestBackendSelection:
             graph_file="graph.json",
             graph_backend="postgres",
             # Mixed case in both: a password and a quoted schema name are
-            # case-sensitive, so a lower() anywhere on the way is a wrong
-            # password or a different schema, and all-lowercase fixtures
-            # cannot tell.
+            # case-sensitive, so a lower() in the factory is a wrong password
+            # or a different schema, and all-lowercase fixtures cannot tell.
+            # The environment-read tests below hold the AppConfig half.
             graph_postgres_dsn="postgresql://Usr:PwXY@Db.Example:5432/One",
             graph_postgres_schema="TenantB",
             graph_postgres_pool_size=3,
@@ -459,8 +459,11 @@ class TestTheEnvironmentIsTheInterface:
         assert build_persistence_backend(config) is None
 
     def test_dsn_is_read_from_the_environment(self, monkeypatch):
-        monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///from-env")
-        assert AppConfig().graph_postgres_dsn == "postgresql:///from-env"
+        # Mixed case: this is the path a deployment takes, and a password is
+        # case-sensitive, so a lower() in the default_factory must show here.
+        dsn = "postgresql://Usr:PwXY@Db.Example/FromEnv"
+        monkeypatch.setenv("GRAPH_POSTGRES_DSN", dsn)
+        assert AppConfig().graph_postgres_dsn == dsn
 
     def test_a_dsn_alone_does_not_select_postgres(self, monkeypatch):
         """No auto-detection: the backend is chosen by GRAPH_BACKEND only.
@@ -478,8 +481,8 @@ class TestTheEnvironmentIsTheInterface:
         assert build_persistence_backend(config) is None
 
     def test_schema_is_read_from_the_environment(self, monkeypatch):
-        monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "corp")
-        assert AppConfig().graph_postgres_schema == "corp"
+        monkeypatch.setenv("GRAPH_POSTGRES_SCHEMA", "TenantB")
+        assert AppConfig().graph_postgres_schema == "TenantB"
 
     def test_schema_defaults_to_public(self, monkeypatch):
         monkeypatch.delenv("GRAPH_POSTGRES_SCHEMA", raising=False)
