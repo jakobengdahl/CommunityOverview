@@ -697,6 +697,24 @@ class TestSearchRanking:
         ids = [n.id for n in temp_storage.search_nodes("aktör")]
         assert ids == ["name-match", "type-label", "desc-match"]
 
+    def test_localized_type_label_stays_below_the_alias_band(self, temp_storage):
+        """The type label is a type-tier signal, not an alternative name: a
+        node whose alias merely contains the term must outrank a node that only
+        matches through its type's localized label."""
+        nodes = [
+            Node(id="type-label", type=NodeType.ACTOR, name="Unrelated"),
+            Node(
+                id="alias-substring",
+                type=NodeType.THEME,
+                name="Other",
+                aliases=["huvudaktör"],
+            ),
+        ]
+        temp_storage.add_nodes(nodes, [])
+        ids = [n.id for n in temp_storage.search_nodes("aktör")]
+        assert ids == ["alias-substring", "type-label"]
+        assert temp_storage._score_node_match(nodes[0], "aktör") < 200_000
+
     def test_ranking_respects_limit(self, ranking_storage):
         """Ranked results still respect the limit parameter."""
         results = ranking_storage.search_nodes("esam", limit=2)
