@@ -584,7 +584,7 @@ class ChatProcessor:
         return [
             {
                 "name": "search_graph",
-                "description": "Search for nodes in the graph based on text query. Matches a local node's name, description, summary, tags, subtypes, aliases and type label (federated nodes: the fields their cache holds). By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
+                "description": "Search for nodes in the graph based on text query. Matches a local node's name, description, summary, tags, subtypes, aliases and type label (federated nodes: a subset of these fields). By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
                 "input_schema": {
                     "type": "object",
                     "properties": {

@@ -370,8 +370,8 @@ def register_mcp_tools(
         Args:
             query: Search text, matched against a local node's name,
                 description, summary, tags, subtypes, aliases and type label
-                (federated nodes against the fields their cache holds). Use ""
-                to match on the filters alone.
+                (federated nodes against a subset of these fields). Use "" to
+                match on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)

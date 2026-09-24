@@ -148,6 +148,8 @@ class TestChatServiceToolExecution:
             "type label",
         ):
             assert field in description
+        assert "a local node's name" in description
+        assert "federated nodes: a subset of these fields" in description
         assert "semantic-fallback" in description
         assert "returns nothing" not in description
 
