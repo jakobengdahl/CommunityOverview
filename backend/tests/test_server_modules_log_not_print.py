@@ -76,6 +76,10 @@ _STDOUT_CALLS = {
     "sys.__stdout__.write",
     "sys.stdout.buffer.write",
     "sys.__stdout__.buffer.write",
+    "sys.stdout.writelines",
+    "sys.__stdout__.writelines",
+    "sys.stdout.buffer.writelines",
+    "sys.__stdout__.buffer.writelines",
 }
 
 # Names an alias can stand for on its way to one of the calls above. Only
@@ -139,7 +143,21 @@ def _bindings(node):
     return []
 
 
-def _scope_aliases(nodes, inherited):
+def _parameter_bindings(scope):
+    """(parameter, dotted name of its default) for a function's defaulted
+    parameters: `def f(out=sys.stdout)` binds `out` inside `f`."""
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        return []
+    args = scope.args
+    positional = args.posonlyargs + args.args
+    pairs = list(zip(positional[len(positional) - len(args.defaults) :], args.defaults))
+    pairs += [
+        (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None
+    ]
+    return [(arg.arg, _dotted(default)) for arg, default in pairs]
+
+
+def _scope_aliases(scope, nodes, inherited):
     """Local name -> the stdout route it stands for in this scope.
 
     May-alias and fail-closed: a name bound to a stdout route anywhere in a
@@ -151,11 +169,13 @@ def _scope_aliases(nodes, inherited):
     which fails loudly and is fixed by renaming.
     """
     aliases = dict(inherited)
+    bindings = _parameter_bindings(scope)
     for node in nodes:
-        for name, target in _bindings(node):
-            target = _resolved(target, aliases) if target else None
-            if target in _STDOUT_ROUTES and target != name:
-                aliases[name] = target
+        bindings.extend(_bindings(node))
+    for name, target in bindings:
+        target = _resolved(target, aliases) if target else None
+        if target in _STDOUT_ROUTES and target != name:
+            aliases[name] = target
     return aliases
 
 
@@ -175,14 +195,16 @@ def _writes_to_stdout(call, aliases):
 
 def _collect(scope, inherited, found):
     nodes = _own_nodes(scope)
-    aliases = _scope_aliases(nodes, inherited)
-    # A class body's names are not visible inside its methods.
-    passed_down = inherited if isinstance(scope, ast.ClassDef) else aliases
+    aliases = _scope_aliases(scope, nodes, inherited)
+    # Class scopes too, though a method body cannot see a class body's names:
+    # its decorators, defaults and bases are evaluated in that body, and
+    # telling the two apart is the kind of precision the fail-closed rule
+    # above gives up.
     for node in nodes:
         if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases):
             found.append(node.lineno)
         if isinstance(node, _SCOPES):
-            _collect(node, passed_down, found)
+            _collect(node, aliases, found)
 
 
 def _stdout_calls(source):
@@ -225,6 +247,13 @@ def _stdout_calls(source):
         "import sys\nout = sys.stdout\ndef f(out, x=out.write('x')): pass",
         "import sys\nout = sys.stdout\ndef f():\n    out = open('y')\n"
         "    out.write('x')",
+        # A class body's aliases, used where the body evaluates them.
+        "import sys\nclass A:\n    out = sys.stdout\n"
+        "    def m(self, x=out.write('x')): pass",
+        "import sys\nclass A:\n    w = sys.stdout.write\n    class B(w('x')): pass",
+        "import sys\ndef f(out=sys.stdout):\n    out.write('x')",
+        "import sys\ndef f(*, out=sys.stdout):\n    out.write('x')",
+        "import sys\nsys.stdout.writelines(['x'])",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
@@ -248,9 +277,6 @@ def test_the_guard_catches_a_write_in_a_decorator_the_function_rebinds():
         # handle in another.
         "import sys\ndef b():\n    f = open('x')\n    f.write('y')\n"
         "def a():\n    f = sys.stdout",
-        # A class body's names do not reach its methods.
-        "import sys\nclass A:\n    f = sys.stdout\n    def m(self):\n"
-        "        f.write('x')",
     ],
 )
 def test_the_guard_ignores_logger_calls_and_other_streams(source):
