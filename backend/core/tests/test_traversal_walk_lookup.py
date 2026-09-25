@@ -18,11 +18,12 @@ from backend.core.models import Edge, Node, NodeType, RelationshipType
 class _VanishingOnLookup(dict):
     """Loses one key on its first observation, and counts every observation.
 
-    Every route that can tell whether the key is present is instrumented -
-    `in`, `.get()`, `[]` and `.keys()` - so a check-then-use is caught whichever
-    spelling it takes: the first observation answers "present" and removes the
-    key, and a second one misses. `observations` counts how often the victim
-    was observed while armed, present or not; `.keys()` observes every key.
+    Four routes are instrumented - `in`, `.get()`, `[]` and `.keys()` - so a
+    check-then-use spelled through any of them is caught: the first
+    observation answers "present" and removes the key, and a second one misses.
+    Iteration, `.items()` and `.values()` are not instrumented. `observations`
+    counts how often the victim was observed while armed, present or not;
+    `.keys()` observes every key.
 
     Unarmed, the dict is plain. The walk legitimately reads `nodes` while it
     traverses (to skip archived neighbours); only the resolution that follows
@@ -68,7 +69,9 @@ class _ArmsWhenTheWalkEnds:
 
     The walk reads the graph only through `out_edges` and `in_edges`, and only
     while it traverses. Once `expected` of those iterators have been drained,
-    every hop is done and what follows is resolution.
+    every hop is done and what follows is resolution. That assumes the walk
+    consumes each iterator as it loops over it; a walk that materialised them
+    up front would arm the fixture before its traversal-phase reads.
     """
 
     def __init__(self, graph, expected, *fixtures):
