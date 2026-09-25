@@ -3033,6 +3033,141 @@ class TestDeleteSessionSyncRateLimit:
         assert await _drain(sub) == []
 
 
+class _AdmittingRecordingBucket:
+    """Admits every consume and records ``(key, amount)``, so a test can pin
+    which key a write charged and how many times."""
+
+    def __init__(self):
+        self.calls = []
+
+    def consume(self, key, n=1.0):
+        self.calls.append((key, n))
+        return True
+
+
+def _recording_mcp_bucket(mgr):
+    bucket = _AdmittingRecordingBucket()
+    mgr._mcp_bucket = bucket
+    return bucket
+
+
+class TestRenameDeleteSyncCharges:
+    """Which ``_mcp_bucket`` key rename/delete charge, and exactly when."""
+
+    @pytest.mark.parametrize(
+        "actor, label, key",
+        [
+            (None, None, "rest"),
+            (None, "tool", "rest:tool"),
+            ("mcp-agent", None, "mcp-agent"),
+            ("mcp-agent", "tool", "mcp-agent:tool"),
+        ],
+    )
+    @pytest.mark.parametrize("name", ["Renamed", None])
+    async def test_rename_charges_one_token_under_the_actor_key(
+        self, actor, label, key, name
+    ):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        bucket = _recording_mcp_bucket(mgr)
+
+        mgr.rename_session_sync(s.id, name, client_id=actor, rate_limit_label=label)
+
+        assert bucket.calls == [(key, 1.0)]
+        assert s.name == name
+
+    @pytest.mark.parametrize(
+        "actor, label, key",
+        [
+            (None, None, "rest"),
+            (None, "tool", "rest:tool"),
+            ("mcp-agent", None, "mcp-agent"),
+            ("mcp-agent", "tool", "mcp-agent:tool"),
+        ],
+    )
+    async def test_delete_charges_one_token_under_the_actor_key(
+        self, actor, label, key
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        assert mgr.delete_session_sync(s.id, deleted_by=actor, rate_limit_label=label)
+
+        assert bucket.calls == [(key, 1.0)]
+        assert mgr.get_session(s.id) is None
+
+    async def test_rename_of_an_invalid_id_charges_nothing(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(SessionNotFound):
+            mgr.rename_session_sync("nope", "Name", client_id="mcp-agent")
+
+        assert bucket.calls == []
+
+    async def test_rename_with_a_non_string_name_charges_nothing(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(OpError):
+            mgr.rename_session_sync(s.id, 42, client_id="mcp-agent")
+
+        assert bucket.calls == []
+
+    @pytest.mark.parametrize("bad_id", ["nope", "../1234-5678", "", "1234-5678-"])
+    async def test_delete_of_an_invalid_id_is_not_found_and_charges_nothing(
+        self, bad_id
+    ):
+        mgr = _manager()
+        s = mgr.create_session()
+        bucket = _recording_mcp_bucket(mgr)
+        deleted = []
+        mgr.store.delete = deleted.append
+
+        assert mgr.delete_session_sync(bad_id, deleted_by="mcp-agent") is False
+
+        assert bucket.calls == []
+        assert deleted == []
+        assert mgr.get_session(s.id) is s
+
+    async def test_delete_of_a_missing_valid_id_charges_exactly_once(self):
+        mgr = _manager()
+        bucket = _recording_mcp_bucket(mgr)
+
+        assert (
+            mgr.delete_session_sync("1234-5678-9012-3456", deleted_by="mcp-agent")
+            is False
+        )
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+
+    async def test_a_busy_rename_charges_exactly_once(self):
+        mgr = _manager()
+        s = mgr.create_session(name="Before")
+        await mgr._lock(s.id).acquire()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(LayoutBusy):
+            mgr.rename_session_sync(s.id, "After", client_id="mcp-agent")
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+        assert s.name == "Before"
+
+    async def test_a_busy_delete_charges_exactly_once(self):
+        mgr = _manager()
+        s = mgr.create_session()
+        await mgr._lock(s.id).acquire()
+        bucket = _recording_mcp_bucket(mgr)
+
+        with pytest.raises(LayoutBusy):
+            mgr.delete_session_sync(s.id, deleted_by="mcp-agent")
+
+        assert bucket.calls == [("mcp-agent", 1.0)]
+        assert mgr.get_session(s.id) is s
+
+
 class TestDeleteRenameLocking:
     """R10: delete must not race an in-flight apply_ops batch for the same session."""
 
@@ -3495,10 +3630,18 @@ _MCP_BUCKET_WRITES = {
     "rename_session_sync": lambda mgr, sid, i, label: mgr.rename_session_sync(
         sid, f"name-{i}", client_id="mcp-agent", rate_limit_label=label
     ),
-    "delete_session_sync": lambda mgr, sid, i, label: mgr.delete_session_sync(
-        sid, deleted_by="mcp-agent", rate_limit_label=label
+    "delete_session_sync": lambda mgr, sid, i, label: _delete_existing_session(
+        mgr, sid, label
     ),
 }
+
+
+def _delete_existing_session(mgr, sid, label):
+    # Recreated first so every admitted call really deletes: a harness call
+    # against an already-deleted id returns False and proves only "not limited".
+    mgr.get_or_create(sid)
+    assert mgr.delete_session_sync(sid, deleted_by="mcp-agent", rate_limit_label=label)
+
 
 # session_manager calls in mcp_tools.py that spend no rate-limit bucket.
 _MCP_UNMETERED_CALLS = {
@@ -3654,7 +3797,9 @@ class TestBucketAttrsReach:
         mgr = _manager()
         del mgr._lookup_bucket
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(
+            AssertionError, match=r"required rate buckets missing.*'_lookup_bucket'"
+        ):
             bucket_attrs(mgr)
 
 
@@ -4004,8 +4149,9 @@ class TestUpsertImageAnnotation:
         assert len(reads) == int(_DEFAULT_IMAGE_BUCKET_CAPACITY) + 1
 
         # One refill interval later exactly one more is admitted: the default
-        # refill rate is the source-keyed one too.
-        now[0] += 1.0 / _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC
+        # refill rate is the source-keyed one too. The 0.1% margin keeps float
+        # rounding in the refill from landing just under one token at some rates.
+        now[0] += 1.001 / _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC
         ingest("img-refilled")
         with pytest.raises(RateLimited):
             ingest("img-over-again")
