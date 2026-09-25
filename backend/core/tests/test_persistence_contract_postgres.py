@@ -264,8 +264,21 @@ def reported(caplog, capsys):
     A report is a WARNING record on the backend's module logger. Each one is
     also checked not to have reached stdout, so a report printed as well as
     logged fails here rather than reading as a single line.
+
+    Anything louder than WARNING fails outright, on every call and again at
+    teardown. Filtered to WARNING alone, the same text at ERROR would slip
+    past both a positive check and any check that nothing was said - and a
+    record logged after the last call would never be looked at at all.
     """
     caplog.set_level(logging.WARNING, logger=_BACKEND_LOGGER)
+
+    def assert_nothing_louder(records):
+        louder = [
+            record.getMessage()
+            for record in records
+            if record.name == _BACKEND_LOGGER and record.levelno > logging.WARNING
+        ]
+        assert not louder, f"reported above WARNING: {louder}"
 
     def take() -> str:
         messages = [
@@ -273,13 +286,15 @@ def reported(caplog, capsys):
             for record in caplog.records
             if record.name == _BACKEND_LOGGER and record.levelno == logging.WARNING
         ]
+        assert_nothing_louder(caplog.records)
         caplog.clear()
         out = capsys.readouterr().out
         leaked = [message for message in messages if message in out]
         assert not leaked, f"a report went to stdout: {leaked}"
         return "\n".join(messages)
 
-    return take
+    yield take
+    assert_nothing_louder(caplog.get_records("call"))
 
 
 def _statements_issued(action, into=None):
@@ -537,7 +552,15 @@ class TestPostgresSequentialScanHelperSkipsMaintenance:
         assert touched and scanning == touched, (touched, scanning)
 
     @pytest.mark.parametrize(
-        "statement", ["ANALYZE", "-- DELETE\nVACUUM", "/* SELECT */ analyze"]
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
     )
     def test_a_maintenance_statement_is_skipped(self, schema, statement):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -548,6 +571,41 @@ class TestPostgresSequentialScanHelperSkipsMaintenance:
         query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
 
         assert _sequential_scans([(query, None)]) == ([], [])
+
+
+class TestPostgresPlansHelperSkipsMaintenance:
+    """`_plans` around a whole-graph save, ANALYZE included.
+
+    The same guard `_sequential_scans` needs, for the same reason: planned as
+    `EXPLAIN ANALYZE <table>`, the save's trailing ANALYZE is a syntax error.
+    The rest of the save must still be planned.
+    """
+
+    def test_a_whole_graph_save_is_planned_without_its_analyze(self, schema, backends):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        backends.append(backend)
+        backend.exists()
+
+        issued = _statements_issued(
+            lambda: backend.save_graph_data(
+                snapshot(
+                    [node_payload("n1"), node_payload("n2")],
+                    [edge_payload("e1", "n1", "n2")],
+                )
+            )
+        )
+        assert [
+            text
+            for text in (_rendered(q) for q, _ in issued)
+            if text.upper().startswith("ANALYZE")
+        ], "the save no longer issues its trailing ANALYZE, so this proves nothing"
+
+        planned = [text for text, _ in _plans(issued)]
+
+        assert not [t for t in planned if t.upper().startswith("ANALYZE")]
+        assert any(t.upper().startswith("INSERT") for t in planned), planned
+        deletes = [t for t in planned if t.upper().startswith("DELETE")]
+        assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
 
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
@@ -1656,7 +1714,12 @@ class TestPostgresIndexWorkIsDoneOnce:
         assert [n["id"] for n in backend.load_graph_data()["nodes"]] == ["a"], (
             "the save did not land"
         )
-        assert "could not ANALYZE after save" in reported()
+        # The exception text as well as the prefix: the prefix alone says a
+        # refresh was skipped, and only the text says why.
+        assert (
+            f"could not ANALYZE after save; the traversal's indexes may go "
+            f"unused: {failure()}"
+        ) in reported().splitlines()
 
 
 class TestPostgresReportsAnIndexItCannotUse:
@@ -5330,7 +5393,9 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
         (change,) = collector.wait_for(1)
         assert change.operations is None
 
-    def test_a_listener_that_raises_does_not_end_the_reporting(self, schema, backends):
+    def test_a_listener_that_raises_does_not_end_the_reporting(
+        self, schema, backends, reported
+    ):
         """One bad refresh must not silence the instance for good: the thread
         that dies here is the only one that would ever hear another write."""
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
@@ -5353,6 +5418,12 @@ class TestPostgresTreatsAnUnreadableAnnouncementAsAReload:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
+        # The refresh that failed is the one thing an operator must hear
+        # about: the instance is behind until the next change reaches it.
+        assert reported().splitlines() == [
+            "applying an external change failed: RuntimeError: "
+            "the application refused this one"
+        ]
 
     def test_a_non_driver_read_failure_reconnects_and_keeps_reporting(
         self, schema, backends, monkeypatch
@@ -5594,7 +5665,7 @@ class TestPostgresDoesNotStartASecondListener:
     """
 
     def test_a_start_that_times_out_does_not_leave_a_startable_backend(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -5617,6 +5688,14 @@ class TestPostgresDoesNotStartASecondListener:
         try:
             with pytest.raises(TimeoutError):
                 backend.start_change_notification(_Collector())
+            # The failed start stopped a thread it could not join. That is
+            # the one state in which this backend refuses to start again, so
+            # the operator is told why rather than left to find out.
+            assert (
+                f"the listener thread for {backend._channel} did not stop "
+                f"within 1.0s; notification cannot be started again on this "
+                f"backend"
+            ) in reported().splitlines()
 
             live = [t for t in threading.enumerate() if t.name.startswith("pg-notify")]
             # The thread is still there - that is the situation, not the bug.
@@ -5825,7 +5904,10 @@ class TestPostgresReportsAContractViolationDistinctly:
             backend.stop_change_notification()
 
         assert [op.entity_id for op in changes[1].operations] == ["second"]
-        assert "refused" in reported()
+        assert (
+            "change notification refused: reported from a writing thread"
+            in reported().splitlines()
+        )
 
 
 class TestPostgresStopFromInsideTheListener:
@@ -5930,7 +6012,7 @@ class TestPostgresPacesAServerThatRefusesConnections:
         return [b - a for a, b in zip(attempts, attempts[1:])]
 
     def test_a_refused_connection_is_retried_with_a_growing_wait(
-        self, schema, backends, monkeypatch
+        self, schema, backends, monkeypatch, reported
     ):
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.append(backend)
@@ -5938,6 +6020,18 @@ class TestPostgresPacesAServerThatRefusesConnections:
         # High enough that the ceiling never binds: this is about the shape of
         # the escalation, not about where it stops.
         gaps = self._refused_connect_gaps(backend, monkeypatch, 30.0, 4)
+
+        # Both halves of the outage are reported: the connection that
+        # dropped, and each attempt to get it back. A deaf instance that says
+        # nothing looks exactly like a quiet one.
+        lines = reported().splitlines()
+        lost = f"lost the listening connection on {backend._channel}: "
+        assert [line for line in lines if line.startswith(lost)], lines
+        retrying = (
+            f"reconnecting to {backend._channel} after OperationalError: "
+            f"injected: connection refused"
+        )
+        assert lines.count(retrying) >= 3, lines
 
         assert gaps[-1] >= 2 * gaps[0], (
             f"connect attempts {[round(g, 3) for g in gaps]} are evenly "
@@ -6805,7 +6899,8 @@ def _plans(issued, dsn=DSN, scope=None):
 
     Planned as `dsn`'s role sees it, with the scope setting bound the way the
     backend binds it, so the plan is the one the deployment actually gets -
-    policy qual included, where the server applies one.
+    policy qual included, where the server applies one. Maintenance
+    statements are skipped, not planned: see `_MAINTENANCE`.
     """
     plans = []
     with psycopg.connect(dsn) as conn:
@@ -6816,6 +6911,8 @@ def _plans(issued, dsn=DSN, scope=None):
             if "graph_nodes" not in text and "graph_edges" not in text:
                 continue
             if params is _EXECUTED_NEVER:
+                continue
+            if _leading_verb(conn, query) in _MAINTENANCE:
                 continue
             rows = conn.execute(psycopg.sql.SQL("EXPLAIN ") + query, params).fetchall()
             plans.append((text, "\n".join(r[0] for r in rows)))
