@@ -124,8 +124,11 @@ class SearchRequest(BaseModel):
         False,
         description=(
             "When true, rank results by embedding meaning instead of lexical "
-            "substring matching. Lexical search still auto-falls back to semantic "
-            "ranking when it returns zero results."
+            "substring matching. A query other than '' or '*' that matches no "
+            "local node of the requested types (archived nodes count only with "
+            "include_archived) falls back to semantic ranking for local results. "
+            "The check runs before tag, metadata and access filters, so a match "
+            "those filters remove gets no fallback."
         ),
     )
     match_mode: str = Field(
@@ -134,7 +137,9 @@ class SearchRequest(BaseModel):
             "Lexical match mode: 'substring' (default) requires the whole query "
             "verbatim; 'any_term' matches nodes containing any of the query's "
             "distinct whitespace-separated terms, and a repeated term counts "
-            "once. Ignored when semantic is true."
+            "once. Applies to local and federated results alike; semantic=true "
+            "replaces it for local results only, since federated results are "
+            "always matched lexically."
         ),
     )
 

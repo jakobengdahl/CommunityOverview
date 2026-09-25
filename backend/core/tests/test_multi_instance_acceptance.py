@@ -32,17 +32,19 @@ somewhere this file names.
    holds the other half of criterion 5 below.
 
 4. Restart does not lose acknowledged writes. Proved here for a write that
-   succeeds. The half where a write FAILS and `flush()` has to heal it is
-   proved in `test_file_backend_journal.py` - dropping the heal from
-   `flush()` loses an acknowledged write and passes everything in this file.
+   succeeds, and - on the file backend, with no server - that `flush()`
+   heals a failed write BEFORE it checkpoints, so the snapshot it folds
+   holds that write. That the heal puts a failed write on disk at all -
+   through `flush()`, and through shutdown for one that fails after the last
+   flush - is proved in `test_file_backend_journal.py`.
 
 5. A file-backed installation stays single-instance. Not proved here either:
    `test_persistence_contract_file.py` asserts that the file backend declares
    no change notification and that a storage on it never starts any.
 
 What a green run here therefore does NOT establish: criterion 1, the boot
-gate, the file backend's capabilities, criterion 4's failed-write half
-(`test_file_backend_journal.py`), the announcement's ordering, its
+gate, the file backend's capabilities, that the heal puts a failed write
+on disk at shutdown (`test_file_backend_journal.py`), the announcement's ordering, its
 unreadable-payload fallback and its per-schema channel (all three in
 `test_persistence_contract_postgres.py` - they survive this file AND every
 other module named here), or that the server wires the session
@@ -380,6 +382,70 @@ class TestCriterion4RestartKeepsAcknowledgedWrites:
             "flush() returned but the write was not in the store, so an "
             "instance killed mid-rollout loses a write it acknowledged"
         )
+
+
+class TestCriterion4FlushHealsBeforeItCheckpoints:
+    """The order inside `flush()`, which no end-state assertion can see.
+
+    A failed entity write leaves the backend's image without the mutation,
+    and `flush()` heals it by re-issuing the whole graph. Healing AFTER the
+    checkpoint still ends with the write on disk, so every test that only
+    reads the final state passes against that order. What it changes is the
+    snapshot the checkpoint folds: an image that lacks the failed write, with
+    the journal truncated behind it, and nothing on disk holding the write
+    until the heal lands. `flush()` states that it heals first "so the
+    checkpoint folds a complete image"; this holds that sentence.
+
+    Needs no server: the file backend is the one that checkpoints.
+    """
+
+    def test_the_checkpoint_folds_the_healed_image(self, tmp_path):
+        import json
+
+        path = tmp_path / "graph.json"
+        storage = GraphStorage(json_path=str(path))
+        try:
+            storage.add_nodes([_node("a", "Before")], [])
+            storage.flush()
+
+            backend = storage._persistence_backend
+            real_upsert = backend.upsert_node
+            failures = {"left": 1}
+
+            def fails_once(node):
+                if failures["left"]:
+                    failures["left"] -= 1
+                    raise OSError("transient append failure")
+                return real_upsert(node)
+
+            real_checkpoint = backend.checkpoint
+            folded = []
+
+            def recording_checkpoint():
+                real_checkpoint()
+                nodes = json.loads(path.read_text())["nodes"]
+                folded.append({n["id"]: n["name"] for n in nodes})
+
+            backend.upsert_node = fails_once
+            backend.checkpoint = recording_checkpoint
+
+            storage.update_node("a", {"name": "After"})
+            storage.flush()
+
+            assert failures["left"] == 0, (
+                "the entity write never failed, so there was nothing to heal "
+                "and this test exercised only the ordinary path"
+            )
+            assert folded, (
+                "flush() ran no checkpoint, so the order it is meant to "
+                "respect was never tested"
+            )
+            assert folded[0]["a"] == "After", (
+                "flush() checkpointed an image that lacked the failed write, "
+                "so the heal ran after the checkpoint instead of before it"
+            )
+        finally:
+            storage.shutdown_events()
 
 
 class TestCriterion2SessionsAcrossInstances:

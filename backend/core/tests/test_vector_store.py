@@ -335,6 +335,29 @@ class TestVectorStorePersistenceSeam:
         assert results[0][0] == "alpha"
         assert results[0][1] < 1.0
 
+    def test_reloading_the_same_ids_in_a_new_order_rebuilds_the_row_order(self):
+        """The test above builds a fresh index. A reload of the SAME id set in
+        a different order is the case a rebuild could skip: `node_ids` would
+        still name every row, so nothing crashes, but the tie order would be
+        the previous load's rather than this one's - or, if the matrix were
+        restacked while `node_ids` was kept, a row's score would carry another
+        row's id."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        store = VectorStore()
+        store.load_vectors({"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [0.0, 1.0]})
+        store.load_vectors({"c": [1.0, 0.0], "b": [0.0, 1.0], "a": [1.0, 0.0]})
+        store.model = _Model()
+
+        assert store.node_ids == ["c", "b", "a"]
+        # c and a tie at 1.0, so they come back in this load's order; b now
+        # points away and is below the floor.
+        results = store.search(query_text="anything", limit=3, threshold=0.5)
+        assert [node_id for node_id, _ in results] == ["c", "a"]
+
     def test_revision_advances_on_every_change(self):
         store = self._store()
         start = store.revision
@@ -467,10 +490,14 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     sidecar silently unwritable — with nothing failing at the time."""
     store = VectorStore()
     store.load_vectors({"a": np.ones(4, dtype=np.float32)})
-    before = store.export_vectors()
+    # export_vectors hands out the live arrays; copy them, or an in-place
+    # write to "a" would change the snapshot too and could never fail below.
+    before = {k: v.copy() for k, v in store.export_vectors().items()}
 
-    with pytest.raises(ValueError):
-        store._absorb({"b": [1.0, 2.0], "c": [1.0, 2.0, 3.0]})
+    # "a" rides in the refused batch at its own width, so an absorb that wrote
+    # matching rows in place before checking the batch would change it.
+    with pytest.raises(ValueError, match="mixed widths"):
+        store._absorb({"a": [2.0, 2.0, 2.0, 2.0], "c": [1.0, 2.0, 3.0]})
 
     after = store.export_vectors()
     assert set(after) == set(before), "a refused batch still changed the index"
@@ -599,8 +626,12 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 f"{budget}-byte budget: the floor is being applied by building "
                 f"something the size of the index"
             )
+        # A literal, not `_FLOORED_SEARCHES`: the child iterates that same
+        # tuple, so comparing against it cannot fail when an entry is dropped.
         assert [[f, lim] for f, lim, _ in measured["floored"]] == [
-            list(pair) for pair in _FLOORED_SEARCHES
+            [0.3, 200],
+            [0.4, 5],
+            [0.5, 5],
         ]
         # And the budget is not passing by being generous: the index it is
         # measured against is far larger than it.
@@ -660,6 +691,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         ]
         assert [node_id for node_id, _ in every_row] == full_expected, (
             "the ranking past the head does not match the form this replaced"
+        )
+        # And its scores: the order above holds for any scores that sort the
+        # same way, so a tail scored wrongly but monotonically passes it.
+        np.testing.assert_allclose(
+            [score for _, score in every_row],
+            [float(sims[store.node_ids.index(node_id)]) for node_id in full_expected],
+            rtol=1e-5,
+            atol=1e-6,
         )
 
     def test_the_text_path_scores_what_the_node_path_would_have(self):
@@ -949,6 +988,26 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         store = VectorStore()
         store.load_vectors({"a": [1.0, 0.0], "b": [0.0, 1.0]})
 
+        assert store.unit_matrix.dtype == np.float32
+
+    def test_generated_vectors_are_stored_as_float32(self):
+        """The test above loads through `load_vectors`, and so do the budget
+        fixtures; vectors produced by the model enter through `_absorb`
+        instead. Both shapes the model path hands it are covered: a float64
+        array, and the Python list `generate_embedding` returns, which numpy
+        would otherwise read as float64."""
+
+        class _Model:
+            def encode(self, text):
+                return np.asarray([0.0, 1.0], dtype=np.float64)
+
+        store = VectorStore()
+        store.model = _Model()
+        store.absorb_embeddings({"array": np.asarray([1.0, 0.0], dtype=np.float64)})
+        store.update_node_embedding(Node(id="listed", type=NodeType.ACTOR, name="L"))
+
+        assert store.embeddings["array"].dtype == np.float32
+        assert store.embeddings["listed"].dtype == np.float32
         assert store.unit_matrix.dtype == np.float32
 
     def test_a_query_with_no_direction_is_not_a_nan_either(self):
@@ -1474,6 +1533,24 @@ class TestSearchCostsNothingItDoesNotHaveTo:
                 f"tie block that straddles the limit is not the stable top-k - "
                 f"either the order or the set of rows changed"
             )
+
+    def test_a_limit_above_every_power_of_two_boundary_reaches_every_row(self):
+        """Whole-ranking membership is otherwise asserted on indexes of at most
+        2000 rows, so a walk capped at a fixed rank such as 2048 or 4096 - the
+        natural chunk sizes for a selection step - passes all of them. 5000
+        rows clears both."""
+        store = self._store(5000, dim=16, seed=11)
+        vector = np.asarray(store.embeddings["n0"])
+
+        class _Model:
+            def encode(self, text):
+                return vector
+
+        store.model = _Model()
+
+        results = store.search(query_text="anything", limit=5000, threshold=-1.0)
+        assert len(results) == 5000, f"reached {len(results)} of 5000 rows"
+        assert {node_id for node_id, _ in results} == set(store.node_ids)
 
     def test_a_search_does_not_rewrite_the_vectors_it_reads(self):
         """`embeddings` is the source of truth - what `export_vectors` returns

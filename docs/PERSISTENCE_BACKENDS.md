@@ -683,7 +683,7 @@ one copy to keep true.
 
 Nodes, edges and metadata are JSONB rows, the same payloads the file backend
 writes: the graph's own schema is configuration, not something these tables
-should have an opinion about. Six things about it are worth knowing before
+should have an opinion about. Seven things about it are worth knowing before
 writing a backend of your own against a shared server:
 
 - **Migration takes an advisory lock.** Every instance runs the same
@@ -732,12 +732,32 @@ writing a backend of your own against a shared server:
   after it takes a fresh snapshot at statement start; under a server or role
   default of `REPEATABLE READ` the snapshot would be taken at the lock,
   before it blocks, and the writer that waited would die on a serialization
-  failure rather than proceed. Neither level is left to the environment for
-  the save or the load — each states its own. Migration (`_ensure_schema()`)
-  and `exists()` are not part of that guarantee: they run under whatever the
-  connection's environment defaults to, which is fine for what they do —
-  neither reads graph data, so neither is exposed to the statement-snapshot
-  anomaly the save and the load guard against. What they actually send
+  failure rather than proceed. Two more transactions state theirs for the
+  same two reasons: `traverse()` states `REPEATABLE READ`, so every level of
+  one traversal reads the same moment, and `apply_batch()` — which every
+  entity write goes through — states `READ COMMITTED`, so a second writer on
+  a contended row waits and wins rather than failing on serialization. None
+  of those four leaves its level to the environment. Migration
+  (`_ensure_schema()`) and `exists()` are not part of that guarantee: they
+  run under whatever the connection's environment defaults to. Neither reads
+  nodes or edges, so neither is exposed to the snapshot anomalies those four
+  guard against. The one graph row they do touch is the `graph_metadata` row:
+  the graph-identity check that ends migration reads it (and, only when it
+  exists without a claim, writes this instance's with one `UPDATE`), and
+  `exists()` reads it too.
+  `_resolve()`, the read behind change notification, inherits the default
+  too; it answers each identifier from what the store holds when it reads,
+  and a write it sees that is newer than the announcement it is resolving is
+  followed by that write's own announcement. So does the transaction
+  `start_change_notification()` opens before it starts listening, which
+  holds only the graph-identity check (`_claim_or_check_graph_identity()`):
+  at most one read of the metadata row — none once this backend's check has
+  completed, which, on this backend's first migration, the `_ensure_schema()`
+  call just before it does if the row was there to find —
+  and, only when that row exists without a claim, one `UPDATE` writing this
+  instance's. It states no level of its own.
+  What migration and `exists()`
+  actually send
   depends on whether the store has been migrated before. Cold (nothing
   provisioned yet), `_ensure_schema()` issues one advisory-lock statement,
   then one catalog lookup for the schema (`pg_namespace`) plus a
@@ -745,17 +765,34 @@ writing a backend of your own against a shared server:
   tables one catalog lookup via `_create_missing()` (a `pg_class`/
   `pg_namespace` join) plus a `CREATE TABLE IF NOT EXISTS` if it is missing:
   up to four catalog lookups and four creates behind the one lock, not a
-  single `SELECT`. Once a process has migrated once, `self._migrated`
+  single `SELECT`. The last thing a cold migration sends, in a transaction of
+  its own after the lock is released, is the graph-identity check: one
+  `SELECT doc` from `graph_metadata`, plus the claiming `UPDATE` described
+  above when the row exists unclaimed. Once a process has migrated once,
+  `self._migrated`
   short-circuits every later call on that backend object: no advisory lock,
-  no catalog lookup, nothing sent to the server. `exists()` adds exactly one
-  further read on top of whichever of those two paths `_ensure_schema()`
-  took — the single-row `SELECT` against `graph_metadata` — so a warm
-  `exists()` call is one `SELECT` and zero advisory locks, and a cold one is
-  that same `SELECT` plus everything above. The traversal's two indexes are
-  not in those counts: they are created after the lock is released, one pooled
-  connection each, and each costs a `pg_class`/`pg_index` lookup plus a
-  `CREATE INDEX IF NOT EXISTS` only when the lookup says it is missing — see
-  the index bullet below for why they sit outside the transaction.
+  no catalog lookup, nothing sent to the server. `exists()` then runs the
+  identity check again, unless this backend has already completed it, and
+  adds the single-row `SELECT 1` against `graph_metadata`. The check counts as
+  completed only once it has found the row, so on a store nothing has been
+  saved to yet, it repeats on every call. A warm `exists()` call is therefore
+  one `SELECT` and zero advisory locks once this backend has seen the metadata
+  row, and two `SELECT`s until then — including on a store another instance
+  saved to after this one migrated, until the first call that finds the row;
+  a cold call is that plus everything above.
+  Two more steps are left out of those counts. The traversal's two indexes are
+  created after the lock is released, one pooled connection each, and each
+  costs a `pg_class`/`pg_index` lookup plus a `CREATE INDEX IF NOT EXISTS`
+  only when the lookup says it is missing — see the index bullet below for
+  why they sit outside the transaction. After them, and before the identity
+  check, the scope seam reads the catalog for each scoped table (the
+  `scope_id` column in `pg_attribute`, the policy state in
+  `pg_class`/`pg_policy`), adding the column with `ALTER TABLE … ADD COLUMN
+  IF NOT EXISTS` where it is missing, then reads the column (and, for a
+  scoped instance, the policy state) again to learn what took. A scoped
+  instance also sends, per table and only for what is missing, `CREATE
+  POLICY`, `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `ALTER TABLE … FORCE
+  ROW LEVEL SECURITY` — see "Keeping scopes apart" below.
 - **Whole-graph saves are serialised per store**, by a second advisory lock
   keyed on the schema. Without it two concurrent saves do not merely race for
   last place: the second writer's `DELETE` takes its snapshot when the
@@ -840,7 +877,11 @@ writing a backend of your own against a shared server:
   of transferring the documents themselves. A separate prepared-statement run at
   `prepare_threshold=5` with 20 000 ids gives a flat 216–280 ms per call with
   no cliff, dominated by transferring 20 000 jsonb documents rather than by
-  planning. The level query is different because it filters on *expressions*
+  planning. The two scales are not in conflict: the `_resolve` figures above
+  are server-side execution times as `EXPLAIN ANALYZE` reports them, which
+  never send a row to the client, while the per-call figure includes
+  transferring and decoding every one of those 20 000 documents. The level
+  query is different because it filters on *expressions*
   (`doc->>'source'`, `doc->>'target'`) and then joins, which is exactly where
   the frontier's size decides the join strategy and where the mis-estimate can
   turn into orders of magnitude rather than tens of milliseconds. Every other

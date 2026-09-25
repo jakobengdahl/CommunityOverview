@@ -221,13 +221,15 @@ git checkout -b claude/<short-description> origin/main
 
 ### 5. Test
 
-CI runs the full suite in three attributable jobs (see `.github/workflows/ci.yml`):
-the complete backend pytest suite, the frontend vitest workspaces, and the OAuth
-gateway tests. Two further jobs (`python-lint`, `frontend-lint`) run the ruff /
-eslint / prettier gates; they are not in the Docker build's dependency chain,
-but they are still merge-blocking on `main` PRs via branch protection (see step
-10) — see the Lint & format tooling note under Code Style. Reproduce what CI
-validates locally:
+CI has four split worker+gate required checks: `Backend tests`, `Frontend tests`,
+`Gateway tests`, `Python lint (ruff)`. The backend, frontend and gateway workers
+skip draft PRs when service code changed, and their gates fail that draft-skip
+instead of letting an unrun suite report green. The Python lint worker uses the
+same worker/gate required-check shape for path scoping. Frontend lint is an
+unconditional required check: `Frontend lint (eslint + prettier)`. These lint
+jobs are not in the Docker build's dependency chain, but they are still
+merge-blocking on `main` PRs via branch protection (see step 10) — see the Lint &
+format tooling note under Code Style. Reproduce what CI validates locally:
 
 ```bash
 pytest backend/ -q          # backend-tests job (base/ML-free install)
@@ -350,9 +352,9 @@ raised, verify locally per step 5, then push once. Several commits in one push
 is fine; step 6 asks for one commit per logical change, not one push.
 
 On a **draft** PR there is noise on top of that. When the diff touches service
-code the three heavy suites skip, and their gates fail that skip rather than let
-it report green, so each push turns three required checks red and mails the
-repository owner. (A draft whose diff is only `docs/` or `*.md` reports green instead:
+code the backend, frontend and gateway suites skip, and their gates fail that
+skip rather than let it report green, so each push turns those three required
+checks red and mails the repository owner. (A draft whose diff is only `docs/` or `*.md` reports green instead:
 `detect-changes` resolves `service_code=false` and the gates pass that as a
 path-skip.) A stream of such alarms is how a real failure gets missed.
 
@@ -371,7 +373,13 @@ below, every round. Without them a reviewer has no contract to classify
 findings against, and the loop has nothing to terminate on.
 
 **A round is two reviewers, not one.** Both, every round, on the full diff from
-main:
+main. **Spawn the mutation reviewer with `isolation: "worktree"`**, never
+sharing the correctness reviewer's checkout: the correctness reviewer only
+reads the tree, so it can share, but running both against one checkout lets
+the mutation reviewer's in-progress production-code edits show up under the
+correctness reviewer as unexplained working-tree changes — which it may then
+revert (e.g. `git checkout --`), destroying the mutation reviewer's edit
+mid-run and corrupting both reports.
 
 ```
 Agent(   # 1. correctness — its findings decide whether the loop continues
@@ -397,6 +405,7 @@ Agent(   # 1. correctness — its findings decide whether the loop continues
 )
 
 Agent(   # 2. mutation — its survivors are residue, not blockers
+  isolation: "worktree",  # own worktree — never the correctness reviewer's checkout
   prompt="""In /path/to/repo on branch <name>: edit the CHANGED PRODUCTION
             code to try to violate one of the guarantees below, and report
             which edits the test suite lets through.
@@ -861,6 +870,17 @@ only other language with full coverage today.
 4. Add a button for it to the language selector in
    `frontend/web/src/components/SettingsDialog.jsx` — the selector lists each
    language explicitly and does not read `SUPPORTED_LANGUAGES`.
+5. Update the tests that pin the language set: `frontend/web/src/i18n/index.test.jsx`
+   asserts `SUPPORTED_LANGUAGES` equals `['en', 'sv']`, and
+   `frontend/web/src/i18n/keyParity.test.js` compares only `en.json` with
+   `sv.json`, so extend it to cover the new file.
+
+`LANGUAGE_SWITCHING_ENABLED` in `index.jsx` is currently `false`: the UI is held
+English-only and the selector in `SettingsDialog.jsx` is not rendered, so a new
+language's button stays hidden until that flag is flipped. Flipping it also means
+replacing the tests that pin the English-only state: the "interim English-only
+lock" block in `frontend/web/src/i18n/index.test.jsx` and the hidden-selector
+test in `frontend/web/tests/SettingsDialog.test.jsx`.
 
 ---
 

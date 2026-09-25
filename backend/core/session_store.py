@@ -111,7 +111,7 @@ STATE_OPS = {
 
 
 def is_valid_session_id(session_id: str) -> bool:
-    return bool(isinstance(session_id, str) and SESSION_ID_RE.match(session_id))
+    return bool(isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id))
 
 
 def _now_iso() -> str:
@@ -1155,6 +1155,24 @@ class SessionStore:
     def ring(self, session_id: str) -> Optional[Deque[Dict[str, Any]]]:
         """Return the per-session op ring buffer (or None), for batch rollback."""
         return self._rings.get(session_id)
+
+    def restore_ring(
+        self, session_id: str, saved: Optional[List[Dict[str, Any]]]
+    ) -> None:
+        """Roll the ring back to ``saved``, a ``list(ring)`` taken before an op.
+
+        ``None`` means no ring existed then; ``apply_state_op`` creates one on
+        demand, so the rollback drops it rather than leaving an entry for an op
+        that never committed.
+        """
+        with self._lock:
+            if saved is None:
+                self._rings.pop(session_id, None)
+                return
+            ring = self._rings.get(session_id)
+            if ring is not None:
+                ring.clear()
+                ring.extend(saved)
 
     def ops_since(
         self, session_id: str, since_seq: int

@@ -330,6 +330,14 @@
     "unlock_canvas": "Unlock visualization",
     "settings": "Settings"
   },
+  "app_install": {
+    "install": "Install app",
+    "ios_hint": "Use Share, then Add to Home Screen.",
+    "dismiss_hint": "Dismiss install hint"
+  },
+  "offline": {
+    "read_only": "Offline — viewing only. Reconnect before editing the graph."
+  },
   "settings": {
     "title": "Settings",
     "close": "Close settings",
@@ -693,6 +701,12 @@
     "snap_peek": "Peek",
     "snap_half": "Half",
     "snap_full": "Full"
+  },
+  "floating_search": {
+    "placeholder": "Search graph...",
+    "aria_label": "Search",
+    "local_graph": "Local",
+    "in_view_badge": "in view"
   },
   "mobile_nav": {
     "bottom_nav": "App navigation",

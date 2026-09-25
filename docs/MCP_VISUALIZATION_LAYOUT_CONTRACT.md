@@ -195,8 +195,9 @@ apply_visualization_layout(
   An agent laying out a session larger than the node cap must split the work into
   successive writes, threading the returned `revision` into the next call's
   `expected_revision`.
-- **Rate limiting.** Writes consume from a per-client token bucket sized to the
-  number of moves; exhaustion yields a `rate_limited` error (§11). Layout writes
+- **Rate limiting.** Writes consume from this tool's token bucket, sized to the
+  number of moves. The bucket is per tool, not per client: every MCP client on
+  the instance draws from the same one. Exhaustion yields a `rate_limited` error (§11). Layout writes
   are expected to be infrequent (agent-driven), so this bounds abuse without
   affecting normal use.
 - **Serialization against realtime edits.** The synchronous layout write must not

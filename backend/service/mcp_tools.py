@@ -357,18 +357,22 @@ def register_mcp_tools(
         before.
 
         By default the query is matched lexically (substring). Multi-word or
-        natural-language queries that no node contains verbatim therefore return
-        nothing; set ``match_mode="any_term"`` to match any single term instead,
-        or ``semantic=True`` to rank nodes by embedding meaning.
-        As a safety net the search also falls back to semantic ranking
-        automatically when a non-empty lexical query yields zero results, so a
-        conceptual query still surfaces the closest nodes. The response includes
-        a ``"semantic"`` boolean indicating whether semantic ranking produced the
-        returned nodes.
+        natural-language queries that no node contains verbatim therefore match
+        nothing lexically; set ``match_mode="any_term"`` to match any single term
+        instead, or ``semantic=True`` to rank nodes by embedding meaning.
+        As a safety net the search falls back to semantic ranking automatically
+        when a non-empty lexical query matches no local node, so such a
+        query's local results come only from that fallback (none where no
+        embedding model is available); federated results are always matched
+        lexically in the requested ``match_mode``. The response includes a
+        ``"semantic"`` boolean
+        indicating whether semantic ranking produced the returned nodes.
 
         Args:
-            query: Search text (matches against name, description, summary). Use ""
-                to match on the filters alone.
+            query: Search text, matched against a node's name, description,
+                summary, tags, subtypes, aliases and type label; local and
+                federated nodes are matched on the same fields. Use "" to match
+                on the filters alone.
             node_types: List of node types to filter on (Actor, Initiative, etc.)
             limit: Max number of results (default 50)
             action: Optional action for frontend ('add_to_visualization' to add to current view)
@@ -386,8 +390,12 @@ def register_mcp_tools(
                 excluded. Set True to include archived items in the results.
             semantic: When True, rank results by embedding meaning (cosine
                 similarity) instead of lexical substring matching. Default False
-                keeps the lexical behavior, which still auto-falls back to
-                semantic ranking when it returns zero results.
+                keeps the lexical behavior. A query other than "" or "*" that
+                matches no local node of the requested types (archived nodes
+                count only with ``include_archived``) falls back to semantic
+                ranking for local results. The check runs before tag, metadata
+                and access filters, so a match those filters remove gets no
+                fallback.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
                 behaviour. ``"any_term"`` splits the query on whitespace into
@@ -398,9 +406,10 @@ def register_mcp_tools(
                 you repeat counts once. Each term is matched as a
                 substring, not as a word, so pass the distinctive terms: a short
                 or common one ("a", "the") matches almost everything and pads
-                the tail of the result with noise. Ignored when
-                ``semantic=True``. Applies to the local graph; federated search
-                stays substring-matched.
+                the tail of the result with noise. Applies to local and
+                federated search alike; ``semantic=True`` replaces it for local
+                results only, since federated results are always matched
+                lexically.
             visualization_session_id: Optional browser session ID — when provided, the result
                 is pushed to that session's live canvas, if one is open. The
                 result then carries a ``visualization_delivery`` report saying
@@ -1561,8 +1570,10 @@ def register_mcp_tools(
         reports them. Only the nodes you name move; a write is a partial update of
         the position map, not a replacement. A batch is capped at 500 moves and
         256 KiB of payload (``too_large`` above that), and each write also draws
-        from a per-client rate budget sized to the number of moves — so a single
-        very large arrange may return ``rate_limited`` before the hard cap. Either
+        from this tool's rate budget, sized to the number of moves — so a single
+        very large arrange may return ``rate_limited`` before the hard cap. The
+        budget is per tool, not per client: every MCP client on the instance
+        draws from the same one. Either
         way, split a large session across successive writes, threading the
         returned ``revision`` into the next ``expected_revision``.
         Layout patterns (horizontal DAG, grid, swimlanes) and the full geometry
@@ -1700,9 +1711,13 @@ def register_mcp_tools(
         nothing new on the canvas.
 
         A batch is capped at 500 distinct ids and 256 KiB of ids, and each call
-        also draws from a per-client rate budget sized to the number of distinct
-        ids — so a batch well below the hard caps can still return
-        ``rate_limited``. A repeated id counts once against all three. Split
+        also draws from this tool's rate budget, sized to the number of distinct
+        ids that resolve — ids reported in ``skipped`` are not charged, and a
+        call that returns ``no_resolvable_nodes`` draws nothing — so a batch
+        well below the hard caps can still return ``rate_limited``. The budget
+        is per tool, not per client: every MCP client on the instance draws
+        from the same one. A repeated
+        id counts once against all three. Split
         large sets across successive calls, threading the returned ``revision``
         into the next ``expected_revision``.
 
@@ -1757,18 +1772,41 @@ def register_mcp_tools(
         # below count it. This runs on the uncapped list, so it must stay
         # linear — an unhashable value (a dict or list arriving unvalidated
         # through POST /execute_tool) is keyed by its canonical JSON instead of
-        # being compared pairwise.
+        # being compared pairwise. Every id is encoded once here, and the byte
+        # cap below is summed from those encodings. A value with no canonical
+        # JSON (a cycle, mixed-type dict keys, nesting past the recursion
+        # limit, a ``__str__`` that raises) can only come from an in-process
+        # caller; it could never resolve and the byte cap could not measure
+        # it, so it is skipped before both, whether it is hashable or not.
         unique_ids: List[Any] = []
+        unique_ids_bytes = 0
+        unencodable: List[Any] = []
         seen: set = set()
         for node_id in node_ids:
             try:
                 key = ("h", node_id)
                 hash(key)
-            except TypeError:
-                key = ("u", json.dumps(node_id, sort_keys=True, default=str))
+                hashable = True
+            except Exception:
+                hashable = False
+            if hashable and key in seen:
+                continue
+            # Only an unhashable id needs the sorted form, as its dedupe key;
+            # sorting a hashable one could refuse keys the unsorted form takes.
+            try:
+                encoded = json.dumps(node_id, sort_keys=not hashable, default=str)
+            except Exception:
+                key = ("i", id(node_id))
+                if key not in seen:
+                    seen.add(key)
+                    unencodable.append(node_id)
+                continue
+            if not hashable:
+                key = ("u", encoded)
             if key not in seen:
                 seen.add(key)
                 unique_ids.append(node_id)
+                unique_ids_bytes += len(encoded)
         # Both caps are checked before the resolve below, which costs one node
         # lookup per id: the write path enforces them too, but only after that
         # work is already done.
@@ -1781,7 +1819,9 @@ def register_mcp_tools(
                     f"{session_manager.max_ops_per_batch}); split into batches."
                 ),
             }
-        if len(json.dumps(unique_ids, default=str)) > (
+        # The length of ``json.dumps(unique_ids)``: the brackets plus a ", "
+        # between items.
+        if unique_ids_bytes + 2 * max(len(unique_ids), 1) > (
             session_manager.max_op_batch_bytes
         ):
             return {
@@ -1820,7 +1860,7 @@ def register_mcp_tools(
             node_id
             for node_id in unique_ids
             if not (isinstance(node_id, str) and node_id in known)
-        ]
+        ] + unencodable
         if not resolvable:
             return {
                 "success": False,
@@ -2067,7 +2107,9 @@ def register_mcp_tools(
             name: The new display name, or null to clear it.
 
         Returns:
-            Dict with success and the updated session resource.
+            Dict with success and the updated session resource. Each call draws
+            one unit from a rate budget shared with no other tool; busy and
+            rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -2081,13 +2123,22 @@ def register_mcp_tools(
             return denied
         try:
             session = session_manager.rename_session_sync(
-                session_id, name, client_id=_MCP_SESSION_CLIENT_ID
+                session_id,
+                name,
+                client_id=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="rename_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         except SessionLimitReached:
             return {
@@ -2122,7 +2173,8 @@ def register_mcp_tools(
 
         Returns:
             Dict with success and deleted=true, or a confirmation_required / error
-            result.
+            result. A confirmed call draws one unit from a rate budget shared with
+            no other tool; busy and rate_limited are retryable.
         """
         if session_manager is None:
             return {"success": False, "error": "Session manager not available"}
@@ -2145,13 +2197,21 @@ def register_mcp_tools(
             }
         try:
             existed = session_manager.delete_session_sync(
-                session_id, deleted_by=_MCP_SESSION_CLIENT_ID
+                session_id,
+                deleted_by=_MCP_SESSION_CLIENT_ID,
+                rate_limit_label="delete_visualization_session",
             )
         except LayoutBusy:
             return {
                 "success": False,
                 "error": "busy",
                 "message": "Another change is being applied to this session; retry.",
+            }
+        except RateLimited:
+            return {
+                "success": False,
+                "error": "rate_limited",
+                "message": "Too many session writes; slow down and retry.",
             }
         if not existed:
             return {"success": False, "error": f"Session '{session_id}' not found."}
@@ -4684,8 +4744,8 @@ def _push_to_session(
     undelivered push is not necessarily discarded: a legacy registry entry with
     nothing draining it keeps the command queued, and a browser that opens the
     session later may still apply it.
-    ``delivered`` means a consumer was attached when the command was enqueued,
-    not that the canvas has finished applying it.
+    ``delivered`` means a consumer was attached when the command was sent, not
+    that the canvas has finished applying it.
     """
     if not session_id:
         return {"requested": False, "delivered": False, "status": "not_requested"}

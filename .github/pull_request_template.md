@@ -2,13 +2,14 @@
 
 ## Summary
 
-<!-- What changed and why. Reference the SMALL_FIXES.md entry or design doc
-     section this implements, if any. -->
+<!-- What changed and why. Reference the small-fix task in the planning graph
+     or the design doc section this implements, if any. -->
 
 ## What was not changed (scope)
 
 <!-- Explicit boundaries: related issues deliberately left alone (and logged
-     in SMALL_FIXES.md), follow-up steps that belong to a later PR. -->
+     as small-fix tasks in the planning graph — see CLAUDE.md; SMALL_FIXES.md
+     is a historical archive), follow-up steps that belong to a later PR. -->
 
 ## Test plan
 

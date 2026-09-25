@@ -42,6 +42,9 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core import storage_search  # noqa: E402
+from backend.core.tests.test_traversal_walk_lookup import (  # noqa: E402
+    _VanishingOnLookup,
+)
 from backend.core.postgres_backend import (  # noqa: E402
     PostgresGraphPersistenceBackend,
 )
@@ -1383,35 +1386,19 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
-    def test_a_delete_between_the_check_and_the_lookup_does_not_raise(self, schema):
-        """The delete-based test above removes the node BEFORE the call, which
-        a check-then-use survives: the membership test already fails. What
-        that shape cannot reach is the window the comment is actually about -
-        a delete landing between the `in` and the `[]`, which this path is
-        exposed to because it takes no lock while every mutator holds one.
-        A dict whose membership test is true and whose lookup then misses is
-        that window, made deterministic.
+    @staticmethod
+    def _vanishing_lookup_storage(schema, monkeypatch):
+        """A storage whose store has `a -ab-> b` and will answer, with the
+        walk replaced by a spy that fails the test if it is called: these
+        tests are about the store engine's resolution, and a fallback to the
+        walk would pass them without exercising it.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
 
-        class _VanishingOnLookup(dict):
-            """Says yes, then loses the key - exactly one id, exactly once."""
-
-            def __init__(self, *args, victim=None, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.victim = victim
-
-            def __contains__(self, key):
-                present = super().__contains__(key)
-                if key == self.victim:
-                    super().pop(key, None)
-                    self.victim = None
-                return present
-
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        storage = GraphStorage(persistence_backend=backend)
         try:
+            storage = GraphStorage(persistence_backend=backend)
             storage.add_nodes(
                 [
                     Node(id="a", type=NodeType.ACTOR, name="a"),
@@ -1427,13 +1414,52 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
                 ],
             )
             storage.flush()
+        except BaseException:
+            backend.close()
+            raise
 
-            storage.nodes = _VanishingOnLookup(storage.nodes, victim="b")
-            # Must not raise. The answer may come from either engine - what
-            # this pins is that a traversal does not turn into a KeyError out
-            # of the API.
+        def _walk_called(*args, **kwargs):
+            raise AssertionError("the walk answered; the store was meant to")
+
+        monkeypatch.setattr(storage_search, "get_related_nodes", _walk_called)
+        return backend, storage
+
+    def test_a_node_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """A test of the entry point when the store answers. It swaps
+        `storage.nodes` for a dict that loses `b` on its first observation by
+        any instrumented route, so a check-then-use in the store engine's node
+        resolution turns into a KeyError here. It says nothing about the walk:
+        the store answers, its `.get()` of `b` is the fixture's one
+        observation, and the walk is never called. The walk-level tests in
+        `test_traversal_walk_lookup.py` pin the walk.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.nodes, victim="b")
+            storage.nodes = vanishing
             result = storage.get_related_nodes("a", depth=1)
-            assert "a" in {n.id for n in result["nodes"]}
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            backend.close()
+
+    def test_an_edge_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """The edge twin: `storage.edges` loses `ab` on its first observation,
+        so a check-then-use in the store engine's edge resolution raises here.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.edges, victim="ab")
+            storage.edges = vanishing
+            result = storage.get_related_nodes("a", depth=1)
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
         finally:
             backend.close()
 

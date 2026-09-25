@@ -330,6 +330,14 @@
     "unlock_canvas": "Lås upp visualiseringen",
     "settings": "Inställningar"
   },
+  "app_install": {
+    "install": "Installera app",
+    "ios_hint": "Använd Dela och sedan Lägg till på hemskärmen.",
+    "dismiss_hint": "Stäng installationstips"
+  },
+  "offline": {
+    "read_only": "Offline — endast visning. Återanslut innan du redigerar grafen."
+  },
   "settings": {
     "title": "Inställningar",
     "close": "Stäng inställningar",
@@ -693,6 +701,12 @@
     "snap_peek": "Kika",
     "snap_half": "Halv",
     "snap_full": "Full"
+  },
+  "floating_search": {
+    "placeholder": "Sök i grafen...",
+    "aria_label": "Sök",
+    "local_graph": "Lokal",
+    "in_view_badge": "i vyn"
   },
   "mobile_nav": {
     "bottom_nav": "Appnavigering",

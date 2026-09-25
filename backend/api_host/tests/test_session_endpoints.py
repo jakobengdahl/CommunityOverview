@@ -37,6 +37,9 @@ def open_browser(test_app: TestClient):
     deliberately not used: that entry is exactly the state that outlives a
     closed browser, so standing it in for an open one would hide the gate under
     test.
+
+    Returns a callable that closes that browser again, the way a tab closing
+    ends the SSE request: the consumer is released, the registry entry is not.
     """
     registry = test_app.app.state.session_registry
     loop = asyncio.new_event_loop()
@@ -52,10 +55,17 @@ def open_browser(test_app: TestClient):
                 return
             await asyncio.sleep(0)
 
-    def _open(session_id: str) -> None:
-        tasks.append(loop.create_task(_drain(registry.stream(session_id))))
+    def _open(session_id: str):
+        task = loop.create_task(_drain(registry.stream(session_id)))
+        tasks.append(task)
         loop.run_until_complete(_settle(session_id))
         assert registry.has_consumer(session_id), "the stream never registered"
+
+        def _close() -> None:
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+
+        return _close
 
     yield _open
 
@@ -299,21 +309,22 @@ class TestHeadlessSessionAddressability:
         assert data["selected_node_ids"] == []
 
     def test_session_stays_addressable_after_its_client_goes_away(
-        self, test_app: TestClient, headless_session
+        self, test_app: TestClient, headless_session, open_browser
     ):
         """A disconnected client is not a deleted session.
 
-        Nothing removes the registry entry when the browser leaves, so its TTL
-        eviction is forced here; the stored session outlives it and must keep
-        resolving.
+        A browser opens the session and then closes it. That leaves the stale
+        state: a registry entry with nothing draining it, which fails the
+        consumer gate. The stored session outlives the browser and must keep
+        resolving through both read tools.
         """
         session_id = headless_session()
         _add_nodes(test_app, session_id, ["node-1"])
         registry = test_app.app.state.session_registry
-        registry.get_or_create(session_id)
-        registry._sessions[session_id]["last_seen"] -= 10_000
-        registry.cleanup_stale()
-        assert registry.session_exists(session_id) is False
+        close_browser = open_browser(session_id)
+        close_browser()
+        assert registry.session_exists(session_id) is True
+        assert registry.has_consumer(session_id) is False
 
         data = test_app.post(
             "/execute_tool",
@@ -322,9 +333,18 @@ class TestHeadlessSessionAddressability:
                 "arguments": {"session_id": session_id},
             },
         ).json()
+        state = test_app.post(
+            "/execute_tool",
+            json={
+                "tool_name": "get_visualization_session_state",
+                "arguments": {"session_id": session_id},
+            },
+        ).json()
 
         assert data["connected"] is True
         assert data["visible_node_count"] == 1
+        assert data["connected_clients"] == 0
+        assert state["visible_node_ids"] == ["node-1"]
 
     def test_headless_session_reports_stored_state_and_no_client(
         self, test_app: TestClient, headless_session

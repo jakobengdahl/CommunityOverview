@@ -6,6 +6,8 @@ import pytest
 import base64
 from fastapi.testclient import TestClient
 from backend.api_host import create_app, AppConfig
+from backend.api_host.middleware import compute_auth_active
+from backend.api_host.session_auth import credentials_valid
 
 
 @pytest.fixture
@@ -44,6 +46,22 @@ def bearer_auth_app(temp_graph_file, temp_static_dirs, tmp_path) -> TestClient:
 # ---------------------------------------------------------------------------
 # Basic auth
 # ---------------------------------------------------------------------------
+
+
+def test_auth_username_has_no_implicit_default(monkeypatch):
+    """AUTH_USERNAME must be configured explicitly for Basic auth."""
+    monkeypatch.delenv("AUTH_USERNAME", raising=False)
+    assert AppConfig().auth_username is None
+
+
+def test_password_without_username_fails_closed():
+    """Password-only Basic auth activates the guard but accepts no default user."""
+    config = AppConfig(
+        auth_enabled=True,
+        auth_password="secretpassword",
+    )
+    assert compute_auth_active(config)
+    assert not credentials_valid(config, "admin", "secretpassword")
 
 
 def test_auth_required(auth_enabled_app):

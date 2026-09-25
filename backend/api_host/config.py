@@ -144,8 +144,8 @@ class AppConfig:
     auth_enabled: bool = field(
         default_factory=lambda: os.getenv("AUTH_ENABLED", "false").lower() == "true"
     )
-    auth_username: str = field(
-        default_factory=lambda: os.getenv("AUTH_USERNAME", "admin")
+    auth_username: Optional[str] = field(
+        default_factory=lambda: os.getenv("AUTH_USERNAME")
     )
     auth_password: Optional[str] = field(
         default_factory=lambda: os.getenv("AUTH_PASSWORD")

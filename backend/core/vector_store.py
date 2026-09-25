@@ -14,6 +14,7 @@ Imports are deferred (lazy) so the module loads fast and so the absence of the
 optional ML stack surfaces only when embedding generation is actually attempted.
 """
 
+import threading
 from typing import List, Dict, Optional, Tuple, Any
 
 from .models import Node
@@ -119,6 +120,11 @@ class VectorStore:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
         self.model = None
+        # Guards _load_model so two background passes that both need the
+        # model - preload_model at startup and a backfill of nodes missing
+        # a vector, which can legitimately run at the same time - load it
+        # once between them rather than racing to construct it twice.
+        self._model_lock = threading.Lock()
         self.embeddings: Dict[str, Any] = {}  # node_id -> embedding (numpy array)
         self.node_ids: List[
             str
@@ -140,18 +146,18 @@ class VectorStore:
 
     def _load_model(self):
         """Lazy load the model"""
-        if self.model is None:
-            SentenceTransformer = _ensure_sentence_transformers()
-            print(f"Loading embedding model: {self.model_name}...")
-            self.model = SentenceTransformer(self.model_name)
-            print("Model loaded.")
+        with self._model_lock:
+            if self.model is None:
+                SentenceTransformer = _ensure_sentence_transformers()
+                print(f"Loading embedding model: {self.model_name}...")
+                self.model = SentenceTransformer(self.model_name)
+                print("Model loaded.")
 
     def preload_model(self):
         """
         Preload the embedding model in a background thread.
         Call at startup to avoid slow first request.
         """
-        import threading
 
         def _load():
             try:

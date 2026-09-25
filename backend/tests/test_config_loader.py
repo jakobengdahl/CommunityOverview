@@ -503,6 +503,68 @@ class TestConfigLoader:
         ]
         assert config_loader.get_presentation()["capabilities"] == capabilities
 
+    @pytest.mark.parametrize("capabilities", [True, 5, "animated_layout"])
+    def test_scalar_capabilities_is_ignored_not_fatal(
+        self, tmp_path, caplog, capabilities
+    ):
+        """A scalar declares no id, so the default stays enabled and the rest loads."""
+        config_loader = self._load_capability_config(tmp_path, capabilities)
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            node_type_names = config_loader.get_node_type_names()
+
+        assert "Widget" in node_type_names
+        assert any(
+            "presentation.capabilities must be a list" in r.getMessage()
+            for r in caplog.records
+        )
+        assert config_loader.get_presentation()["title"] == "Capability Test Graph"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    @pytest.mark.parametrize("valid_first", [False, True])
+    def test_valid_entry_wins_over_a_dropped_entry_for_the_same_id(
+        self, tmp_path, valid_first
+    ):
+        entries = [
+            {"id": "animated_layout", "enabled": None},
+            {"id": "animated_layout", "enabled": True},
+        ]
+        if valid_first:
+            entries.reverse()
+        config_loader = self._load_capability_config(tmp_path, entries)
+
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 1
+
+    @pytest.mark.parametrize("breakage", ["missing", "invalid-json"])
+    def test_reload_to_a_default_config_forgets_a_previously_dropped_override(
+        self, tmp_path, breakage
+    ):
+        config_loader = self._load_capability_config(
+            tmp_path, [{"id": "animated_layout", "enabled": None}]
+        )
+        assert config_loader.get_capabilities()["capabilities"][0]["enabled"] is False
+
+        config_path = tmp_path / "schema_config.json"
+        if breakage == "missing":
+            config_path.unlink()
+        else:
+            config_path.write_text("{not json")
+        config_loader.reload_config()
+
+        assert "Widget" not in config_loader.get_node_type_names()
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+
     def _load_capability_config_with_fatal_error(self, tmp_path, capabilities):
         config_loader = self._load_capability_config(tmp_path, capabilities)
         config_path = tmp_path / "schema_config.json"
@@ -555,6 +617,119 @@ class TestConfigLoader:
         assert [(c["id"], c["enabled"]) for c in capabilities] == [
             ("animated_layout", True)
         ]
+
+    def test_unreadable_config_path_uses_server_defaults(self, tmp_path, caplog):
+        """A directory is neither missing nor JSON: the generic fallback handles it."""
+        from backend.config import config_loader
+
+        os.environ["SCHEMA_FILE"] = str(tmp_path)
+        config_loader.reset_loader()
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def _write_raw_config(self, tmp_path, raw):
+        from backend.config import config_loader
+
+        config_path = tmp_path / "schema_config.json"
+        config_path.write_text(json.dumps(raw))
+        os.environ["SCHEMA_FILE"] = str(config_path)
+        config_loader.reset_loader()
+        return config_loader
+
+    def test_fatal_fallback_without_a_capabilities_key_uses_server_defaults(
+        self, tmp_path
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path,
+            {
+                "schema": {"node_types": "not-an-object"},
+                "presentation": {"title": "No Capabilities Declared"},
+            },
+        )
+
+        assert config_loader.get_presentation()["title"] != "No Capabilities Declared"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def test_fatal_fallback_on_non_object_presentation_uses_server_defaults(
+        self, tmp_path, caplog
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path, {"presentation": "not-an-object"}
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            capabilities = config_loader.get_capabilities()["capabilities"]
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("animated_layout", True)
+        ]
+        assert config_loader.get_declared_capability_count() == 0
+
+    def test_fatal_error_inside_presentation_keeps_the_capability_override(
+        self, tmp_path, caplog
+    ):
+        config_loader = self._write_raw_config(
+            tmp_path,
+            {
+                "presentation": {
+                    "title": "Broken Presentation",
+                    "colors": "not-an-object",
+                    "capabilities": [
+                        {"id": "search", "name": "Search"},
+                        {"id": "animated_layout", "enabled": False},
+                    ],
+                }
+            },
+        )
+
+        with caplog.at_level("WARNING", logger="backend.config.config_loader"):
+            presentation = config_loader.get_presentation()
+
+        assert any("Error loading config" in r.getMessage() for r in caplog.records)
+        assert presentation["title"] != "Broken Presentation"
+        capabilities = config_loader.get_capabilities()["capabilities"]
+        assert [(c["id"], c["enabled"]) for c in capabilities] == [
+            ("search", True),
+            ("animated_layout", False),
+        ]
+        assert presentation["capabilities"] == capabilities
+        assert config_loader.get_declared_capability_count() == 2
+
+    def test_fatal_fallback_treats_duplicate_ids_like_a_clean_load(self, tmp_path):
+        """Whatever the loader does with repeated ids, the fallback must not differ,
+        and the declared count must describe the declared part of the manifest."""
+        duplicates = [
+            {"id": "search", "name": "Search"},
+            {"id": "search", "enabled": False},
+            {"id": "animated_layout", "enabled": False},
+            {"id": "animated_layout", "enabled": None},
+            {"id": "animated_layout"},
+        ]
+        clean_loader = self._load_capability_config(tmp_path, duplicates)
+        clean_manifest = clean_loader.get_capabilities()["capabilities"]
+        clean_count = clean_loader.get_declared_capability_count()
+
+        fallback_loader = self._load_capability_config_with_fatal_error(
+            tmp_path, duplicates
+        )
+        assert "Widget" not in fallback_loader.get_node_type_names()
+
+        assert fallback_loader.get_capabilities()["capabilities"] == clean_manifest
+        assert fallback_loader.get_declared_capability_count() == clean_count
+        # animated_layout is declared, so no default is appended.
+        assert clean_count == len(clean_manifest)
 
     def test_presentation_capabilities_match_the_discovery_manifest(self, tmp_path):
         config_loader = self._load_capability_config(

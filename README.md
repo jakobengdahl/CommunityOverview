@@ -395,7 +395,7 @@ platform and add AI capabilities later by setting an API key and restarting.
 
 ```bash
 export AUTH_ENABLED=true
-export AUTH_USERNAME=admin
+export AUTH_USERNAME=operator
 export AUTH_PASSWORD=secret
 ```
 
@@ -414,10 +414,14 @@ export AUTH_PASSWORD=secret
 |---|---|---|
 | `AUTH_ENABLED` | `false` | Enable Basic Auth on **all** endpoints (except `/health`, `/info`) |
 | `MCP_BASIC_AUTH` | `false` | Enable Basic Auth **only** on `/mcp/*` and `/execute_tool` |
-| `AUTH_USERNAME` | `admin` | Username for Basic Auth |
+| `AUTH_USERNAME` | *(none)* | Username for Basic Auth. Set explicitly; no default username is supplied. |
 | `AUTH_PASSWORD` | *(none)* | Password for Basic Auth (required for either mode to activate) |
 
 If both `AUTH_ENABLED` and `MCP_BASIC_AUTH` are `true`, `AUTH_ENABLED` takes precedence and all endpoints require auth.
+Basic Auth accepts credentials only when both `AUTH_USERNAME` and `AUTH_PASSWORD`
+are set. A password without a username still activates the auth guard when an
+auth mode is enabled, but no Basic login will succeed until `AUTH_USERNAME` is
+configured.
 
 ## Testing
 

@@ -11,6 +11,7 @@ import ActivityDrawer from './components/ActivityDrawer';
 import NodeHistoryPanel from './components/NodeHistoryPanel';
 import AppDialogs from './components/AppDialogs';
 import ConfirmDialog from './components/ConfirmDialog';
+import AppInstallPrompt from './components/AppInstallPrompt';
 import * as api from './services/api';
 import * as sessionStore from './services/sessionStore';
 import {
@@ -46,6 +47,9 @@ import './App.css';
 // that same request's own timeout value (imported, not duplicated — a
 // hardcoded copy could silently drift out of sync, review round 6).
 const RESYNC_GUARD_TIMEOUT_MS = SYNC_REQUEST_TIMEOUT_MS;
+// How many times one resync may fetch the session while the op stream keeps
+// running ahead of each payload (see resyncFromServer).
+const RESYNC_MAX_FETCHES = 3;
 
 const _urlParams = new URLSearchParams(window.location.search);
 const _collectShortName = _urlParams.get('collect');
@@ -147,6 +151,7 @@ function App() {
   const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
     useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
+  const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -252,7 +257,12 @@ function App() {
   // no timeout, unlike SessionSyncClient's own outbound ops POST, so a hung
   // GET must not wedge reconnect recovery forever) recognise it is no longer
   // the current owner and not stomp on a newer resync that started meanwhile.
-  const resyncInFlightRef = useRef(false);
+  // Holds `{ client }`, the sync client the in-flight resync was started
+  // for (null when idle), not a bare boolean or a session id: a slow resync
+  // for the session being left must not swallow the first resync of the
+  // session just switched to, and switching away and back builds a new
+  // client for the same id whose first resync must not be swallowed either.
+  const resyncInFlightRef = useRef(null);
   const resyncGuardTokenRef = useRef(0);
   // Ops the sync client has told us (via onDropped) were terminally rejected
   // by the server — 400/413/404/410, never retryable — since the current
@@ -593,11 +603,29 @@ function App() {
       // concurrent one loses nothing a later op/resync wouldn't also catch —
       // including onDropped's own resync call, whose "converge back to
       // server truth" goal an already-in-flight resync accomplishes anyway.
-      if (resyncInFlightRef.current) return 0;
-      resyncInFlightRef.current = true;
-      // A token, not just the boolean: if the guard timer below fires (its
-      // request never settles) while a *later* resync has since legitimately
-      // taken over, this call's eventual finally must not clear a flag it no
+      //
+      // Only a resync for the *same* sync client is skipped. One for the
+      // current client's session supersedes an in-flight one started for a
+      // client that has since been replaced (a session switch, including away
+      // and back to the same id): taking the token below makes the old call
+      // stop at its next checkpoint. A resync naming a session the current
+      // client is not on never supersedes, or it would cancel the current
+      // session's resync and then bail at its own switched-away check,
+      // leaving nothing to reload.
+      //
+      // Every switched-away check below compares the client instance, not the
+      // session id: switching away and back builds a new client for the same
+      // id, and this call's payload and captured ops belong to the old one.
+      // That is also why a call naming a session the current client is not on
+      // stops here: from then on `client` is the only identity it checks.
+      const client = syncRef.current;
+      if (!client || client.sessionId !== targetId) return 0;
+      const inFlight = resyncInFlightRef.current;
+      if (inFlight !== null && inFlight.client === client) return 0;
+      resyncInFlightRef.current = { client };
+      // A token, not just the marker: if the guard timer below fires (its
+      // request never settles), or a resync for a newer client supersedes
+      // this one, this call's eventual finally must not clear a marker it no
       // longer owns (review round 3). Every checkpoint below that could run
       // after an arbitrarily long await (the reload, and each recovered
       // nodes_added's node fetch inside the replay loop) re-checks this same
@@ -619,7 +647,7 @@ function App() {
       // run letting a redundant resync start): they stop this call from
       // acting on stale state instead of preventing the timer from firing.
       const guardTimer = setTimeout(() => {
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }, RESYNC_GUARD_TIMEOUT_MS);
       try {
         // Selection claims are excluded from every capture below:
@@ -629,7 +657,7 @@ function App() {
         // case for it (a no-op) — counting it would misreport a reconnect
         // with zero real edits as a recovery (review round 1).
         const capturePendingOps = () =>
-          (syncRef.current?.sessionId === targetId ? syncRef.current.getPendingOps() : []).filter(
+          (syncRef.current === client ? client.getPendingOps() : []).filter(
             (op) => op?.op !== 'selection_claimed' && op?.op !== 'selection_released'
           );
         // Read whatever is already queued *before* the network round-trip
@@ -643,21 +671,31 @@ function App() {
         // before starting the request is still the only way to see an op
         // that flushes and gets fully confirmed *during* that request).
         const pendingOpsBefore = capturePendingOps();
+        // Stream ops keep arriving while the GET is in flight, and each one
+        // is applied to the canvas and advances the client's appliedSeq. A
+        // payload whose seq is below that predates them, and the wholesale
+        // reload below would wipe them for good (the stream never resends
+        // them), so fetch again instead. Bounded: under a steady op stream
+        // the last payload is applied anyway rather than never converging.
         let payload;
-        try {
-          payload = await api.getSession(targetId, { resolve: true });
-        } catch {
-          return 0;
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            payload = await api.getSession(targetId, { resolve: true });
+          } catch {
+            return 0;
+          }
+          // Also bail if the guard timeout already fired and a newer resync
+          // now owns it (review round 4): the token check above only stops
+          // *this* stale call from clearing a flag it no longer owns — without
+          // this check here too, a call that finally resolves after its own
+          // timeout would still go on to apply its now-outdated payload/replay
+          // over whatever the newer resync already established, silently
+          // reintroducing the very data loss this PR fixes.
+          if (resyncGuardTokenRef.current !== myToken) return 0;
+          if (syncRef.current !== client) return 0; // switched away
+          const behindStream = typeof payload?.seq === 'number' && payload.seq < client.appliedSeq;
+          if (!behindStream || attempt >= RESYNC_MAX_FETCHES) break;
         }
-        // Also bail if the guard timeout already fired and a newer resync
-        // now owns it (review round 4): the token check above only stops
-        // *this* stale call from clearing a flag it no longer owns — without
-        // this check here too, a call that finally resolves after its own
-        // timeout would still go on to apply its now-outdated payload/replay
-        // over whatever the newer resync already established, silently
-        // reintroducing the very data loss this PR fixes.
-        if (resyncGuardTokenRef.current !== myToken) return 0;
-        if (!syncRef.current || syncRef.current.sessionId !== targetId) return 0; // switched away
         // Capture again, right before the destructive reload below: an op
         // enqueued *during* the getSession request above is not reflected in
         // `payload` either, and without this second read it would be
@@ -684,7 +722,7 @@ function App() {
         recentlyDroppedOpsRef.current.clear();
         applyServerSessionRef.current?.(payload);
         const resolvedIds = (payload?.resolved?.nodes || []).map((n) => n.id);
-        syncRef.current.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
+        client.setBaseline(serverStateToMirror(payload?.state, resolvedIds));
         // A full reload re-hydrates every annotation from server truth, so any
         // image-ingest race this browser was still waiting to resolve (see
         // createSelfEchoDedup) is moot — drop it rather than let it linger and
@@ -720,7 +758,7 @@ function App() {
         // under a shared, non-personal client id specifically so its own
         // echo is *not* filtered there.
         for (const op of pendingOps) {
-          syncRef.current.foldOpIntoBaseline(op);
+          client.foldOpIntoBaseline(op);
         }
         // Sequential, not Promise.all: ops must replay in their original order
         // (e.g. nodes_added before a node_moved for the same id), not race.
@@ -738,7 +776,7 @@ function App() {
         let appliedCount = 0;
         for (const op of pendingOps) {
           if (resyncGuardTokenRef.current !== myToken) return 0;
-          if (!syncRef.current || syncRef.current.sessionId !== targetId) break;
+          if (syncRef.current !== client) break;
           if (await applyRemoteOp(op)) appliedCount += 1;
         }
         // Not pendingOps.length unconditionally (review round 7): a session
@@ -749,7 +787,7 @@ function App() {
         return appliedCount;
       } finally {
         clearTimeout(guardTimer);
-        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = false;
+        if (resyncGuardTokenRef.current === myToken) resyncInFlightRef.current = null;
       }
     },
     [syncRef, applyRemoteOp]
@@ -1015,6 +1053,17 @@ function App() {
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  useEffect(() => {
+    const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
+    window.addEventListener('online', syncOfflineState);
+    window.addEventListener('offline', syncOfflineState);
+    syncOfflineState();
+    return () => {
+      window.removeEventListener('online', syncOfflineState);
+      window.removeEventListener('offline', syncOfflineState);
+    };
   }, []);
 
   // Callback: Selection changed in GraphCanvas
@@ -2041,8 +2090,8 @@ function App() {
       // that had to replay locally-queued ops means real, user-visible
       // content survived a dropped connection — worth a confirmation rather
       // than a silent reconciliation.
-      onResync: async () => {
-        const recovered = await resyncFromServer(sessionId);
+      onResync: async (resyncSessionId = sessionId) => {
+        const recovered = await resyncFromServer(resyncSessionId);
         if (recovered > 0) {
           showNotification('info', t('sessions.reconnect_recovered', { count: recovered }));
         }
@@ -2811,6 +2860,11 @@ function App() {
           <button onClick={() => setNotification(null)}>×</button>
         </div>
       )}
+      {isOffline && (
+        <div className="app-offline-banner" role="status">
+          {t('offline.read_only')}
+        </div>
+      )}
 
       <AppDialogs
         dialogs={dialogs}
@@ -2843,6 +2897,7 @@ function App() {
       />
 
       <GuideOverlay />
+      <AppInstallPrompt />
     </div>
   );
 }

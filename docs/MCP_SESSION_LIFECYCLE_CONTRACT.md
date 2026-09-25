@@ -182,17 +182,28 @@ letting the SaaS layer reuse the exact same session resource and MCP tools.
 
 ## 8. Error model
 
-Tool results are structured (never a bare exception). At minimum:
+Tool results are structured (never a bare exception). The table is not
+exhaustive (a rejected argument, for example, returns its validation message as
+`error`), but each `error` value it lists is the literal string the open-core
+tools return (`backend/service/mcp_tools.py`); where a row also names a
+`message`, that field carries the human-readable text.
 
 | Condition | Result |
 |---|---|
-| Invalid `session_id` format | `{"success": false, "error": "invalid session id format …"}` |
-| Session not found | `{"success": false, "error": "session '<id>' not found …"}` |
-| Delete without confirmation | `{"success": false, "error": "deletion requires explicit confirmation …"}` |
-| Not authorized (SaaS) | `{"success": false, "error": "not authorized for this session"}` |
-| Session cap reached | `{"success": false, "error": "too many sessions"}` |
-| Rate limited | `{"success": false, "error": "rate limit exceeded"}` |
-| No public base URL configured | success, with `session_url: null` and an explanatory `message` |
+| Invalid `session_id` format | `{"success": false, "error": "Invalid session ID format — expected DDDD-DDDD-DDDD-DDDD (the older DDDD-DDDD form is also accepted)"}` |
+| Session not found | `{"success": false, "error": "Session '<id>' not found."}` |
+| Delete without confirmation | `{"success": false, "error": "confirmation_required", "message": "Deleting session '<id>' is permanent …"}` |
+| Not authorized (SaaS) | `{"success": false, "error": "Graph access denied", "error_code": "access_denied", "message": <hook reason, or "Graph access denied.">, "authorization": {…}}` |
+| Session cap reached | `{"success": false, "error": "too_many_sessions", "message": …}` |
+| Another write holds the session | `{"success": false, "error": "busy", "message": …}` — retryable |
+| Rate limited | `{"success": false, "error": "rate_limited", "message": …}` — retryable |
+| No public base URL configured | success, with `session_url: null` |
+
+A rename, and a confirmed delete, each draw one unit per call from a rate budget
+of their own tool; a call refused before that point (invalid id, not authorized,
+delete without confirmation) draws nothing.
+The budget is per tool, not per client: every MCP client on the instance shares
+it, so one agent's writes can spend another's.
 
 Results mirror the REST endpoints' existing status semantics (400/404/429/503)
 so the two surfaces stay consistent.

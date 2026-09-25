@@ -49,6 +49,21 @@ def validate_match_mode(match_mode: str) -> str:
     return match_mode
 
 
+def query_terms(query_lower: str, match_mode: str) -> List[str]:
+    """The terms a lowered, stripped, non match-all query is matched by.
+
+    Shared by local and federated search so both split a query the same way.
+    In ``any_term`` mode the terms are deduplicated with order preserved: the
+    tie-break counts matched terms, so a word the caller happened to repeat
+    ("AI in the public sector and AI in the private sector") would otherwise be
+    counted once per occurrence and could reorder same-tier results on
+    repetition alone.
+    """
+    if match_mode == MATCH_MODE_ANY_TERM:
+        return list(dict.fromkeys(query_lower.split()))[:MAX_ANY_TERM_TERMS]
+    return [query_lower]
+
+
 # ---------------------------------------------------------------------------
 # Searchable-text helpers
 # ---------------------------------------------------------------------------
@@ -540,14 +555,7 @@ def search_nodes(
     results = []
     match_all = query_lower == "" or query_lower == "*"
 
-    terms = [query_lower]
-    if match_mode == MATCH_MODE_ANY_TERM and not match_all:
-        # Deduplicated, order preserved: the tie-break below counts matched
-        # terms, so a word the caller happened to repeat ("AI in the public
-        # sector and AI in the private sector") would otherwise be counted once
-        # per occurrence and could reorder same-tier results on repetition
-        # alone.
-        terms = list(dict.fromkeys(query_lower.split()))[:MAX_ANY_TERM_TERMS]
+    terms = [query_lower] if match_all else query_terms(query_lower, match_mode)
 
     # Ranked during the scan rather than by a sort key afterwards. The key was
     # `max(score(n, t) for t in matched_terms[n.id])` inside a lambda, so every
@@ -750,6 +758,45 @@ def semantic_search_nodes(
 # ---------------------------------------------------------------------------
 
 
+def _copied_items(d: Dict[Any, Any]) -> List[Any]:
+    """`list(d.items())`, taken again if a write lands during the copy.
+
+    The copy runs in C, so a thread switch cannot split it at a bytecode
+    boundary. It is still not atomic: each item is a new tuple, a tuple
+    allocation can start a garbage collection, and a collection runs
+    finalizers - Python code, which can hand the GIL to a writer mid-copy.
+    That is rare, and the copy only reads, so it is simply taken again.
+    """
+    while True:
+        try:
+            return list(d.items())
+        except RuntimeError:
+            continue
+
+
+def _adjacent(adjacency: Dict[str, Dict[str, Dict[str, Any]]], node_id: str):
+    """Snapshot the (neighbour, edge key, edge data) triples at *node_id*.
+
+    The walk takes no lock while every mutator holds one, so the adjacency can
+    change under it. networkx's `out_edges` / `in_edges` are Python generators
+    over these same dicts: a mutation between two of their steps raises
+    "dictionary changed size during iteration". So the walk copies both levels
+    (neighbours, then each pair's parallel-edge keys) with `_copied_items` and
+    reads only the copies. `list(graph.out_edges(...))` would not do: that
+    list is filled by the same Python generator, one step at a time. The walk
+    cannot take the lock instead: it is handed the dicts, not the storage that
+    owns the lock.
+    """
+    neighbours = adjacency.get(node_id)
+    if neighbours is None:
+        return []
+    return [
+        (neighbour, key, data)
+        for neighbour, keydict in _copied_items(neighbours)
+        for key, data in _copied_items(keydict)
+    ]
+
+
 def get_related_nodes(
     nodes: Dict[str, Node],
     edges: Dict[str, Edge],
@@ -787,9 +834,7 @@ def get_related_nodes(
         next_layer: set = set()
 
         for curr_id in current_layer:
-            for _, target, edge_id, edge_data in graph.out_edges(
-                curr_id, keys=True, data=True
-            ):
+            for target, edge_id, edge_data in _adjacent(graph._succ, curr_id):
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
                     continue
@@ -802,9 +847,7 @@ def get_related_nodes(
                     visited_nodes.add(target)
                     next_layer.add(target)
 
-            for source, _, edge_id, edge_data in graph.in_edges(
-                curr_id, keys=True, data=True
-            ):
+            for source, edge_id, edge_data in _adjacent(graph._pred, curr_id):
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
                     continue
@@ -819,9 +862,13 @@ def get_related_nodes(
 
         current_layer = next_layer
 
+    # One `.get()` per id, not `in` then `[]`: this path takes no lock, so a
+    # delete can land between two observations of the same dict.
+    resolved_nodes = (nodes.get(nid) for nid in visited_nodes)
+    resolved_edges = (edges.get(eid) for eid in visited_edges)
     return {
-        "nodes": [nodes[nid] for nid in visited_nodes if nid in nodes],
-        "edges": [edges[eid] for eid in visited_edges if eid in edges],
+        "nodes": [n for n in resolved_nodes if n is not None],
+        "edges": [e for e in resolved_edges if e is not None],
     }
 
 
@@ -898,17 +945,63 @@ def find_similar_nodes_batch(
     threshold: float = 0.7,
     limit: int = 5,
 ) -> Dict[str, List[SimilarNode]]:
-    """Batch variant of :func:`find_similar_nodes`.  More efficient than
-    calling it repeatedly when many names need to be checked at once.
+    """Batch variant of :func:`find_similar_nodes`.
+
+    The lexical pass over graph nodes is shared across all distinct input
+    names. Semantic lookup still calls ``VectorStore.search`` once per distinct
+    name because the vector store exposes only single-query search.
     """
-    return {
-        name: find_similar_nodes(
-            nodes,
-            vector_store,
-            name,
-            node_type=node_type,
-            threshold=threshold,
-            limit=limit,
+    unique_names = list(dict.fromkeys(names))
+    results: Dict[str, List[SimilarNode]] = {name: [] for name in unique_names}
+    seen_node_ids: Dict[str, set] = {name: set() for name in unique_names}
+    lowered_names = {name: name.lower() for name in unique_names}
+
+    for node in nodes.values():
+        if node_type and node.type != node_type:
+            continue
+
+        node_name_lower = node.name.lower()
+        for name in unique_names:
+            name_lower = lowered_names[name]
+            distance = Levenshtein.distance(name_lower, node_name_lower)
+            max_len = max(len(name_lower), len(node_name_lower))
+            similarity = 1.0 if max_len == 0 else 1.0 - (distance / max_len)
+
+            if similarity >= threshold:
+                results[name].append(
+                    SimilarNode(
+                        node=node,
+                        similarity_score=round(similarity, 2),
+                        match_reason=f"Name similarity: {int(similarity * 100)}%",
+                    )
+                )
+                seen_node_ids[name].add(node.id)
+
+    vector_threshold = max(0.4, threshold - 0.2)
+    for name in unique_names:
+        vector_results = vector_store.search(
+            query_text=name, limit=limit, threshold=vector_threshold
         )
-        for name in names
-    }
+
+        for node_id, score in vector_results:
+            if node_id in seen_node_ids[name]:
+                continue
+            node = nodes.get(node_id)
+            if not node:
+                continue
+            if node_type and node.type != node_type:
+                continue
+            results[name].append(
+                SimilarNode(
+                    node=node,
+                    similarity_score=round(score, 2),
+                    match_reason=f"Semantic similarity: {int(score * 100)}%",
+                )
+            )
+            seen_node_ids[name].add(node_id)
+
+    for matches in results.values():
+        matches.sort(key=lambda x: x.similarity_score, reverse=True)
+        del matches[limit:]
+
+    return results

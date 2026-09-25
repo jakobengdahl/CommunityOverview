@@ -584,7 +584,7 @@ class ChatProcessor:
         return [
             {
                 "name": "search_graph",
-                "description": "Search for nodes in the graph based on text query. Matches against name, description, and summary. By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
+                "description": "Search for nodes in the graph based on text query. Matches a node's name, description, summary, tags, subtypes, aliases and type label, for local and federated nodes alike. By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -615,12 +615,12 @@ class ChatProcessor:
                         "match_mode": {
                             "type": "string",
                             "enum": list(MATCH_MODES),
-                            "description": "How the query text is matched. 'substring' (default) requires the whole query verbatim. 'any_term' splits the query on whitespace and matches nodes containing ANY of the terms, each as a substring — pass distinctive terms, since a short or common one matches almost everything. Ignored when semantic is true; federated results stay substring-matched.",
+                            "description": "How the query text is matched. 'substring' (default) requires the whole query verbatim. 'any_term' splits the query on whitespace and matches nodes containing ANY of the terms, each as a substring — pass distinctive terms, since a short or common one matches almost everything. Applies to local and federated results alike; semantic=true replaces it for local results only, since federated results are always matched lexically.",
                             "default": "substring",
                         },
                         "semantic": {
                             "type": "boolean",
-                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false; a lexical query that matches nothing already falls back to semantic ranking automatically.",
+                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false. A query other than '' or '*' that matches no local node of the requested types (archived nodes count only with include_archived) falls back to semantic ranking for local results. The check runs before tag, metadata and access filters, so a match those filters remove gets no fallback.",
                             "default": False,
                         },
                     },

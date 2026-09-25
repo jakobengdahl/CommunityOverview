@@ -185,18 +185,21 @@ export function reorderNodesForParentChild(nodes) {
  * Compute a dragged graph node's post-drag placement: its final parentId and
  * position, accounting for entering a group (position becomes parent-relative),
  * leaving a group (position becomes absolute), or neither. `currentNodes` is the
- * live ReactFlow node list and `groupNodes` its group nodes. Returns
- * { parentId, position:{x,y} }. Pure, so both the on-screen re-parent and the
- * recorded undo entry derive the same final placement from one source.
+ * live ReactFlow node list, `groupNodes` its group nodes and `groupById` the
+ * lookup built from them by indexGroupsById (built once per drag commit so the
+ * per-node parent lookup is not a scan). Returns { parentId, position:{x,y} }.
+ * Pure, so both the on-screen re-parent and the recorded undo entry derive the
+ * same final placement from one source.
  */
-function computeGroupPlacement(node, currentNodes, groupNodes) {
+export function computeGroupPlacement(node, currentNodes, groupNodes, groupById) {
   const flowNode = currentNodes.find((cn) => cn.id === node.id);
   const pos = flowNode?.position || node.position;
+  const oldParent = node.parentId ? groupById.get(node.parentId) : undefined;
 
   const absPos = node.parentId
     ? {
-        x: pos.x + (groupNodes.find((g) => g.id === node.parentId)?.position.x || 0),
-        y: pos.y + (groupNodes.find((g) => g.id === node.parentId)?.position.y || 0),
+        x: pos.x + (oldParent?.position.x || 0),
+        y: pos.y + (oldParent?.position.y || 0),
       }
     : pos;
 
@@ -229,7 +232,6 @@ function computeGroupPlacement(node, currentNodes, groupNodes) {
 
   if (!targetGroup && node.parentId) {
     // Exit group: position becomes absolute again.
-    const oldParent = groupNodes.find((gn) => gn.id === node.parentId);
     return {
       parentId: undefined,
       position: {
@@ -241,6 +243,15 @@ function computeGroupPlacement(node, currentNodes, groupNodes) {
 
   // No membership change: keep the current parent and the just-dragged position.
   return { parentId: node.parentId, position: { x: pos.x, y: pos.y } };
+}
+
+// First occurrence wins on a duplicate id, matching the Array.find it replaces.
+export function indexGroupsById(groupNodes) {
+  const groupById = new Map();
+  for (const g of groupNodes) {
+    if (!groupById.has(g.id)) groupById.set(g.id, g);
+  }
+  return groupById;
 }
 
 // Used by reactFlowArraysEqual below: two closures over the same callback are
@@ -2821,9 +2832,10 @@ function GraphCanvasInner({
       // groups to enter/leave — a plain drag needs no re-parenting.
       const finalById = new Map();
       if (draggedIds.size > 0 && groupNodes.length > 0) {
+        const groupById = indexGroupsById(groupNodes);
         for (const n of currentNodes) {
           if (!draggedIds.has(n.id) || n.type === 'group') continue;
-          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes));
+          finalById.set(n.id, computeGroupPlacement(n, currentNodes, groupNodes, groupById));
         }
       }
 
@@ -3016,6 +3028,7 @@ function GraphCanvasInner({
           // flag revert on the next autosave, whatever the translators did.
           z: g.data.z ?? 0,
           locked: Boolean(g.data.locked),
+          rotation: g.data.rotation ?? 0,
           // Same envelope treatment as z/locked above, for the same reason:
           // server-owned same-field-conflict bookkeeping
           // (dec-annotation-field-patches-and-conflicts) that must survive
@@ -4371,6 +4384,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },
@@ -4662,6 +4676,7 @@ function GraphCanvasInner({
             color: g.color || '#646cff',
             z: g.z ?? 0,
             locked: Boolean(g.locked),
+            rotation: g.rotation ?? 0,
             version: g.version,
             field_versions: g.field_versions,
           },

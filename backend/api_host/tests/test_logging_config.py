@@ -5,9 +5,12 @@ import sys
 
 from backend.api_host.config import AppConfig
 from backend.api_host.logging_config import (
+    TEXT_LOG_FORMAT,
     StructuredJsonFormatter,
     configure_root_logging,
 )
+
+_UVICORN_NAMES = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def test_app_config_reads_log_format_from_env(monkeypatch):
@@ -130,32 +133,105 @@ def test_text_format_is_not_replaced_by_fastmcp_logging_setup():
 
 
 def test_text_format_leaves_an_existing_root_handler_and_uvicorn_alone():
-    uvicorn_names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    """The uvicorn loggers are set to a fixed state first, so what an earlier
+    test left on them can neither mask nor fake a change."""
     previous_handlers = logging.root.handlers[:]
     previous_level = logging.root.level
+    previous_uvicorn = {
+        name: (
+            logging.getLogger(name).level,
+            logging.getLogger(name).propagate,
+            logging.getLogger(name).handlers[:],
+        )
+        for name in _UVICORN_NAMES
+    }
     existing = logging.StreamHandler()
+    uvicorn_handlers = {name: logging.StreamHandler() for name in _UVICORN_NAMES}
     try:
         logging.root.handlers = [existing]
-        uvicorn_before = {
-            name: (
-                logging.getLogger(name).level,
-                logging.getLogger(name).propagate,
-                logging.getLogger(name).handlers[:],
-            )
-            for name in uvicorn_names
-        }
+        for name in _UVICORN_NAMES:
+            logger = logging.getLogger(name)
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            logger.handlers = [uvicorn_handlers[name]]
 
         configure_root_logging("text")
 
         assert logging.root.handlers == [existing]
         assert existing.formatter is None
-        for name in uvicorn_names:
+        for name in _UVICORN_NAMES:
             logger = logging.getLogger(name)
-            assert (
-                logger.level,
-                logger.propagate,
-                logger.handlers,
-            ) == uvicorn_before[name]
+            assert logger.level == logging.DEBUG
+            assert logger.propagate is False
+            assert logger.handlers == [uvicorn_handlers[name]]
+            assert uvicorn_handlers[name].formatter is None
     finally:
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+        for name, (level, propagate, handlers) in previous_uvicorn.items():
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.handlers = handlers
+
+
+def test_structured_json_with_an_empty_root_logs_json_to_stdout():
+    """basicConfig would put a handler on stderr with the text format; the
+    JSON handler must be the only one, and on stdout.
+
+    The call also re-formats whatever handlers the uvicorn loggers carry, so
+    they are pinned empty and restored: otherwise this test would re-format
+    handlers another test or a real server left on them."""
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    previous_uvicorn_handlers = {
+        name: logging.getLogger(name).handlers[:] for name in _UVICORN_NAMES
+    }
+    try:
+        logging.root.handlers = []
+        logging.root.setLevel(logging.WARNING)
+        for name in _UVICORN_NAMES:
+            logging.getLogger(name).handlers = []
+
+        configure_root_logging("structured_json")
+
+        assert len(logging.root.handlers) == 1
+        handler = logging.root.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        assert handler.stream is sys.stdout
+        assert isinstance(handler.formatter, StructuredJsonFormatter)
+        assert logging.root.level == logging.INFO
+        for name in _UVICORN_NAMES:
+            assert logging.getLogger(name).handlers == []
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
+        logging.root.handlers = previous_handlers
+        logging.root.setLevel(previous_level)
+        for name, handlers in previous_uvicorn_handlers.items():
+            logging.getLogger(name).handlers = handlers
+
+
+def test_an_unrecognised_log_format_takes_the_text_branch():
+    previous_handlers = logging.root.handlers[:]
+    previous_level = logging.root.level
+    try:
+        logging.root.handlers = []
+        # Not INFO, so the level assertion below sees the call set it rather
+        # than what an earlier test left behind.
+        logging.root.setLevel(logging.WARNING)
+
+        configure_root_logging("xml")
+
+        assert len(logging.root.handlers) == 1
+        formatter = logging.root.handlers[0].formatter
+        assert not isinstance(formatter, StructuredJsonFormatter)
+        assert formatter._fmt == TEXT_LOG_FORMAT
+        assert logging.root.level == logging.INFO
+    finally:
+        for handler in logging.root.handlers:
+            if handler not in previous_handlers:
+                handler.close()
         logging.root.handlers = previous_handlers
         logging.root.setLevel(previous_level)

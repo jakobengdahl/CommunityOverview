@@ -28,6 +28,7 @@ Two properties keep it from rotting into a green rubber stamp:
   split, so that is a live possibility rather than a hypothetical.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -36,6 +37,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 # gate job id -> the detect-changes output that decides whether its worker had
 # anything to do. A skip is legitimate only when this flag is false.
@@ -295,6 +297,29 @@ class TestTheGateSetIsDiscovered:
                 "neither a verified gate nor unconditional: if it is skipped, "
                 "branch protection sees success for work that never ran."
             )
+
+    def test_claude_md_pins_the_required_check_shape(self):
+        """CLAUDE.md is agent-facing process text, so it must describe the same
+        merge-blocking CI shape this file verifies from ci.yml."""
+        text = CLAUDE_MD.read_text()
+        split_claim = re.search(
+            r"four split worker\+gate required checks: ([^.]+)\.", text
+        )
+
+        assert split_claim, (
+            "CLAUDE.md must state the count/shape of the split required checks"
+        )
+        documented_split_checks = set(re.findall(r"`([^`]+)`", split_claim.group(1)))
+        assert documented_split_checks == set(REQUIRED_CHECK_NAMES.values())
+
+        frontend_lint_claim = re.search(
+            r"Frontend lint is an\s+unconditional required check: `([^`]+)`\.",
+            text,
+        )
+        assert frontend_lint_claim, (
+            "CLAUDE.md must state that frontend lint is required and unconditional"
+        )
+        assert frontend_lint_claim.group(1) == "Frontend lint (eslint + prettier)"
 
 
 class TestGateDistinguishesWhyTheWorkerSkipped:

@@ -160,8 +160,12 @@ describe('BottomSheet', () => {
 
       // Start a drag but never fire pointerup - e.g. Escape or a surface
       // manager closes the sheet mid-gesture, unmounting the handle before
-      // finishDrag runs and clears dragStateRef.
-      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointerdown', 300, 1);
+      // finishDrag runs and clears dragStateRef. A distinct pointerId and
+      // start Y from the later drag, so a leftover dragStateRef can neither
+      // accept that drag's events nor coincidentally yield the same snap.
+      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointerdown', 800, 7);
+      firePointerEvent(screen.getByTestId('bottom-sheet-handle'), 'pointermove', 850, 7);
+      expect(screen.getByRole('dialog').style.transform).toBe('translateY(50px)');
 
       rerender(
         <BottomSheet
@@ -183,6 +187,9 @@ describe('BottomSheet', () => {
           <button type="button">first</button>
         </BottomSheet>
       );
+
+      // The abandoned gesture's offset must not paint on the new open.
+      expect(screen.getByRole('dialog').style.transform).toBe('');
 
       // A fresh pointerdown must start a new drag, not be swallowed by a
       // dragStateRef the abandoned gesture left set.
@@ -213,6 +220,15 @@ describe('BottomSheet', () => {
       const { onClose } = renderSheet();
       fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
       expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps Escape from reaching handlers outside the sheet', () => {
+      const outer = vi.fn();
+      document.addEventListener('keydown', outer);
+      renderSheet();
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+      document.removeEventListener('keydown', outer);
+      expect(outer).not.toHaveBeenCalled();
     });
 
     it('closes on clicking the backdrop scrim', () => {
@@ -265,6 +281,39 @@ describe('BottomSheet', () => {
       expect(trigger).toHaveFocus();
       trigger.remove();
     });
+
+    it('restores focus to the previously focused element when isOpen turns false', () => {
+      const trigger = document.createElement('button');
+      document.body.appendChild(trigger);
+      trigger.focus();
+
+      const { rerender } = renderSheet();
+      expect(trigger).not.toHaveFocus();
+
+      rerender(<BottomSheet isOpen={false} snapPoint="half" onClose={vi.fn()} />);
+      expect(trigger).toHaveFocus();
+      trigger.remove();
+    });
+
+    it('pulls focus back to the first element on Tab when it has escaped the sheet', () => {
+      renderSheet();
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus();
+
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Tab' });
+      expect(screen.getByText('first')).toHaveFocus();
+      outside.remove();
+    });
+
+    it('leaves keys other than Tab and Escape alone', () => {
+      const { onClose } = renderSheet();
+      const first = screen.getByText('first');
+      const notPrevented = fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowDown' });
+      expect(notPrevented).toBe(true);
+      expect(first).toHaveFocus();
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   describe('prefers-reduced-motion', () => {
@@ -295,6 +344,14 @@ describe('BottomSheet', () => {
       const { unmount } = renderSheet();
       expect(document.body.style.overflow).toBe('hidden');
       unmount();
+      expect(document.body.style.overflow).toBe('auto');
+    });
+
+    it('restores body scroll when isOpen turns false', () => {
+      document.body.style.overflow = 'auto';
+      const { rerender } = renderSheet();
+      expect(document.body.style.overflow).toBe('hidden');
+      rerender(<BottomSheet isOpen={false} snapPoint="half" onClose={vi.fn()} />);
       expect(document.body.style.overflow).toBe('auto');
     });
   });

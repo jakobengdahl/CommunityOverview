@@ -96,6 +96,7 @@ export function annotationsToGroups(annotations) {
       // everything else.
       z: a.z ?? 0,
       locked: Boolean(a.locked),
+      rotation: a.geometry?.rotation ?? 0,
       // Same server-owned same-field-conflict bookkeeping as every other
       // annotation kind (dec-annotation-field-patches-and-conflicts) — a
       // group is an ordinary annotation server-side (session_store.py's
@@ -143,6 +144,7 @@ export function groupsToAnnotations(viewGroups, parentIds) {
           member_node_ids: membersByGroup[g.id] || [],
           z: g.z ?? 0,
           locked: Boolean(g.locked),
+          rotation: g.rotation ?? 0,
           version: g.version,
           field_versions: g.field_versions,
         })
@@ -309,10 +311,13 @@ function genericOverlayToAnnotation(o) {
 // node shape needs `position` + points *relative* to it, the same anchor
 // convention `line`'s dx/dy uses, so a plain ReactFlow drag (which only
 // moves `position`) slides the whole stroke without this layer rewriting
-// every point on every render.
+// every point on every render. When a stored envelope position exists, it is
+// the anchor: the first sampled point may differ from it, and deriving the
+// overlay position from points[0] would rewrite geometry.x/y on a no-op
+// browser round trip.
 function freehandAnnotationToOverlay(a) {
   const rawPoints = Array.isArray(a.points) && a.points.length ? a.points : [{ x: 0, y: 0 }];
-  const anchor = rawPoints[0];
+  const anchor = a.position || a.geometry || rawPoints[0];
   return {
     id: a.id,
     kind: 'freehand',

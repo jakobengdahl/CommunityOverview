@@ -14,9 +14,11 @@ the original ordering existed to guarantee.
 """
 
 import threading
+import time
 
 import pytest
 
+from backend.core import storage as storage_module
 from backend.core.storage import _BOOT_BUFFER_LIMIT, GraphStorage, _BootGate
 from backend.core.storage_backends import (
     BackendCapabilities,
@@ -39,6 +41,47 @@ def _change(name: str) -> ExternalChange:
 
 def _names(changes) -> list:
     return [c.operations[0].entity_id for c in changes]
+
+
+class _YieldingLock:
+    """A `threading.Lock` that gives up the interpreter before each acquire."""
+
+    def __init__(self):
+        self._inner = threading.Lock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        time.sleep(0)
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self):
+        self._inner.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def _free_to_another_thread(lock) -> bool:
+    """Whether a DIFFERENT thread could take `lock` right now.
+
+    Probed from a thread of its own because an `RLock` held by the caller
+    would grant a same-thread acquire and hide exactly what this looks for.
+    """
+    got = []
+
+    def probe():
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        got.append(acquired)
+
+    prober = threading.Thread(target=probe)
+    prober.start()
+    prober.join()
+    return got[0]
 
 
 class TestTheGateHoldsAndReplays:
@@ -91,6 +134,11 @@ class TestTheGateHoldsAndReplays:
             # Exactly once, while the first held report is being delivered.
             if not fired:
                 fired.append(True)
+                # Checked first because re-entering a gate that drains under
+                # its own plain Lock deadlocks, and a hang reports nothing.
+                assert _free_to_another_thread(gate._lock), (
+                    "the replay called the listener with the gate lock held"
+                )
                 gate(arrived_late)
 
         gate._listener = listener
@@ -113,6 +161,17 @@ class TestTheGateHoldsAndReplays:
             "the gate did not stay open after replaying, so every later "
             "report would be buffered and never delivered"
         )
+
+    def test_a_second_open_delivers_nothing_again(self):
+        seen = []
+        gate = _BootGate(seen.append)
+        gate(_change("held"))
+        gate.open()
+        seen.clear()
+
+        gate.open()
+
+        assert seen == [], "a second open() replayed what the first already had"
 
 
 class TestTheBufferIsBounded:
@@ -156,6 +215,115 @@ class TestTheBufferIsBounded:
 
         assert _names(seen) == ["later"]
 
+    def test_the_overflow_is_announced_once(self, capsys):
+        gate = _BootGate(lambda change: None)
+
+        for i in range(_BOOT_BUFFER_LIMIT + 3):
+            gate(_change(f"held-{i}"))
+        gate.open()
+
+        out = capsys.readouterr().out
+        assert out.count("dropping them for a whole-graph reload") == 1, (
+            "an overflowed boot must warn exactly once: the reload replacing "
+            f"the dropped reports is best-effort. Output was: {out!r}"
+        )
+
+    def test_an_overflow_during_the_drain_ends_in_one_reload(self, monkeypatch):
+        """Reports that arrive mid-drain are held, so they can overflow too.
+
+        The held ones already delivered stand; the late ones are subsumed by
+        a reload that must still be requested, after them, and the gate must
+        end up open.
+        """
+        monkeypatch.setattr(storage_module, "_BOOT_BUFFER_LIMIT", 2)
+        seen = []
+        gate = _BootGate(None)
+
+        def listener(change):
+            seen.append(change)
+            if len(seen) == 1:
+                assert _free_to_another_thread(gate._lock), (
+                    "the replay called the listener with the gate lock held"
+                )
+                for i in range(3):
+                    gate(_change(f"late-{i}"))
+
+        gate._listener = listener
+        gate(_change("held-0"))
+        gate(_change("held-1"))
+        gate.open()
+
+        assert _names(seen[:2]) == ["held-0", "held-1"]
+        assert len(seen) == 3, (
+            f"expected the two held reports and one reload, got {len(seen)}"
+        )
+        assert seen[2].operations is None and not seen[2].content_read_on_demand(), (
+            "an overflow during the drain must still degrade to unknown()"
+        )
+
+        gate(_change("later"))
+        assert _names(seen[3:]) == ["later"], "the gate stayed shut after the reload"
+
+    def test_a_second_open_after_an_overflow_requests_no_second_reload(self):
+        seen = []
+        gate = _BootGate(seen.append)
+        for i in range(_BOOT_BUFFER_LIMIT + 1):
+            gate(_change(f"held-{i}"))
+        gate.open()
+        seen.clear()
+
+        gate.open()
+
+        assert seen == []
+
+
+class TestTheListenerRunsOutsideTheGateLock:
+    """The gate must never hold its own lock while it calls the listener.
+
+    The listener is `apply_external_change`, which takes the storage lock and
+    can wait on the write queue. Holding the gate lock across it is a
+    lock-ordering inversion against any thread that reports while holding
+    storage state - a deadlock that no test here would otherwise see unless
+    it happened to re-enter the gate from inside the listener.
+    """
+
+    def _gate_recording_lock_state(self):
+        free = []
+        gate = _BootGate(None)
+        gate._listener = lambda change: free.append(_free_to_another_thread(gate._lock))
+        return gate, free
+
+    def test_a_pass_through_delivery_does_not_hold_the_lock(self):
+        gate, free = self._gate_recording_lock_state()
+        gate.open()
+
+        gate(_change("after"))
+
+        assert free == [True], "the listener was called with the gate lock held"
+
+    def test_the_replay_does_not_hold_the_lock(self):
+        gate, free = self._gate_recording_lock_state()
+        gate(_change("held-1"))
+        gate(_change("held-2"))
+
+        gate.open()
+
+        assert free == [True, True], (
+            "the replay called the listener with the gate lock held"
+        )
+
+    def test_the_overflow_reload_does_not_hold_the_lock(self, monkeypatch):
+        monkeypatch.setattr(storage_module, "_BOOT_BUFFER_LIMIT", 2)
+        gate, free = self._gate_recording_lock_state()
+        for i in range(3):
+            gate(_change(f"held-{i}"))
+
+        gate.open()
+
+        assert free == [True], (
+            "the overflow reload was requested with the gate lock held"
+        )
+
 
 class _NotifyingDuringLoad(InMemoryGraphPersistenceBackend):
     """A backend that reports a change while the application is loading.
@@ -189,12 +357,39 @@ class _NotifyingDuringLoad(InMemoryGraphPersistenceBackend):
         self.stopped = True
         self._listener = None
 
+    reports_during_load = 1
+    load_raises = None
+
     def load_graph_data(self):
         if self._listener is not None:
-            change = _change("committed-during-load")
-            self.reported.append(change)
-            self._listener(change)
+            for i in range(self.reports_during_load):
+                change = _change(f"committed-during-load-{i}")
+                self.reported.append(change)
+                self._listener(change)
+        if self.load_raises is not None:
+            raise self.load_raises
         return super().load_graph_data()
+
+
+def _spy_on_applies(monkeypatch):
+    """Record, for every report applied, whether the load was still running."""
+    applied = []
+    real_load = GraphStorage.load
+
+    def spy_apply(self, change):
+        applied.append((self._loading_now, change))
+
+    def load_marking(self, *args, **kwargs):
+        self._loading_now = True
+        try:
+            return real_load(self, *args, **kwargs)
+        finally:
+            self._loading_now = False
+
+    monkeypatch.setattr(GraphStorage, "apply_external_change", spy_apply)
+    monkeypatch.setattr(GraphStorage, "load", load_marking)
+    monkeypatch.setattr(GraphStorage, "_loading_now", False, raising=False)
+    return applied
 
 
 class TestGraphStorageClosesTheWindow:
@@ -228,25 +423,11 @@ class TestGraphStorageClosesTheWindow:
         was protecting.
         """
         backend = _NotifyingDuringLoad()
-        seen_during_load = []
-        real_load = GraphStorage.load
-
-        def spy_apply(self, change):
-            seen_during_load.append(self._loading_now)
-
-        def load_marking(self, *args, **kwargs):
-            self._loading_now = True
-            try:
-                return real_load(self, *args, **kwargs)
-            finally:
-                self._loading_now = False
-
-        monkeypatch.setattr(GraphStorage, "apply_external_change", spy_apply)
-        monkeypatch.setattr(GraphStorage, "load", load_marking)
-        GraphStorage._loading_now = False
+        applied = _spy_on_applies(monkeypatch)
 
         storage = GraphStorage(persistence_backend=backend)
         try:
+            seen_during_load = [during for during, _ in applied]
             assert seen_during_load == [False], (
                 f"expected one report applied after the load, got "
                 f"{seen_during_load} (True means it landed mid-load)"
@@ -280,10 +461,31 @@ class TestGraphStorageClosesTheWindow:
             "written for"
         )
 
-    def test_a_failed_load_stops_notification(self, monkeypatch):
+    @pytest.mark.parametrize("exc_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+    def test_a_failed_load_stops_notification(self, monkeypatch, exc_type):
         """Otherwise the listener outlives the object it reports into, holding
-        its connection and refreshing something nothing will shut down."""
+        its connection and refreshing something nothing will shut down.
+
+        An interrupt mid-load is the likeliest way a boot fails in practice,
+        and it is not an `Exception`."""
         backend = _NotifyingDuringLoad()
+
+        def boom(self, *args, **kwargs):
+            raise exc_type("load failed")
+
+        monkeypatch.setattr(GraphStorage, "load", boom)
+
+        with pytest.raises(exc_type, match="load failed"):
+            GraphStorage(persistence_backend=backend)
+
+        assert backend.stopped, "construction failed with the listener still running"
+
+    def test_a_failed_load_without_notification_raises_its_own_error(
+        self, monkeypatch, tmp_path
+    ):
+        """The file backend has no listener to stop, and no
+        `stop_change_notification` either: the guard must not reach for it and
+        bury the load's error under an AttributeError."""
 
         def boom(self, *args, **kwargs):
             raise RuntimeError("load failed")
@@ -291,8 +493,55 @@ class TestGraphStorageClosesTheWindow:
         monkeypatch.setattr(GraphStorage, "load", boom)
 
         with pytest.raises(RuntimeError, match="load failed"):
+            GraphStorage(json_path=str(tmp_path / "graph.json"))
+
+
+class TestGraphStorageNeverAppliesMidLoad:
+    def test_an_overflowed_boot_becomes_one_reload_after_the_load(self, monkeypatch):
+        """No GraphStorage-level test overflowed before, and the gate-level
+        ones never check WHEN delivery happens. An overflowed gate that
+        delivered instead of holding would apply reports against a half-built
+        model."""
+        monkeypatch.setattr(storage_module, "_BOOT_BUFFER_LIMIT", 2)
+        applied = _spy_on_applies(monkeypatch)
+        backend = _NotifyingDuringLoad()
+        # Past the limit AND past the point it trips, so the overflowed
+        # branch itself is exercised, not just the transition into it.
+        backend.reports_during_load = 5
+
+        storage = GraphStorage(persistence_backend=backend)
+        try:
+            assert len(backend.reported) == 5
+            assert [during for during, _ in applied] == [False], (
+                f"expected one reload applied after the load, got "
+                f"{[during for during, _ in applied]} (True means mid-load)"
+            )
+            change = applied[0][1]
+            assert change.operations is None and not change.content_read_on_demand(), (
+                "an overflowed boot must degrade to unknown(), the whole-graph reload"
+            )
+        finally:
+            storage.shutdown_events()
+
+    def test_a_report_held_by_a_load_that_fails_is_never_applied(self, monkeypatch):
+        """The failure path with something actually held.
+
+        The other failure-path test replaces `load` outright, so the buffer
+        is always empty there. A construction handler that drained what was
+        held before stopping would apply it against a model that failed to
+        load.
+        """
+        applied = _spy_on_applies(monkeypatch)
+        backend = _NotifyingDuringLoad()
+        backend.load_raises = RuntimeError("load failed after a report")
+
+        with pytest.raises(RuntimeError, match="load failed after a report"):
             GraphStorage(persistence_backend=backend)
 
+        assert backend.reported, "the fixture did not hold anything"
+        assert applied == [], (
+            "a report held during a load that then failed was applied anyway"
+        )
         assert backend.stopped, "construction failed with the listener still running"
 
 
@@ -313,3 +562,55 @@ class TestTheGateIsThreadSafe:
         gate.open()
 
         assert sorted(_names(seen)) == sorted(f"t{i}" for i in range(50))
+
+    def test_no_report_is_lost_when_open_races_a_reporting_thread(self):
+        """Every report sent while `open()` runs is delivered exactly once, in
+        the order it was sent.
+
+        The concurrent test above joins every thread BEFORE opening, so no
+        report is ever in flight during the drain. Here one thread reports
+        continuously while another opens the gate partway through. A gate
+        that read its flag outside the lock could decide "closed", lose the
+        race to `open()`, and then buffer into a list nobody drains again.
+        """
+        trials, per_trial = 300, 40
+        for trial in range(trials):
+            seen = []
+
+            def listener(change, seen=seen):
+                # Yield mid-drain so a report let through by a flag raised
+                # too early can overtake the held ones; a drain that finishes
+                # within one interpreter slice would hide that reorder.
+                time.sleep(0)
+                seen.append(change)
+
+            gate = _BootGate(listener)
+            # The lost-report race sits between a flag read and the lock
+            # acquire - a few bytecodes, which the interpreter almost never
+            # switches inside on its own. Yielding at every acquire puts a
+            # switch exactly there, so the race is exercised on most trials.
+            gate._lock = _YieldingLock()
+            sent = [_change(f"r{trial}-{i}") for i in range(per_trial)]
+            halfway = threading.Event()
+
+            def report(gate=gate, sent=sent, halfway=halfway):
+                for i, change in enumerate(sent):
+                    if i == per_trial // 2:
+                        halfway.set()
+                    gate(change)
+
+            reporter = threading.Thread(target=report, daemon=True)
+            reporter.start()
+            assert halfway.wait(timeout=5), (
+                f"trial {trial}: the reporter never got halfway"
+            )
+            gate.open()
+            reporter.join(timeout=5)
+            assert not reporter.is_alive(), (
+                f"trial {trial}: the reporter did not finish"
+            )
+
+            assert _names(seen) == _names(sent), (
+                f"trial {trial}: delivered {len(seen)} of {per_trial} "
+                "reports, or out of order"
+            )

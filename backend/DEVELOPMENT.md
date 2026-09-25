@@ -328,8 +328,19 @@ npm run test:e2e
 ```
 
 E2E tests include:
-- `chat.spec.js` - Complete chat workflow testing
+- `smoke.spec.js` - Desktop shell: header, search-to-canvas, toolbar node
+  creation, Settings stats
+- `chat.spec.js` - Desktop chat panel; every `/ui/chat` call is answered by
+  `page.route`, so no request reaches an LLM provider
+- `shared-session.spec.js` - Two browser contexts in one shared session
+  (presence, node and note fan-out, move sync, delete warning)
 - `mobile-smoke.spec.js` - Phone-viewport smoke tests (see below)
+
+The e2e graph file starts empty, so the desktop specs seed the nodes they need
+through `POST /api/nodes` (helpers in `tests/e2e/helpers.js`). Only
+`mobile-smoke.spec.js` runs in CI (the non-required `mobile-e2e` job); the three
+desktop specs run locally only, under the `chromium` project. Tests marked
+`test.fixme` pin a known product defect and name the tracking item.
 
 Playwright starts the backend and the vite dev server itself (the `webServer`
 block in `playwright.config.js`), so no server needs to be running first. If one
@@ -339,8 +350,8 @@ hand-started dev server keeps its own key and its e2e nodes land in its own
 graph. Stop it first to get the isolated setup; `CI=1` does not help, it just
 makes Playwright refuse to start against an occupied port.
 
-The mobile specs require the backend to report an LLM as available, because the
-chat panel does not mount otherwise. Against a reused backend with no API key
+The mobile and chat specs require the backend to report an LLM as available,
+because the chat panel does not mount otherwise. Against a reused backend with no API key
 configured they fail at startup rather than half-passing.
 
 #### Mobile smoke tests
@@ -506,7 +517,9 @@ same parameters.
 ### Lexical match mode (`match_mode` on `/api/search` and `search_graph`)
 
 The lexical matcher requires the **whole query** in a node's searchable text, so
-a multi-word query returns nothing unless some node contains that phrase.
+a multi-word query that no node contains as a phrase matches nothing lexically;
+the local results then come only from the automatic semantic fallback (see
+below), which finds nothing where no embedding model is available.
 `match_mode` makes the alternative explicit instead of forcing a caller to probe
 term by term:
 
@@ -528,8 +541,8 @@ The requested mode is echoed back as `result["match_mode"]`, but it describes th
 mode that was **requested, not necessarily the matcher that produced the
 results** — see the paragraph on the semantic fallback below. Read
 `result["semantic"]` alongside it: that is the field that says which matcher ran
-locally. (Federated rows come from the federation manager's own substring
-matcher either way — see the boundary note below.)
+locally. (Federated rows are always matched lexically in the requested mode —
+see the note below.)
 
 Each term is matched as a **substring, not a word**, and no term is filtered out:
 `"a pricing plan"` matches every node containing the letter `a` anywhere. Ranking
@@ -538,14 +551,22 @@ callers should pass the distinctive terms rather than a whole natural-language
 sentence. (A word-boundary or minimum-length rule would change what a term means
 and is deliberately left out of the opt-in mode.)
 
-The mode applies to the local lexical search. It is ignored when `semantic=true`
-(that path does not use the lexical matcher). It is *superseded* — not ignored —
+The mode applies to the lexical search, local and federated. For local results it
+is ignored when `semantic=true` (that path does not use the lexical matcher);
+federated results are still matched in the requested mode. It is *superseded* — not ignored —
 by the automatic semantic fallback: the lexical attempt still runs in the
 requested mode, and the mode decides whether the fallback fires at all, since it
 only fires when that attempt matched nothing. A non-empty lexical result is never
 discarded. `match_mode` is still echoed in that case while `result["semantic"]`
-flips to true. Federated search stays substring-matched — the same boundary
-semantic ranking has.
+flips to true. Federated search honours `match_mode` too: the federation cache
+splits the query into the same terms and ranks by the same best-term rule and
+tie-break as local search, so a query finds the same nodes locally and remotely
+in either mode. It does not take part in semantic ranking or the semantic
+fallback, which stay local. The federation cache is matched and ranked by the
+same code as local search, over the fields the cache holds — including the
+node type and its localized schema labels, so a query such as `aktör` reaches
+federated Actor nodes as well as local ones. The cache keeps each remote node's
+aliases and subtypes, so those match federated nodes too.
 
 The in-app chat agent's `search_graph` tool exposes `match_mode` and `semantic`
 with the same values and defaults, so the chat and MCP search surfaces offer the
@@ -555,8 +576,9 @@ same modes. (The chat tool does not expose the tag/metadata filters above.)
 
 The default `query` is matched **lexically** (case-insensitive substring over
 name, description, summary, tags, subtypes, aliases and type label). Multi-word or
-natural-language queries that no node contains verbatim therefore return nothing
-unless `match_mode="any_term"` (above) is used.
+natural-language queries that no node contains verbatim therefore match nothing
+lexically unless `match_mode="any_term"` (above) is used; the local results then
+come only from the automatic fallback described below.
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -565,10 +587,12 @@ unless `match_mode="any_term"` (above) is used.
 Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
 embeddings are built from `name + summary + description + tags` on create/update,
 and the query text is embedded and compared with cosine similarity, keeping hits
-above a similarity threshold ordered by score. No new dependency is involved — in
-the ML-free base install the embedding model is unavailable, so the vector search
-degrades to returning nothing (and, for `semantic=true`, an empty result) rather
-than failing.
+above a similarity threshold ordered by score. No new dependency is required for
+the base install to run, but query-text semantic ranking needs an embedding
+model. On the ML-free base install, a non-match-all query that reaches semantic
+ranking cannot be embedded, so it produces no local semantic hits rather than
+failing. Match-all queries (`""` and `*`) still use the lexical match-all
+behaviour, and federated results remain lexical in the requested `match_mode`.
 
 Two behaviours make this safe and backward compatible:
 
@@ -583,11 +607,11 @@ Two behaviours make this safe and backward compatible:
   no text to rank by meaning, so `semantic=true` falls through to the lexical
   match-all behaviour.
 
-The response includes a top-level `"semantic"` boolean indicating whether semantic
-ranking (explicit or fallback) produced the returned nodes. Semantic ranking
-applies to the local graph; federated search remains lexical. Tag/metadata
-filters, `node_types`, archived exclusion and `limit` all still apply to semantic
-results.
+The response includes a top-level `"semantic"` boolean indicating whether local
+semantic ranking ran for an explicit semantic request, or whether the automatic
+fallback returned local semantic hits. Semantic ranking applies to the local
+graph; federated search remains lexical. Tag/metadata filters, `node_types`,
+archived exclusion and `limit` all still apply to semantic results.
 
 ### Archived lifecycle (`archived` flag on nodes and edges)
 
@@ -616,7 +640,9 @@ this node's id over a live session op, e.g. `nodes_added` from an MCP
 `add_nodes_to_session`, can hydrate its edges to already-visible nodes) does apply
 the default-exclude: an archived edge, or one with an archived endpoint, is
 omitted. Federated nodes/edges preserve the origin graph's `archived` flag, so a
-node archived upstream stays hidden downstream.
+node archived upstream stays hidden downstream. Unless `include_archived` is set,
+the federation cache search drops archived federated nodes before its `limit`, as
+local search does, so they never take a result slot.
 
 **Mutations.** Archiving goes through dedicated operations rather than a generic
 field update (a generic `update_node` cannot set `archived`):
@@ -864,12 +890,12 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
-| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
+| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
-| `rename_visualization_session` | Set or clear a session's display name |
-| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` |
+| `rename_visualization_session` | Set or clear a session's display name (draws one unit from a rate budget of its own; `rate_limited` when spent) |
+| `delete_visualization_session` | Permanently delete a session — requires `confirm=true` (a confirmed call draws one unit from a rate budget of its own; `rate_limited` when spent) |
 | `list_sticky_notes` | List every sticky note in a session (id/text/x/y/w/h/color/font_size/rotation/z/locked) |
 | `create_sticky_note` | Create a sticky note at a model-space position, or replace one by id (create/upsert) |
 | `update_sticky_note` | Partially update a sticky note's content, style, position, size, rotation, layer order and/or lock state |
@@ -921,7 +947,7 @@ registry entry with nothing draining it, the command still waits in that
 entry's bounded queue (oldest dropped first), and a browser that opens the
 session before the entry expires drains it and may apply it then. So an
 undelivered push can still change a canvas later; `delivered` reports only
-whether a consumer took it when it was sent, not whether it is applied later.
+whether a consumer was attached when it was sent, not whether it is applied later.
 A routine that refreshes a canvas on a schedule has to check `delivered` instead
 of reading a successful search as a refreshed canvas. Do **not** substitute `connect_to_visualization_session`'s reachability
 verdict for that check either: it is read before the push, and a consumer
@@ -971,7 +997,7 @@ months ago would report `delivered: true` forever, and would inflate
 (`connect_to_visualization_session`, `get_visualization_session_state` and
 `clear_visualization`) use the same consumer count for the same reason.
 
-`delivered` means a consumer was attached when the command was enqueued, not
+`delivered` means a consumer was attached when the command was sent, not
 that the canvas has finished applying it. `clear_visualization` has nothing to
 report — it refuses up front instead.
 
@@ -1018,15 +1044,21 @@ without having to craft a search that returns exactly that set. It is additive
 and idempotent (ids already in the session are not re-added and leave the
 `revision` untouched), goes through the same authorization gate as the other
 session writes, and skips — reporting in `skipped` — any id that does not resolve
-to a node the caller may read, so a stale id never becomes a phantom session
-reference. Session state is server-owned, so connected browsers receive the
-broadcast op and hydrate the nodes; a browser that connects later picks them up
-from the session state. The returned `revision` threads straight into
+to a node the caller may add, so a stale id never becomes a phantom session
+reference. The ids are resolved under the same mutate decision as the gate, not
+a read one, so a node the caller can see but not change is skipped too. Session
+state is server-owned, so connected browsers receive the broadcast op and
+hydrate the nodes; a browser that connects later picks them up from the session
+state. The returned `revision` threads straight into
 `apply_visualization_layout`'s `expected_revision`, making "create → populate →
 arrange" three deterministic calls.
 
 A repeated id counts once: the tool deduplicates `node_ids` before checking the
-500-id cap, the 256 KiB byte cap and the per-client rate budget. Both caps are
+500-id cap, the 256 KiB byte cap and the tool's rate budget. That budget is per
+tool, not per client — every MCP client on the instance draws from the same one —
+and it is charged one unit per distinct id that resolves, not per id sent: ids reported
+in `skipped` are not charged, and a call that returns `no_resolvable_nodes`
+draws nothing. Both caps are
 checked before any id is resolved and return `too_large`, with a `message` that
 names which cap was hit. An unknown session is reported as not found before any
 id is resolved, so it is never masked by `no_resolvable_nodes`. That error is
@@ -1076,8 +1108,9 @@ computed from `assumed_node_size` (`{width, height}` from the read tool) plus a
 gap — offset by the full node size, not half, to leave a visible gutter. Read the
 layout first to get `assumed_node_size` and the current `revision`, then pass that
 `revision` as `expected_revision` on the write. A single write is capped at 500
-moves / 256 KiB (`too_large` beyond that) and additionally draws from a per-client
-rate budget sized to the number of moves, so a very large arrange can hit
+moves / 256 KiB (`too_large` beyond that) and additionally draws from the tool's
+rate budget (per tool, shared by every MCP client on the instance) sized to the
+number of moves, so a very large arrange can hit
 `rate_limited` first — either way, split it across successive writes and thread the
 returned `revision` into the next `expected_revision`.
 
