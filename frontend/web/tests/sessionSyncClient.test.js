@@ -1716,6 +1716,35 @@ describe('SessionSyncClient', () => {
     expect(reconnectUrl.searchParams.get('since_seq')).toBe('9');
   });
 
+  // App.jsx's resyncFromServer refetches a reload payload whose seq is below
+  // this, so it must track what the stream applied, not the POST-inflated seq.
+  it('appliedSeq reports the highest seq applied from the stream, not the POST-inflated seq', async () => {
+    const fetchImpl = makeFetch([
+      { ok: true, status: 200, json: async () => ({ applied: [], seq: 11 }) },
+    ]);
+    const { client } = makeClient({ fetchImpl });
+    client.connect();
+    const es = FakeEventSource.instances[0];
+    es.emit({ type: 'snapshot', seq: 5, session: { state: {} } });
+    expect(client.appliedSeq).toBe(5);
+
+    es.emit({
+      type: 'op',
+      client_id: 'client-other',
+      op: { op: 'nodes_added', node_ids: ['a'] },
+      seq: 6,
+    });
+    expect(client.appliedSeq).toBe(6);
+
+    client.syncState({ node_refs: ['mine'] });
+    await flush();
+    expect(client.seq).toBe(11);
+    expect(client.appliedSeq).toBe(6);
+
+    es.emit({ type: 'catch_up', seq: 12, ops: [], roster: [], claims: {} });
+    expect(client.appliedSeq).toBe(12);
+  });
+
   it('reconnect since_seq tracks the highest seq delivered by the stream, including remote ops', () => {
     const { client } = makeClient();
     client.connect();
