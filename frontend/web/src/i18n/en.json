@@ -330,6 +330,14 @@
     "unlock_canvas": "Unlock visualization",
     "settings": "Settings"
   },
+  "app_install": {
+    "install": "Install app",
+    "ios_hint": "Use Share, then Add to Home Screen.",
+    "dismiss_hint": "Dismiss install hint"
+  },
+  "offline": {
+    "read_only": "Offline — viewing only. Reconnect before editing the graph."
+  },
   "settings": {
     "title": "Settings",
     "close": "Close settings",

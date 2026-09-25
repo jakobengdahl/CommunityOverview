@@ -151,6 +151,7 @@ function App() {
   const { enterFullscreenCanvas, exitFullscreenCanvas, fullscreenCanvasActive } =
     useFullscreenCanvas(appRef);
   const [notification, setNotification] = useState(null);
+  const [isOffline, setIsOffline] = useState(() => window.navigator?.onLine === false);
   const [saveViewDialog, setSaveViewDialog] = useState(null);
   const [showSubscriptionDialog, setShowSubscriptionDialog] = useState(false);
   const [editingSubscriptionData, setEditingSubscriptionData] = useState(null);
@@ -1052,6 +1053,17 @@ function App() {
   const showNotification = useCallback((type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
+  }, []);
+
+  useEffect(() => {
+    const syncOfflineState = () => setIsOffline(window.navigator?.onLine === false);
+    window.addEventListener('online', syncOfflineState);
+    window.addEventListener('offline', syncOfflineState);
+    syncOfflineState();
+    return () => {
+      window.removeEventListener('online', syncOfflineState);
+      window.removeEventListener('offline', syncOfflineState);
+    };
   }, []);
 
   // Callback: Selection changed in GraphCanvas
@@ -2846,6 +2858,11 @@ function App() {
         <div className={`app-notification app-notification-${notification.type}`}>
           <span>{notification.message}</span>
           <button onClick={() => setNotification(null)}>×</button>
+        </div>
+      )}
+      {isOffline && (
+        <div className="app-offline-banner" role="status">
+          {t('offline.read_only')}
         </div>
       )}
 

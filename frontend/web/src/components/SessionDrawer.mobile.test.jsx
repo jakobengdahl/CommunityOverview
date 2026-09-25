@@ -40,13 +40,20 @@ function renderDrawer(props = {}) {
 
 describe('SessionDrawer mobile overlay', () => {
   let originalMatchMedia;
+  let originalUserAgent;
 
   beforeEach(() => {
     originalMatchMedia = window.matchMedia;
+    originalUserAgent = window.navigator.userAgent;
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
+    Object.defineProperty(window.navigator, 'userAgent', {
+      configurable: true,
+      value: originalUserAgent,
+    });
   });
 
   it('renders no scrim and the desktop docked class on a wide viewport', () => {
@@ -104,6 +111,25 @@ describe('SessionDrawer mobile overlay', () => {
     renderDrawer();
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('shows a one-time iOS Add to Home Screen hint in the mobile menu', () => {
+    setMobile(true);
+    Object.defineProperty(window.navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+    });
+
+    renderDrawer();
+
+    expect(screen.getByText('Use Share, then Add to Home Screen.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss install hint' }));
+    expect(screen.queryByText('Use Share, then Add to Home Screen.')).not.toBeInTheDocument();
+
+    renderDrawer();
+    expect(screen.queryByText('Use Share, then Add to Home Screen.')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('app_install_ios_hint_dismissed')).toBe('true');
   });
 
   it('moves focus into the drawer and traps Tab inside it on a mobile viewport', () => {

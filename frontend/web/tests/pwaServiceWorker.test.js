@@ -46,8 +46,16 @@ describe('PWA service worker', () => {
     expect(worker).toContain('BYPASS_PATH_PREFIXES');
     expect(worker).toContain("'/api/'");
     expect(worker).toContain("'/sessions'");
+    expect(worker).toContain("'/session'");
     expect(worker).toContain("'/auth'");
+    expect(worker).toContain("'/login'");
+    expect(worker).toContain("'/logout'");
+    expect(worker).toContain("'/billing'");
+    expect(worker).toContain("'/checkout'");
+    expect(worker).toContain("'/subscriptions'");
+    expect(worker).toContain("'/iap'");
     expect(worker).toContain("event.request.mode !== 'navigate'");
     expect(worker).not.toMatch(/cache\.put\([^)]*event\.request/);
+    expect(worker).not.toMatch(/caches\.match\(event\.request\)[\s\S]*shouldBypass/);
   });
 });

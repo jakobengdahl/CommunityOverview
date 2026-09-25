@@ -18,6 +18,7 @@ import {
 import { useI18n } from '../i18n';
 import { useViewportMode } from '../hooks/useViewportMode';
 import { useModalFocusTrap } from '../hooks/useModalFocusTrap';
+import { useAppInstallPrompt } from '../pwa/useAppInstallPrompt';
 import SessionContextMenu from './SessionContextMenu';
 import './SessionDrawer.css';
 
@@ -51,6 +52,8 @@ function SessionDrawer({
 }) {
   const { t } = useI18n();
   const { isMobile } = useViewportMode();
+  const { canInstall, promptInstall, showIosInstallHint, dismissIosInstallHint } =
+    useAppInstallPrompt();
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
@@ -277,6 +280,26 @@ function SessionDrawer({
         </div>
 
         <div className="session-drawer-footer">
+          {canInstall && (
+            <button className="session-drawer-item" onClick={promptInstall}>
+              <PlusCircle size={15} />
+              <span>{t('app_install.install')}</span>
+            </button>
+          )}
+          {isMobile && showIosInstallHint && (
+            <div className="session-drawer-install-hint" role="status">
+              <span>{t('app_install.ios_hint')}</span>
+              <button
+                type="button"
+                className="session-drawer-install-hint-dismiss"
+                onClick={dismissIosInstallHint}
+                aria-label={t('app_install.dismiss_hint')}
+                title={t('app_install.dismiss_hint')}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
           <button className="session-drawer-item" onClick={() => onEnterFullscreen?.()}>
             <ArrowsFullscreen size={15} />
             <span>{t('fullscreen.enter')}</span>

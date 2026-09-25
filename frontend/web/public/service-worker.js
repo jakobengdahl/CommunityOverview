@@ -15,6 +15,15 @@ const BYPASS_PATH_PREFIXES = [
   '/oauth',
   '/login',
   '/logout',
+  '/account',
+  '/admin',
+  '/billing',
+  '/checkout',
+  '/subscriptions',
+  '/subscription',
+  '/iap',
+  '/purchase',
+  '/payments',
 ];
 const BYPASS_SEARCH_PARAMS = ['session', 'collect', 'akc'];
 

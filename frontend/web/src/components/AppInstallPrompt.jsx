@@ -1,38 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useI18n } from '../i18n';
+import { useViewportMode } from '../hooks/useViewportMode';
+import { useAppInstallPrompt } from '../pwa/useAppInstallPrompt';
 import './AppInstallPrompt.css';
 
-function isStandaloneDisplay() {
-  return (
-    window.matchMedia?.('(display-mode: standalone)').matches ||
-    window.navigator?.standalone === true
-  );
-}
-
 function AppInstallPrompt() {
-  const [installPrompt, setInstallPrompt] = useState(null);
-  const [installed, setInstalled] = useState(() => isStandaloneDisplay());
+  const { t } = useI18n();
+  const { isMobile } = useViewportMode();
+  const { canInstall, promptInstall } = useAppInstallPrompt();
 
-  useEffect(() => {
-    function handleBeforeInstallPrompt(event) {
-      event.preventDefault();
-      setInstallPrompt(event);
-    }
-
-    function handleInstalled() {
-      setInstallPrompt(null);
-      setInstalled(true);
-    }
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    window.addEventListener('appinstalled', handleInstalled);
-
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', handleInstalled);
-    };
-  }, []);
-
-  if (installed || !installPrompt) {
+  if (isMobile || !canInstall) {
     return null;
   }
 
@@ -40,18 +16,10 @@ function AppInstallPrompt() {
     <button
       type="button"
       className="app-install-prompt"
-      aria-label="Install app"
-      onClick={async () => {
-        const promptEvent = installPrompt;
-        setInstallPrompt(null);
-        try {
-          await promptEvent.prompt?.();
-        } catch {
-          // The install prompt is optional browser UI; ignore dismissal or platform failures.
-        }
-      }}
+      aria-label={t('app_install.install')}
+      onClick={promptInstall}
     >
-      Install app
+      {t('app_install.install')}
     </button>
   );
 }

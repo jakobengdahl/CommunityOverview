@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 import SessionDrawer from '../src/components/SessionDrawer';
 import { I18nProvider } from '../src/i18n';
@@ -118,5 +118,22 @@ describe('SessionDrawer', () => {
     window.removeEventListener('keydown', outerListener);
     expect(props.onClose).toHaveBeenCalled();
     expect(outerListener).not.toHaveBeenCalled();
+  });
+
+  it('puts the install affordance in the menu drawer when the browser exposes one', async () => {
+    const prompt = vi.fn().mockResolvedValue({ outcome: 'accepted' });
+    renderDrawer();
+
+    act(() => {
+      const event = new Event('beforeinstallprompt');
+      event.preventDefault = vi.fn();
+      event.prompt = prompt;
+      window.dispatchEvent(event);
+    });
+
+    const installButton = await screen.findByRole('button', { name: 'Install app' });
+    fireEvent.click(installButton);
+
+    await waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
   });
 });
