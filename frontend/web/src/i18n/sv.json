@@ -694,6 +694,12 @@
     "snap_half": "Halv",
     "snap_full": "Full"
   },
+  "floating_search": {
+    "placeholder": "Sök i grafen...",
+    "aria_label": "Sök",
+    "local_graph": "Lokal",
+    "in_view_badge": "i vyn"
+  },
   "mobile_nav": {
     "bottom_nav": "Appnavigering",
     "graph": "Graf",
