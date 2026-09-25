@@ -49,6 +49,21 @@ def validate_match_mode(match_mode: str) -> str:
     return match_mode
 
 
+def query_terms(query_lower: str, match_mode: str) -> List[str]:
+    """The terms a lowered, stripped, non match-all query is matched by.
+
+    Shared by local and federated search so both split a query the same way.
+    In ``any_term`` mode the terms are deduplicated with order preserved: the
+    tie-break counts matched terms, so a word the caller happened to repeat
+    ("AI in the public sector and AI in the private sector") would otherwise be
+    counted once per occurrence and could reorder same-tier results on
+    repetition alone.
+    """
+    if match_mode == MATCH_MODE_ANY_TERM:
+        return list(dict.fromkeys(query_lower.split()))[:MAX_ANY_TERM_TERMS]
+    return [query_lower]
+
+
 # ---------------------------------------------------------------------------
 # Searchable-text helpers
 # ---------------------------------------------------------------------------
@@ -540,14 +555,7 @@ def search_nodes(
     results = []
     match_all = query_lower == "" or query_lower == "*"
 
-    terms = [query_lower]
-    if match_mode == MATCH_MODE_ANY_TERM and not match_all:
-        # Deduplicated, order preserved: the tie-break below counts matched
-        # terms, so a word the caller happened to repeat ("AI in the public
-        # sector and AI in the private sector") would otherwise be counted once
-        # per occurrence and could reorder same-tier results on repetition
-        # alone.
-        terms = list(dict.fromkeys(query_lower.split()))[:MAX_ANY_TERM_TERMS]
+    terms = [query_lower] if match_all else query_terms(query_lower, match_mode)
 
     # Ranked during the scan rather than by a sort key afterwards. The key was
     # `max(score(n, t) for t in matched_terms[n.id])` inside a lambda, so every

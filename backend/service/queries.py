@@ -196,6 +196,7 @@ def search_graph(
                 max_depth=federation_depth,
                 include_archived=include_archived,
                 type_searchable_text=getattr(storage, "_type_searchable_text", None),
+                match_mode=match_mode,
             )
             if include_archived:
                 federated_nodes = [

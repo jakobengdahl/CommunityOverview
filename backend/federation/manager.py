@@ -236,6 +236,7 @@ class FederationManager:
         max_depth: Optional[int] = None,
         include_archived: bool = False,
         type_searchable_text: Optional[Dict[str, str]] = None,
+        match_mode: str = storage_search.MATCH_MODE_SUBSTRING,
     ) -> Dict[str, Any]:
         """Search the federation caches the way local search searches storage.
 
@@ -243,9 +244,12 @@ class FederationManager:
         labels" map, so a query such as a translated type label matches federated
         nodes of that type too. Archived nodes are dropped before the ``limit``
         slice unless ``include_archived`` is set, so they cannot take slots.
+        ``match_mode`` splits and ranks the query exactly as local search does.
         """
+        storage_search.validate_match_mode(match_mode)
         query_lower = query.lower().strip()
         match_all = query_lower in {"", "*"}
+        terms = [] if match_all else storage_search.query_terms(query_lower, match_mode)
         type_text = type_searchable_text or {}
 
         matched_nodes: List[Node] = []
@@ -280,13 +284,17 @@ class FederationManager:
                     continue
 
                 fields = storage_search.build_match_fields(node, type_text)
-                if query_lower not in fields.text:
+                matched_terms = [term for term in terms if term in fields.text]
+                if not matched_terms:
                     continue
-                scored.append((storage_search.score_fields(fields, query_lower), node))
+                best = max(
+                    storage_search.score_fields(fields, term) for term in matched_terms
+                )
+                scored.append((best, len(matched_terms), node))
 
         if not match_all:
-            scored.sort(key=lambda entry: entry[0], reverse=True)
-            matched_nodes = [node for _, node in scored]
+            scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+            matched_nodes = [entry[2] for entry in scored]
 
         matched_nodes = matched_nodes[:limit]
         matched_node_ids = {n.id for n in matched_nodes}

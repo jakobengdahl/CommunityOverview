@@ -134,7 +134,9 @@ class SearchRequest(BaseModel):
             "Lexical match mode: 'substring' (default) requires the whole query "
             "verbatim; 'any_term' matches nodes containing any of the query's "
             "distinct whitespace-separated terms, and a repeated term counts "
-            "once. Ignored when semantic is true."
+            "once. Applies to local and federated results alike; semantic=true "
+            "replaces it for local results only, since federated results are "
+            "always matched lexically."
         ),
     )
 
