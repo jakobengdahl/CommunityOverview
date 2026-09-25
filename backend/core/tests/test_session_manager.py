@@ -38,9 +38,11 @@ from backend.core.session_manager import (
     SessionNotFound,
     UndoConflict,
     _DEFAULT_IMAGE_BUCKET_CAPACITY,
+    _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC,
     _TokenBucket,
     _UNDO_REPLAY_CLIENT_ID,
 )
+from backend.core.tests.rate_buckets import REQUIRED_BUCKET_ATTRS, bucket_attrs
 from backend.service.rest_api import _resolve_stream_event
 
 pytestmark = pytest.mark.asyncio
@@ -3550,14 +3552,76 @@ _MCP_UNMETERED_RUNS = {
 }
 
 
-def _bucket_attrs(mgr):
-    """Every ``_TokenBucket`` the manager holds, so a bucket added later is
-    covered without editing the tests that use this."""
-    attrs = sorted(
-        attr for attr, value in vars(mgr).items() if isinstance(value, _TokenBucket)
+class TestBucketAttrsReach:
+    """``bucket_attrs`` is what the swap-every-bucket tests below and in
+    ``test_mcp_add_nodes_to_session.py`` rely on to see every bucket, so a
+    bucket it cannot swap must fail it rather than be skipped."""
+
+    async def test_every_instance_bucket_is_returned(self):
+        mgr = _manager()
+        mgr._extra_bucket = _TokenBucket(1.0, 0.0)
+
+        attrs = bucket_attrs(mgr)
+
+        assert REQUIRED_BUCKET_ATTRS | {"_extra_bucket"} <= set(attrs)
+
+    async def test_a_bucket_on_the_class_fails_discovery(self):
+        class ClassBucketManager(SessionManager):
+            _shared_bucket = _TokenBucket(1.0, 0.0)
+
+        mgr = ClassBucketManager(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(AssertionError, match=r"ClassBucketManager\._shared_bucket"):
+            bucket_attrs(mgr)
+
+    async def test_a_bucket_on_a_base_class_fails_discovery(self):
+        class Base(SessionManager):
+            _shared_bucket = _TokenBucket(1.0, 0.0)
+
+        class Derived(Base):
+            pass
+
+        mgr = Derived(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(AssertionError, match=r"Base\._shared_bucket"):
+            bucket_attrs(mgr)
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda b: {"k": b},
+            lambda b: {b: "v"},
+            lambda b: [b],
+            lambda b: (b,),
+            lambda b: {b},
+            lambda b: frozenset({b}),
+        ],
+        ids=["dict-value", "dict-key", "list", "tuple", "set", "frozenset"],
     )
-    assert {"_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"} <= set(attrs)
-    return attrs
+    async def test_a_bucket_in_an_instance_container_fails_discovery(self, wrap):
+        mgr = _manager()
+        mgr._buckets_by_route = wrap(_TokenBucket(1.0, 0.0))
+
+        with pytest.raises(AssertionError, match=r"self\._buckets_by_route\[\.\.\.\]"):
+            bucket_attrs(mgr)
+
+    async def test_a_bucket_in_a_class_container_fails_discovery(self):
+        class ContainerManager(SessionManager):
+            _route_buckets = {"route": _TokenBucket(1.0, 0.0)}
+
+        mgr = ContainerManager(SessionStore(InMemorySessionPersistenceBackend()))
+
+        with pytest.raises(
+            AssertionError, match=r"ContainerManager\._route_buckets\[\.\.\.\]"
+        ):
+            bucket_attrs(mgr)
+
+    async def test_a_missing_required_bucket_fails_discovery(self):
+        mgr = _manager()
+        del mgr._lookup_bucket
+
+        with pytest.raises(AssertionError):
+            bucket_attrs(mgr)
 
 
 class TestMcpUnmeteredCallsSpendNoBucket:
@@ -3569,7 +3633,7 @@ class TestMcpUnmeteredCallsSpendNoBucket:
         mgr = _manager()
         s = mgr.create_session()
         consumed = []
-        for attr in _bucket_attrs(mgr):
+        for attr in bucket_attrs(mgr):
             setattr(mgr, attr, _RecordingBucket(consumed))
 
         _MCP_UNMETERED_RUNS[call](mgr, s.id)
@@ -3587,7 +3651,7 @@ class TestMcpUnmeteredCallsSpendNoBucket:
         mgr.connect(s.id, "c1", "A")
         mgr.claims.claim(s.id, "c1", ["n1"])
         sid = s.id if state == "claimed_with_presence" else "9999-9999"
-        buckets = _bucket_attrs(mgr)
+        buckets = bucket_attrs(mgr)
         before = {
             attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
             for attr in buckets
@@ -3870,27 +3934,47 @@ class TestUpsertImageAnnotation:
     async def test_default_image_bucket_uses_source_keyed_ceiling(self):
         """The REST image-ingest path has its own collision-resistant keyspace,
         but it must not create another full generic write bucket by default.
-        Its default burst follows the source-keyed ceiling instead."""
+        Its default burst follows the source-keyed ceiling instead.
+
+        The bucket is the one ``__init__`` built, with its default capacity
+        and refill, but read against a clock the test moves: draining it
+        against the real clock let it refill mid-drain under CI load, so the
+        over-capacity call was admitted and the test failed with the ceiling
+        intact."""
         mgr = _manager()
         s = mgr.create_session()
+        now = [1000.0]
+        reads = []
+
+        def frozen_clock():
+            reads.append(now[0])
+            return now[0]
+
+        mgr._image_bucket._time = frozen_clock
+
+        def ingest(annotation_id):
+            mgr.upsert_image_annotation(
+                s.id,
+                "human-image-ingest",
+                _image_annotation(annotation_id, data_bytes=100),
+                optimized_image_bytes=100,
+                rate_limit_key="1.2.3.4",
+            )
 
         for index in range(int(_DEFAULT_IMAGE_BUCKET_CAPACITY)):
-            mgr.upsert_image_annotation(
-                s.id,
-                "human-image-ingest",
-                _image_annotation(f"img-{index}", data_bytes=100),
-                optimized_image_bytes=100,
-                rate_limit_key="1.2.3.4",
-            )
+            ingest(f"img-{index}")
 
         with pytest.raises(RateLimited):
-            mgr.upsert_image_annotation(
-                s.id,
-                "human-image-ingest",
-                _image_annotation("img-over", data_bytes=100),
-                optimized_image_bytes=100,
-                rate_limit_key="1.2.3.4",
-            )
+            ingest("img-over")
+        # The admission decisions were read off the frozen clock, not the real one.
+        assert len(reads) == int(_DEFAULT_IMAGE_BUCKET_CAPACITY) + 1
+
+        # One refill interval later exactly one more is admitted: the default
+        # refill rate is the source-keyed one too.
+        now[0] += 1.0 / _DEFAULT_IMAGE_BUCKET_REFILL_PER_SEC
+        ingest("img-refilled")
+        with pytest.raises(RateLimited):
+            ingest("img-over-again")
 
     async def test_image_budget_rejection_does_not_spend_source_quota(self):
         """A request that is rejected before it can write should not consume
