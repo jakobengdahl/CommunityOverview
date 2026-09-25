@@ -243,9 +243,31 @@ describe('ActivityDrawer mobile overlay', () => {
     trigger.remove();
   });
 
+  it.each([
+    ['mobile', true],
+    ['desktop', false],
+  ])('ignores Escape and Tab entirely while closed on %s', (_label, isMobile) => {
+    setMobile(isMobile);
+    const onClose = vi.fn();
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    renderDrawer({ open: false, onClose });
+
+    const escapeNotPrevented = fireEvent.keyDown(document.body, { key: 'Escape' });
+    const tabNotPrevented = fireEvent.keyDown(document.body, { key: 'Tab' });
+    window.removeEventListener('keydown', outerListener);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(escapeNotPrevented).toBe(true);
+    expect(tabNotPrevented).toBe(true);
+    expect(outerListener).toHaveBeenCalledTimes(2);
+  });
+
   it('locks body scroll while open on a mobile viewport and restores it on close', async () => {
     setMobile(true);
-    const previousOverflow = document.body.style.overflow;
+    // Seeded with a non-default value so a restore that hard-codes '' fails.
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'clip';
 
     const { rerender } = renderDrawer({ open: true });
     await settled();
@@ -262,7 +284,8 @@ describe('ActivityDrawer mobile overlay', () => {
         />
       </I18nProvider>
     );
-    expect(document.body.style.overflow).toBe(previousOverflow);
+    expect(document.body.style.overflow).toBe('clip');
+    document.body.style.overflow = originalOverflow;
   });
 
   it('does not lock body scroll on desktop', async () => {
