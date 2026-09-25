@@ -692,6 +692,14 @@ class TestSearchCostsNothingItDoesNotHaveTo:
         assert [node_id for node_id, _ in every_row] == full_expected, (
             "the ranking past the head does not match the form this replaced"
         )
+        # And its scores: the order above holds for any scores that sort the
+        # same way, so a tail scored wrongly but monotonically passes it.
+        np.testing.assert_allclose(
+            [score for _, score in every_row],
+            [float(sims[store.node_ids.index(node_id)]) for node_id in full_expected],
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
     def test_the_text_path_scores_what_the_node_path_would_have(self):
         """The query_text branch, on its scores rather than its bytes.
