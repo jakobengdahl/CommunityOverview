@@ -516,9 +516,10 @@ class TestChangeNotificationWiring:
         """The payload belongs to the backend, which may still hold the record
         it reported. Parsing copies only the top level, so the node's nested
         metadata values ARE the backend's objects: nothing may change them in
-        place - not the refresh, and not a later local write to that node.
-        The local half bites on the node, whose merge could write into a
-        shared inner value; update_edge replaces metadata wholesale."""
+        place - not the refresh, and not a later local write to that node or
+        edge. A local write reaches the backend as a record of its own, so
+        that is checked too: a write that never left this instance would
+        leave the reported record untouched without having honoured it."""
         backend = _NotifyingBackend()
         storage = GraphStorage(persistence_backend=backend)
         node_payload = dict(
@@ -538,6 +539,7 @@ class TestChangeNotificationWiring:
             assert storage.get_node("b").metadata == {"owner": {"teams": ["core"]}}
             assert [op.payload for op in reported] == as_reported
 
+            backend.calls.clear()
             storage.update_node(
                 "b", {"metadata": {"owner": {"teams": ["edge"]}}}, metadata_merge=True
             )
@@ -546,6 +548,16 @@ class TestChangeNotificationWiring:
             assert storage.get_node("b").metadata == {"owner": {"teams": ["edge"]}}
             assert storage.edges["bc"].metadata == {"weight": {"history": [2]}}
             assert [op.payload for op in reported] == as_reported
+
+            written = [
+                (kind, payload["id"], payload) for kind, payload in backend.calls
+            ]
+            assert [(kind, entity_id) for kind, entity_id, _ in written] == [
+                ("upsert_node", "b"),
+                ("upsert_edge", "bc"),
+            ]
+            assert written[0][2]["metadata"] == {"owner": {"teams": ["edge"]}}
+            assert written[1][2]["metadata"] == {"weight": {"history": [2]}}
         finally:
             storage.shutdown_events()
 
@@ -1706,6 +1718,7 @@ class TestExternalRefreshBatchMatchesOneOperationReports:
                     )
             else:
                 assert got == pytest.approx(expected), f"{node_id} differs"
+            assert batched[node_id][0] == name, f"{node_id} landed another name"
 
 
 class TestExternalRefreshSettlesEvenWhenTheBatchFails:
