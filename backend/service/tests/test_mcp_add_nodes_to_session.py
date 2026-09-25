@@ -604,8 +604,16 @@ class TestAddNodesToSession:
     def test_only_resolvable_ids_draw_from_the_rate_budget(self, tools):
         tools_map, manager = tools
         sid = _session(manager)
-        bucket = _RecordingBucket()
-        manager._mcp_bucket = bucket
+        buckets = {
+            attr: _RecordingBucket()
+            for attr, value in vars(manager).items()
+            if isinstance(value, _TokenBucket)
+        }
+        assert {"_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"} <= set(
+            buckets
+        )
+        for attr, bucket in buckets.items():
+            setattr(manager, attr, bucket)
         cyclic = []
         cyclic.append(cyclic)
 
@@ -616,7 +624,9 @@ class TestAddNodesToSession:
 
         assert result["success"] is True
         assert result["added"] == ["alpha", "beta"]
-        assert bucket.consumed == [2]
+        assert {attr: bucket.consumed for attr, bucket in buckets.items()} == {
+            attr: [2] if attr == "_mcp_bucket" else [] for attr in buckets
+        }
 
     def test_an_id_with_no_canonical_json_counts_against_no_cap_and_is_not_resolved(
         self, tmp_path

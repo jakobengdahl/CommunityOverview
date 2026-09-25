@@ -120,6 +120,38 @@ describe('useModalFocusTrap', () => {
     expect(screen.getByText('two')).toHaveFocus();
   });
 
+  it.each([
+    ['input', () => <input disabled aria-label="disabled control" />],
+    ['textarea', () => <textarea disabled aria-label="disabled control" />],
+    [
+      'select',
+      () => (
+        <select disabled aria-label="disabled control">
+          <option>x</option>
+        </select>
+      ),
+    ],
+  ])('skips a disabled %s at both ends when wrapping', (_tag, disabledControl) => {
+    render(
+      <Trap active>
+        {disabledControl()}
+        <button type="button">one</button>
+        <button type="button">two</button>
+        {disabledControl()}
+      </Trap>
+    );
+    expect(screen.getByText('one')).toHaveFocus();
+
+    screen.getByText('two').focus();
+    expect(fireEvent.keyDown(screen.getByTestId('trap'), { key: 'Tab' })).toBe(false);
+    expect(screen.getByText('one')).toHaveFocus();
+
+    expect(fireEvent.keyDown(screen.getByTestId('trap'), { key: 'Tab', shiftKey: true })).toBe(
+      false
+    );
+    expect(screen.getByText('two')).toHaveFocus();
+  });
+
   it('ignores keys other than Tab, even at the last element', () => {
     render(<Trap active>{threeButtons}</Trap>);
     const last = screen.getByText('three');
