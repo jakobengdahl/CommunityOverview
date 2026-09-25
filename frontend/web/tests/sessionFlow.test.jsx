@@ -1405,6 +1405,7 @@ describe('Server-backed session lifecycle', () => {
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockReturnValue(pendingOps);
+    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
     api.getNodeDetails.mockImplementation(async (id) => {
       if (id !== 'node-a') return { success: false };
       await nodeAGate;
@@ -1458,6 +1459,7 @@ describe('Server-backed session lifecycle', () => {
     } finally {
       releaseNodeA();
       getPendingOpsSpy.mockRestore();
+      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
     }
   });
 
@@ -1591,19 +1593,41 @@ describe('Server-backed session lifecycle', () => {
 
   // Holds back every timeout of the request-timeout length (App's resync
   // guard timer among them) so a test can fire them by hand instead of
-  // waiting out the real delay. The ops POST timers share that length; firing
-  // one after its request settled is a no-op.
+  // waiting out the real delay. The ops POST timers share that length and are
+  // cleared once their request settles; a cleared timer is dropped here too,
+  // so only the timers still scheduled are ever fired.
   function holdRequestTimeouts() {
-    const held = [];
+    const held = new Map();
+    let nextId = 0;
     const realSetTimeout = globalThis.setTimeout;
-    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb, ms, ...args) => {
+    const realClearTimeout = globalThis.clearTimeout;
+    const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb, ms, ...args) => {
       if (ms === DEFAULT_REQUEST_TIMEOUT_MS) {
-        held.push(cb);
-        return -held.length;
+        nextId -= 1;
+        held.set(nextId, cb);
+        return nextId;
       }
       return realSetTimeout(cb, ms, ...args);
     });
-    return { held, restore: () => spy.mockRestore() };
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
+      if (held.has(id)) held.delete(id);
+      else realClearTimeout(id);
+    });
+    const fire = (ids) =>
+      ids.forEach((id) => {
+        const cb = held.get(id);
+        held.delete(id);
+        cb?.();
+      });
+    return {
+      pending: () => [...held.keys()],
+      fire,
+      fireAll: () => fire([...held.keys()]),
+      restore: () => {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      },
+    };
   }
 
   const catchUpMessage = () => ({
@@ -1657,7 +1681,7 @@ describe('Server-backed session lifecycle', () => {
       await settle();
       expect(totalLoads()).toBe(1); // still guarded while the first call hangs
 
-      act(() => timeouts.held.splice(0).forEach((cb) => cb()));
+      act(() => timeouts.fireAll());
       act(() => source.onmessage(catchUpMessage()));
       await waitFor(() => expect(totalLoads()).toBe(2));
 
@@ -1680,6 +1704,81 @@ describe('Server-backed session lifecycle', () => {
     } finally {
       releaseHung();
       releaseNext();
+      timeouts.restore();
+      api.getSession.mockImplementation(originalGetSession);
+    }
+  });
+
+  // The token check runs after every fetch, not only the first: a call
+  // refetching a payload behind the stream can outlive its guard timer, and
+  // a newer resync on the same client then owns the reload. The older call's
+  // refetch settling afterwards must not apply over it.
+  it('a refetch settling after its guard timer fired does not overwrite the newer resync', async () => {
+    const NODE_C = { id: 'node-c', type: 'Theme', name: 'Theme C' };
+    const timeouts = holdRequestTimeouts();
+    let releaseReload;
+    const reloadGate = new Promise((resolve) => {
+      releaseReload = resolve;
+    });
+    let releaseRefetch;
+    const refetchGate = new Promise((resolve) => {
+      releaseRefetch = resolve;
+    });
+    const gate = { active: false };
+    const loads = {};
+    const originalGetSession = api.getSession.getMockImplementation();
+    api.getSession.mockImplementation(async (id, opts) => {
+      if (!gate.active) return originalGetSession(id, opts);
+      loads[id] = (loads[id] || 0) + 1;
+      if (loads[id] === 1) {
+        await reloadGate;
+        return { id, seq: 5, state: {}, resolved: { nodes: [NODE_A], edges: [] } };
+      }
+      if (loads[id] === 2) {
+        await refetchGate;
+        return { id, seq: 6, state: {}, resolved: { nodes: [NODE_C], edges: [] } };
+      }
+      return { id, seq: 6, state: {}, resolved: { nodes: [NODE_A, NODE_B], edges: [] } };
+    });
+
+    try {
+      const source = await startResyncHeldOnGate(gate, (id) => loads[id] || 0);
+      const totalLoads = () => Object.values(loads).reduce((a, b) => a + b, 0);
+      act(() => {
+        source.onmessage({
+          data: JSON.stringify({
+            type: 'op',
+            seq: 6,
+            client_id: 'someone-else',
+            op: { op: 'nodes_hidden', node_ids: [] },
+          }),
+        });
+      });
+      await act(async () => {
+        releaseReload();
+      });
+      await waitFor(() => expect(totalLoads()).toBe(2));
+
+      expect(timeouts.pending()).toHaveLength(1); // the refetching call's guard timer
+      act(() => timeouts.fireAll());
+      act(() => source.onmessage(catchUpMessage()));
+      await waitFor(() => expect(totalLoads()).toBe(3));
+      await waitFor(() => {
+        expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+      });
+
+      await act(async () => {
+        releaseRefetch();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useGraphStore.getState().nodes.map((n) => n.id)).toEqual(['node-a', 'node-b']);
+    } finally {
+      releaseReload();
+      releaseRefetch();
       timeouts.restore();
       api.getSession.mockImplementation(originalGetSession);
     }
@@ -1728,7 +1827,8 @@ describe('Server-backed session lifecycle', () => {
       fireEvent.click(screen.getByTitle('Menu'));
       fireEvent.click(screen.getByText('7777-8888'));
       await waitFor(() => expect(returningLoads).toBe(2));
-      const firstVisitTimeouts = timeouts.held.slice();
+      const firstVisitTimeouts = timeouts.pending();
+      expect(firstVisitTimeouts).toHaveLength(1); // the held resync's guard timer
 
       fireEvent.click(screen.getByTitle('Menu'));
       fireEvent.click(screen.getByText('5555-6666'));
@@ -1739,7 +1839,7 @@ describe('Server-backed session lifecycle', () => {
       fireEvent.click(screen.getByText('7777-8888'));
       await waitFor(() => expect(returningLoads).toBe(4));
 
-      act(() => firstVisitTimeouts.forEach((cb) => cb()));
+      act(() => timeouts.fire(firstVisitTimeouts));
       await act(async () => {
         releaseFirstResync();
         await Promise.resolve();
@@ -1787,6 +1887,7 @@ describe('Server-backed session lifecycle', () => {
     const getPendingOpsSpy = vi
       .spyOn(SessionSyncClient.prototype, 'getPendingOps')
       .mockImplementation(() => (recovering ? pendingOps : []));
+    const originalGetNodeDetails = api.getNodeDetails.getMockImplementation();
     api.getNodeDetails.mockImplementation(async (id) => {
       if (id !== 'node-a') return { success: false };
       await nodeAGate;
@@ -1816,7 +1917,7 @@ describe('Server-backed session lifecycle', () => {
       await waitFor(() => expect(api.getNodeDetails).toHaveBeenCalledWith('node-a'));
 
       recovering = false;
-      act(() => timeouts.held.splice(0).forEach((cb) => cb()));
+      act(() => timeouts.fireAll());
       act(() => source.onmessage(catchUpMessage()));
       await waitFor(() => expect(loads()).toBe(loadsBefore + 2));
       await act(async () => {
@@ -1836,6 +1937,7 @@ describe('Server-backed session lifecycle', () => {
       releaseNodeA();
       timeouts.restore();
       getPendingOpsSpy.mockRestore();
+      api.getNodeDetails.mockImplementation(originalGetNodeDetails);
     }
   });
 
