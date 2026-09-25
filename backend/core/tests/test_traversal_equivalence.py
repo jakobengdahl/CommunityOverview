@@ -42,6 +42,9 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 from psycopg_pool import PoolTimeout  # noqa: E402
 
 from backend.core import storage_search  # noqa: E402
+from backend.core.tests.test_traversal_walk_lookup import (  # noqa: E402
+    _VanishingOnLookup,
+)
 from backend.core.postgres_backend import (  # noqa: E402
     PostgresGraphPersistenceBackend,
 )
@@ -84,21 +87,6 @@ def schema():
     yield name
     with psycopg.connect(DSN, autocommit=True) as conn:
         conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
-
-
-class _VanishingOnLookup(dict):
-    """Says yes, then loses the key - exactly one id, exactly once."""
-
-    def __init__(self, *args, victim=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.victim = victim
-
-    def __contains__(self, key):
-        present = super().__contains__(key)
-        if key == self.victim:
-            super().pop(key, None)
-            self.victim = None
-        return present
 
 
 def _reference(nodes, edges, anchor, depth, types, include_archived):
@@ -1398,14 +1386,13 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
-    def test_a_delete_between_the_check_and_the_lookup_does_not_raise(self, schema):
-        """The delete-based test above removes the node BEFORE the call, which
-        a check-then-use survives: the membership test already fails. What
-        that shape cannot reach is the window the comment is actually about -
-        a delete landing between the `in` and the `[]`, which this path is
-        exposed to because it takes no lock while every mutator holds one.
-        A dict whose membership test is true and whose lookup then misses is
-        that window, made deterministic.
+    def test_a_node_that_vanishes_on_first_observation_does_not_raise(self, schema):
+        """A smoke test of the entry point, not of the window. It swaps
+        `storage.nodes` for a dict that loses `b` on its first observation by
+        any route, so a check-then-use in whichever engine answers turns into
+        a KeyError here. It does not say which engine answered, nor does it
+        separate the walk's traversal reads from its resolution; the
+        walk-level tests in `test_traversal_walk_lookup.py` pin that.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
@@ -1430,9 +1417,6 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
 
             storage.nodes = _VanishingOnLookup(storage.nodes, victim="b")
-            # Must not raise. The answer may come from either engine - what
-            # this pins is that a traversal does not turn into a KeyError out
-            # of the API.
             result = storage.get_related_nodes("a", depth=1)
             assert "a" in {n.id for n in result["nodes"]}
         finally:
@@ -1732,67 +1716,3 @@ class TestDepthIsBoundedByTheGraphNotByTheCaller:
         finally:
             psycopg.Connection.execute = original
             backend.close()
-
-
-class TestTheWalkResolvesEachIdOnce:
-    """The walk is also the fallback, and it reads `nodes` and `edges` without
-    the lock every mutator holds. Resolving a result with a membership test and
-    then an index observes the dict twice; a delete landing between the two
-    raised KeyError out of the traversal. These drive the walk directly, so the
-    store cannot answer in its place and hide the window.
-    """
-
-    @staticmethod
-    def _graph(nodes, edges):
-        import networkx as nx
-
-        graph = nx.MultiDiGraph()
-        for node in nodes.values():
-            graph.add_node(node.id, data=node)
-        for edge in edges.values():
-            graph.add_edge(edge.source, edge.target, key=edge.id, data=edge)
-        return graph
-
-    @staticmethod
-    def _fixture():
-        nodes = {
-            "a": Node(id="a", type=NodeType.ACTOR, name="a"),
-            "b": Node(id="b", type=NodeType.ACTOR, name="b"),
-        }
-        edges = {
-            "ab": Edge(
-                id="ab", source="a", target="b", type=RelationshipType.RELATES_TO
-            )
-        }
-        return nodes, edges
-
-    def test_a_node_deleted_between_check_and_lookup_does_not_raise(self):
-        nodes, edges = self._fixture()
-        graph = self._graph(nodes, edges)
-        vanishing = _VanishingOnLookup(nodes, victim="b")
-
-        result = storage_search.get_related_nodes(vanishing, edges, graph, "a")
-
-        assert {n.id for n in result["nodes"]} == {"a", "b"}
-        assert {e.id for e in result["edges"]} == {"ab"}
-
-    def test_an_edge_deleted_between_check_and_lookup_does_not_raise(self):
-        nodes, edges = self._fixture()
-        graph = self._graph(nodes, edges)
-        vanishing = _VanishingOnLookup(edges, victim="ab")
-
-        result = storage_search.get_related_nodes(nodes, vanishing, graph, "a")
-
-        assert {n.id for n in result["nodes"]} == {"a", "b"}
-        assert {e.id for e in result["edges"]} == {"ab"}
-
-    def test_an_id_that_is_already_gone_is_dropped_not_returned_as_none(self):
-        nodes, edges = self._fixture()
-        graph = self._graph(nodes, edges)
-        del nodes["b"]
-        del edges["ab"]
-
-        result = storage_search.get_related_nodes(nodes, edges, graph, "a")
-
-        assert [n.id for n in result["nodes"]] == ["a"]
-        assert result["edges"] == []
