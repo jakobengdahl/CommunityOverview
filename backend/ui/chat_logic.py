@@ -620,7 +620,7 @@ class ChatProcessor:
                         },
                         "semantic": {
                             "type": "boolean",
-                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false; a lexical query that matches nothing already falls back to semantic ranking automatically.",
+                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false. A query other than '' or '*' that matches no local node of the requested types (archived nodes count only with include_archived) falls back to semantic ranking for local results. The check runs before tag, metadata and access filters, so a match those filters remove gets no fallback.",
                             "default": False,
                         },
                     },

@@ -120,6 +120,15 @@ class TestChatServiceToolExecution:
         assert props["match_mode"]["default"] == "substring"
         assert props["semantic"]["type"] == "boolean"
         assert props["semantic"]["default"] is False
+        # The fallback trigger as queries.search_graph gates it.
+        assert (
+            "A query other than '' or '*' that matches no local node of the "
+            "requested types (archived nodes count only with include_archived) "
+            "falls back to semantic ranking for local results. The check runs "
+            "before tag, metadata and access filters, so a match those filters "
+            "remove gets no fallback."
+        ) in props["semantic"]["description"]
+        assert "matches nothing" not in props["semantic"]["description"]
         assert props["include_archived"]["type"] == "boolean"
         assert props["include_archived"]["default"] is False
 

@@ -390,10 +390,12 @@ def register_mcp_tools(
                 excluded. Set True to include archived items in the results.
             semantic: When True, rank results by embedding meaning (cosine
                 similarity) instead of lexical substring matching. Default False
-                keeps the lexical behavior, which still auto-falls back to
-                semantic ranking for local results when a non-empty query
-                matches no local node before tag, metadata and access filters
-                are applied.
+                keeps the lexical behavior. A query other than "" or "*" that
+                matches no local node of the requested types (archived nodes
+                count only with ``include_archived``) falls back to semantic
+                ranking for local results. The check runs before tag, metadata
+                and access filters, so a match those filters remove gets no
+                fallback.
             match_mode: How the lexical query is matched. ``"substring"``
                 (default) requires the whole query verbatim — unchanged
                 behaviour. ``"any_term"`` splits the query on whitespace into
