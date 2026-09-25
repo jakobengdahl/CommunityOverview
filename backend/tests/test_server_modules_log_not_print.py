@@ -94,7 +94,12 @@ _STDOUT_ROUTES = _STDOUT_CALLS | {
     "sys.__stdout__.buffer",
     "os",
     "os.write",
+    "os.writev",
 }
+
+# A module's attributes include the modules it imported, so `os.sys` is `sys`
+# and a path through any module to one of these reaches the same object.
+_ROUTE_MODULES = {"builtins", "os", "sys"}
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
@@ -115,8 +120,12 @@ def _expansions(dotted, aliases, seen=frozenset()):
     first component through every route that name may be bound to."""
     if not dotted:
         return set()
-    head, _, rest = dotted.partition(".")
+    parts = dotted.split(".")
     names = {dotted}
+    for i in range(1, len(parts)):
+        if parts[i] in _ROUTE_MODULES:
+            names |= _expansions(".".join(parts[i:]), aliases, seen)
+    head, _, rest = dotted.partition(".")
     if head not in seen:
         for route in aliases.get(head, ()):
             expanded = route + (f".{rest}" if rest else "")
@@ -124,9 +133,44 @@ def _expansions(dotted, aliases, seen=frozenset()):
     return names
 
 
+def _chains(expr):
+    """The dotted name `expr` is, or else every outermost dotted name inside
+    it: a name bound to `sys.stdout if c else x`, or unpacked from
+    `(sys.stdout, x)`, may stand for any of them."""
+    if expr is None or isinstance(expr, _SCOPES):
+        return []
+    dotted = _dotted(expr)
+    if dotted is not None:
+        return [dotted]
+    return [chain for child in ast.iter_child_nodes(expr) for chain in _chains(child)]
+
+
+def _targets(target):
+    """Every name a binding target binds, through tuples, lists and stars."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _targets(element)]
+    if isinstance(target, ast.Starred):
+        return _targets(target.value)
+    return []
+
+
+def _bound(targets, value):
+    return [
+        (name, chain)
+        for t in targets
+        for name in _targets(t)
+        for chain in _chains(value)
+    ]
+
+
 def _bindings(node):
     """(local name, dotted name it is bound to, or None) for each name `node`
-    binds: imports, plain and annotated assignments."""
+    binds: imports, assignments of every form, and loop, comprehension and
+    `with` targets. A name bound to an expression rather than to a plain
+    dotted name is paired with every dotted name in it. An `except` target is
+    left out: it binds the exception raised, which no stdout route is."""
     if isinstance(node, ast.Import):
         return [(name.asname, name.name) for name in node.names if name.asname]
     if isinstance(node, ast.ImportFrom):
@@ -145,10 +189,19 @@ def _bindings(node):
             (name.asname or name.name, f"{node.module}.{name.name}")
             for name in node.names
         ]
-    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        value = _dotted(node.value)
-        return [(t.id, value) for t in targets if isinstance(t, ast.Name)]
+    if isinstance(node, ast.Assign):
+        return _bound(node.targets, node.value)
+    if isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+        return _bound([node.target], node.value)
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return _bound([node.target], node.iter)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [
+            binding
+            for item in node.items
+            for binding in _bound([item.optional_vars], item.context_expr)
+            if item.optional_vars is not None
+        ]
     return []
 
 
@@ -163,7 +216,7 @@ def _parameter_bindings(scope):
     pairs += [
         (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None
     ]
-    return [(arg.arg, _dotted(default)) for arg, default in pairs]
+    return [(arg.arg, chain) for arg, default in pairs for chain in _chains(default)]
 
 
 def _scope_aliases(scope, nodes, inherited):
@@ -201,16 +254,22 @@ def _writes_to_stdout(call, aliases):
         return True
     # File descriptor 1 is stdout whatever sys.stdout has been swapped for.
     return (
-        "os.write" in names
+        bool(names & {"os.write", "os.writev"})
         and bool(call.args)
         and isinstance(call.args[0], ast.Constant)
         and call.args[0].value == 1
     )
 
 
-def _collect(scope, inherited, found):
+def _collect(scope, inherited, found, escaped):
     nodes = _own_nodes(scope)
     aliases = _scope_aliases(scope, nodes, inherited)
+    # A name declared global or nonlocal binds in an enclosing scope, which
+    # has already been walked by now: record its routes for the next pass.
+    for node in nodes:
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                escaped.setdefault(name, set()).update(aliases.get(name, ()))
     # Class scopes too, though a method body cannot see a class body's names:
     # its decorators, defaults and bases are evaluated in that body, and
     # telling the two apart is the kind of precision the fail-closed rule
@@ -219,13 +278,22 @@ def _collect(scope, inherited, found):
         if isinstance(node, ast.Call) and _writes_to_stdout(node, aliases):
             found.append(node.lineno)
         if isinstance(node, _SCOPES):
-            _collect(node, aliases, found)
+            _collect(node, aliases, found, escaped)
 
 
 def _stdout_calls(source):
-    found = []
-    _collect(ast.parse(source), {}, found)
-    return sorted(found)
+    """Walked until no global or nonlocal binding adds a route, each pass
+    seeding the module scope with what the last one found escaping. A
+    nonlocal's routes land at module level too, so they count in every scope
+    rather than only the enclosing function's - the fail-closed direction."""
+    tree = ast.parse(source)
+    escaped = {}
+    while True:
+        before = {name: set(routes) for name, routes in escaped.items()}
+        found = []
+        _collect(tree, before, found, escaped)
+        if escaped == before:
+            return sorted(found)
 
 
 @pytest.mark.parametrize(
@@ -278,6 +346,27 @@ def _stdout_calls(source):
         "from sys import *\nstdout.write('x')",
         "from sys import *\n__stdout__.buffer.write(b'x')",
         "from os import *\nwrite(1, b'x')",
+        "import os\nos.writev(1, [b'x'])",
+        "from os import writev\nwritev(1, [b'x'])",
+        # Every binding form, not only a plain name on the left of `=`.
+        "import sys\nout, err = sys.stdout, sys.stderr\nout.write('x')",
+        "import sys\nif (out := sys.stdout):\n    out.write('x')",
+        "import sys\nfor out in (sys.stdout,):\n    out.write('x')",
+        "import sys\n[out.write('x') for out in [sys.stdout]]",
+        "import sys\nwith sys.stdout as out:\n    out.write('x')",
+        "import sys\nout = sys.stdout if c else x\nout.write('x')",
+        "import sys\nout = x or sys.stdout\nout.write('x')",
+        "import sys\ndef f(out=sys.stdout if c else x):\n    out.write('x')",
+        # Bound in a nested scope, for the scope that declares it.
+        "import sys\ndef f():\n    global out\n    out = sys.stdout\nout.write('x')",
+        "def f():\n    global out\n    import sys as s\n    out = s.stdout\n"
+        "out.write('x')",
+        "import sys\ndef f():\n    out = None\n    def g():\n        nonlocal out\n"
+        "        out = sys.stdout\n    out.write('x')",
+        # Reached through another module's attributes.
+        "import os\nos.sys.stdout.write('x')",
+        "import logging\nlogging.sys.__stdout__.write('x')",
+        "import os\nm = os.sys\nm.stdout.write('x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
@@ -303,6 +392,11 @@ def test_the_guard_catches_a_write_where_the_function_is_defined(source):
         "from sys import stderr\nstderr.write('x')",
         "import os\nos.write(2, b'x')",
         "import os\nos.write(fd, b'x')",
+        "import os\nos.writev(2, [b'x'])",
+        # A route only inside an expression is not what the expression is.
+        "import sys\nf = open(sys.argv[1])\nf.write('x')",
+        "import sys\nwith open(sys.argv[1]) as out:\n    out.write('x')",
+        "import sys\nfor out in (sys.stderr,):\n    out.write('x')",
         "handle = open('f', 'w')\nhandle.write('x')",
         # An alias to stdout in one function does not reach a same-named
         # handle in another.
