@@ -31,7 +31,7 @@ def _record(**overrides):
         session_id="1234-5678",
         seq=1,
         correlation_id=None,
-        affected={"kind": "annotation", "id": "note-1", "fields": ["text"]},
+        affected={"kind": "annotation", "id": "note-1"},
         before={"id": "note-1", "text": "old"},
         after={"id": "note-1", "text": "new"},
         inverse_op={
