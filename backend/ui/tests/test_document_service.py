@@ -64,6 +64,21 @@ class TestDocumentServiceUpload:
         # Cleanup
         os.unlink(result["file_path"])
 
+    def test_save_upload_success_reports_raw_filename_size_and_upload_dir(
+        self, document_service
+    ):
+        """A successful save echoes the raw uploaded name, the byte count and a path inside the upload dir."""
+        import asyncio
+
+        content = b"twelve bytes"
+        result = asyncio.run(document_service.save_upload(content, "dir/a b.txt"))
+
+        assert result["success"]
+        assert result["filename"] == "dir/a b.txt"
+        assert result["size"] == len(content)
+        assert Path(result["file_path"]).parent == Path(document_service._upload_dir)
+        assert Path(result["file_path"]).read_bytes() == content
+
     def test_save_upload_rejects_unsupported_format(self, document_service):
         """save_upload should reject unsupported file formats."""
         import asyncio
