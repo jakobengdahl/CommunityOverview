@@ -884,7 +884,7 @@ can configure one. See `docs/EVENT_SUBSCRIPTIONS.md`.
 | `clear_visualization` | Clear the canvas in the browsers displaying a session (refuses unless a client is on the op stream or draining the legacy push channel; a leftover registry entry does not count, see below) |
 | `get_visualization_layout` | Read every node's model-space position, type and status in an open session, plus the current selection (for an agent to compute a new arrangement) |
 | `apply_visualization_layout` | Move nodes in an open session by absolute positions or deltas; applied atomically, animated on the canvas, and mirrored live to all connected browsers |
-| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller cannot read) |
+| `add_nodes_to_session` | Put a known set of nodes on a session's canvas by id (additive, skips ids the caller may not add) |
 | `create_visualization_session` | Create a new empty session (optional non-unique name; server assigns a default when omitted) |
 | `list_visualization_sessions` | List existing sessions, most recently updated first |
 | `get_visualization_session` | Inspect one session's resource metadata (incl. node count) |
@@ -1038,10 +1038,12 @@ without having to craft a search that returns exactly that set. It is additive
 and idempotent (ids already in the session are not re-added and leave the
 `revision` untouched), goes through the same authorization gate as the other
 session writes, and skips — reporting in `skipped` — any id that does not resolve
-to a node the caller may read, so a stale id never becomes a phantom session
-reference. Session state is server-owned, so connected browsers receive the
-broadcast op and hydrate the nodes; a browser that connects later picks them up
-from the session state. The returned `revision` threads straight into
+to a node the caller may add, so a stale id never becomes a phantom session
+reference. The ids are resolved under the same mutate decision as the gate, not
+a read one, so a node the caller can see but not change is skipped too. Session
+state is server-owned, so connected browsers receive the broadcast op and
+hydrate the nodes; a browser that connects later picks them up from the session
+state. The returned `revision` threads straight into
 `apply_visualization_layout`'s `expected_revision`, making "create → populate →
 arrange" three deterministic calls.
 

@@ -651,3 +651,17 @@ class TestRestoreRing:
 
         assert store.ring(a.id) is None
         assert list(store.ring(b.id)) == b_before
+
+    def test_restoring_keeps_the_ring_bounded(self):
+        store = SessionStore(InMemorySessionPersistenceBackend(), ring_size=2)
+        s = store.create()
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["n0"]})
+        saved = list(store.ring(s.id))
+        store.apply_state_op(s, {"op": "nodes_added", "node_ids": ["n1"]})
+
+        store.restore_ring(s.id, saved)
+        for i in range(2, 5):
+            store.apply_state_op(s, {"op": "nodes_added", "node_ids": [f"n{i}"]})
+
+        assert store.ring(s.id).maxlen == 2
+        assert [op["seq"] for op in store.ring(s.id)] == [4, 5]

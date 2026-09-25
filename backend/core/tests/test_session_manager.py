@@ -3566,6 +3566,34 @@ class TestMcpUnmeteredCallsSpendNoBucket:
 
         assert consumed == []
 
+    @pytest.mark.parametrize("state", ["claimed_with_presence", "missing"])
+    @pytest.mark.parametrize("call", sorted(_MCP_UNMETERED_CALLS))
+    async def test_call_leaves_the_buckets_bound_in_init_untouched(self, call, state):
+        """The buckets are the ones ``__init__`` built, not swapped-in fakes, and
+        the call runs against a live claim with a client connected or against a
+        session that does not exist, so a consume on either branch shows."""
+        mgr = _manager()
+        s = mgr.create_session()
+        mgr.connect(s.id, "c1", "A")
+        mgr.claims.claim(s.id, "c1", ["n1"])
+        sid = s.id if state == "claimed_with_presence" else "9999-9999"
+        buckets = ("_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket")
+        before = {
+            attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
+            for attr in buckets
+        }
+
+        try:
+            _MCP_UNMETERED_RUNS[call](mgr, sid)
+        except SessionNotFound:
+            assert state == "missing"
+
+        after = {
+            attr: (dict(getattr(mgr, attr)._tokens), dict(getattr(mgr, attr)._last))
+            for attr in buckets
+        }
+        assert after == before
+
 
 class TestMcpWritesDrawFromTheMcpBucket:
     """Each rate-limited synchronous MCP write is charged to ``_mcp_bucket``,
