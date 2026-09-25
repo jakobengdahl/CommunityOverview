@@ -167,8 +167,8 @@ def _bound(targets, value):
 
 def _bindings(node):
     """(local name, dotted name it is bound to, or None) for each name `node`
-    binds: imports, assignments of every form, and loop, comprehension and
-    `with` targets. A name bound to an expression rather than to a plain
+    binds: imports, assignments of every form, loop, comprehension and `with`
+    targets, and `match` captures. A name bound to an expression rather than to a plain
     dotted name is paired with every dotted name in it. An `except` target is
     left out: it binds the exception raised, which no stdout route is."""
     if isinstance(node, ast.Import):
@@ -195,6 +195,18 @@ def _bindings(node):
         return _bound([node.target], node.value)
     if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
         return _bound([node.target], node.iter)
+    if isinstance(node, ast.Match):
+        captures = [
+            name
+            for case in node.cases
+            for pattern in ast.walk(case.pattern)
+            for name in (
+                getattr(pattern, "name", None),
+                getattr(pattern, "rest", None),
+            )
+            if name
+        ]
+        return [(name, chain) for name in captures for chain in _chains(node.subject)]
     if isinstance(node, (ast.With, ast.AsyncWith)):
         return [
             binding
@@ -206,8 +218,8 @@ def _bindings(node):
 
 
 def _parameter_bindings(scope):
-    """(parameter, dotted name of its default) for a function's defaulted
-    parameters: `def f(out=sys.stdout)` binds `out` inside `f`."""
+    """(parameter, dotted name) for each dotted name in a defaulted
+    parameter's default: `def f(out=sys.stdout)` binds `out` inside `f`."""
     if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         return []
     args = scope.args
@@ -348,12 +360,16 @@ def _stdout_calls(source):
         "from os import *\nwrite(1, b'x')",
         "import os\nos.writev(1, [b'x'])",
         "from os import writev\nwritev(1, [b'x'])",
-        # Every binding form, not only a plain name on the left of `=`.
+        # Each binding form the guard follows, not only a plain name on the left
+        # of `=`.
         "import sys\nout, err = sys.stdout, sys.stderr\nout.write('x')",
         "import sys\nif (out := sys.stdout):\n    out.write('x')",
         "import sys\nfor out in (sys.stdout,):\n    out.write('x')",
         "import sys\n[out.write('x') for out in [sys.stdout]]",
         "import sys\nwith sys.stdout as out:\n    out.write('x')",
+        "import sys\nmatch sys.stdout:\n    case out:\n        out.write('x')",
+        "import sys\nmatch [sys.stdout]:\n    case [*out]:\n        out.write('x')",
+        "import sys\nmatch {1: sys.stdout}:\n    case {**out}:\n        out.write('x')",
         "import sys\nout = sys.stdout if c else x\nout.write('x')",
         "import sys\nout = x or sys.stdout\nout.write('x')",
         "import sys\ndef f(out=sys.stdout if c else x):\n    out.write('x')",
@@ -393,7 +409,8 @@ def test_the_guard_catches_a_write_where_the_function_is_defined(source):
         "import os\nos.write(2, b'x')",
         "import os\nos.write(fd, b'x')",
         "import os\nos.writev(2, [b'x'])",
-        # A route only inside an expression is not what the expression is.
+        # A longer dotted name that merely starts with a route does not bind
+        # the route.
         "import sys\nf = open(sys.argv[1])\nf.write('x')",
         "import sys\nwith open(sys.argv[1]) as out:\n    out.write('x')",
         "import sys\nfor out in (sys.stderr,):\n    out.write('x')",
