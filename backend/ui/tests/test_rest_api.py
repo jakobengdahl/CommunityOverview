@@ -198,6 +198,36 @@ class TestUploadEndpoint:
             assert response.status_code == 200, path
             assert response.json()["filename"] == "my notes.txt", path
 
+    def test_upload_failures_return_the_uploaded_filename(self, fastapi_test_client):
+        """A rejected upload and a failed extraction both name the user's file."""
+        from unittest.mock import patch
+
+        client, _, _ = fastapi_test_client
+
+        def post(path, name):
+            response = client.post(
+                path,
+                files={"file": (name, io.BytesIO(b"Some text."), "text/plain")},
+                data={"analyze": "false"},
+            )
+            assert response.status_code == 200, (path, name)
+            body = response.json()
+            assert body["success"] is False, (path, name)
+            return body
+
+        for path in ("/ui/upload", "/ui/upload/extract"):
+            rejected = post(path, "old notes.xyz")
+            assert "unsupported" in rejected["error"].lower(), path
+            assert rejected["filename"] == "old notes.xyz", path
+
+            with patch(
+                "backend.ui.document_service.DocumentProcessor.extract_text",
+                side_effect=ValueError("broken"),
+            ):
+                failed = post(path, "my notes.txt")
+            assert "broken" in failed["error"], path
+            assert failed["filename"] == "my notes.txt", path
+
     def test_upload_unsupported_format(self, fastapi_test_client):
         """POST /ui/upload should reject unsupported formats."""
         client, _, _ = fastapi_test_client
