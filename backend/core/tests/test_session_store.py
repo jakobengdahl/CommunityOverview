@@ -37,6 +37,12 @@ class TestSessionIdValidation:
         assert not is_valid_session_id("../etc")
         assert not is_valid_session_id(None)
 
+    def test_rejects_trailing_characters(self):
+        assert not is_valid_session_id("1234-5678\n")
+        assert not is_valid_session_id("1234-5678-9012-3456\n")
+        assert not is_valid_session_id("1234-5678x")
+        assert not is_valid_session_id("1234-5678-9012-3456x")
+
     def test_new_ids_use_four_group_form(self, tmp_path):
         store = _store(tmp_path)
         for _ in range(20):
