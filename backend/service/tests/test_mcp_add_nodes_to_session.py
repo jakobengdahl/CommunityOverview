@@ -18,6 +18,7 @@ from backend.core import GraphStorage, Node
 from backend.core.session_auto_add import SessionAutoAddRegistry
 from backend.core.session_manager import SessionManager, SessionNotFound, _TokenBucket
 from backend.core.session_registry import SessionRegistry
+from backend.core.tests.rate_buckets import bucket_attrs
 from backend.core.session_store import (
     InMemorySessionPersistenceBackend,
     SessionStore,
@@ -604,14 +605,7 @@ class TestAddNodesToSession:
     def test_only_resolvable_ids_draw_from_the_rate_budget(self, tools):
         tools_map, manager = tools
         sid = _session(manager)
-        buckets = {
-            attr: _RecordingBucket()
-            for attr, value in vars(manager).items()
-            if isinstance(value, _TokenBucket)
-        }
-        assert {"_bucket", "_mcp_bucket", "_image_bucket", "_lookup_bucket"} <= set(
-            buckets
-        )
+        buckets = {attr: _RecordingBucket() for attr in bucket_attrs(manager)}
         for attr, bucket in buckets.items():
             setattr(manager, attr, bucket)
         cyclic = []
