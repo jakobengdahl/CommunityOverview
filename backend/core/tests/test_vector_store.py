@@ -496,7 +496,7 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
 
     # "a" rides in the refused batch at its own width, so an absorb that wrote
     # matching rows in place before checking the batch would change it.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="mixed widths"):
         store._absorb({"a": [2.0, 2.0, 2.0, 2.0], "c": [1.0, 2.0, 3.0]})
 
     after = store.export_vectors()
