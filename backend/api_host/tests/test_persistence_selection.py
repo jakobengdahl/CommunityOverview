@@ -475,23 +475,40 @@ class TestTheEnvironmentIsTheInterface:
         monkeypatch.setenv("GRAPH_POSTGRES_DSN", dsn)
         assert AppConfig().graph_postgres_dsn == dsn
 
+    @pytest.mark.parametrize(
+        "leftover, value",
+        [
+            ("GRAPH_POSTGRES_DSN", "postgresql:///stale"),
+            ("GRAPH_POSTGRES_SCHEMA", "stale"),
+            ("GRAPH_POSTGRES_POOL_SIZE", "5"),
+        ],
+    )
     @pytest.mark.parametrize("selected", [None, "file"])
-    def test_a_dsn_alone_does_not_select_postgres(self, monkeypatch, selected):
+    def test_a_postgres_setting_alone_does_not_select_postgres(
+        self, monkeypatch, selected, leftover, value
+    ):
         """No auto-detection: the backend is chosen by GRAPH_BACKEND only.
 
-        A stale DSN in the environment beside an unset or explicit
-        `GRAPH_BACKEND=file` is a rollback in progress, not a request for
-        PostgreSQL. Picking postgres because a DSN happens to be present would
-        move the graph without anyone asking. The other tests that set a DSN
-        either pass the backend as a keyword, which skips the environment
+        A stale PostgreSQL setting in the environment beside an unset or
+        explicit `GRAPH_BACKEND=file` is a rollback in progress, not a request
+        for PostgreSQL. Picking postgres because one happens to be present
+        would move the graph without anyone asking. The other tests that set
+        one either pass the backend as a keyword, which skips the environment
         default entirely, or never ask which backend was chosen, so none of
-        them would notice.
+        them would notice. One setting per case, the others cleared, so each
+        is shown unable to select postgres on its own.
         """
         if selected is None:
             monkeypatch.delenv("GRAPH_BACKEND", raising=False)
         else:
             monkeypatch.setenv("GRAPH_BACKEND", selected)
-        monkeypatch.setenv("GRAPH_POSTGRES_DSN", "postgresql:///stale")
+        for name in (
+            "GRAPH_POSTGRES_DSN",
+            "GRAPH_POSTGRES_SCHEMA",
+            "GRAPH_POSTGRES_POOL_SIZE",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(leftover, value)
         config = AppConfig()
         assert config.graph_backend == "file"
         assert build_persistence_backend(config) is None
