@@ -674,7 +674,12 @@ class SessionManager:
         return existed
 
     def rename_session_sync(
-        self, session_id: str, name: Optional[str], client_id: Optional[str] = None
+        self,
+        session_id: str,
+        name: Optional[str],
+        client_id: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
     ) -> Session:
         """Rename a session **synchronously** (the MCP tool path).
 
@@ -690,12 +695,21 @@ class SessionManager:
 
         ``get_or_create`` first (R7): a rename for an id that only exists in a
         browser URL/recents must materialise it rather than raise, matching the
-        async path and the REST ``PATCH``.
+        async path and the REST ``PATCH``. The rate check comes before it, so a
+        refused rename materialises nothing.
+
+        Charges one token to ``_mcp_bucket``, like every other synchronous MCP
+        write.
         """
         if not is_valid_session_id(session_id):
             raise SessionNotFound()
         if name is not None and not isinstance(name, str):
             raise OpError("'name' must be a string or null")
+        actor = client_id or "rest"
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(actor, rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         self.get_or_create(session_id)
         if self._lock(session_id).locked():
             raise LayoutBusy()
@@ -703,13 +717,16 @@ class SessionManager:
         if session is None:
             raise SessionNotFound()
 
-        actor = client_id or "rest"
         op = {"op": "session_renamed", "name": name, "client_id": actor}
         self._apply_op_sync(session, session_id, actor, op)
         return session
 
     def delete_session_sync(
-        self, session_id: str, deleted_by: Optional[str] = None
+        self,
+        session_id: str,
+        deleted_by: Optional[str] = None,
+        *,
+        rate_limit_label: Optional[str] = None,
     ) -> bool:
         """Delete a session **synchronously** (the MCP tool path).
 
@@ -720,7 +737,14 @@ class SessionManager:
         otherwise deletes inline on the event-loop thread, where no coroutine can
         interleave. Stale lock objects are left in ``self._locks`` for the same
         reason ``delete_session`` documents.
+
+        Charges one token to ``_mcp_bucket`` under ``deleted_by``, like every
+        other synchronous MCP write.
         """
+        if not self._mcp_bucket.consume(
+            self._mcp_rate_limit_key(deleted_by or "rest", rate_limit_label), 1.0
+        ):
+            raise RateLimited()
         if self._lock(session_id).locked():
             raise LayoutBusy()
         existed = self.store.delete(session_id)
