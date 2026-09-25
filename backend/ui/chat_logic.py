@@ -584,7 +584,7 @@ class ChatProcessor:
         return [
             {
                 "name": "search_graph",
-                "description": "Search for nodes in the graph based on text query. Matches a local node's name, description, summary, tags, subtypes, aliases and type label (federated nodes: a subset of these fields). By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
+                "description": "Search for nodes in the graph based on text query. Matches a node's name, description, summary, tags, subtypes, aliases and type label, for local and federated nodes alike. By default the whole query must occur verbatim, so a multi-word query that no node contains matches nothing lexically and at best returns semantic-fallback results; use match_mode='any_term' or semantic=true for such queries.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -620,7 +620,7 @@ class ChatProcessor:
                         },
                         "semantic": {
                             "type": "boolean",
-                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false; a lexical query that matches nothing already falls back to semantic ranking automatically.",
+                            "description": "When true, rank results by embedding meaning instead of lexical matching — for conceptual or natural-language queries. Default false. A query other than '' or '*' that matches no local node of the requested types (archived nodes count only with include_archived) falls back to semantic ranking for local results. The check runs before tag, metadata and access filters, so a match those filters remove gets no fallback.",
                             "default": False,
                         },
                     },

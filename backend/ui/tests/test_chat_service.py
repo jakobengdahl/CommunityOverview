@@ -120,6 +120,15 @@ class TestChatServiceToolExecution:
         assert props["match_mode"]["default"] == "substring"
         assert props["semantic"]["type"] == "boolean"
         assert props["semantic"]["default"] is False
+        # The fallback trigger as queries.search_graph gates it.
+        assert (
+            "A query other than '' or '*' that matches no local node of the "
+            "requested types (archived nodes count only with include_archived) "
+            "falls back to semantic ranking for local results. The check runs "
+            "before tag, metadata and access filters, so a match those filters "
+            "remove gets no fallback."
+        ) in props["semantic"]["description"]
+        assert "matches nothing" not in props["semantic"]["description"]
         assert props["include_archived"]["type"] == "boolean"
         assert props["include_archived"]["default"] is False
 
@@ -148,14 +157,14 @@ class TestChatServiceToolExecution:
             "type label",
         ):
             assert field in description
-        assert "a local node's name" in description
-        assert "federated nodes: a subset of these fields" in description
+        assert "local and federated nodes alike" in description
+        assert "subset" not in description
         assert "semantic-fallback" in description
         assert "returns nothing" not in description
         # Exact sentences, so a changed field list, scope or fallback clause fails.
         assert (
-            "Matches a local node's name, description, summary, tags, subtypes, "
-            "aliases and type label (federated nodes: a subset of these fields)."
+            "Matches a node's name, description, summary, tags, subtypes, "
+            "aliases and type label, for local and federated nodes alike."
         ) in description
         assert (
             "By default the whole query must occur verbatim, so a multi-word query "

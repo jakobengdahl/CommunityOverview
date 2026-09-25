@@ -124,8 +124,11 @@ class SearchRequest(BaseModel):
         False,
         description=(
             "When true, rank results by embedding meaning instead of lexical "
-            "substring matching. Lexical search still auto-falls back to semantic "
-            "ranking when it returns zero results."
+            "substring matching. A query other than '' or '*' that matches no "
+            "local node of the requested types (archived nodes count only with "
+            "include_archived) falls back to semantic ranking for local results. "
+            "The check runs before tag, metadata and access filters, so a match "
+            "those filters remove gets no fallback."
         ),
     )
     match_mode: str = Field(
