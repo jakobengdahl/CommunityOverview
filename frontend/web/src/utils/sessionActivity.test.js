@@ -1262,13 +1262,11 @@ describe('describeActivity', () => {
   describe('annotation_updated classification, browser-shaped full payloads (continued)', () => {
     it('reports an agent-only sparse patch from the same before/after diff', () => {
       // The MCP path sends a sparse patch, but the store still snapshots the
-      // whole annotation either side, so the diff serves both producers. The
-      // record carries the pre-PR #627 `affected.fields`, which is not
-      // consulted.
+      // whole annotation either side, so the diff serves both producers.
       const before = createAnnotation({ id: 'n1', type: 'note', text: 'before' });
       const r = record({
         op: 'annotation_updated',
-        affected: { kind: 'annotation', id: 'n1', fields: ['id', 'text'] },
+        affected: { kind: 'annotation', id: 'n1' },
         before,
         after: { ...before, text: 'after' },
       });
