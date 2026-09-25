@@ -758,6 +758,29 @@ def semantic_search_nodes(
 # ---------------------------------------------------------------------------
 
 
+def _adjacent(adjacency: Dict[str, Dict[str, Dict[str, Any]]], node_id: str):
+    """Snapshot the (neighbour, edge key, edge data) triples at *node_id*.
+
+    The walk takes no lock while every mutator holds one, so the adjacency can
+    change under it. networkx's `out_edges` / `in_edges` are Python generators
+    over these same dicts: a mutation between two of their steps raises
+    "dictionary changed size during iteration". `list(d.items())` on a plain
+    dict copies it in C without running bytecode, so under the GIL no other
+    thread can interleave with the copy; everything after reads the copies.
+    `list(graph.out_edges(...))` would not do: that list is filled by the same
+    Python generator, one step at a time. The walk cannot take the lock
+    instead: it is handed the dicts, not the storage that owns the lock.
+    """
+    neighbours = adjacency.get(node_id)
+    if neighbours is None:
+        return []
+    return [
+        (neighbour, key, data)
+        for neighbour, keydict in list(neighbours.items())
+        for key, data in list(keydict.items())
+    ]
+
+
 def get_related_nodes(
     nodes: Dict[str, Node],
     edges: Dict[str, Edge],
@@ -795,9 +818,7 @@ def get_related_nodes(
         next_layer: set = set()
 
         for curr_id in current_layer:
-            for _, target, edge_id, edge_data in graph.out_edges(
-                curr_id, keys=True, data=True
-            ):
+            for target, edge_id, edge_data in _adjacent(graph._succ, curr_id):
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
                     continue
@@ -810,9 +831,7 @@ def get_related_nodes(
                     visited_nodes.add(target)
                     next_layer.add(target)
 
-            for source, _, edge_id, edge_data in graph.in_edges(
-                curr_id, keys=True, data=True
-            ):
+            for source, edge_id, edge_data in _adjacent(graph._pred, curr_id):
                 edge = edge_data["data"]
                 if relationship_types and edge.type not in relationship_types:
                     continue
