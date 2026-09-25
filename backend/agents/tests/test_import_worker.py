@@ -401,13 +401,13 @@ class TestGenerationStalenessGuard:
 
         real_commit = storage.commit_generation_embeddings
 
-        def _armed_commit(generation, vectors):
+        def _armed_commit(*args, **kwargs):
             # Armed only while the commit is on the stack, so any other lock
             # the worker takes before or after it can never fire the hook.
             nonlocal armed
             armed = True
             try:
-                return real_commit(generation, vectors)
+                return real_commit(*args, **kwargs)
             finally:
                 armed = False
 

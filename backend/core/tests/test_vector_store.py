@@ -494,8 +494,10 @@ def test_absorb_refuses_a_mixed_width_batch_and_leaves_the_index_alone():
     # write to "a" would change the snapshot too and could never fail below.
     before = {k: v.copy() for k, v in store.export_vectors().items()}
 
+    # "a" rides in the refused batch at its own width, so an absorb that wrote
+    # matching rows in place before checking the batch would change it.
     with pytest.raises(ValueError):
-        store._absorb({"b": [1.0, 2.0], "c": [1.0, 2.0, 3.0]})
+        store._absorb({"a": [2.0, 2.0, 2.0, 2.0], "c": [1.0, 2.0, 3.0]})
 
     after = store.export_vectors()
     assert set(after) == set(before), "a refused batch still changed the index"
