@@ -129,11 +129,11 @@ class TestImportReturnsBeforeEmbeddingsComplete:
         the endpoint behaving correctly. An endpoint that waits on the encode
         step returns only after the gate's timeout has run out, by which point
         the step has finished and the first assertion below fails. Two loose
-        clocks remain, and only a stall of the test thread can trip either:
-        the gate's 30 s timeout, which must not run out between the POST and
-        the immediate status check or the stub releases itself; and the 10 s
-        terminal wait after the release. Short of such a stall the outcome
-        does not depend on how fast the runner is."""
+        clocks remain: the gate's 30 s timeout, which must not run out between
+        the POST and the immediate status check or the stub releases itself;
+        and the 10 s terminal wait, within which the import worker thread must
+        finish once released. A process stalled or starved past either one,
+        on any of those threads, fails a correct endpoint."""
         json_path = os.path.join(temp_dir, "test.json")
         storage = GraphStorage(json_path=json_path)
         service = GraphService(storage)
