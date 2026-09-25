@@ -132,6 +132,15 @@ def _bindings(node):
     if isinstance(node, ast.ImportFrom):
         if not node.module or node.level:
             return [(name.asname or name.name, None) for name in node.names]
+        if [name.name for name in node.names] == ["*"]:
+            # Binds whatever the module exports, so every attribute of it a
+            # stdout route goes through.
+            prefix = f"{node.module}."
+            return [
+                (route[len(prefix) :], route)
+                for route in _STDOUT_ROUTES
+                if route.startswith(prefix) and "." not in route[len(prefix) :]
+            ]
         return [
             (name.asname or name.name, f"{node.module}.{name.name}")
             for name in node.names
@@ -266,6 +275,9 @@ def _stdout_calls(source):
         "import sys\nout = sys\nout = sys.stdout\nout.stdout.write('x')",
         "import os\nw = print\nw = os\nw.write(1, b'x')",
         "import sys\nw = out.write\nout = sys.stdout\ndef f():\n    w('x')",
+        "from sys import *\nstdout.write('x')",
+        "from sys import *\n__stdout__.buffer.write(b'x')",
+        "from os import *\nwrite(1, b'x')",
     ],
 )
 def test_the_guard_catches_each_way_of_writing_to_stdout(source):
