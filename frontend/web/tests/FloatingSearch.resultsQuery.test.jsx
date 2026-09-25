@@ -66,17 +66,21 @@ describe('FloatingSearch data-results-query', () => {
     expect(screen.getByText('Alpha actor')).toBeInTheDocument();
   });
 
-  it('keeps naming the rendered query while a longer query is still pending', async () => {
+  it('names the searched query, not the live input, when a stale search settles', async () => {
+    const first = deferred();
     const second = deferred();
-    api.searchGraph
-      .mockResolvedValueOnce({ nodes: [actor], edges: [] })
-      .mockReturnValueOnce(second.promise);
+    api.searchGraph.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const { root, input, user } = renderSearch();
 
     await user.type(input, 'al');
-    await waitFor(() => expect(root).toHaveAttribute(ATTR, 'al'));
-
+    await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('al', expect.anything()));
     await user.type(input, 'p');
+    expect(input).toHaveValue('alp');
+
+    first.resolve({ nodes: [actor], edges: [] });
+    await waitFor(() => expect(screen.getByText('Alpha actor')).toBeInTheDocument());
+    expect(root).toHaveAttribute(ATTR, 'al');
+
     await waitFor(() => expect(api.searchGraph).toHaveBeenCalledWith('alp', expect.anything()));
     expect(root).toHaveAttribute(ATTR, 'al');
 
