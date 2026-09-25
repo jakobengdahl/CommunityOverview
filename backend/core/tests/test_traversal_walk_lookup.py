@@ -18,26 +18,21 @@ from backend.core.models import Edge, Node, NodeType, RelationshipType
 class _VanishingOnLookup(dict):
     """Loses one key on its first observation, and counts every observation.
 
-    Four routes are instrumented - `in`, `.get()`, `[]` and `.keys()` - so a
-    check-then-use spelled through any of them is caught: the first
-    observation answers "present" and removes the key, and a second one misses.
-    Iteration, `.items()` and `.values()` are not instrumented. `observations`
-    counts how often the victim was observed while armed, present or not;
-    `.keys()` observes every key.
-
-    Unarmed, the dict is plain. The walk legitimately reads `nodes` while it
-    traverses (to skip archived neighbours); only the resolution that follows
-    is the window, so the tests arm it when the traversal ends.
+    Seven routes are instrumented - `in`, `.get()`, `[]`, `.keys()`,
+    iteration, `.items()` and `.values()` - so a check-then-use spelled through
+    any of them is caught: the first observation answers "present" and removes
+    the key, and a second one misses. `observations` counts how often the
+    victim was observed, present or not; the four whole-dict routes observe
+    every key, so each counts as one observation of the victim.
     """
 
-    def __init__(self, *args, victim=None, armed=True, **kwargs):
+    def __init__(self, *args, victim=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.victim = victim
-        self.armed = armed
         self.observations = 0
 
     def _observe(self, key):
-        if not self.armed or key != self.victim:
+        if key != self.victim:
             return
         self.observations += 1
         if self.observations == 1:
@@ -58,39 +53,28 @@ class _VanishingOnLookup(dict):
         self._observe(key)
         return value
 
+    # The whole-dict routes snapshot before they observe: removing the victim
+    # mid-iteration would raise "dictionary changed size", which is the
+    # fixture failing rather than the code under test.
     def keys(self):
         snapshot = set(super().keys())
         self._observe(self.victim)
         return snapshot
 
+    def __iter__(self):
+        snapshot = list(super().__iter__())
+        self._observe(self.victim)
+        return iter(snapshot)
 
-class _ArmsWhenTheWalkEnds:
-    """Stands in for the graph and arms the fixtures once the traversal is over.
+    def items(self):
+        snapshot = list(super().items())
+        self._observe(self.victim)
+        return snapshot
 
-    The walk reads the graph only through `out_edges` and `in_edges`, and only
-    while it traverses. Once `expected` of those iterators have been drained,
-    every hop is done and what follows is resolution. That assumes the walk
-    consumes each iterator as it loops over it; a walk that materialised them
-    up front would arm the fixture before its traversal-phase reads.
-    """
-
-    def __init__(self, graph, expected, *fixtures):
-        self._graph = graph
-        self._remaining = expected
-        self._fixtures = fixtures
-
-    def _watch(self, iterator):
-        yield from iterator
-        self._remaining -= 1
-        if self._remaining == 0:
-            for fixture in self._fixtures:
-                fixture.armed = True
-
-    def out_edges(self, *args, **kwargs):
-        return self._watch(self._graph.out_edges(*args, **kwargs))
-
-    def in_edges(self, *args, **kwargs):
-        return self._watch(self._graph.in_edges(*args, **kwargs))
+    def values(self):
+        snapshot = list(super().values())
+        self._observe(self.victim)
+        return snapshot
 
 
 def _graph(nodes, edges):
@@ -114,18 +98,25 @@ def _fixture():
 
 
 class TestTheWalkResolvesEachIdOnce:
-    """Depth 1 from `a` drains exactly two edge iterators, `a`'s out-edges and
-    in-edges, so the fixture arms after two. `observations == 1` is also what
-    keeps these from passing vacuously: a resolution the fixture never saw
-    would leave it at zero.
+    """The fixtures are armed from the start, so nothing here depends on how
+    the walk reads the graph - lazily or up front, through `out_edges` or
+    `succ`. That needs the resolution to be the walk's only observation of the
+    victim. The walk never reads `edges` while it traverses, so an edge victim
+    qualifies as is. It does read `nodes` - to skip archived neighbours - but
+    not with `include_archived=True`, so the node test passes that; the
+    resolution after the traversal is the same line either way.
+
+    `observations == 1` is also what keeps these from passing vacuously: a
+    resolution the fixture never saw would leave it at zero.
     """
 
     def test_a_node_deleted_during_resolution_is_observed_once(self):
         nodes, edges = _fixture()
-        vanishing = _VanishingOnLookup(nodes, victim="b", armed=False)
-        graph = _ArmsWhenTheWalkEnds(_graph(nodes, edges), 2, vanishing)
+        vanishing = _VanishingOnLookup(nodes, victim="b")
 
-        result = storage_search.get_related_nodes(vanishing, edges, graph, "a")
+        result = storage_search.get_related_nodes(
+            vanishing, edges, _graph(nodes, edges), "a", include_archived=True
+        )
 
         assert vanishing.observations == 1
         assert None not in result["nodes"]
@@ -134,10 +125,11 @@ class TestTheWalkResolvesEachIdOnce:
 
     def test_an_edge_deleted_during_resolution_is_observed_once(self):
         nodes, edges = _fixture()
-        vanishing = _VanishingOnLookup(edges, victim="ab", armed=False)
-        graph = _ArmsWhenTheWalkEnds(_graph(nodes, edges), 2, vanishing)
+        vanishing = _VanishingOnLookup(edges, victim="ab")
 
-        result = storage_search.get_related_nodes(nodes, vanishing, graph, "a")
+        result = storage_search.get_related_nodes(
+            nodes, vanishing, _graph(nodes, edges), "a"
+        )
 
         assert vanishing.observations == 1
         assert None not in result["edges"]
