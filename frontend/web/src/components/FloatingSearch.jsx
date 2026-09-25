@@ -178,11 +178,15 @@ function FloatingSearch({ variant = 'floating' }) {
       return;
     }
 
+    // Set when the query or depth changes, so a response that settles afterwards
+    // cannot repopulate results the user has already typed past or cleared.
+    let cancelled = false;
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       setIsLoading(true);
       try {
         const result = await api.searchGraph(query, { limit: 10, federationDepth });
+        if (cancelled) return;
         const nodes = (result.nodes || []).filter(
           (n) => n.type !== 'Community' && n.type !== 'VisualizationView'
         );
@@ -191,6 +195,7 @@ function FloatingSearch({ variant = 'floating' }) {
         setSelectedIndex(0);
         setShowDropdown(nodes.length > 0);
       } catch (err) {
+        if (cancelled) return;
         console.error('Search error:', err);
         setResults([]);
         setResultsQuery(query);
@@ -199,7 +204,10 @@ function FloatingSearch({ variant = 'floating' }) {
       }
     }, 300);
 
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounceRef.current);
+    };
   }, [query, federationDepth]);
 
   // Click outside to close
