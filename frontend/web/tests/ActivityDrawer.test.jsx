@@ -218,4 +218,16 @@ describe('ActivityDrawer', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(props.onClose).toHaveBeenCalled();
   });
+
+  it('stops Escape from reaching listeners outside the drawer on desktop too', async () => {
+    const outerListener = vi.fn();
+    window.addEventListener('keydown', outerListener);
+    const props = renderDrawer();
+    await screen.findByText('No session activity yet');
+
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', outerListener);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(outerListener).not.toHaveBeenCalled();
+  });
 });

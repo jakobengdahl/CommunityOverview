@@ -167,6 +167,73 @@ describe('useModalFocusTrap', () => {
     expect(screen.getByText('two')).toHaveFocus();
   });
 
+  const focusableKinds = [
+    [
+      'a[href]',
+      () => (
+        <a href="#target" aria-label="focusable">
+          link
+        </a>
+      ),
+    ],
+    ['input', () => <input aria-label="focusable" />],
+    ['textarea', () => <textarea aria-label="focusable" />],
+    [
+      'select',
+      () => (
+        <select aria-label="focusable">
+          <option>x</option>
+        </select>
+      ),
+    ],
+    ['tabIndex=0', () => <div tabIndex={0} aria-label="focusable" />],
+  ];
+
+  it.each(focusableKinds)('treats %s as the first focusable element', (_kind, Kind) => {
+    render(
+      <Trap active>
+        <Kind />
+        <button type="button">after</button>
+      </Trap>
+    );
+    expect(screen.getByLabelText('focusable')).toHaveFocus();
+  });
+
+  it.each(focusableKinds)(
+    'treats %s as the last focusable element when wrapping',
+    (_kind, Kind) => {
+      render(
+        <Trap active>
+          <button type="button">before</button>
+          <Kind />
+        </Trap>
+      );
+      const before = screen.getByText('before');
+      expect(before).toHaveFocus();
+
+      // `before` is not the last element, so Tab from it is the browser's move.
+      expect(fireEvent.keyDown(screen.getByTestId('trap'), { key: 'Tab' })).toBe(true);
+
+      expect(fireEvent.keyDown(screen.getByTestId('trap'), { key: 'Tab', shiftKey: true })).toBe(
+        false
+      );
+      expect(screen.getByLabelText('focusable')).toHaveFocus();
+    }
+  );
+
+  it.each([
+    ['an anchor without href', () => <a aria-label="inert">inert</a>],
+    ['tabIndex=-1', () => <div tabIndex={-1} aria-label="inert" />],
+  ])('does not treat %s as focusable', (_kind, Kind) => {
+    render(
+      <Trap active>
+        <Kind />
+        <button type="button">only</button>
+      </Trap>
+    );
+    expect(screen.getByText('only')).toHaveFocus();
+  });
+
   it('restores the overflow value it found, not a hard-coded default', () => {
     originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'clip';
