@@ -587,10 +587,12 @@ come only from the automatic fallback described below.
 Semantic ranking reuses the same embedding path as `find_similar_nodes`: node
 embeddings are built from `name + summary + description + tags` on create/update,
 and the query text is embedded and compared with cosine similarity, keeping hits
-above a similarity threshold ordered by score. No new dependency is involved — in
-the ML-free base install the embedding model is unavailable, so the vector search
-degrades to returning nothing (and, for `semantic=true`, an empty result) rather
-than failing.
+above a similarity threshold ordered by score. No new dependency is required for
+the base install to run, but query-text semantic ranking needs an embedding
+model. On the ML-free base install, a non-match-all query that reaches semantic
+ranking cannot be embedded, so it produces no local semantic hits rather than
+failing. Match-all queries (`""` and `*`) still use the lexical match-all
+behaviour, and federated results remain lexical in the requested `match_mode`.
 
 Two behaviours make this safe and backward compatible:
 
@@ -605,11 +607,11 @@ Two behaviours make this safe and backward compatible:
   no text to rank by meaning, so `semantic=true` falls through to the lexical
   match-all behaviour.
 
-The response includes a top-level `"semantic"` boolean indicating whether semantic
-ranking (explicit or fallback) produced the returned nodes. Semantic ranking
-applies to the local graph; federated search remains lexical. Tag/metadata
-filters, `node_types`, archived exclusion and `limit` all still apply to semantic
-results.
+The response includes a top-level `"semantic"` boolean indicating whether local
+semantic ranking ran for an explicit semantic request, or whether the automatic
+fallback returned local semantic hits. Semantic ranking applies to the local
+graph; federated search remains lexical. Tag/metadata filters, `node_types`,
+archived exclusion and `limit` all still apply to semantic results.
 
 ### Archived lifecycle (`archived` flag on nodes and edges)
 
