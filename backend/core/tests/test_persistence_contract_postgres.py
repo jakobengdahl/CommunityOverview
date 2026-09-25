@@ -617,6 +617,27 @@ class TestPostgresPlansHelperSkipsMaintenance:
         deletes = [t for t in planned if t.upper().startswith("DELETE")]
         assert _tables_named(" ".join(deletes)) == {"graph_nodes", "graph_edges"}
 
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ANALYZE",
+            "ANALYSE",
+            "-- DELETE\nVACUUM",
+            "/* SELECT */ analyze",
+            "  \n\tANALYZE",
+            "/* a */\n-- b\n  VACUUM",
+        ],
+    )
+    def test_a_maintenance_statement_is_skipped(self, schema, statement):
+        backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
+        try:
+            backend.exists()
+        finally:
+            backend.close()
+        query = psycopg.sql.SQL(f'{statement} "{schema}".graph_nodes')
+
+        assert _plans([(query, None)]) == []
+
 
 def _wait_until_blocking(pid, timeout=15.0, count=1):
     """Wait until `count` distinct sessions are blocked on the session `pid`.

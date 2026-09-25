@@ -752,8 +752,8 @@ writing a backend of your own against a shared server:
   `start_change_notification()` opens before it starts listening, which
   holds only the graph-identity check (`_claim_or_check_graph_identity()`):
   at most one read of the metadata row — none once this backend's check has
-  completed, which the `_ensure_schema()` call just before it has done if the
-  row was there to find —
+  completed, which, on this backend's first migration, the `_ensure_schema()`
+  call just before it does if the row was there to find —
   and, only when that row exists without a claim, one `UPDATE` writing this
   instance's. It states no level of its own.
   What migration and `exists()`
