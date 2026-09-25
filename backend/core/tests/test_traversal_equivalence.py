@@ -1386,21 +1386,19 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
             storage.flush()
             backend.close()
 
-    def test_a_node_that_vanishes_on_first_observation_does_not_raise(self, schema):
-        """A test of the entry point when the store answers. It swaps
-        `storage.nodes` for a dict that loses `b` on its first observation by
-        any instrumented route, so a check-then-use in the store engine's node
-        resolution turns into a KeyError here. It says nothing about the walk:
-        the store answers, its `.get()` of `b` is the fixture's one
-        observation, and the walk is never called. The walk-level tests in
-        `test_traversal_walk_lookup.py` pin the walk.
+    @staticmethod
+    def _vanishing_lookup_storage(schema, monkeypatch):
+        """A storage whose store has `a -ab-> b` and will answer, with the
+        walk replaced by a spy that fails the test if it is called: these
+        tests are about the store engine's resolution, and a fallback to the
+        walk would pass them without exercising it.
         """
         from backend.core.postgres_backend import PostgresGraphPersistenceBackend
         from backend.core.storage import GraphStorage
 
         backend = PostgresGraphPersistenceBackend(DSN, schema=schema)
-        storage = GraphStorage(persistence_backend=backend)
         try:
+            storage = GraphStorage(persistence_backend=backend)
             storage.add_nodes(
                 [
                     Node(id="a", type=NodeType.ACTOR, name="a"),
@@ -1416,10 +1414,52 @@ class TestWhatTheStoreDecidedIsFilteredByWhatWeReturn:
                 ],
             )
             storage.flush()
+        except BaseException:
+            backend.close()
+            raise
 
-            storage.nodes = _VanishingOnLookup(storage.nodes, victim="b")
+        def _walk_called(*args, **kwargs):
+            raise AssertionError("the walk answered; the store was meant to")
+
+        monkeypatch.setattr(storage_search, "get_related_nodes", _walk_called)
+        return backend, storage
+
+    def test_a_node_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """A test of the entry point when the store answers. It swaps
+        `storage.nodes` for a dict that loses `b` on its first observation by
+        any instrumented route, so a check-then-use in the store engine's node
+        resolution turns into a KeyError here. It says nothing about the walk:
+        the store answers, its `.get()` of `b` is the fixture's one
+        observation, and the walk is never called. The walk-level tests in
+        `test_traversal_walk_lookup.py` pin the walk.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.nodes, victim="b")
+            storage.nodes = vanishing
             result = storage.get_related_nodes("a", depth=1)
-            assert "a" in {n.id for n in result["nodes"]}
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
+        finally:
+            backend.close()
+
+    def test_an_edge_that_vanishes_on_first_observation_does_not_raise(
+        self, schema, monkeypatch
+    ):
+        """The edge twin: `storage.edges` loses `ab` on its first observation,
+        so a check-then-use in the store engine's edge resolution raises here.
+        """
+        backend, storage = self._vanishing_lookup_storage(schema, monkeypatch)
+        try:
+            vanishing = _VanishingOnLookup(storage.edges, victim="ab")
+            storage.edges = vanishing
+            result = storage.get_related_nodes("a", depth=1)
+            assert vanishing.observations == 1
+            assert {n.id for n in result["nodes"]} == {"a", "b"}
+            assert {e.id for e in result["edges"]} == {"ab"}
         finally:
             backend.close()
 
