@@ -2004,7 +2004,9 @@ class TestPostgresLoadIsOneMomentInTime:
     the normal case rather than a race to engineer.
     """
 
-    def test_loading_while_another_instance_saves_never_tears(self, schema, backends):
+    def test_loading_while_another_instance_saves_never_tears(
+        self, schema, backends, monkeypatch
+    ):
         reader = PostgresGraphPersistenceBackend(DSN, schema=schema)
         writer = PostgresGraphPersistenceBackend(DSN, schema=schema)
         backends.extend([reader, writer])
@@ -2024,50 +2026,42 @@ class TestPostgresLoadIsOneMomentInTime:
             }
 
         writer.save_graph_data(graph("first"))
-        stop = threading.Event()
-        torn, errors = [], []
-        generations = set()
+        interleaved = []
+        real_execute = psycopg.Connection.execute
 
-        def save_repeatedly():
-            tag = 0
-            while not stop.is_set():
-                tag += 1
-                try:
-                    writer.save_graph_data(graph(f"g{tag}"))
-                except Exception as exc:
-                    errors.append(f"writer: {type(exc).__name__}: {exc}")
-                    return
+        def spy(conn, query, *args, **kwargs):
+            result = real_execute(conn, query, *args, **kwargs)
+            if (
+                not interleaved
+                and "SELECT doc FROM" in str(query)
+                and "graph_nodes" in str(query)
+            ):
+                interleaved.append(True)
+                writer.save_graph_data(graph("second"))
+            return result
 
-        writing = threading.Thread(target=save_repeatedly, daemon=True)
-        writing.start()
-        try:
-            for _ in range(40):
-                loaded = reader.load_graph_data()
-                ids = {n["id"] for n in loaded["nodes"]}
-                dangling = [e["id"] for e in loaded["edges"] if e["source"] not in ids]
-                if dangling:
-                    torn.append(
-                        f"edges {dangling} have no endpoint among {sorted(ids)}"
-                    )
-                # Metadata is the third of the moment. Each save stamps its
-                # generation into graph_name, so a load that mixes two shows
-                # up here even when the edges happen to line up.
-                generation = loaded["metadata"].get("graph_name")
-                generations.add(generation)
-                if ids and f"n_{generation}" not in ids:
-                    torn.append(
-                        f"metadata says {generation!r} but the nodes are {sorted(ids)}"
-                    )
-        finally:
-            stop.set()
-            writing.join(30)
+        monkeypatch.setattr(psycopg.Connection, "execute", spy)
+        loaded = reader.load_graph_data()
 
-        assert errors == []
+        assert interleaved == [True], "the save was not forced between load reads"
+        ids = {n["id"] for n in loaded["nodes"]}
+        dangling = [e["id"] for e in loaded["edges"] if e["source"] not in ids]
+        torn = (
+            [f"edges {dangling} have no endpoint among {sorted(ids)}"]
+            if dangling
+            else []
+        )
+        # Metadata is the third of the moment. Each save stamps its
+        # generation into graph_name, so a load that mixes two shows up here
+        # even when the edges happen to line up.
+        generation = loaded["metadata"].get("graph_name")
+        if ids and f"n_{generation}" not in ids:
+            torn.append(f"metadata says {generation!r} but the nodes are {sorted(ids)}")
+
         assert torn == [], f"load returned a graph that never existed: {torn[:3]}"
-        # A reader frozen on its first result is maximally consistent and
-        # would satisfy every check above without ever reading the store
-        # again.
-        assert len(generations) > 1, f"the reader never advanced past {generations}"
+        assert [n["id"] for n in loaded["nodes"]] == ["n_first"]
+        assert [e["id"] for e in loaded["edges"]] == ["e_first"]
+        assert loaded["metadata"] == {"version": "1.0", "graph_name": "first"}
 
 
 class TestPostgresSaveFailsWholeOnAnEntityWrite:
@@ -6815,6 +6809,16 @@ class TestTheLevelQueryIsNeverPrepared:
             }
         )
 
+        # Warm a deliberately ordinary statement on the same pinned
+        # connection. This is the control half of the test: `prepare=False`
+        # must belong to the level query itself, not to the whole pool.
+        anchor_probe = psycopg.sql.SQL("SELECT 1 FROM {} WHERE id = %s").format(
+            backend._table("graph_nodes")
+        )
+        with backend._pool.connection() as conn:
+            for _ in range(10):
+                assert conn.execute(anchor_probe, ("a",)).fetchone() == (1,)
+
         # Well past psycopg's prepare threshold: each depth-2 traversal issues
         # one level execution per level, so this is ~40 executions.
         for _ in range(20):
@@ -6830,12 +6834,13 @@ class TestTheLevelQueryIsNeverPrepared:
 
         # The opt-out is ONE query, not the pool. Without this half, replacing
         # `prepare=False` with a pool-wide `prepare_threshold=None` passes the
-        # whole of backend/core/tests - 1648 tests - while the property the
-        # change is about is destroyed. The anchor probe is the natural
-        # witness: `traverse` issues it on this same connection, inside the
-        # same call, so if it is missing the backend stopped preparing
-        # everything.
-        assert any("graph_nodes" in s and "WHERE id = $1" in s for s in prepared), (
+        # whole of backend/core/tests while the property the change is about
+        # is destroyed. The explicit anchor probe above is the witness; if it
+        # is missing, the backend stopped preparing everything.
+        assert any(
+            "SELECT 1 FROM" in s and "graph_nodes" in s and "WHERE id = $1" in s
+            for s in prepared
+        ), (
             "the backend stopped preparing its other statements, so the "
             "opt-out is no longer one query but the whole pool: "
             f"{prepared}"
