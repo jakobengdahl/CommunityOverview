@@ -3051,6 +3051,12 @@ def _recording_mcp_bucket(mgr):
     return bucket
 
 
+def _spy_publish(mgr):
+    published = []
+    mgr.bus.publish = lambda session_id, event: published.append((session_id, event))
+    return published
+
+
 class TestRenameDeleteSyncCharges:
     """Which ``_mcp_bucket`` key rename/delete charge, and exactly when."""
 
@@ -3091,11 +3097,13 @@ class TestRenameDeleteSyncCharges:
         mgr = _manager()
         s = mgr.create_session()
         bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
 
         assert mgr.delete_session_sync(s.id, deleted_by=actor, rate_limit_label=label)
 
         assert bucket.calls == [(key, 1.0)]
         assert mgr.get_session(s.id) is None
+        assert published == [(s.id, {"type": "session_deleted", "deleted_by": actor})]
 
     async def test_rename_of_an_invalid_id_charges_nothing(self):
         mgr = _manager()
@@ -3123,6 +3131,7 @@ class TestRenameDeleteSyncCharges:
         mgr = _manager()
         s = mgr.create_session()
         bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
         deleted = []
         mgr.store.delete = deleted.append
 
@@ -3130,11 +3139,13 @@ class TestRenameDeleteSyncCharges:
 
         assert bucket.calls == []
         assert deleted == []
+        assert published == []
         assert mgr.get_session(s.id) is s
 
     async def test_delete_of_a_missing_valid_id_charges_exactly_once(self):
         mgr = _manager()
         bucket = _recording_mcp_bucket(mgr)
+        published = _spy_publish(mgr)
 
         assert (
             mgr.delete_session_sync("1234-5678-9012-3456", deleted_by="mcp-agent")
@@ -3142,6 +3153,7 @@ class TestRenameDeleteSyncCharges:
         )
 
         assert bucket.calls == [("mcp-agent", 1.0)]
+        assert published == []
 
     async def test_a_busy_rename_charges_exactly_once(self):
         mgr = _manager()
